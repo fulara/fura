@@ -1,0 +1,23 @@
+1. the  agent's reading shouldn't be p reviewed in full, but the approach from the tui should be copied.
+a) we should also try to clone the formatting of the snippets in the gui, like when agents searches for something it uses line numbers and identifiers, they should be different colors as in tui
+2. then the streaming of the text should also be supported, rather than waiting for entire message.
+3. isolated web container was at 100% is that omp?
+
+4. When tools exit I see sometimes "no matches found" in a new box, but I am guessing what should be happening is that this should be tied to like a tool invocation window earlier, maybe there is some id that we can connect it with.
+
+i am thinking how to resolve this, i think omp's TUI handles it well. 
+
+
+4. I want to copy the status window from the TUI too, let's start with it being the same.
+
+
+| Intercept `paste` event on the textarea | Ctrl+V just works, images appear inline | localhost (no permission prompt) |
+| File picker button | Explicit, accessible | everywhere |
+| Drag onto the prompt area | Natural for screenshots | everywhere |
+
+
+5. I think when omp is working "within a single turn" on a file, it tends to overwrite the previous invocations on a same tool.
+we probably want to mimic this somehow.
+
+right now its  abit too spammy
+
