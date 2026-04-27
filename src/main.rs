@@ -116,10 +116,10 @@ struct SessionRecord {
     /// In-flight partial message from `message_update` deltas; included at the end of projection and cleared on `message_end`.
     #[serde(skip)]
     streaming_message: Option<TranscriptMessage>,
-    /// Completed tool-execution cards, in the order they finished.
+    /// Completed tool-execution cards projected from live events or historical tool results.
     #[serde(skip)]
     tool_cards: Vec<ToolCard>,
-    /// Tool-execution cards currently in progress (cleared on tool_execution_end).
+    /// Tool-execution cards currently in progress.
     #[serde(skip)]
     active_tool_calls: Vec<ToolCard>,
     kind: SessionKind,
@@ -1659,7 +1659,7 @@ async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
             let args = frame.get("args").cloned().unwrap_or(Value::Null);
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
-                sessions.get_mut(session_id).map(|record| {
+                sessions.get_mut(&target_session_id).map(|record| {
                     let insert_after_count = record.messages.len();
                     record.active_tool_calls.push(ToolCard {
                         tool_call_id,
@@ -1673,7 +1673,7 @@ async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
                         insert_after_count,
                     });
                     ServerMessage::SessionSnapshot {
-                        session_id: session_id.to_string(),
+                        session_id: target_session_id.clone(),
                         state: record.projection(),
                     }
                 })
@@ -1685,16 +1685,28 @@ async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
         "tool_execution_update" => {
             let tool_call_id = value_str(frame, "toolCallId").unwrap_or("");
             let partial_result = frame.get("partialResult").cloned();
+            let async_state = partial_result.as_ref().and_then(tool_async_state);
+            let is_final_async = matches!(async_state, Some("completed" | "failed"));
+            let is_async_error = matches!(async_state, Some("failed"));
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
-                sessions.get_mut(session_id).and_then(|record| {
-                    let card = record
+                sessions.get_mut(&target_session_id).and_then(|record| {
+                    let pos = record
                         .active_tool_calls
-                        .iter_mut()
-                        .find(|c| c.tool_call_id == tool_call_id)?;
-                    card.partial_result = partial_result;
+                        .iter()
+                        .position(|c| c.tool_call_id == tool_call_id)?;
+                    if is_final_async {
+                        let mut card = record.active_tool_calls.remove(pos);
+                        card.is_active = false;
+                        card.is_error = is_async_error;
+                        card.result = partial_result;
+                        card.partial_result = None;
+                        record.tool_cards.push(card);
+                    } else {
+                        record.active_tool_calls[pos].partial_result = partial_result;
+                    }
                     Some(ServerMessage::SessionSnapshot {
-                        session_id: session_id.to_string(),
+                        session_id: target_session_id.clone(),
                         state: record.projection(),
                     })
                 })
@@ -1710,23 +1722,33 @@ async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let result = frame.get("result").cloned();
+            let is_background_running =
+                matches!(result.as_ref().and_then(tool_async_state), Some("running"));
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
-                sessions.get_mut(session_id).map(|record| {
+                sessions.get_mut(&target_session_id).map(|record| {
                     if let Some(pos) = record
                         .active_tool_calls
                         .iter()
                         .position(|c| c.tool_call_id == tool_call_id)
                     {
-                        let mut card = record.active_tool_calls.remove(pos);
-                        card.is_active = false;
-                        card.is_error = is_error;
-                        card.result = result;
-                        card.partial_result = None;
-                        record.tool_cards.push(card);
+                        if is_background_running {
+                            let card = &mut record.active_tool_calls[pos];
+                            card.is_active = true;
+                            card.is_error = false;
+                            card.result = result;
+                            card.partial_result = None;
+                        } else {
+                            let mut card = record.active_tool_calls.remove(pos);
+                            card.is_active = false;
+                            card.is_error = is_error;
+                            card.result = result;
+                            card.partial_result = None;
+                            record.tool_cards.push(card);
+                        }
                     }
                     ServerMessage::SessionSnapshot {
-                        session_id: session_id.to_string(),
+                        session_id: target_session_id.clone(),
                         state: record.projection(),
                     }
                 })
@@ -1788,17 +1810,19 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
     match command {
         Some("get_messages") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
-            let messages = data
+            let projection = data
                 .and_then(|data| data.get("messages"))
                 .and_then(|messages| messages.as_array())
-                .map(|messages| {
-                    messages
-                        .iter()
-                        .filter_map(map_omp_message)
-                        .collect::<Vec<_>>()
-                });
-            if let Some(messages) = messages {
-                replace_messages_and_broadcast(state, &current_session_id, messages, None).await;
+                .map(|messages| project_omp_transcript(messages));
+            if let Some((messages, tool_cards)) = projection {
+                replace_messages_and_broadcast(
+                    state,
+                    &current_session_id,
+                    messages,
+                    tool_cards,
+                    None,
+                )
+                .await;
             }
         }
         Some("get_state") => {
@@ -2028,7 +2052,11 @@ async fn mark_status_and_broadcast(state: &AppState, session_id: &str, status: S
     }
 }
 
-fn replace_record_messages(record: &mut SessionRecord, messages: Vec<TranscriptMessage>) -> bool {
+fn replace_record_transcript(
+    record: &mut SessionRecord,
+    messages: Vec<TranscriptMessage>,
+    tool_cards: Vec<ToolCard>,
+) -> bool {
     if messages.len() < record.messages.len() {
         return false;
     }
@@ -2043,13 +2071,20 @@ fn replace_record_messages(record: &mut SessionRecord, messages: Vec<TranscriptM
         })
         .collect();
     record.messages = reconciled;
+    record.tool_cards = tool_cards;
     true
+}
+
+#[cfg(test)]
+fn replace_record_messages(record: &mut SessionRecord, messages: Vec<TranscriptMessage>) -> bool {
+    replace_record_transcript(record, messages, Vec::new())
 }
 
 async fn replace_messages_and_broadcast(
     state: &AppState,
     session_id: &str,
     messages: Vec<TranscriptMessage>,
+    tool_cards: Vec<ToolCard>,
     status: Option<SessionStatus>,
 ) {
     let snapshot = {
@@ -2059,7 +2094,7 @@ async fn replace_messages_and_broadcast(
                 record.status = status;
             }
             let incoming_count = messages.len();
-            if !replace_record_messages(record, messages) {
+            if !replace_record_transcript(record, messages, tool_cards) {
                 warn!(
                     session_id = %session_id,
                     current_count = record.messages.len(),
@@ -2102,6 +2137,8 @@ struct DiscoveredSession {
     created_at: u64,
     updated_at: u64,
     session_file: String,
+    messages: Vec<TranscriptMessage>,
+    tool_cards: Vec<ToolCard>,
 }
 
 async fn refresh_session_catalog(state: &AppState) {
@@ -2119,6 +2156,10 @@ async fn refresh_session_catalog(state: &AppState) {
                 record.session_file = Some(session.session_file);
                 record.title = session.title;
                 record.timestamp = session.timestamp;
+                if record.messages.is_empty() && !session.messages.is_empty() {
+                    record.messages = session.messages.clone();
+                    record.tool_cards = session.tool_cards.clone();
+                }
             }
             Some(record) => {
                 if record.session_file.is_none() {
@@ -2141,10 +2182,10 @@ async fn refresh_session_catalog(state: &AppState) {
                         status: SessionStatus::Available,
                         created_at: session.created_at,
                         updated_at: session.updated_at,
-                        messages: Vec::new(),
+                        messages: session.messages.clone(),
                         live_message_ids: HashSet::new(),
                         streaming_message: None,
-                        tool_cards: Vec::new(),
+                        tool_cards: session.tool_cards.clone(),
                         active_tool_calls: Vec::new(),
                         kind: SessionKind::Available,
                         session_file: Some(session.session_file),
@@ -2171,7 +2212,15 @@ async fn refresh_session_catalog(state: &AppState) {
 fn discover_sessions(root: &Path) -> Vec<DiscoveredSession> {
     let mut sessions = Vec::new();
     collect_session_files(root, &mut sessions);
-    sessions.sort_by_key(|session| std::cmp::Reverse(session.created_at));
+    // Sort newest-updated first so we preload the most relevant sessions.
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+    // Preload messages for up to 30 most recently updated sessions.
+    for session in sessions.iter_mut().take(30) {
+        let path = Path::new(&session.session_file);
+        let (messages, tool_cards) = read_session_file_messages(path);
+        session.messages = messages;
+        session.tool_cards = tool_cards;
+    }
     sessions
 }
 
@@ -2230,7 +2279,34 @@ fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
         created_at,
         updated_at,
         session_file: path.to_string_lossy().to_string(),
+        messages: Vec::new(),
+        tool_cards: Vec::new(),
     })
+}
+
+fn read_session_file_messages(path: &Path) -> (Vec<TranscriptMessage>, Vec<ToolCard>) {
+    let Ok(file) = fs::File::open(path) else {
+        return (Vec::new(), Vec::new());
+    };
+    let reader = StdBufReader::new(file);
+    let mut message_values: Vec<Value> = Vec::new();
+    for (i, line) in reader.lines().enumerate() {
+        if i == 0 {
+            continue; // skip session header
+        }
+        let Ok(line) = line else {
+            continue;
+        };
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(|v| v.as_str()) == Some("message") {
+            if let Some(message) = entry.get("message").cloned() {
+                message_values.push(message);
+            }
+        }
+    }
+    project_omp_transcript(&message_values)
 }
 
 fn parse_timestamp_seconds(timestamp: &str) -> Option<u64> {
@@ -2481,6 +2557,100 @@ fn map_python_execution_message(value: &Value) -> Option<TranscriptMessage> {
     })
 }
 
+fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage>, Vec<ToolCard>) {
+    let mut messages = Vec::new();
+    let mut tool_cards = Vec::new();
+    let mut pending_tool_calls: HashMap<String, (String, Option<String>, Value, usize)> =
+        HashMap::new();
+    let mut visible_message_count = 0_usize;
+
+    for value in values {
+        if let Some(mut message) = map_omp_message(value) {
+            message.is_new = false;
+            messages.push(message);
+            visible_message_count += 1;
+        }
+
+        if let Some(content) = value.get("content").and_then(|content| content.as_array()) {
+            for item in content {
+                if item.get("type").and_then(|value| value.as_str()) != Some("toolCall") {
+                    continue;
+                }
+                let Some(tool_call_id) = item.get("id").and_then(|value| value.as_str()) else {
+                    continue;
+                };
+                let tool_name = item
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let intent = item
+                    .get("intent")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
+                let args = item
+                    .get("arguments")
+                    .or_else(|| item.get("args"))
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                pending_tool_calls.insert(
+                    tool_call_id.to_string(),
+                    (tool_name, intent, args, visible_message_count),
+                );
+            }
+        }
+
+        let role = value.get("role").and_then(|role| role.as_str());
+        if !matches!(role, Some("toolResult" | "tool")) {
+            continue;
+        }
+        let Some(tool_call_id) = value.get("toolCallId").and_then(|value| value.as_str()) else {
+            continue;
+        };
+        let pending = pending_tool_calls.remove(tool_call_id);
+        let tool_name = value
+            .get("toolName")
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .or_else(|| {
+                pending
+                    .as_ref()
+                    .map(|(tool_name, _, _, _)| tool_name.clone())
+            })
+            .unwrap_or_default();
+        let (intent, args, insert_after_count) = pending
+            .map(|(_, intent, args, insert_after_count)| (intent, args, insert_after_count))
+            .unwrap_or_else(|| (None, serde_json::json!({}), visible_message_count));
+        let mut result = serde_json::Map::new();
+        if let Some(content) = value.get("content").cloned() {
+            result.insert("content".to_string(), content);
+        }
+        if let Some(details) = value.get("details").cloned() {
+            result.insert("details".to_string(), details);
+        }
+        if let Some(is_error) = value.get("isError").cloned() {
+            result.insert("isError".to_string(), is_error);
+        }
+        let is_error = value
+            .get("isError")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+        tool_cards.push(ToolCard {
+            tool_call_id: tool_call_id.to_string(),
+            tool_name,
+            intent,
+            args,
+            is_active: false,
+            is_error,
+            partial_result: None,
+            result: Some(Value::Object(result)),
+            insert_after_count,
+        });
+    }
+
+    (messages, tool_cards)
+}
+
 fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
     let role_str = value
         .get("role")
@@ -2528,9 +2698,22 @@ fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
         return None;
     };
 
-    if blocks.is_empty() {
-        return None;
-    }
+    let blocks = if blocks.is_empty() {
+        // If the message stopped with an error, synthesize a visible error notice block.
+        if let Some(err) = value.get("errorMessage").and_then(|v| v.as_str()) {
+            if !err.is_empty() {
+                vec![ContentBlock::Text {
+                    text: format!("Error: {err}"),
+                }]
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        }
+    } else {
+        blocks
+    };
 
     Some(TranscriptMessage {
         id: value
@@ -2646,6 +2829,10 @@ fn model_display_name(value: &Value) -> Option<String> {
 
 fn value_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(|value| value.as_str())
+}
+
+fn tool_async_state(result: &Value) -> Option<&str> {
+    result.get("details")?.get("async")?.get("state")?.as_str()
 }
 
 fn ensure_rpc_id(command: &mut Value) {
@@ -2788,14 +2975,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn append_bridge_debug_rpc_line_writes_exact_raw_line() {
-        let path = env::temp_dir().join(format!(
-            "fura-bridge-debug-{}.jsonl",
-            Uuid::new_v4().simple()
-        ));
-        let (events, _) = broadcast::channel(1);
-        let state = AppState {
+    fn test_state(channel_capacity: usize, bridge_debug_file: Option<PathBuf>) -> AppState {
+        let (events, _) = broadcast::channel(channel_capacity);
+        AppState {
             token: Arc::new("test".into()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -2806,9 +2988,18 @@ mod tests {
                 args: Vec::new(),
             }),
             log_frames: false,
-            bridge_debug_file: Some(path.clone()),
+            bridge_debug_file,
             session_root: env::temp_dir(),
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn append_bridge_debug_rpc_line_writes_exact_raw_line() {
+        let path = env::temp_dir().join(format!(
+            "fura-bridge-debug-{}.jsonl",
+            Uuid::new_v4().simple()
+        ));
+        let state = test_state(1, Some(path.clone()));
         let raw_line = r#"{"type":"message_end","content":[{"type":"text","text":"<critical>"}]}"#;
 
         append_bridge_debug_rpc_line(&state, "session-a", raw_line).await;
@@ -2862,6 +3053,70 @@ mod tests {
             }));
             assert!(result.is_none(), "{role} should be suppressed");
         }
+    }
+
+    #[test]
+    fn projects_historical_task_results_as_tool_cards() {
+        let raw_messages = vec![
+            serde_json::json!({
+                "id": "u1",
+                "role": "user",
+                "content": [{ "type": "text", "text": "review this" }]
+            }),
+            serde_json::json!({
+                "id": "a1",
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "task-call",
+                    "name": "task",
+                    "intent": "launching review",
+                    "arguments": { "agent": "reviewer" }
+                }]
+            }),
+            serde_json::json!({
+                "id": "tr1",
+                "role": "toolResult",
+                "toolCallId": "task-call",
+                "toolName": "task",
+                "content": [{ "type": "text", "text": "<task-summary>raw summary</task-summary>" }],
+                "details": {
+                    "results": [{
+                        "index": 0,
+                        "id": "0-Review",
+                        "agent": "reviewer",
+                        "task": "review",
+                        "exitCode": 0,
+                        "durationMs": 12,
+                        "tokens": 34,
+                        "output": "ok"
+                    }],
+                    "totalDurationMs": 12
+                },
+                "isError": false
+            }),
+        ];
+
+        let (messages, tool_cards) = project_omp_transcript(&raw_messages);
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "tool-only assistant and toolResult messages stay out of normal transcript"
+        );
+        assert_eq!(tool_cards.len(), 1);
+        let card = &tool_cards[0];
+        assert_eq!(card.tool_call_id, "task-call");
+        assert_eq!(card.tool_name, "task");
+        assert_eq!(card.intent.as_deref(), Some("launching review"));
+        assert_eq!(card.args["agent"], "reviewer");
+        assert!(!card.is_active);
+        assert!(!card.is_error);
+        assert_eq!(card.insert_after_count, 1);
+        assert_eq!(
+            card.result.as_ref().unwrap()["details"]["results"][0]["id"],
+            "0-Review"
+        );
     }
 
     #[test]
@@ -3096,22 +3351,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rpc_session_switch_creates_new_record_and_preserves_previous_transcript() {
-        let (events, _) = broadcast::channel(8);
-        let state = AppState {
-            token: Arc::new("test".into()),
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
-            rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
-            events,
-            rpc_config: Arc::new(RpcConfig {
-                program: "omp".into(),
-                args: Vec::new(),
+    async fn async_task_card_stays_active_until_final_update() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "tool_execution_start",
+                "toolCallId": "task-call",
+                "toolName": "task",
+                "args": { "agent": "task" }
             }),
-            log_frames: false,
-            bridge_debug_file: None,
-            session_root: env::temp_dir(),
-        };
+        )
+        .await;
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "tool_execution_end",
+                "toolCallId": "task-call",
+                "isError": false,
+                "result": {
+                    "content": [{ "type": "text", "text": "Started background task job." }],
+                    "details": {
+                        "progress": [{
+                            "index": 0,
+                            "id": "CheckUi",
+                            "agent": "task",
+                            "status": "running",
+                            "task": "Check UI",
+                            "toolCount": 1,
+                            "tokens": 0,
+                            "durationMs": 0
+                        }],
+                        "async": { "state": "running", "jobId": "job-1", "type": "task" }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        {
+            let sessions = state.sessions.read().await;
+            let record = sessions.get("s1").expect("record remains");
+            assert_eq!(record.active_tool_calls.len(), 1);
+            assert!(record.tool_cards.is_empty());
+            assert!(record.active_tool_calls[0].is_active);
+            assert_eq!(
+                record.active_tool_calls[0].result.as_ref().unwrap()["details"]["async"]["state"],
+                "running"
+            );
+        }
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "tool_execution_update",
+                "toolCallId": "task-call",
+                "partialResult": {
+                    "content": [{ "type": "text", "text": "Background task batch complete." }],
+                    "details": {
+                        "progress": [{
+                            "index": 0,
+                            "id": "CheckUi",
+                            "agent": "task",
+                            "status": "completed",
+                            "task": "Check UI",
+                            "toolCount": 2,
+                            "tokens": 42,
+                            "durationMs": 1234
+                        }],
+                        "async": { "state": "completed", "jobId": "job-1", "type": "task" }
+                    }
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert!(record.active_tool_calls.is_empty());
+        assert_eq!(record.tool_cards.len(), 1);
+        assert!(!record.tool_cards[0].is_active);
+        assert!(!record.tool_cards[0].is_error);
+        assert!(record.tool_cards[0].partial_result.is_none());
+        assert_eq!(
+            record.tool_cards[0].result.as_ref().unwrap()["details"]["async"]["state"],
+            "completed"
+        );
+        assert_eq!(
+            record.tool_cards[0].result.as_ref().unwrap()["details"]["progress"][0]["status"],
+            "completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_session_switch_creates_new_record_and_preserves_previous_transcript() {
+        let state = test_state(8, None);
 
         let mut previous = test_record();
         previous.id = "old-session".to_string();
@@ -3192,6 +3535,58 @@ mod tests {
                 .is_none(),
             "previous session must not send prompts to the handoff transport"
         );
+
+        apply_rpc_frame(
+            &state,
+            "old-session",
+            &serde_json::json!({
+                "type": "tool_execution_start",
+                "toolCallId": "tool-1",
+                "toolName": "read",
+                "intent": "reading file",
+                "args": { "path": "src/main.rs" }
+            }),
+        )
+        .await;
+        apply_rpc_frame(
+            &state,
+            "old-session",
+            &serde_json::json!({
+                "type": "tool_execution_update",
+                "toolCallId": "tool-1",
+                "partialResult": { "content": [{ "type": "text", "text": "line 1" }] }
+            }),
+        )
+        .await;
+        apply_rpc_frame(
+            &state,
+            "old-session",
+            &serde_json::json!({
+                "type": "tool_execution_end",
+                "toolCallId": "tool-1",
+                "isError": false,
+                "result": { "content": [{ "type": "text", "text": "line 1" }] }
+            }),
+        )
+        .await;
+
+        {
+            let sessions = state.sessions.read().await;
+            let previous = sessions
+                .get("old-session")
+                .expect("previous record remains");
+            assert!(
+                previous.active_tool_calls.is_empty() && previous.tool_cards.is_empty(),
+                "tool progress from the post-handoff transport must not attach to the previous session",
+            );
+
+            let next = sessions.get("new-session").expect("new record remains");
+            assert!(next.active_tool_calls.is_empty());
+            assert_eq!(next.tool_cards.len(), 1);
+            assert_eq!(next.tool_cards[0].tool_call_id, "tool-1");
+            assert_eq!(next.tool_cards[0].tool_name, "read");
+            assert!(next.tool_cards[0].result.is_some());
+        }
 
         apply_rpc_response(
             &state,

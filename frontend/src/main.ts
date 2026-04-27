@@ -1,6 +1,7 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
 import hljs from "highlight.js/lib/common";
+import { marked, type Token, type Tokens } from "marked";
 import { fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 
 type SessionStatus = "starting" | "idle" | "busy" | "exited" | "error" | "available";
@@ -18,6 +19,77 @@ type TranscriptMessage = {
   isNew: boolean;
 };
 
+type AgentProgress = {
+  index: number;
+  id: string;
+  agent: string;
+  status: "pending" | "running" | "completed" | "failed" | "aborted";
+  task: string;
+  assignment?: string;
+  description?: string;
+  lastIntent?: string;
+  currentTool?: string;
+  currentToolArgs?: string;
+  toolCount: number;
+  tokens: number;
+  durationMs: number;
+};
+
+type TaskResult = {
+  index: number;
+  id: string;
+  agent: string;
+  agentSource?: string;
+  task: string;
+  assignment?: string;
+  description?: string;
+  lastIntent?: string;
+  exitCode: number;
+  output?: string;
+  stderr?: string;
+  truncated?: boolean;
+  durationMs?: number;
+  tokens?: number;
+  error?: string;
+  aborted?: boolean;
+  abortReason?: string;
+  outputPath?: string;
+  patchPath?: string;
+  branchName?: string;
+  extractedToolData?: Record<string, unknown>;
+};
+
+type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
+
+type TodoItem = {
+  id: string;
+  content: string;
+  status: TodoStatus;
+  notes?: string;
+  details?: string;
+};
+
+type TodoPhase = {
+  id: string;
+  name: string;
+  tasks: TodoItem[];
+};
+
+type ToolCard = {
+  toolCallId: string;
+  toolName: string;
+  intent?: string | null;
+  args: Record<string, unknown>;
+  isActive: boolean;
+  isError: boolean;
+  partialResult?: unknown;
+  result?: unknown;
+};
+
+type TranscriptEntry =
+  | ({ kind: "message" } & TranscriptMessage)
+  | ({ kind: "tool" } & ToolCard);
+
 type SessionSummary = {
   kind: "managed" | "available";
   sessionId: string;
@@ -32,7 +104,7 @@ type SessionSummary = {
 
 type SessionProjection = {
   summary: SessionSummary;
-  messages: TranscriptMessage[];
+  transcript: TranscriptEntry[];
   isBusy: boolean;
   model?: string | null;
   thinkingLevel?: string | null;
@@ -144,8 +216,11 @@ const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const commandPalette = requireElement<HTMLDivElement>("commandPalette");
 const imagePreviews = requireElement<HTMLDivElement>("imagePreviews");
 
-type PendingImage = { type: "image"; data: string; mimeType: string };
+type PendingImage = { type: "image"; marker: string; data: string; mimeType: string };
+type PendingSnippet = { type: "snippet"; marker: string; text: string };
 let pendingImages: PendingImage[] = [];
+let pendingSnippets: PendingSnippet[] = [];
+let nextPendingAttachmentId = 1;
 
 let socket: WebSocket | null = null;
 let activeSessionId: string | null = null;
@@ -154,6 +229,7 @@ let lastRenderedSessionId: string | null = null;
 let paletteCommands: SlashCommandSpec[] = [];
 let paletteSelectedIndex = -1;
 const projections = new Map<string, SessionProjection>();
+const sessionNotices = new Map<string, Array<{ level: string; text: string }>>();
 
 const url = new URL(window.location.href);
 const initialToken = url.searchParams.get("token") ?? window.localStorage.getItem("fura.token") ?? "";
@@ -174,36 +250,52 @@ stopButton.addEventListener("click", () => {
 });
 promptForm.addEventListener("submit", event => {
   event.preventDefault();
-  const text = promptInput.value.trim();
+  const text = expandSnippetTokens(promptInput.value.trim());
   if ((!text && pendingImages.length === 0) || !activeSessionId) return;
   hidePalette();
-  const msg: { type: "prompt.send"; sessionId: string; text: string; images?: PendingImage[] } = {
+  const msg: ClientMessage = {
     type: "prompt.send",
     sessionId: activeSessionId,
     text,
   };
-  if (pendingImages.length > 0) msg.images = pendingImages;
+  if (pendingImages.length > 0) {
+    msg.images = pendingImages.map(({ type, data, mimeType }) => ({ type, data, mimeType }));
+  }
+  if (activeSessionId) sessionNotices.delete(activeSessionId);
   send(msg);
   pendingImages = [];
+  pendingSnippets = [];
   renderImagePreviews();
   promptInput.value = "";
 });
 promptInput.addEventListener("paste", async event => {
   const items = Array.from(event.clipboardData?.items ?? []);
   const imageItems = items.filter(item => item.type.startsWith("image/"));
-  if (imageItems.length === 0) return; // let text paste proceed normally
+  const pastedText = event.clipboardData?.getData("text/plain") ?? "";
+  const shouldCaptureSnippet = imageItems.length === 0 && pastedText.length > 500;
+  if (imageItems.length === 0 && !shouldCaptureSnippet) return; // let normal short text paste proceed
   event.preventDefault();
+
+  if (shouldCaptureSnippet) {
+    const marker = createPendingMarker("Snippet");
+    pendingSnippets.push({ type: "snippet", marker, text: pastedText });
+    insertTextAtCursor(marker);
+  }
+
   for (const item of imageItems) {
     const file = item.getAsFile();
     if (!file) continue;
     try {
       const base64 = await blobToBase64(file);
-      pendingImages.push({ type: "image", data: base64, mimeType: file.type });
+      const marker = createPendingMarker("Image");
+      pendingImages.push({ type: "image", marker, data: base64, mimeType: file.type });
+      insertTextAtCursor(marker);
     } catch {
       appendLog("Failed to read pasted image.");
     }
   }
   renderImagePreviews();
+  updatePalette();
 });
 promptInput.addEventListener("input", () => updatePalette());
 promptInput.addEventListener("blur", () => {
@@ -216,7 +308,13 @@ promptInput.addEventListener("keydown", event => {
     promptForm.requestSubmit();
     return;
   }
-  if (commandPalette.hidden) return;
+  if (commandPalette.hidden) {
+    if (event.key === "Escape" && activeSessionId && projections.get(activeSessionId)?.isBusy) {
+      event.preventDefault();
+      send({ type: "prompt.abort", sessionId: activeSessionId });
+    }
+    return;
+  }
   if (event.key === "ArrowDown") {
     event.preventDefault();
     setPaletteSelected(paletteSelectedIndex + 1);
@@ -312,12 +410,24 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     case "session.notice":
       appendLog(`[${message.sessionId}] ${message.level}: ${message.text}`);
+      if (message.level === "error" || message.level === "warning") {
+        const notices = sessionNotices.get(message.sessionId) ?? [];
+        notices.push({ level: message.level, text: message.text });
+        sessionNotices.set(message.sessionId, notices);
+        render();
+      }
       break;
     case "raw.omp":
       appendLog(`[raw ${message.sessionId}] ${JSON.stringify(message.frame)}`);
       break;
     case "error":
       appendLog(`Error: ${message.message}`);
+      if (activeSessionId) {
+        const notices = sessionNotices.get(activeSessionId) ?? [];
+        notices.push({ level: "error", text: message.message });
+        sessionNotices.set(activeSessionId, notices);
+        render();
+      }
       break;
   }
 }
@@ -416,7 +526,7 @@ function renderActiveSession(): void {
   promptInput.placeholder = "Send a prompt… (type / for commands)";
   renderStatusBar(projection);
 
-  if (projection.messages.length === 0) {
+  if (projection.transcript.length === 0) {
     const empty = document.createElement("p");
     empty.className = "empty transcript-empty";
     empty.textContent = "Transcript is empty.";
@@ -424,8 +534,9 @@ function renderActiveSession(): void {
     return;
   }
 
-  for (const message of projection.messages) {
-    transcript.append(renderMessage(message));
+
+  for (const entry of projection.transcript) {
+    transcript.append(entry.kind === "message" ? renderMessage(entry) : renderToolCard(entry));
   }
 
   // Restore manually-toggled thinking block open state from before the rebuild.
@@ -437,6 +548,14 @@ function renderActiveSession(): void {
   });
 
   // Scroll to bottom when switching sessions; during live updates, only if already near bottom.
+  const pending = activeSessionId ? (sessionNotices.get(activeSessionId) ?? []) : [];
+  for (const notice of pending) {
+    const bar = document.createElement("div");
+    bar.className = `session-notice notice-${notice.level}`;
+    bar.textContent = notice.text;
+    transcript.append(bar);
+  }
+
   if (sessionChanged || wasNearBottom) {
     transcript.scrollTop = transcript.scrollHeight;
   }
@@ -444,9 +563,12 @@ function renderActiveSession(): void {
 
 function renderStatusBar(projection?: SessionProjection): void {
   statusBar.replaceChildren();
+  statusBar.classList.toggle("busy", Boolean(projection?.isBusy));
 
   const parts: HTMLElement[] = [];
-  parts.push(statusPart("π", "status-pi"));
+  const piSpan = statusPart("π", "status-pi");
+  if (projection?.isBusy) piSpan.classList.add("is-running");
+  parts.push(piSpan);
 
   if (!projection) {
     parts.push(statusPart("No session", "muted"));
@@ -457,11 +579,14 @@ function renderStatusBar(projection?: SessionProjection): void {
   const cwd = projection.summary.cwd ?? "current cwd";
   parts.push(statusPart(projection.model ?? "model unknown", "model"));
   parts.push(statusPart(projection.thinkingLevel ?? "thinking inherit", "thinking"));
-  parts.push(statusPart(`\uD83D\uDCC1 ${shortPath(cwd)}`, "cwd"));
+  parts.push(statusPart(`📁 ${shortPath(cwd)}`, "cwd"));
   parts.push(statusPart(formatTokens(projection.tokensTotal), "tokens"));
   parts.push(statusPart(formatCost(projection.costUsd), "cost"));
   if (projection.contextPercent != null && projection.contextWindow != null) {
     parts.push(statusPart(formatContext(projection.contextPercent, projection.contextWindow), "context"));
+  }
+  if (projection.isBusy) {
+    parts.push(statusPart("esc to interrupt", "interrupt"));
   }
 
   statusBar.append(...interleaveStatusParts(parts));
@@ -542,45 +667,691 @@ function renderMessage(message: TranscriptMessage): HTMLElement {
   return article;
 }
 
-// --- Text segment parsing ---
+function renderToolCard(card: ToolCard): HTMLElement {
+  if (card.toolName === "todo_write") return renderTodoWriteCard(card);
+  if (card.toolName === "task") return renderTaskCard(card);
+  const wrapper = document.createElement("section");
+  wrapper.className = `tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
+  wrapper.dataset.toolName = card.toolName;
 
-type TextSegment =
-  | { kind: "prose"; text: string }
-  | { kind: "code"; lang: string; code: string };
+  const header = document.createElement("div");
+  header.className = "tool-header";
+  header.append(
+    toolStatusIcon(card),
+    toolHeaderText(card.toolName, "tool-name"),
+    toolHeaderText(toolArgSummary(card.args), "tool-args-summary"),
+  );
+  if (card.isActive) header.append(interruptButton());
+  wrapper.append(header);
 
-const FENCE_RE = /^```(\w*)\n([\s\S]*?)^```[ \t]*$/gm;
+  appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
 
-function parseTextSegments(text: string): TextSegment[] {
-  const segments: TextSegment[] = [];
-  let lastIndex = 0;
-  FENCE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = FENCE_RE.exec(text)) !== null) {
-    const before = text.slice(lastIndex, match.index);
-    if (before.trim()) {
-      segments.push({ kind: "prose", text: before.trim() });
-    }
-    segments.push({ kind: "code", lang: match[1] ?? "", code: match[2] });
-    lastIndex = FENCE_RE.lastIndex;
-  }
-  const tail = text.slice(lastIndex);
-  if (tail.trim()) {
-    segments.push({ kind: "prose", text: tail.trim() });
-  }
-  return segments.length > 0 ? segments : [{ kind: "prose", text }];
+  return wrapper;
 }
 
-function renderProse(text: string): HTMLElement {
-  const div = document.createElement("div");
-  div.className = "prose";
-  // Split on blank lines into paragraphs; fall back to a single block.
-  const paras = text.split(/\n{2,}/);
-  for (const para of paras) {
-    const p = document.createElement("p");
-    p.textContent = para.trim();
-    if (p.textContent) div.append(p);
+function appendToolResultBody(wrapper: HTMLElement, resultText: string): void {
+  if (!resultText) return;
+  const body = document.createElement("div");
+  body.className = "tool-result-body";
+  const pre = document.createElement("pre");
+  pre.className = "tool-result-text";
+  pre.textContent = truncate(resultText, 8000);
+  body.append(pre);
+  wrapper.append(body);
+}
+
+function renderTodoWriteCard(card: ToolCard): HTMLElement {
+  const wrapper = document.createElement("section");
+  wrapper.className = `tool-card todo-write-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
+  wrapper.dataset.toolName = "todo_write";
+
+  const header = document.createElement("div");
+  header.className = "tool-header todo-write-header";
+  header.append(
+    toolStatusIcon(card),
+    toolHeaderText("Todo Write", "tool-name"),
+  );
+  const phases = todoPhases(card.partialResult ?? card.result);
+  const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
+  header.append(toolHeaderText(`${taskCount} ${taskCount === 1 ? "task" : "tasks"}`, "tool-args-summary"));
+  if (card.isActive) header.append(interruptButton());
+  wrapper.append(header);
+
+  if (phases.length > 0) {
+    const tree = document.createElement("div");
+    tree.className = "todo-tree";
+    for (const phase of phases) tree.append(renderTodoPhase(phase, phases.length > 1));
+    wrapper.append(tree);
+  } else {
+    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
   }
-  return div;
+
+  return wrapper;
+}
+
+function renderTodoPhase(phase: TodoPhase, showPhaseName: boolean): HTMLElement {
+  const section = document.createElement("section");
+  section.className = "todo-phase";
+
+  if (showPhaseName) {
+    const title = document.createElement("div");
+    title.className = "todo-phase-title";
+    title.textContent = `└─ ${phase.name}`;
+    section.append(title);
+  }
+
+  const list = document.createElement("div");
+  list.className = "todo-task-list";
+  phase.tasks.forEach((todo, index) => {
+    list.append(renderTodoItem(todo, index === 0));
+  });
+  section.append(list);
+  return section;
+}
+
+function renderTodoItem(todo: TodoItem, firstInPhase: boolean): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `todo-task todo-${todo.status}`;
+
+  const prefix = document.createElement("span");
+  prefix.className = "todo-prefix";
+  prefix.textContent = firstInPhase ? "└─" : "  ";
+
+  const icon = document.createElement("span");
+  icon.className = "todo-icon";
+  icon.textContent = todo.status === "completed" ? "☑" : "☐";
+
+  const content = document.createElement("span");
+  content.className = "todo-content";
+  content.textContent = todo.content;
+
+  row.append(prefix, icon, content);
+
+  if (todo.status === "in_progress" && todo.details) {
+    for (const line of todo.details.split("\n")) {
+      const details = document.createElement("div");
+      details.className = "todo-details";
+      details.textContent = line;
+      row.append(details);
+    }
+  }
+
+  return row;
+}
+
+function todoPhases(value: unknown): TodoPhase[] {
+  if (!isRecord(value) || !isRecord(value.details) || !Array.isArray(value.details.phases)) return [];
+  return value.details.phases.filter(isTodoPhase);
+}
+
+function isTodoPhase(value: unknown): value is TodoPhase {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.name === "string"
+    && Array.isArray(value.tasks)
+    && value.tasks.every(isTodoItem);
+}
+
+function isTodoItem(value: unknown): value is TodoItem {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.content === "string"
+    && isTodoStatus(value.status)
+    && (value.details === undefined || typeof value.details === "string")
+    && (value.notes === undefined || typeof value.notes === "string");
+}
+
+function isTodoStatus(value: unknown): value is TodoStatus {
+  return value === "pending" || value === "in_progress" || value === "completed" || value === "abandoned";
+}
+
+function renderTaskCard(card: ToolCard): HTMLElement {
+  const wrapper = document.createElement("section");
+  wrapper.className = `tool-card task-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
+  wrapper.dataset.toolName = "task";
+
+  const header = document.createElement("div");
+  header.className = "tool-header task-header";
+  header.append(
+    toolStatusIcon(card),
+    toolHeaderText("Task:", "task-label"),
+    toolHeaderText(String(card.args?.agent ?? card.toolName), "task-agent-name"),
+  );
+  if (card.intent) header.append(toolHeaderText(card.intent, "task-intent"));
+  if (card.isActive) header.append(interruptButton());
+  wrapper.append(header);
+
+  const source = card.partialResult ?? card.result;
+  const progress = taskProgress(source);
+  const results = taskResults(source);
+  const shouldRenderProgress = progress.length > 0 && (card.isActive || results.length === 0);
+
+  if (shouldRenderProgress) {
+    const list = document.createElement("div");
+    list.className = "task-progress";
+    for (const agent of progress) list.append(renderTaskAgent(agent));
+    wrapper.append(list);
+  } else if (results.length > 0) {
+    const list = document.createElement("div");
+    list.className = "task-progress task-results";
+    for (let i = 0; i < results.length; i++) list.append(renderTaskResult(results[i], i === results.length - 1));
+    wrapper.append(list);
+  } else {
+    appendToolResultBody(wrapper, toolResultText(source));
+  }
+
+  const totals = shouldRenderProgress ? taskProgressTotals(progress) : taskResultTotals(results, source);
+  if (totals) {
+    const total = document.createElement("div");
+    total.className = "task-total";
+    total.textContent = totals;
+    wrapper.append(total);
+  }
+
+  return wrapper;
+}
+
+function renderTaskAgent(agent: AgentProgress): HTMLElement {
+  const row = document.createElement("div");
+  row.className = `task-agent status-${agent.status}`;
+
+  const main = document.createElement("div");
+  main.className = "task-agent-main";
+  const status = toolHeaderText(taskStatusGlyph(agent.status), "task-agent-status");
+  if (agent.status === "running") status.classList.add("is-running");
+  main.append(
+    status,
+    toolHeaderText(formatTaskId(agent.id), "task-agent-id"),
+    toolHeaderText(agent.description ?? agent.task, "task-agent-desc"),
+  );
+  const stats = taskProgressStats(agent);
+  if (stats) main.append(toolHeaderText(stats, "task-agent-stats"));
+  row.append(main);
+
+  if (agent.lastIntent || agent.currentTool) {
+    const activity = document.createElement("div");
+    activity.className = "task-agent-activity";
+    activity.textContent = `└─ ${agent.lastIntent ?? `${agent.currentTool} ${agent.currentToolArgs ?? ""}`}`;
+    row.append(activity);
+  }
+
+  return row;
+}
+
+function renderTaskResult(result: TaskResult, isLast: boolean): HTMLElement {
+  const resultStatus = taskResultStatus(result);
+  const row = document.createElement("div");
+  row.className = `task-agent task-result status-${resultStatus} ${isLast ? "task-last" : ""}`;
+
+  const main = document.createElement("div");
+  main.className = "task-agent-main";
+  main.append(
+    toolHeaderText(taskResultGlyph(result), "task-agent-status"),
+    toolHeaderText(formatTaskId(result.id), "task-agent-id"),
+    toolHeaderText(result.description ?? result.task, "task-agent-desc"),
+    toolHeaderText(taskResultLabel(result), "task-result-badge"),
+  );
+  const stats = taskResultStats(result);
+  if (stats) main.append(toolHeaderText(stats, "task-agent-stats"));
+  row.append(main);
+
+  const activityText = result.lastIntent ?? result.abortReason ?? result.error;
+  if (activityText) {
+    const activity = document.createElement("div");
+    activity.className = "task-agent-activity";
+    activity.textContent = `└─ ${activityText}`;
+    row.append(activity);
+  }
+
+  const outputLines = taskOutputPreview(result.output);
+  if (outputLines.length > 0) {
+    const output = document.createElement("pre");
+    output.className = "task-result-output";
+    output.textContent = outputLines.join("\n");
+    row.append(output);
+  }
+
+  const artifactPath = result.patchPath ?? result.branchName ?? result.outputPath;
+  if (artifactPath) {
+    const path = document.createElement("div");
+    path.className = "task-result-path";
+    path.textContent = `${result.patchPath ? "Patch" : result.branchName ? "Branch" : "Output"}: ${artifactPath}`;
+    row.append(path);
+  }
+
+  return row;
+}
+
+function toolStatusIcon(card: ToolCard): HTMLElement {
+  const span = document.createElement("span");
+  span.className = "tool-status-icon";
+  if (card.isActive) {
+    span.classList.add("is-running");
+    span.textContent = "⠋";
+  } else {
+    span.textContent = card.isError ? "✗" : "✓";
+  }
+  return span;
+}
+
+function toolHeaderText(text: string, className: string): HTMLElement {
+  const span = document.createElement("span");
+  span.className = className;
+  span.textContent = text;
+  return span;
+}
+
+function interruptButton(): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "tool-interrupt";
+  button.textContent = "esc to interrupt";
+  button.addEventListener("click", () => {
+    if (activeSessionId) send({ type: "prompt.abort", sessionId: activeSessionId });
+  });
+  return button;
+}
+
+function taskProgress(value: unknown): AgentProgress[] {
+  if (!isRecord(value)) return [];
+  const details = value.details;
+  if (!isRecord(details) || !Array.isArray(details.progress)) return [];
+  return details.progress.filter(isAgentProgress);
+}
+
+function taskResults(value: unknown): TaskResult[] {
+  if (!isRecord(value)) return [];
+  const details = value.details;
+  if (!isRecord(details) || !Array.isArray(details.results)) return [];
+  return details.results.filter(isTaskResult);
+}
+
+function isAgentProgress(value: unknown): value is AgentProgress {
+  return isRecord(value) && typeof value.id === "string" && typeof value.status === "string" && typeof value.task === "string";
+}
+
+function isTaskResult(value: unknown): value is TaskResult {
+  return isRecord(value)
+    && typeof value.id === "string"
+    && typeof value.agent === "string"
+    && typeof value.task === "string"
+    && typeof value.exitCode === "number";
+}
+
+function taskStatusGlyph(status: AgentProgress["status"]): string {
+  if (status === "completed") return "✓";
+  if (status === "failed" || status === "aborted") return "✗";
+  if (status === "running") return "⠋";
+  return "·";
+}
+
+function taskResultGlyph(result: TaskResult): string {
+  if (result.aborted || result.exitCode !== 0) return "✗";
+  if (result.error) return "!";
+  return "✓";
+}
+
+function taskResultStatus(result: TaskResult): "completed" | "failed" | "aborted" | "warning" {
+  if (result.aborted) return "aborted";
+  if (result.exitCode !== 0) return "failed";
+  if (result.error) return "warning";
+  return "completed";
+}
+
+function taskResultLabel(result: TaskResult): string {
+  if (result.aborted) return "aborted";
+  if (result.exitCode !== 0) return "failed";
+  if (result.error) return "merge failed";
+  return "done";
+}
+
+function formatTaskId(id: string): string {
+  const segments = id.split(".");
+  if (segments.length < 2 && !/^\d+-/.test(id)) return id;
+  return segments.map(segment => {
+    const match = segment.match(/^(\d+)-(.+)$/);
+    return match ? `${match[1]} ${match[2]}` : segment;
+  }).join(">");
+}
+
+function taskProgressStats(agent: AgentProgress): string {
+  const parts: string[] = [];
+  if ((agent.toolCount ?? 0) > 0) parts.push(`${agent.toolCount} tools`);
+  if ((agent.tokens ?? 0) > 0) parts.push(`${formatTokens(agent.tokens)} tokens`);
+  if ((agent.durationMs ?? 0) > 0 && agent.status !== "running") parts.push(formatDuration(agent.durationMs));
+  return parts.join(" · ");
+}
+
+function taskResultStats(result: TaskResult): string {
+  const parts: string[] = [];
+  if ((result.tokens ?? 0) > 0) parts.push(`${formatTokens(result.tokens ?? 0)} tokens`);
+  if ((result.durationMs ?? 0) > 0) parts.push(formatDuration(result.durationMs ?? 0));
+  if (result.truncated) parts.push("truncated");
+  return parts.join(" · ");
+}
+
+function taskOutputPreview(output: string | undefined): string[] {
+  if (!output?.trim()) return [];
+  const lines = output
+    .split("\n")
+    .map(line => line.replace(/\t/g, "  ").trimEnd())
+    .filter(line => line.trim().length > 0);
+  const visible = lines.slice(0, 3);
+  if (lines.length > visible.length) visible.push("…");
+  return visible;
+}
+
+function taskProgressTotals(progress: AgentProgress[]): string {
+  if (progress.length === 0) return "";
+  const done = progress.filter(p => p.status === "completed").length;
+  const failed = progress.filter(p => p.status === "failed" || p.status === "aborted").length;
+  const duration = Math.max(...progress.map(p => p.durationMs || 0));
+  if (done + failed === 0) return "";
+  return `Total: ${done} succeeded${failed ? ` · ${failed} failed` : ""}${duration > 0 ? ` · ${formatDuration(duration)}` : ""}`;
+}
+
+function taskResultTotals(results: TaskResult[], source: unknown): string {
+  if (results.length === 0) return "";
+  const aborted = results.filter(r => r.aborted).length;
+  const warnings = results.filter(r => !r.aborted && r.exitCode === 0 && Boolean(r.error)).length;
+  const succeeded = results.filter(r => !r.aborted && r.exitCode === 0 && !r.error).length;
+  const failed = results.length - aborted - warnings - succeeded;
+  const parts: string[] = [];
+  if (aborted > 0) parts.push(`${aborted} aborted`);
+  if (succeeded > 0) parts.push(`${succeeded} succeeded`);
+  if (warnings > 0) parts.push(`${warnings} merge failed`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  const totalDuration = isRecord(source) && isRecord(source.details) && typeof source.details.totalDurationMs === "number"
+    ? source.details.totalDurationMs
+    : Math.max(...results.map(r => r.durationMs ?? 0));
+  if (totalDuration > 0) parts.push(formatDuration(totalDuration));
+  return parts.length > 0 ? `Total: ${parts.join(" · ")}` : "";
+}
+
+function toolArgSummary(args: Record<string, unknown>): string {
+  const path = typeof args.path === "string" ? args.path : undefined;
+  if (path) return shortPath(path);
+  for (const key of ["command", "message", "input", "pattern"]) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim()) return truncate(value.trim(), 70);
+  }
+  const first = Object.entries(args).find(([, value]) => typeof value === "string");
+  return first ? `${first[0]}=${truncate(String(first[1]), 60)}` : "";
+}
+
+function toolResultText(value: unknown): string {
+  if (!isRecord(value)) return "";
+  if (typeof value.text === "string") return value.text;
+  const content = value.content;
+  if (Array.isArray(content)) {
+    const text = content.map(item => isRecord(item) && typeof item.text === "string" ? item.text : "").filter(Boolean).join("\n");
+    if (text) return text;
+  }
+  return "";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function truncate(value: string, max: number): string {
+  return value.length > max ? `${value.slice(0, max - 1)}…` : value;
+}
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return "0s";
+  const sec = 1_000;
+  const min = 60 * sec;
+  const hour = 60 * min;
+  const day = 24 * hour;
+  if (ms < sec) return `${Math.round(ms)}ms`;
+  if (ms < min) return `${(ms / sec).toFixed(1)}s`;
+  if (ms < hour) {
+    const minutes = Math.floor(ms / min);
+    const seconds = Math.floor((ms % min) / sec);
+    return seconds > 0 ? `${minutes}m${seconds}s` : `${minutes}m`;
+  }
+  if (ms < day) {
+    const hours = Math.floor(ms / hour);
+    const minutes = Math.floor((ms % hour) / min);
+    return minutes > 0 ? `${hours}h${minutes}m` : `${hours}h`;
+  }
+  const days = Math.floor(ms / day);
+  const hours = Math.floor((ms % day) / hour);
+  return hours > 0 ? `${days}d${hours}h` : `${days}d`;
+}
+
+// --- Markdown rendering ---
+
+function renderMarkdown(text: string): HTMLElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = "markdown-body";
+
+  const tokens = marked.lexer(text.trim());
+  for (const token of tokens) {
+    const node = renderMarkdownToken(token);
+    if (node) wrapper.append(node);
+  }
+
+  if (!wrapper.hasChildNodes() && text.trim()) {
+    const p = document.createElement("p");
+    p.textContent = text.trim();
+    wrapper.append(p);
+  }
+
+  return wrapper;
+}
+
+function renderMarkdownToken(token: Token): Node | null {
+  switch (token.type) {
+    case "space":
+      return null;
+    case "heading":
+      return renderHeading(token as Tokens.Heading);
+    case "paragraph":
+      return renderParagraph((token as Tokens.Paragraph).tokens ?? []);
+    case "code": {
+      const code = token as Tokens.Code;
+      return renderCodeBlock(code.lang ?? "", code.text);
+    }
+    case "list":
+      return renderList(token as Tokens.List);
+    case "blockquote":
+      return renderBlockquote(token as Tokens.Blockquote);
+    case "hr":
+      return document.createElement("hr");
+    case "table":
+      return renderTable(token as Tokens.Table);
+    case "html":
+      return renderPlainParagraph(token.raw.trim());
+    default: {
+      const text = tokenText(token).trim();
+      return text ? renderPlainParagraph(text) : null;
+    }
+  }
+}
+
+function renderHeading(token: Tokens.Heading): HTMLElement {
+  const depth = Math.min(Math.max(token.depth, 1), 6) as 1 | 2 | 3 | 4 | 5 | 6;
+  const heading = document.createElement(`h${depth}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+  heading.append(renderInlineTokens(token.tokens));
+  return heading;
+}
+
+function renderParagraph(tokens: Token[]): HTMLParagraphElement {
+  const p = document.createElement("p");
+  p.append(renderInlineTokens(tokens));
+  return p;
+}
+
+function renderPlainParagraph(text: string): HTMLParagraphElement {
+  const p = document.createElement("p");
+  p.textContent = text;
+  return p;
+}
+
+function renderList(token: Tokens.List): HTMLOListElement | HTMLUListElement {
+  if (token.ordered) {
+    const list = document.createElement("ol");
+    if (typeof token.start === "number" && token.start !== 1) {
+      list.start = token.start;
+    }
+    for (const item of token.items) {
+      list.append(renderListItem(item));
+    }
+    return list;
+  }
+
+  const list = document.createElement("ul");
+  for (const item of token.items) {
+    list.append(renderListItem(item));
+  }
+  return list;
+}
+
+function renderListItem(item: Tokens.ListItem): HTMLLIElement {
+  const li = document.createElement("li");
+  if (item.task) {
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.disabled = true;
+    checkbox.checked = Boolean(item.checked);
+    li.append(checkbox, " ");
+  }
+
+  const tokens = item.tokens;
+  for (const token of tokens) {
+    if (token.type === "text") {
+      li.append(renderInlineTokens(token.tokens ?? [token]));
+      continue;
+    }
+    if (token.type === "paragraph") {
+      const p = renderParagraph((token as Tokens.Paragraph).tokens ?? []);
+      if (tokens.length === 1 || item.task) {
+        li.append(...Array.from(p.childNodes));
+      } else {
+        li.append(p);
+      }
+      continue;
+    }
+    const node = renderMarkdownToken(token);
+    if (node) li.append(node);
+  }
+
+  return li;
+}
+
+function renderBlockquote(token: Tokens.Blockquote): HTMLQuoteElement {
+  const quote = document.createElement("blockquote");
+  for (const child of token.tokens) {
+    const node = renderMarkdownToken(child);
+    if (node) quote.append(node);
+  }
+  return quote;
+}
+
+function renderTable(token: Tokens.Table): HTMLTableElement {
+  const table = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headerRow = document.createElement("tr");
+  token.header.forEach((cell, index) => {
+    const th = document.createElement("th");
+    setTableCellAlignment(th, token.align[index]);
+    th.append(renderInlineTokens(cell.tokens));
+    headerRow.append(th);
+  });
+  thead.append(headerRow);
+  table.append(thead);
+
+  const tbody = document.createElement("tbody");
+  for (const row of token.rows) {
+    const tr = document.createElement("tr");
+    row.forEach((cell, index) => {
+      const td = document.createElement("td");
+      setTableCellAlignment(td, token.align[index]);
+      td.append(renderInlineTokens(cell.tokens));
+      tr.append(td);
+    });
+    tbody.append(tr);
+  }
+  table.append(tbody);
+
+  return table;
+}
+
+function setTableCellAlignment(cell: HTMLTableCellElement, align: Tokens.TableCell["align"] | undefined): void {
+  if (align) cell.style.textAlign = align;
+}
+
+function renderInlineTokens(tokens: Token[]): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  for (const token of tokens) {
+    fragment.append(renderInlineToken(token));
+  }
+  return fragment;
+}
+
+function renderInlineToken(token: Token): Node {
+  switch (token.type) {
+    case "text": {
+      const text = token as Tokens.Text;
+      if (text.tokens && text.tokens.length > 0) return renderInlineTokens(text.tokens);
+      return document.createTextNode(text.text);
+    }
+    case "strong":
+      return wrapInline("strong", (token as Tokens.Strong).tokens ?? []);
+    case "em":
+      return wrapInline("em", (token as Tokens.Em).tokens ?? []);
+    case "del":
+      return wrapInline("del", (token as Tokens.Del).tokens ?? []);
+    case "codespan": {
+      const code = document.createElement("code");
+      code.textContent = (token as Tokens.Codespan).text;
+      return code;
+    }
+    case "link":
+      return renderLink(token as Tokens.Link);
+    case "br":
+      return document.createElement("br");
+    case "html":
+      return document.createTextNode(token.raw);
+    default:
+      return document.createTextNode(tokenText(token));
+  }
+}
+
+function wrapInline(tagName: "strong" | "em" | "del", tokens: Token[]): HTMLElement {
+  const el = document.createElement(tagName);
+  el.append(renderInlineTokens(tokens));
+  return el;
+}
+
+function renderLink(token: Tokens.Link): HTMLElement {
+  const href = safeHref(token.href);
+  const el = href ? document.createElement("a") : document.createElement("span");
+  el.append(renderInlineTokens(token.tokens));
+  if (href && el instanceof HTMLAnchorElement) {
+    el.href = href;
+    el.target = "_blank";
+    el.rel = "noreferrer noopener";
+    if (token.title) el.title = token.title;
+  }
+  return el;
+}
+
+function safeHref(href: string): string | null {
+  try {
+    const url = new URL(href, window.location.href);
+    return ["http:", "https:", "mailto:"].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function tokenText(token: Token): string {
+  if ("text" in token && typeof token.text === "string") return token.text;
+  if ("raw" in token && typeof token.raw === "string") return token.raw;
+  return "";
 }
 
 function renderCodeBlock(lang: string, code: string): HTMLElement {
@@ -630,14 +1401,7 @@ function renderBlock(block: ContentBlock, isNew: boolean, messageId: string, blo
     wrapper.dataset.messageId = messageId;
     wrapper.dataset.blockIndex = String(blockIndex);
     wrapper.dataset.blockKind = "text";
-    const segments = parseTextSegments(block.text);
-    for (const segment of segments) {
-      if (segment.kind === "prose") {
-        wrapper.append(renderProse(segment.text));
-      } else {
-        wrapper.append(renderCodeBlock(segment.lang, segment.code));
-      }
-    }
+    wrapper.append(renderMarkdown(block.text));
     return wrapper;
   }
 
@@ -647,9 +1411,7 @@ function renderBlock(block: ContentBlock, isNew: boolean, messageId: string, blo
     details.dataset.messageId = messageId;
     details.dataset.blockIndex = String(blockIndex);
     details.dataset.blockKind = "thinking";
-    if (isNew) {
-      details.open = true;
-    }
+    details.open = true;
 
     const summary = document.createElement("summary");
     summary.className = "thinking-label";
@@ -689,9 +1451,51 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+function insertTextAtCursor(text: string): void {
+  const start = promptInput.selectionStart ?? promptInput.value.length;
+  const end = promptInput.selectionEnd ?? promptInput.value.length;
+  const prefix = promptInput.value.slice(0, start);
+  const suffix = promptInput.value.slice(end);
+  const separator = prefix && !prefix.endsWith(" ") && !prefix.endsWith("\n") ? " " : "";
+  const trailing = suffix && !suffix.startsWith(" ") && !suffix.startsWith("\n") ? " " : "";
+  const inserted = `${separator}${text}${trailing}`;
+  promptInput.value = `${prefix}${inserted}${suffix}`;
+  const cursor = start + inserted.length;
+  promptInput.selectionStart = cursor;
+  promptInput.selectionEnd = cursor;
+}
+
+function createPendingMarker(label: "Image" | "Snippet"): string {
+  return `[${label} ${nextPendingAttachmentId++}]`;
+}
+
+function removePendingMarker(marker: string): void {
+  const index = promptInput.value.indexOf(marker);
+  if (index === -1) return;
+
+  let start = index;
+  let end = index + marker.length;
+  if (start > 0 && promptInput.value[start - 1] === " " && (end === promptInput.value.length || promptInput.value[end] === " ")) {
+    start--;
+  } else if (end < promptInput.value.length && promptInput.value[end] === " ") {
+    end++;
+  }
+
+  promptInput.value = `${promptInput.value.slice(0, start)}${promptInput.value.slice(end)}`;
+  updatePalette();
+}
+
+function expandSnippetTokens(text: string): string {
+  let expanded = text;
+  for (const snippet of pendingSnippets) {
+    expanded = expanded.split(snippet.marker).join(`\n\n--- ${snippet.marker.slice(1, -1)} ---\n${snippet.text}\n---`);
+  }
+  return expanded;
+}
+
 function renderImagePreviews(): void {
   imagePreviews.replaceChildren();
-  if (pendingImages.length === 0) {
+  if (pendingImages.length === 0 && pendingSnippets.length === 0) {
     imagePreviews.hidden = true;
     return;
   }
@@ -703,7 +1507,7 @@ function renderImagePreviews(): void {
 
     const el = document.createElement("img");
     el.src = `data:${img.mimeType};base64,${img.data}`;
-    el.alt = "Attached image";
+    el.alt = img.marker.slice(1, -1);
 
     const remove = document.createElement("button");
     remove.type = "button";
@@ -712,11 +1516,31 @@ function renderImagePreviews(): void {
     remove.setAttribute("aria-label", "Remove image");
     remove.addEventListener("click", () => {
       pendingImages.splice(i, 1);
+      removePendingMarker(img.marker);
       renderImagePreviews();
     });
 
     thumb.append(el, remove);
     imagePreviews.append(thumb);
+  }
+
+  for (let i = 0; i < pendingSnippets.length; i++) {
+    const snippet = pendingSnippets[i];
+    const chip = document.createElement("div");
+    chip.className = "snippet-chip";
+    chip.textContent = `${snippet.marker} ${snippet.text.split(/\s+/).slice(0, 8).join(" ")}`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "image-remove";
+    remove.textContent = "\u00d7";
+    remove.setAttribute("aria-label", "Remove snippet");
+    remove.addEventListener("click", () => {
+      pendingSnippets.splice(i, 1);
+      removePendingMarker(snippet.marker);
+      renderImagePreviews();
+    });
+    chip.append(remove);
+    imagePreviews.append(chip);
   }
 }
 
