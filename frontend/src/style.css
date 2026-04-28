@@ -847,6 +847,7 @@ h2 {
 }
 
 .tool-args-summary,
+.grep-pattern,
 .task-intent {
   color: #9ba4b5;
   overflow: hidden;
@@ -898,6 +899,27 @@ h2 {
   min-width: 0;
   overflow: hidden;
   color: #15b7ff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.grep-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+  padding: 0 0.85rem 0.65rem 1.05rem;
+}
+
+.grep-tool-connector {
+  flex: 0 0 auto;
+  color: #566175;
+}
+
+.grep-tool-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: #7c879b;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

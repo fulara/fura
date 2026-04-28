@@ -932,6 +932,7 @@ function renderToolCard(card: ToolCard): HTMLElement {
   if (card.toolName === "todo_write") return renderTodoWriteCard(card);
   if (card.toolName === "task") return renderTaskCard(card);
   if (card.toolName === "read") return renderReadToolCard(card);
+  if (card.toolName === "grep") return renderGrepToolCard(card);
   const wrapper = document.createElement("section");
   wrapper.className = `tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = card.toolName;
@@ -1030,6 +1031,98 @@ function readSuffixResolution(card: ToolCard): { from?: string; to?: string } | 
 function stringArg(args: Record<string, unknown>, key: string): string | undefined {
   const value = args[key];
   return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function renderGrepToolCard(card: ToolCard): HTMLElement {
+  const wrapper = document.createElement("section");
+  wrapper.className = `tool-card grep-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${card.isError ? "" : "tool-compact"}`;
+  wrapper.dataset.toolName = "grep";
+
+  const header = document.createElement("div");
+  header.className = "tool-header grep-tool-header";
+  header.append(
+    toolStatusIcon(card),
+    toolHeaderText("Grep:", "tool-name"),
+    toolHeaderText(grepPatternSummary(card), "grep-pattern"),
+    toolHeaderText(grepMetaSummary(card), "tool-args-summary"),
+  );
+  wrapper.append(header);
+
+  if (card.isError) {
+    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
+    return wrapper;
+  }
+
+  const collapsed = grepCollapsedSummary(card);
+  if (collapsed) {
+    const row = document.createElement("div");
+    row.className = "grep-tool-row";
+    row.append(
+      toolHeaderText("└─", "grep-tool-connector"),
+      toolHeaderText(collapsed, "grep-tool-summary"),
+    );
+    wrapper.append(row);
+  }
+
+  return wrapper;
+}
+
+function grepPatternSummary(card: ToolCard): string {
+  return truncate(stringArg(card.args, "pattern") ?? "…", 110);
+}
+
+function grepMetaSummary(card: ToolCard): string {
+  const source = card.partialResult ?? card.result;
+  const details = resultDetails(source);
+  const parts: string[] = [];
+
+  const matchCount = numberDetail(details, "matchCount");
+  const fileCount = numberDetail(details, "fileCount");
+  if (matchCount !== undefined) parts.push(formatCount("match", matchCount));
+  if (fileCount !== undefined) parts.push(formatCount("file", fileCount));
+
+  const scope = stringDetail(details, "scopePath") ?? stringArg(card.args, "path");
+  if (scope) parts.push(`in ${shortPath(scope)}`);
+  if (booleanDetail(details, "truncated")) parts.push("truncated");
+  if (stringArg(card.args, "i") === "true" || card.args.i === true) parts.push("case:insensitive");
+
+  return parts.join(" · ");
+}
+
+function grepCollapsedSummary(card: ToolCard): string {
+  const source = card.partialResult ?? card.result;
+  const details = resultDetails(source);
+  const resultText = toolResultText(source);
+  const matchCount = numberDetail(details, "matchCount");
+
+  if (matchCount === 0 || resultText.trim() === "No matches found") return "No matches found";
+  if (matchCount !== undefined) return `${formatCount("match", matchCount)} collapsed`;
+
+  const lineCount = resultText.split("\n").filter(line => line.trim()).length;
+  if (lineCount > 0) return `${formatCount("line", lineCount)} collapsed`;
+  return "";
+}
+
+function resultDetails(source: unknown): Record<string, unknown> | undefined {
+  return isRecord(source) && isRecord(source.details) ? source.details : undefined;
+}
+
+function numberDetail(details: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = details?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringDetail(details: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = details?.[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+function booleanDetail(details: Record<string, unknown> | undefined, key: string): boolean {
+  return details?.[key] === true;
+}
+
+function formatCount(noun: string, count: number): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
 function appendToolResultBody(wrapper: HTMLElement, resultText: string): void {
