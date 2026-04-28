@@ -811,6 +811,48 @@ h2 {
   font-style: italic;
 }
 
+.tool-count {
+  color: #7c879b;
+}
+
+.tool-card.tool-compact .tool-header {
+  border-bottom: 0;
+}
+
+.read-tool-group .read-tool-header {
+  padding-bottom: 0.35rem;
+}
+
+.read-tool-list {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0 0.85rem 0.65rem 1.05rem;
+}
+
+.read-tool-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.read-tool-row .tool-status-icon {
+  width: auto;
+}
+
+.read-tool-connector {
+  flex: 0 0 auto;
+  color: #566175;
+}
+
+.read-tool-path {
+  min-width: 0;
+  overflow: hidden;
+  color: #15b7ff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tool-result-body {
   border-top: 1px solid #191e29;
 }

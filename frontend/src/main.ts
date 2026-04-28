@@ -534,9 +534,23 @@ function renderActiveSession(): void {
     return;
   }
 
+  for (let i = 0; i < projection.transcript.length; i++) {
+    const entry = projection.transcript[i];
+    if (entry.kind === "message") {
+      transcript.append(renderMessage(entry));
+      continue;
+    }
 
-  for (const entry of projection.transcript) {
-    transcript.append(entry.kind === "message" ? renderMessage(entry) : renderToolCard(entry));
+    if (isCompactReadCard(entry)) {
+      const readCards = [entry];
+      while (isCompactReadCard(projection.transcript[i + 1])) {
+        readCards.push(projection.transcript[++i] as { kind: "tool" } & ToolCard);
+      }
+      transcript.append(readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards));
+      continue;
+    }
+
+    transcript.append(renderToolCard(entry));
   }
 
   // Restore manually-toggled thinking block open state from before the rebuild.
@@ -670,6 +684,7 @@ function renderMessage(message: TranscriptMessage): HTMLElement {
 function renderToolCard(card: ToolCard): HTMLElement {
   if (card.toolName === "todo_write") return renderTodoWriteCard(card);
   if (card.toolName === "task") return renderTaskCard(card);
+  if (card.toolName === "read") return renderReadToolCard(card);
   const wrapper = document.createElement("section");
   wrapper.className = `tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = card.toolName;
@@ -687,6 +702,90 @@ function renderToolCard(card: ToolCard): HTMLElement {
   appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
 
   return wrapper;
+}
+
+function renderReadToolCard(card: ToolCard): HTMLElement {
+  const wrapper = document.createElement("section");
+  wrapper.className = `tool-card read-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${card.isError ? "" : "tool-compact"}`;
+  wrapper.dataset.toolName = "read";
+
+  const header = document.createElement("div");
+  header.className = "tool-header read-tool-header";
+  header.append(
+    toolStatusIcon(card),
+    toolHeaderText("Read", "tool-name"),
+    toolHeaderText(readArgSummary(card), "tool-args-summary"),
+  );
+  if (card.isActive) header.append(interruptButton());
+  wrapper.append(header);
+
+  if (card.isError) {
+    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
+  }
+
+  return wrapper;
+}
+
+function renderReadToolGroup(cards: Array<{ kind: "tool" } & ToolCard>): HTMLElement {
+  const wrapper = document.createElement("section");
+  const isActive = cards.some(card => card.isActive);
+  wrapper.className = `tool-card read-tool-card read-tool-group ${isActive ? "tool-active" : ""} tool-compact`;
+  wrapper.dataset.toolName = "read";
+
+  const header = document.createElement("div");
+  header.className = "tool-header read-tool-header";
+  header.append(
+    toolStatusIcon({ ...cards[0], isActive }),
+    toolHeaderText("Read", "tool-name"),
+    toolHeaderText(`(${cards.length})`, "tool-count"),
+  );
+  if (isActive) header.append(interruptButton());
+  wrapper.append(header);
+
+  const list = document.createElement("div");
+  list.className = "read-tool-list";
+  cards.forEach((card, index) => {
+    const row = document.createElement("div");
+    row.className = "read-tool-row";
+    row.append(
+      toolHeaderText(index === cards.length - 1 ? "└─" : "├─", "read-tool-connector"),
+      toolStatusIcon(card),
+      toolHeaderText(readArgSummary(card), "read-tool-path"),
+    );
+    list.append(row);
+  });
+  wrapper.append(list);
+
+  return wrapper;
+}
+
+function isCompactReadCard(entry: TranscriptEntry | undefined): entry is { kind: "tool" } & ToolCard {
+  return entry?.kind === "tool" && entry.toolName === "read" && !entry.isError;
+}
+
+function readArgSummary(card: ToolCard): string {
+  const correctedPath = readSuffixResolution(card)?.to;
+  const path = correctedPath ?? stringArg(card.args, "file_path") ?? stringArg(card.args, "path");
+  const selection = stringArg(card.args, "sel");
+  const suffix = selection ? `:${selection}` : "";
+  const summary = path ? `${shortPath(path)}${suffix}` : suffix || "…";
+  const correctedFrom = readSuffixResolution(card)?.from;
+  return correctedFrom ? `${summary} (corrected from ${shortPath(correctedFrom)})` : summary;
+}
+
+function readSuffixResolution(card: ToolCard): { from?: string; to?: string } | undefined {
+  const source = isRecord(card.result) ? card.result : card.partialResult;
+  if (!isRecord(source) || !isRecord(source.details) || !isRecord(source.details.suffixResolution)) return undefined;
+  const { from, to } = source.details.suffixResolution;
+  return {
+    from: typeof from === "string" ? from : undefined,
+    to: typeof to === "string" ? to : undefined,
+  };
+}
+
+function stringArg(args: Record<string, unknown>, key: string): string | undefined {
+  const value = args[key];
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function appendToolResultBody(wrapper: HTMLElement, resultText: string): void {
