@@ -140,7 +140,7 @@ impl SessionRecord {
         SessionSummary {
             session_id: self.id.clone(),
             cwd: self.cwd.clone(),
-            status: self.status,
+            status: self.effective_status(),
             created_at: self.created_at,
             updated_at: self.updated_at,
             message_count: self.messages.len(),
@@ -148,6 +148,18 @@ impl SessionRecord {
             session_file: self.session_file.clone(),
             title: self.title.clone(),
             timestamp: self.timestamp.clone(),
+        }
+    }
+
+    fn has_active_work(&self) -> bool {
+        self.streaming_message.is_some() || self.active_tool_calls.iter().any(|card| card.is_active)
+    }
+
+    fn effective_status(&self) -> SessionStatus {
+        match self.status {
+            SessionStatus::Exited | SessionStatus::Available | SessionStatus::Error => self.status,
+            _ if self.has_active_work() => SessionStatus::Busy,
+            status => status,
         }
     }
 
@@ -193,7 +205,10 @@ impl SessionRecord {
                 }
                 t
             },
-            is_busy: matches!(self.status, SessionStatus::Starting | SessionStatus::Busy),
+            is_busy: matches!(
+                self.effective_status(),
+                SessionStatus::Starting | SessionStatus::Busy
+            ),
             model: self.model.clone(),
             thinking_level: self.thinking_level.clone(),
             tokens_total: self.tokens_total,
@@ -329,6 +344,23 @@ struct SessionHeader {
     title: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize)]
+enum PromptBehavior {
+    #[serde(rename = "steer")]
+    Steer,
+    #[serde(rename = "followUp")]
+    FollowUp,
+}
+
+impl PromptBehavior {
+    fn as_rpc_streaming_behavior(self) -> &'static str {
+        match self {
+            Self::Steer => "steer",
+            Self::FollowUp => "followUp",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(
     tag = "type",
@@ -360,6 +392,7 @@ enum ClientMessage {
         session_id: String,
         text: String,
         images: Option<Vec<Value>>,
+        behavior: Option<PromptBehavior>,
     },
     #[serde(rename = "prompt.abort")]
     PromptAbort { session_id: String },
@@ -661,7 +694,8 @@ async fn handle_client_message(state: &AppState, message: ClientMessage) -> Vec<
             session_id,
             text,
             images,
-        } => send_prompt(state, session_id, text, images).await,
+            behavior,
+        } => send_prompt(state, session_id, text, images, behavior).await,
         ClientMessage::PromptAbort { session_id } => abort_prompt(state, session_id).await,
         ClientMessage::DialogRespond {
             session_id,
@@ -1231,11 +1265,12 @@ async fn send_prompt(
     session_id: String,
     text: String,
     images: Option<Vec<Value>>,
+    behavior: Option<PromptBehavior>,
 ) -> Vec<ServerMessage> {
-    info!(action = "prompt.send", session_id = %session_id, bytes = text.len(), has_images = images.as_ref().is_some_and(|images| !images.is_empty()));
+    info!(action = "prompt.send", session_id = %session_id, bytes = text.len(), has_images = images.as_ref().is_some_and(|images| !images.is_empty()), behavior = ?behavior.map(PromptBehavior::as_rpc_streaming_behavior));
 
     let has_images = images.as_ref().is_some_and(|images| !images.is_empty());
-    if !has_images {
+    if behavior.is_none() && !has_images {
         if let Some(responses) = handle_slash_command(state, session_id.clone(), text.trim()).await
         {
             return responses;
@@ -1267,6 +1302,10 @@ async fn send_prompt(
     });
     if let Some(images) = images.filter(|images| !images.is_empty()) {
         command["images"] = Value::Array(images);
+    }
+    if let Some(behavior) = behavior {
+        command["streamingBehavior"] =
+            Value::String(behavior.as_rpc_streaming_behavior().to_string());
     }
 
     match send_rpc_command(state, &session_id, command).await {
@@ -1636,7 +1675,6 @@ async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
                     let mut sessions = state.sessions.write().await;
                     sessions.get_mut(&target_session_id).map(|record| {
                         record.streaming_message = None;
-                        record.status = SessionStatus::Idle;
                         record.live_message_ids.insert(message.id.clone());
                         record.messages.push(message);
                         record.updated_at = now_epoch_seconds();
@@ -3033,6 +3071,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_prompt_send_behavior() {
+        let message = serde_json::from_str::<ClientMessage>(
+            r#"{"type":"prompt.send","sessionId":"abc-123","text":"keep going","behavior":"followUp"}"#,
+        )
+        .expect("message should parse");
+
+        match message {
+            ClientMessage::PromptSend {
+                session_id,
+                text,
+                behavior,
+                ..
+            } => {
+                assert_eq!(session_id, "abc-123");
+                assert_eq!(text, "keep going");
+                assert_eq!(
+                    behavior.map(PromptBehavior::as_rpc_streaming_behavior),
+                    Some("followUp")
+                );
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_session_delete_message() {
         let msg: ClientMessage =
             serde_json::from_str(r#"{"type":"session.delete","sessionId":"abc-123"}"#)
@@ -3348,6 +3411,67 @@ mod tests {
             2,
             "existing transcript should remain intact"
         );
+    }
+
+    #[tokio::test]
+    async fn message_end_keeps_session_busy_until_agent_end() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.status = SessionStatus::Busy;
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "done" }]
+                }
+            }),
+        )
+        .await;
+
+        {
+            let sessions = state.sessions.read().await;
+            let record = sessions.get("s1").expect("record remains");
+            assert!(matches!(record.status, SessionStatus::Busy));
+            assert!(record.projection().is_busy);
+            assert!(matches!(record.summary().status, SessionStatus::Busy));
+        }
+
+        apply_rpc_frame(&state, "s1", &serde_json::json!({ "type": "agent_end" })).await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert!(matches!(record.status, SessionStatus::Idle));
+        assert!(!record.projection().is_busy);
+    }
+
+    #[test]
+    fn active_tool_work_keeps_projection_busy() {
+        let mut record = test_record();
+        record.status = SessionStatus::Idle;
+        record.active_tool_calls.push(ToolCard {
+            tool_call_id: "tool-1".to_string(),
+            tool_name: "task".to_string(),
+            intent: None,
+            args: Value::Null,
+            is_active: true,
+            is_error: false,
+            partial_result: None,
+            result: None,
+            insert_after_count: 0,
+        });
+
+        assert!(record.projection().is_busy);
+        assert!(matches!(record.summary().status, SessionStatus::Busy));
     }
 
     #[tokio::test]

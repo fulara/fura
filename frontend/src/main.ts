@@ -135,7 +135,13 @@ type ClientMessage =
   | { type: "session.delete"; sessionId: string }
   | { type: "session.list" }
   | { type: "state.refresh"; sessionId: string }
-  | { type: "prompt.send"; sessionId: string; text: string; images?: unknown[] }
+  | {
+      type: "prompt.send";
+      sessionId: string;
+      text: string;
+      images?: unknown[];
+      behavior?: "steer" | "followUp";
+    }
   | { type: "prompt.abort"; sessionId: string }
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
   | { type: "raw.rpc"; sessionId: string; command: unknown };
@@ -187,12 +193,13 @@ app.innerHTML = `
       <div id="statusBar" class="status-bar" aria-label="Session status"></div>
 
       <form id="promptForm" class="prompt-form">
+        <div id="busyPromptChoice" class="busy-prompt-choice" hidden></div>
         <div class="prompt-field">
           <div id="commandPalette" class="command-palette" hidden></div>
           <div id="imagePreviews" class="image-previews" hidden></div>
           <textarea id="promptInput" rows="4" placeholder="Send a prompt…"></textarea>
         </div>
-        <button type="submit">Send</button>
+        <button id="sendButton" type="submit">Send</button>
       </form>
     </section>
 
@@ -215,9 +222,18 @@ const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const commandPalette = requireElement<HTMLDivElement>("commandPalette");
 const imagePreviews = requireElement<HTMLDivElement>("imagePreviews");
+const busyPromptChoice = requireElement<HTMLDivElement>("busyPromptChoice");
+const sendButton = requireElement<HTMLButtonElement>("sendButton");
 
 type PendingImage = { type: "image"; marker: string; data: string; mimeType: string };
 type PendingSnippet = { type: "snippet"; marker: string; text: string };
+type BusyPromptDraft = {
+  sessionId: string;
+  text: string;
+  editorText: string;
+  images: PendingImage[];
+  snippets: PendingSnippet[];
+};
 let pendingImages: PendingImage[] = [];
 let pendingSnippets: PendingSnippet[] = [];
 let nextPendingAttachmentId = 1;
@@ -230,6 +246,10 @@ let paletteCommands: SlashCommandSpec[] = [];
 let paletteSelectedIndex = -1;
 const projections = new Map<string, SessionProjection>();
 const sessionNotices = new Map<string, Array<{ level: string; text: string }>>();
+let busyPromptDraft: BusyPromptDraft | null = null;
+const PROMPT_HISTORY_LIMIT = 100;
+let promptHistory: string[] = [];
+let promptHistoryIndex = -1;
 
 const url = new URL(window.location.href);
 const initialToken = url.searchParams.get("token") ?? window.localStorage.getItem("fura.token") ?? "";
@@ -250,23 +270,27 @@ stopButton.addEventListener("click", () => {
 });
 promptForm.addEventListener("submit", event => {
   event.preventDefault();
-  const text = expandSnippetTokens(promptInput.value.trim());
+  const editorText = promptInput.value.trim();
+  const text = expandSnippetTokens(editorText);
   if ((!text && pendingImages.length === 0) || !activeSessionId) return;
   hidePalette();
-  const msg: ClientMessage = {
-    type: "prompt.send",
-    sessionId: activeSessionId,
-    text,
-  };
-  if (pendingImages.length > 0) {
-    msg.images = pendingImages.map(({ type, data, mimeType }) => ({ type, data, mimeType }));
+
+  const projection = projections.get(activeSessionId);
+  if (projection?.isBusy) {
+    busyPromptDraft = {
+      sessionId: activeSessionId,
+      text,
+      editorText,
+      images: pendingImages.map(image => ({ ...image })),
+      snippets: pendingSnippets.map(snippet => ({ ...snippet })),
+    };
+    clearPromptEditor();
+    renderBusyPromptChoice();
+    return;
   }
-  if (activeSessionId) sessionNotices.delete(activeSessionId);
-  send(msg);
-  pendingImages = [];
-  pendingSnippets = [];
-  renderImagePreviews();
-  promptInput.value = "";
+
+  sendPromptMessage(activeSessionId, text, pendingImages);
+  clearPromptEditor();
 });
 promptInput.addEventListener("paste", async event => {
   const items = Array.from(event.clipboardData?.items ?? []);
@@ -297,7 +321,10 @@ promptInput.addEventListener("paste", async event => {
   renderImagePreviews();
   updatePalette();
 });
-promptInput.addEventListener("input", () => updatePalette());
+promptInput.addEventListener("input", () => {
+  resetPromptHistoryNavigation();
+  updatePalette();
+});
 promptInput.addEventListener("blur", () => {
   // Delay so mousedown on a palette item fires before blur hides the palette.
   window.setTimeout(hidePalette, 120);
@@ -309,6 +336,7 @@ promptInput.addEventListener("keydown", event => {
     return;
   }
   if (commandPalette.hidden) {
+    if (handlePromptHistoryKey(event)) return;
     if (event.key === "Escape" && activeSessionId && projections.get(activeSessionId)?.isBusy) {
       event.preventDefault();
       send({ type: "prompt.abort", sessionId: activeSessionId });
@@ -432,6 +460,167 @@ function handleServerMessage(message: ServerMessage): void {
   }
 }
 
+function sendPromptMessage(
+  sessionId: string,
+  text: string,
+  images: PendingImage[],
+  behavior?: "steer" | "followUp",
+): void {
+  const msg: ClientMessage = {
+    type: "prompt.send",
+    sessionId,
+    text,
+  };
+  if (images.length > 0) {
+    msg.images = images.map(({ type, data, mimeType }) => ({ type, data, mimeType }));
+  }
+  if (behavior) {
+    msg.behavior = behavior;
+  }
+  sessionNotices.delete(sessionId);
+  addPromptToHistory(text);
+  send(msg);
+}
+
+function addPromptToHistory(text: string): void {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  if (promptHistory[0] === trimmed) {
+    promptHistoryIndex = -1;
+    return;
+  }
+
+  promptHistory.unshift(trimmed);
+  if (promptHistory.length > PROMPT_HISTORY_LIMIT) {
+    promptHistory.pop();
+  }
+  promptHistoryIndex = -1;
+}
+
+function resetPromptHistoryNavigation(): void {
+  promptHistoryIndex = -1;
+}
+
+function handlePromptHistoryKey(event: KeyboardEvent): boolean {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return false;
+
+  const direction = event.key === "ArrowUp" ? -1 : 1;
+  const canEnterHistory = direction === -1 && promptHistoryIndex === -1 && promptInput.value.trim().length === 0;
+  const isBrowsingHistory = promptHistoryIndex !== -1;
+  if (!canEnterHistory && !isBrowsingHistory) return false;
+
+  event.preventDefault();
+  navigatePromptHistory(direction);
+  return true;
+}
+
+function navigatePromptHistory(direction: 1 | -1): void {
+  if (promptHistory.length === 0) return;
+
+  const nextIndex = promptHistoryIndex - direction;
+  if (nextIndex < -1 || nextIndex >= promptHistory.length) return;
+
+  promptHistoryIndex = nextIndex;
+  if (promptHistoryIndex === -1) {
+    promptInput.value = "";
+    promptInput.selectionStart = 0;
+    promptInput.selectionEnd = 0;
+  } else {
+    promptInput.value = promptHistory[promptHistoryIndex] ?? "";
+    const cursor = direction === -1 ? 0 : promptInput.value.length;
+    promptInput.selectionStart = cursor;
+    promptInput.selectionEnd = cursor;
+  }
+
+  updatePalette();
+}
+
+function clearPromptEditor(): void {
+  resetPromptHistoryNavigation();
+  pendingImages = [];
+  pendingSnippets = [];
+  renderImagePreviews();
+  promptInput.value = "";
+  updatePalette();
+}
+
+function renderBusyPromptChoice(): void {
+  busyPromptChoice.replaceChildren();
+  const draft = busyPromptDraft;
+  if (!draft || draft.sessionId !== activeSessionId) {
+    busyPromptChoice.hidden = true;
+    return;
+  }
+
+  busyPromptChoice.hidden = false;
+
+  const copy = document.createElement("div");
+  copy.className = "busy-prompt-copy";
+
+  const title = document.createElement("strong");
+  title.textContent = "Agent is busy";
+
+  const summary = document.createElement("span");
+  const attachmentCount = draft.images.length + draft.snippets.length;
+  const suffix = attachmentCount > 0 ? ` · ${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}` : "";
+  summary.textContent = `Choose how to handle the submitted prompt${suffix}.`;
+
+  const preview = document.createElement("p");
+  preview.className = "busy-prompt-preview";
+  preview.textContent = draft.editorText || (draft.images.length > 0 ? "[Image prompt]" : "");
+
+  copy.append(title, summary, preview);
+
+  const actions = document.createElement("div");
+  actions.className = "busy-prompt-actions";
+
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  cancel.title = "Move the prompt back to the editor";
+  cancel.addEventListener("click", restoreBusyPromptDraft);
+
+  const steer = document.createElement("button");
+  steer.type = "button";
+  steer.textContent = "Steer";
+  steer.title = "Interrupt the running agent after the current tool";
+  steer.addEventListener("click", () => sendBusyPromptDraft("steer"));
+
+  const followUp = document.createElement("button");
+  followUp.type = "button";
+  followUp.textContent = "Follow-up";
+  followUp.title = "Run this prompt after the current turn finishes";
+  followUp.addEventListener("click", () => sendBusyPromptDraft("followUp"));
+
+  actions.append(cancel, steer, followUp);
+  busyPromptChoice.append(copy, actions);
+}
+
+function restoreBusyPromptDraft(): void {
+  const draft = busyPromptDraft;
+  if (!draft) return;
+  busyPromptDraft = null;
+
+  resetPromptHistoryNavigation();
+  const currentText = promptInput.value.trim();
+  promptInput.value = [draft.editorText, currentText].filter(Boolean).join("\n\n");
+  pendingImages = [...draft.images, ...pendingImages];
+  pendingSnippets = [...draft.snippets, ...pendingSnippets];
+  renderImagePreviews();
+  renderBusyPromptChoice();
+  render();
+  promptInput.focus();
+}
+
+function sendBusyPromptDraft(behavior: "steer" | "followUp"): void {
+  const draft = busyPromptDraft;
+  if (!draft) return;
+  sendPromptMessage(draft.sessionId, draft.text, draft.images, behavior);
+  busyPromptDraft = null;
+  renderBusyPromptChoice();
+  render();
+}
+
 function render(): void {
   renderSessions();
   renderActiveSession();
@@ -509,15 +698,17 @@ function renderActiveSession(): void {
   transcript.replaceChildren();
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
 
+  const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
-  promptInput.disabled = !activeSessionId;
-
+  promptInput.disabled = !activeSessionId || hasBusyDraft;
+  sendButton.disabled = !activeSessionId || hasBusyDraft;
   if (!activeSessionId || !projection) {
     sessionTitle.textContent = "No session selected";
     sessionMeta.textContent = "Create or attach to a session to begin.";
     promptInput.placeholder = "Select a session first";
     renderStatusBar(undefined);
+    renderBusyPromptChoice();
     return;
   }
 
@@ -525,6 +716,7 @@ function renderActiveSession(): void {
   sessionMeta.textContent = `${projection.summary.kind} · ${projection.summary.status} · ${projection.summary.cwd ?? "current bridge cwd"}`;
   promptInput.placeholder = "Send a prompt… (type / for commands)";
   renderStatusBar(projection);
+  renderBusyPromptChoice();
 
   if (projection.transcript.length === 0) {
     const empty = document.createElement("p");
@@ -600,7 +792,7 @@ function renderStatusBar(projection?: SessionProjection): void {
     parts.push(statusPart(formatContext(projection.contextPercent, projection.contextWindow), "context"));
   }
   if (projection.isBusy) {
-    parts.push(statusPart("esc to interrupt", "interrupt"));
+    parts.push(statusInterruptButton());
   }
 
   statusBar.append(...interleaveStatusParts(parts));
@@ -620,6 +812,17 @@ function statusPart(text: string, className: string): HTMLElement {
   span.className = `status-part ${className}`;
   span.textContent = text;
   return span;
+}
+
+function statusInterruptButton(): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "status-part interrupt";
+  button.textContent = "esc to interrupt";
+  button.addEventListener("click", () => {
+    if (activeSessionId) send({ type: "prompt.abort", sessionId: activeSessionId });
+  });
+  return button;
 }
 
 function shortPath(path: string): string {
@@ -696,7 +899,6 @@ function renderToolCard(card: ToolCard): HTMLElement {
     toolHeaderText(card.toolName, "tool-name"),
     toolHeaderText(toolArgSummary(card.args), "tool-args-summary"),
   );
-  if (card.isActive) header.append(interruptButton());
   wrapper.append(header);
 
   appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
@@ -716,7 +918,6 @@ function renderReadToolCard(card: ToolCard): HTMLElement {
     toolHeaderText("Read", "tool-name"),
     toolHeaderText(readArgSummary(card), "tool-args-summary"),
   );
-  if (card.isActive) header.append(interruptButton());
   wrapper.append(header);
 
   if (card.isError) {
@@ -739,7 +940,6 @@ function renderReadToolGroup(cards: Array<{ kind: "tool" } & ToolCard>): HTMLEle
     toolHeaderText("Read", "tool-name"),
     toolHeaderText(`(${cards.length})`, "tool-count"),
   );
-  if (isActive) header.append(interruptButton());
   wrapper.append(header);
 
   const list = document.createElement("div");
@@ -813,7 +1013,6 @@ function renderTodoWriteCard(card: ToolCard): HTMLElement {
   const phases = todoPhases(card.partialResult ?? card.result);
   const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
   header.append(toolHeaderText(`${taskCount} ${taskCount === 1 ? "task" : "tasks"}`, "tool-args-summary"));
-  if (card.isActive) header.append(interruptButton());
   wrapper.append(header);
 
   if (phases.length > 0) {
@@ -917,7 +1116,6 @@ function renderTaskCard(card: ToolCard): HTMLElement {
     toolHeaderText(String(card.args?.agent ?? card.toolName), "task-agent-name"),
   );
   if (card.intent) header.append(toolHeaderText(card.intent, "task-intent"));
-  if (card.isActive) header.append(interruptButton());
   wrapper.append(header);
 
   const source = card.partialResult ?? card.result;
@@ -1040,16 +1238,6 @@ function toolHeaderText(text: string, className: string): HTMLElement {
   return span;
 }
 
-function interruptButton(): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "tool-interrupt";
-  button.textContent = "esc to interrupt";
-  button.addEventListener("click", () => {
-    if (activeSessionId) send({ type: "prompt.abort", sessionId: activeSessionId });
-  });
-  return button;
-}
 
 function taskProgress(value: unknown): AgentProgress[] {
   if (!isRecord(value)) return [];
@@ -1551,6 +1739,7 @@ function blobToBase64(blob: Blob): Promise<string> {
 }
 
 function insertTextAtCursor(text: string): void {
+  resetPromptHistoryNavigation();
   const start = promptInput.selectionStart ?? promptInput.value.length;
   const end = promptInput.selectionEnd ?? promptInput.value.length;
   const prefix = promptInput.value.slice(0, start);
@@ -1580,6 +1769,7 @@ function removePendingMarker(marker: string): void {
     end++;
   }
 
+  resetPromptHistoryNavigation();
   promptInput.value = `${promptInput.value.slice(0, start)}${promptInput.value.slice(end)}`;
   updatePalette();
 }
@@ -1696,6 +1886,7 @@ function renderPaletteItems(): void {
 }
 
 function selectPaletteCommand(cmd: SlashCommandSpec): void {
+  resetPromptHistoryNavigation();
   promptInput.value = `/${cmd.name} `;
   hidePalette();
   promptInput.focus();
