@@ -2,7 +2,7 @@ import "./style.css";
 import "highlight.js/styles/github-dark.css";
 import hljs from "highlight.js/lib/common";
 import { marked, type Token, type Tokens } from "marked";
-import { fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
+import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 
 type SessionStatus = "starting" | "idle" | "busy" | "exited" | "error" | "available";
 type MessageRole = "user" | "assistant" | "system" | "tool";
@@ -248,7 +248,8 @@ const projections = new Map<string, SessionProjection>();
 const sessionNotices = new Map<string, Array<{ level: string; text: string }>>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 const PROMPT_HISTORY_LIMIT = 100;
-let promptHistory: string[] = [];
+const promptHistories = new Map<string, string[]>();
+const promptHistoryMessageIds = new Map<string, Set<string>>();
 let promptHistoryIndex = -1;
 
 const url = new URL(window.location.href);
@@ -276,7 +277,24 @@ promptForm.addEventListener("submit", event => {
   hidePalette();
 
   const projection = projections.get(activeSessionId);
+  const isSlashCommandLike = /^\/[^\s:]+/.test(editorText);
+  const knownSlashCommand = findSlashCommand(editorText);
   if (projection?.isBusy) {
+    if (knownSlashCommand && pendingImages.length === 0) {
+      sendPromptMessage(activeSessionId, text, pendingImages);
+      clearPromptEditor();
+      return;
+    }
+    if (isSlashCommandLike) {
+      const notices = sessionNotices.get(activeSessionId) ?? [];
+      notices.push({
+        level: "warning",
+        text: "Slash commands cannot be sent as steer or follow-up prompts while the agent is busy.",
+      });
+      sessionNotices.set(activeSessionId, notices);
+      render();
+      return;
+    }
     busyPromptDraft = {
       sessionId: activeSessionId,
       text,
@@ -418,11 +436,14 @@ function handleServerMessage(message: ServerMessage): void {
       sessions = message.sessions;
       if (activeSessionId && !sessions.some(session => session.sessionId === activeSessionId)) {
         activeSessionId = null;
+        resetPromptHistoryNavigation();
       }
       render();
       break;
     case "session.snapshot":
       projections.set(message.sessionId, message.state);
+      syncPromptHistoryFromProjection(message.sessionId, message.state);
+      if (activeSessionId !== message.sessionId) resetPromptHistoryNavigation();
       activeSessionId = message.sessionId;
       render();
       break;
@@ -478,23 +499,40 @@ function sendPromptMessage(
     msg.behavior = behavior;
   }
   sessionNotices.delete(sessionId);
-  addPromptToHistory(text);
+  addPromptToHistory(sessionId, text);
   send(msg);
 }
 
-function addPromptToHistory(text: string): void {
+function addPromptToHistory(sessionId: string, text: string): void {
   const trimmed = text.trim();
   if (!trimmed) return;
-  if (promptHistory[0] === trimmed) {
+
+  const history = promptHistories.get(sessionId) ?? [];
+  if (history[0] === trimmed) {
     promptHistoryIndex = -1;
     return;
   }
 
-  promptHistory.unshift(trimmed);
-  if (promptHistory.length > PROMPT_HISTORY_LIMIT) {
-    promptHistory.pop();
+  history.unshift(trimmed);
+  if (history.length > PROMPT_HISTORY_LIMIT) {
+    history.pop();
   }
+  promptHistories.set(sessionId, history);
   promptHistoryIndex = -1;
+}
+
+function syncPromptHistoryFromProjection(sessionId: string, projection: SessionProjection): void {
+  let seenIds = promptHistoryMessageIds.get(sessionId);
+  if (!seenIds) {
+    seenIds = new Set<string>();
+    promptHistoryMessageIds.set(sessionId, seenIds);
+  }
+
+  for (const entry of projection.transcript) {
+    if (entry.kind !== "message" || entry.role !== "user" || seenIds.has(entry.id)) continue;
+    seenIds.add(entry.id);
+    addPromptToHistory(sessionId, messageText(entry));
+  }
 }
 
 function resetPromptHistoryNavigation(): void {
@@ -504,21 +542,26 @@ function resetPromptHistoryNavigation(): void {
 function handlePromptHistoryKey(event: KeyboardEvent): boolean {
   if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return false;
 
+  const sessionId = activeSessionId;
+  if (!sessionId) return false;
+
+  const history = promptHistories.get(sessionId) ?? [];
   const direction = event.key === "ArrowUp" ? -1 : 1;
   const canEnterHistory = direction === -1 && promptHistoryIndex === -1 && promptInput.value.trim().length === 0;
   const isBrowsingHistory = promptHistoryIndex !== -1;
-  if (!canEnterHistory && !isBrowsingHistory) return false;
+  if (history.length === 0 || (!canEnterHistory && !isBrowsingHistory)) return false;
 
   event.preventDefault();
-  navigatePromptHistory(direction);
+  navigatePromptHistory(sessionId, direction);
   return true;
 }
 
-function navigatePromptHistory(direction: 1 | -1): void {
-  if (promptHistory.length === 0) return;
+function navigatePromptHistory(sessionId: string, direction: 1 | -1): void {
+  const history = promptHistories.get(sessionId) ?? [];
+  if (history.length === 0) return;
 
   const nextIndex = promptHistoryIndex - direction;
-  if (nextIndex < -1 || nextIndex >= promptHistory.length) return;
+  if (nextIndex < -1 || nextIndex >= history.length) return;
 
   promptHistoryIndex = nextIndex;
   if (promptHistoryIndex === -1) {
@@ -526,13 +569,13 @@ function navigatePromptHistory(direction: 1 | -1): void {
     promptInput.selectionStart = 0;
     promptInput.selectionEnd = 0;
   } else {
-    promptInput.value = promptHistory[promptHistoryIndex] ?? "";
+    promptInput.value = history[promptHistoryIndex] ?? "";
     const cursor = direction === -1 ? 0 : promptInput.value.length;
     promptInput.selectionStart = cursor;
     promptInput.selectionEnd = cursor;
   }
 
-  updatePalette();
+  hidePalette();
 }
 
 function clearPromptEditor(): void {
@@ -645,6 +688,7 @@ function renderSessions(): void {
     button.type = "button";
     button.className = session.sessionId === activeSessionId ? "session active" : "session";
     button.addEventListener("click", () => {
+      if (activeSessionId !== session.sessionId) resetPromptHistoryNavigation();
       activeSessionId = session.sessionId;
       if (session.kind === "available" && session.sessionFile) {
         send({ type: "session.open", sessionFile: session.sessionFile });
