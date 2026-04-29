@@ -222,7 +222,24 @@ h2 {
 
 .workspace-actions {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.5rem;
+}
+
+.tool-visibility-toggle {
+  min-width: 6.5rem;
+}
+
+.tool-visibility-toggle[aria-pressed="true"] {
+  border-color: rgba(21, 183, 255, 0.5);
+  background: rgba(21, 183, 255, 0.12);
+}
+
+.tool-visibility-toggle[aria-pressed="false"] {
+  background: #171b24;
+  color: #9ba4b5;
 }
 
 .transcript {

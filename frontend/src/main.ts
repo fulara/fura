@@ -183,6 +183,7 @@ app.innerHTML = `
           <p id="sessionMeta">Create or attach to a session to begin.</p>
         </div>
         <div class="workspace-actions">
+          <button id="toolVisibilityToggle" class="tool-visibility-toggle" type="button" aria-pressed="true">Tools: on</button>
           <button id="abortButton" type="button">Abort</button>
           <button id="stopButton" type="button">Stop</button>
         </div>
@@ -218,6 +219,7 @@ const transcript = requireElement<HTMLElement>("transcript");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
 const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
+const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
 const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const commandPalette = requireElement<HTMLDivElement>("commandPalette");
@@ -252,13 +254,22 @@ const promptHistories = new Map<string, string[]>();
 const promptHistoryMessageIds = new Map<string, Set<string>>();
 let promptHistoryIndex = -1;
 
+const TOOL_VISIBILITY_STORAGE_KEY = "fura.showTools";
 const url = new URL(window.location.href);
 const initialToken = url.searchParams.get("token") ?? window.localStorage.getItem("fura.token") ?? "";
 tokenInput.value = initialToken;
+let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
+syncToolVisibilityToggle();
 
 connectButton.addEventListener("click", connect);
 createSessionButton.addEventListener("click", () => send({ type: "session.create" }));
 refreshSessionsButton.addEventListener("click", () => send({ type: "session.list" }));
+toolVisibilityToggle.addEventListener("click", () => {
+  showToolBubbles = !showToolBubbles;
+  window.localStorage.setItem(TOOL_VISIBILITY_STORAGE_KEY, String(showToolBubbles));
+  syncToolVisibilityToggle();
+  renderActiveSession();
+});
 abortButton.addEventListener("click", () => {
   if (activeSessionId) {
     send({ type: "prompt.abort", sessionId: activeSessionId });
@@ -726,6 +737,12 @@ function renderSessions(): void {
   }
 }
 
+function syncToolVisibilityToggle(): void {
+  toolVisibilityToggle.textContent = showToolBubbles ? "Tools: on" : "Tools: off";
+  toolVisibilityToggle.setAttribute("aria-pressed", String(showToolBubbles));
+  toolVisibilityToggle.title = showToolBubbles ? "Hide tool bubbles in the transcript" : "Show tool bubbles in the transcript";
+}
+
 function renderActiveSession(): void {
   const sessionChanged = activeSessionId !== lastRenderedSessionId;
   lastRenderedSessionId = activeSessionId;
@@ -774,6 +791,10 @@ function renderActiveSession(): void {
     const entry = projection.transcript[i];
     if (entry.kind === "message") {
       transcript.append(renderMessage(entry));
+      continue;
+    }
+
+    if (!showToolBubbles) {
       continue;
     }
 
