@@ -238,6 +238,29 @@ app.innerHTML = `
       </footer>
     </section>
   </div>
+
+  <div id="cwdPickerOverlay" class="modal-overlay" hidden>
+    <section class="cwd-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="cwdPickerTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="cwdPickerTitle">New session</h2>
+          <p>Choose the working directory for the new OMP session.</p>
+        </div>
+        <button id="cwdPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="cwd-picker-body">
+        <label for="cwdPickerInput">Working directory</label>
+        <input id="cwdPickerInput" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+      </div>
+      <footer class="modal-footer">
+        <span></span>
+        <div class="modal-actions">
+          <button id="cwdPickerCancel" type="button">Cancel</button>
+          <button id="cwdPickerCreate" type="button">Create session</button>
+        </div>
+      </footer>
+    </section>
+  </div>
 `;
 
 const connectionStatus = requireElement<HTMLSpanElement>("connectionStatus");
@@ -266,6 +289,11 @@ const modelPickerList = requireElement<HTMLDivElement>("modelPickerList");
 const modelPickerStatus = requireElement<HTMLSpanElement>("modelPickerStatus");
 const modelPickerCancel = requireElement<HTMLButtonElement>("modelPickerCancel");
 const modelPickerSelect = requireElement<HTMLButtonElement>("modelPickerSelect");
+const cwdPickerOverlay = requireElement<HTMLDivElement>("cwdPickerOverlay");
+const cwdPickerClose = requireElement<HTMLButtonElement>("cwdPickerClose");
+const cwdPickerInput = requireElement<HTMLInputElement>("cwdPickerInput");
+const cwdPickerCancel = requireElement<HTMLButtonElement>("cwdPickerCancel");
+const cwdPickerCreate = requireElement<HTMLButtonElement>("cwdPickerCreate");
 
 type PendingImage = { type: "image"; marker: string; data: string; mimeType: string };
 type PendingSnippet = { type: "snippet"; marker: string; text: string };
@@ -282,6 +310,8 @@ let nextPendingAttachmentId = 1;
 
 let socket: WebSocket | null = null;
 let activeSessionId: string | null = null;
+let pendingCreatedSessionBaseline: Set<string> | null = null;
+const unreadSessions = new Set<string>();
 let sessions: SessionSummary[] = [];
 let lastRenderedSessionId: string | null = null;
 let paletteCommands: SlashCommandSpec[] = [];
@@ -307,7 +337,9 @@ let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !
 syncToolVisibilityToggle();
 
 connectButton.addEventListener("click", connect);
-createSessionButton.addEventListener("click", () => send({ type: "session.create" }));
+createSessionButton.addEventListener("click", () => {
+  openCwdPicker();
+});
 refreshSessionsButton.addEventListener("click", () => send({ type: "session.list" }));
 toolVisibilityToggle.addEventListener("click", () => {
   showToolBubbles = !showToolBubbles;
@@ -337,6 +369,16 @@ modelPickerSearch.addEventListener("input", () => {
 });
 modelPickerSearch.addEventListener("keydown", handleModelPickerKeydown);
 modelPickerList.addEventListener("keydown", handleModelPickerKeydown);
+cwdPickerClose.addEventListener("click", closeCwdPicker);
+cwdPickerCancel.addEventListener("click", closeCwdPicker);
+cwdPickerCreate.addEventListener("click", submitCwdPicker);
+cwdPickerOverlay.addEventListener("mousedown", event => {
+  if (event.target === cwdPickerOverlay) closeCwdPicker();
+});
+cwdPickerInput.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); submitCwdPicker(); }
+  if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
+});
 promptForm.addEventListener("submit", event => {
   event.preventDefault();
   const editorText = promptInput.value.trim();
@@ -348,10 +390,15 @@ promptForm.addEventListener("submit", event => {
     clearPromptEditor();
     return;
   }
+  const knownSlashCommand = findSlashCommand(editorText);
+  if (knownSlashCommand?.name === "new") {
+    clearPromptEditor();
+    openCwdPicker();
+    return;
+  }
 
   const projection = projections.get(activeSessionId);
   const isSlashCommandLike = /^\/[^\s:]+/.test(editorText);
-  const knownSlashCommand = findSlashCommand(editorText);
   if (projection?.isBusy) {
     if (knownSlashCommand && pendingImages.length === 0) {
       sendPromptMessage(activeSessionId, text, pendingImages);
@@ -500,6 +547,20 @@ function connect(): void {
   });
 }
 
+function activateSession(sessionId: string): void {
+  if (activeSessionId !== sessionId) resetPromptHistoryNavigation();
+  activeSessionId = sessionId;
+  unreadSessions.delete(sessionId);
+}
+
+function shouldActivateSnapshot(sessionId: string): boolean {
+  if (pendingCreatedSessionBaseline && !pendingCreatedSessionBaseline.has(sessionId)) {
+    pendingCreatedSessionBaseline = null;
+    return true;
+  }
+  return !activeSessionId || activeSessionId === sessionId;
+}
+
 function handleServerMessage(message: ServerMessage): void {
   switch (message.type) {
     case "hello":
@@ -513,13 +574,18 @@ function handleServerMessage(message: ServerMessage): void {
       }
       render();
       break;
-    case "session.snapshot":
+    case "session.snapshot": {
       projections.set(message.sessionId, message.state);
       syncPromptHistoryFromProjection(message.sessionId, message.state);
-      if (activeSessionId !== message.sessionId) resetPromptHistoryNavigation();
-      activeSessionId = message.sessionId;
-      render();
+      if (shouldActivateSnapshot(message.sessionId)) {
+        activateSession(message.sessionId);
+        render();
+      } else {
+        unreadSessions.add(message.sessionId);
+        renderSessions();
+      }
       break;
+    }
     case "session.exited":
       appendLog(`Session ${message.sessionId} exited with code ${message.code ?? "unknown"}.`);
       render();
@@ -564,6 +630,7 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     case "error":
       appendLog(`Error: ${message.message}`);
+      pendingCreatedSessionBaseline = null;
       if (activeSessionId) {
         const notices = sessionNotices.get(activeSessionId) ?? [];
         notices.push({ level: "error", text: message.message });
@@ -779,10 +846,12 @@ function renderSessions(): void {
 
     const button = document.createElement("button");
     button.type = "button";
-    button.className = session.sessionId === activeSessionId ? "session active" : "session";
+    const isActive = session.sessionId === activeSessionId;
+    const hasUpdates = !isActive && unreadSessions.has(session.sessionId);
+    const classes = ["session", isActive ? "active" : "", hasUpdates ? "has-updates" : ""].filter(Boolean);
+    button.className = classes.join(" ");
     button.addEventListener("click", () => {
-      if (activeSessionId !== session.sessionId) resetPromptHistoryNavigation();
-      activeSessionId = session.sessionId;
+      activateSession(session.sessionId);
       if (session.kind === "available" && session.sessionFile) {
         send({ type: "session.open", sessionFile: session.sessionFile });
       } else {
@@ -797,7 +866,8 @@ function renderSessions(): void {
 
     const meta = document.createElement("span");
     meta.className = "session-meta";
-    meta.textContent = `${session.kind} \u00b7 ${session.status} \u00b7 ${session.messageCount} messages`;
+    const cwdLabel = session.cwd ? shortPath(session.cwd) : "no dir";
+    meta.textContent = `${cwdLabel} \u00b7 ${session.status} \u00b7 ${session.messageCount} msgs`;
 
     button.append(title, meta);
 
@@ -856,7 +926,7 @@ function renderActiveSession(): void {
   }
 
   sessionTitle.textContent = projection.summary.title || `Session ${shortId(activeSessionId)}`;
-  sessionMeta.textContent = `${projection.summary.kind} · ${projection.summary.status} · ${projection.summary.cwd ?? "current bridge cwd"}`;
+  sessionMeta.textContent = `${projection.summary.kind} \u00b7 ${projection.summary.status} \u00b7 ${projection.summary.cwd ?? "no dir"}`;
   promptInput.placeholder = "Send a prompt… (type / for commands)";
   renderStatusBar(projection);
   renderBusyPromptChoice();
@@ -2078,6 +2148,27 @@ function renderImagePreviews(): void {
 
 function isModelPickerCommand(text: string): boolean {
   return /^\/models?(?:\s+(?:list|ls))?\s*$/i.test(text.trim());
+}
+
+function openCwdPicker(): void {
+  // Pre-fill with the active session's cwd when one is known.
+  const activeCwd = activeSessionId ? (projections.get(activeSessionId)?.summary.cwd ?? "") : "";
+  cwdPickerInput.value = activeCwd;
+  cwdPickerOverlay.hidden = false;
+  window.setTimeout(() => { cwdPickerInput.focus(); cwdPickerInput.select(); }, 0);
+}
+
+function closeCwdPicker(): void {
+  cwdPickerOverlay.hidden = true;
+  promptInput.focus();
+}
+
+function submitCwdPicker(): void {
+  const cwd = cwdPickerInput.value.trim();
+  if (!cwd) return;
+  pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
+  send({ type: "session.create", cwd });
+  closeCwdPicker();
 }
 
 function openModelPicker(sessionId: string): void {

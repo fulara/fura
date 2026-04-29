@@ -158,11 +158,29 @@ h2 {
   text-align: left;
   width: 100%;
   padding-right: 1.75rem;
+  position: relative;
 }
 
 .session.active {
   border-color: #7f8cff;
   background: rgba(127, 140, 255, 0.18);
+}
+
+.session.has-updates::after {
+  content: '';
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f5a623;
+  box-shadow: 0 0 5px rgba(245, 166, 35, 0.55);
+}
+
+.session-item:hover .session.has-updates::after {
+  display: none;
 }
 
 .session-item {
@@ -772,6 +790,25 @@ h2 {
 .model-picker-status.error {
   color: #ffaaa6;
 }
+
+/* CWD picker */
+
+.cwd-picker.modal-panel {
+  width: min(480px, 100%);
+}
+
+.cwd-picker-body {
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.cwd-picker-body label {
+  font-size: 0.86rem;
+  color: #9ba4b5;
+}
+
 
 /* Command palette */
 

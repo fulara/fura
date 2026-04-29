@@ -11,7 +11,7 @@ export type SlashCommandSpec = {
 export const SLASH_COMMANDS: SlashCommandSpec[] = [
   { name: "help", description: "Show Fura command help", support: "supported" },
   { name: "commands", description: "Alias for /help", support: "supported" },
-  { name: "new", description: "Start a new OMP RPC session", support: "supported" },
+  { name: "new", description: "Open directory picker and start a new OMP session", support: "supported" },
   { name: "abort", description: "Abort the current prompt", support: "supported" },
   { name: "compact", description: "Compact session context", usage: "[instructions]", support: "supported" },
   { name: "handoff", description: "Hand off session context to a new session", usage: "[focus instructions]", support: "supported" },
