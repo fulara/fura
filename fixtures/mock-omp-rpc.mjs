@@ -46,6 +46,15 @@ let currentSessionId = "mock-session";
 let currentSessionFile = "mock-session.jsonl";
 let forkCount = 0;
 
+const diffSnapshots = [
+  {
+    entryId: "snap-session-start",
+    label: "session-start",
+    kind: "session-start",
+    createdAt: "2026-04-29T00:00:00.000Z",
+    repoRoot: "/mock/repo",
+  },
+];
 function write(frame) {
   stdout.write(`${JSON.stringify(frame)}\n`);
 }
@@ -138,6 +147,35 @@ for await (const line of rl) {
       write({ type: "agent_end" });
       break;
     }
+    case "repo_diff_get": {
+      const selector = command.selector ?? diffSnapshots.at(-1)?.entryId ?? null;
+      const selectedSnapshot = diffSnapshots.find(snapshot => snapshot.entryId === selector) ?? diffSnapshots.at(-1) ?? null;
+      success(command, {
+        snapshots: diffSnapshots,
+        selectedSnapshot,
+        diff: selectedSnapshot ? "diff --git a/mock.ts b/mock.ts\n@@ -1 +1 @@\n-console.log('old')\n+console.log('new')\n" : "",
+        stat: Boolean(command.stat),
+      });
+      break;
+    }
+    case "repo_diff_snapshot": {
+      const snapshot = {
+        entryId: `snap-${diffSnapshots.length + 1}`,
+        label: command.label ?? `snapshot-${diffSnapshots.length + 1}`,
+        kind: "manual",
+        createdAt: new Date().toISOString(),
+        repoRoot: "/mock/repo",
+      };
+      diffSnapshots.push(snapshot);
+      success(command, {
+        snapshots: diffSnapshots,
+        selectedSnapshot: snapshot,
+        diff: "",
+        stat: false,
+      });
+      break;
+    }
+
     default: {
       if (command.type) {
         success(command, { echoedType: command.type });

@@ -420,6 +420,131 @@ h2 {
   padding: 1rem;
 }
 
+.diffs-view {
+  display: grid;
+  grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr);
+  min-height: 100%;
+  gap: 1rem;
+}
+
+.diffs-sidebar,
+.diffs-main,
+.diff-comments {
+  display: grid;
+  align-content: start;
+  gap: 0.75rem;
+}
+
+.diffs-sidebar-header,
+.diffs-toolbar,
+.diffs-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.diff-snapshot {
+  display: grid;
+  gap: 0.2rem;
+  text-align: left;
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.6rem;
+  border: 1px solid #252a35;
+  background: #151922;
+  color: #d7dae4;
+}
+
+.diff-snapshot.active {
+  border-color: #6d7cff;
+  background: rgba(109, 124, 255, 0.12);
+}
+
+.diff-snapshot span {
+  color: #8b95a7;
+  font-size: 0.78rem;
+}
+
+.diff-lines {
+  display: grid;
+  align-content: start;
+  gap: 0.15rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.82rem;
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.5rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.35rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line-add {
+  background: rgba(46, 160, 67, 0.12);
+}
+
+.diff-line-remove {
+  background: rgba(248, 81, 73, 0.12);
+}
+
+.diff-line-file,
+.diff-line-hunk,
+.diff-line-meta {
+  grid-template-columns: auto minmax(0, 1fr);
+  color: #9edbff;
+}
+
+.diff-line-file {
+  color: #f4d35e;
+}
+
+.diff-line-hunk {
+  color: #8bd3ff;
+}
+
+.diff-comment-btn,
+.diff-comment-spacer {
+  width: 1.5rem;
+  min-width: 1.5rem;
+}
+
+.diff-comment-btn {
+  padding: 0;
+  line-height: 1.2;
+  border-radius: 999px;
+  border: 1px solid #343a46;
+  background: #171b24;
+  color: #c7cedc;
+}
+
+.diff-gutter {
+  color: #778195;
+  min-width: 3rem;
+  text-align: right;
+}
+
+.diff-comments {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #252a35;
+}
+
+.diff-comment {
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  background: #151922;
+  border: 1px solid #252a35;
+}
+
+.diff-comment p {
+  margin: 0.35rem 0 0;
+}
+
 .status-bar {
   display: flex;
   align-items: center;

@@ -439,6 +439,17 @@ enum ClientMessage {
         provider: String,
         model_id: String,
     },
+    #[serde(rename = "diff.refresh")]
+    DiffRefresh {
+        session_id: String,
+        selector: Option<String>,
+        stat: Option<bool>,
+    },
+    #[serde(rename = "diff.snapshot")]
+    DiffSnapshot {
+        session_id: String,
+        label: Option<String>,
+    },
     #[serde(rename = "session.fork")]
     SessionFork { session_id: String, name: String },
     #[serde(rename = "session.handoff")]
@@ -515,6 +526,8 @@ enum ServerMessage {
         session_id: String,
         model: ModelSummary,
     },
+    #[serde(rename = "diff.state")]
+    DiffState { session_id: String, state: Value },
     #[serde(rename = "raw.omp")]
     RawOmp { session_id: String, frame: Value },
     #[serde(rename = "error")]
@@ -891,6 +904,14 @@ async fn handle_client_message(state: &AppState, message: ClientMessage) -> Vec<
             provider,
             model_id,
         } => handle_model_set_command(state, session_id, &provider, &model_id).await,
+        ClientMessage::DiffRefresh {
+            session_id,
+            selector,
+            stat,
+        } => handle_diff_refresh(state, session_id, selector, stat.unwrap_or(false)).await,
+        ClientMessage::DiffSnapshot { session_id, label } => {
+            handle_diff_snapshot(state, session_id, label).await
+        }
         ClientMessage::RawRpc {
             session_id,
             mut command,
@@ -1402,6 +1423,40 @@ async fn handle_model_slash_command(
             }
             handle_model_set_command(state, session_id, provider, model_id).await
         }
+    }
+}
+
+async fn handle_diff_refresh(
+    state: &AppState,
+    session_id: String,
+    selector: Option<String>,
+    stat: bool,
+) -> Vec<ServerMessage> {
+    let command = serde_json::json!({
+        "id": next_rpc_id(),
+        "type": "repo_diff_get",
+        "selector": selector,
+        "stat": stat,
+    });
+    match send_rpc_command(state, &session_id, command).await {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
+async fn handle_diff_snapshot(
+    state: &AppState,
+    session_id: String,
+    label: Option<String>,
+) -> Vec<ServerMessage> {
+    let command = serde_json::json!({
+        "id": next_rpc_id(),
+        "type": "repo_diff_snapshot",
+        "label": label,
+    });
+    match send_rpc_command(state, &session_id, command).await {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
     }
 }
 
@@ -2171,6 +2226,17 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
 
     let current_session_id = rpc_session_target_id(state, session_id).await;
     match command {
+        Some("repo_diff_get") | Some("repo_diff_snapshot") => {
+            let state_value = frame
+                .get("data")
+                .or_else(|| frame.get("result"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let _ = state.events.send(ServerMessage::DiffState {
+                session_id: current_session_id.clone(),
+                state: state_value,
+            });
+        }
         Some("get_available_models") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
             let models = data
@@ -2936,6 +3002,21 @@ fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             provider = %model.provider,
             model_id = %model.id
+        ),
+        ServerMessage::DiffState { session_id, state } => info!(
+            direction = "bridge_to_client",
+            message_type = "diff.state",
+            session_id = %session_id,
+            snapshot_count = state
+                .get("snapshots")
+                .and_then(|value| value.as_array())
+                .map(Vec::len)
+                .unwrap_or(0),
+            diff_bytes = state
+                .get("diff")
+                .and_then(|value| value.as_str())
+                .map(str::len)
+                .unwrap_or(0)
         ),
         ServerMessage::RawOmp { session_id, frame } => info!(
             direction = "bridge_to_client",
@@ -3828,6 +3909,71 @@ mod tests {
         assert!(
             matches!(msg, ClientMessage::SessionDelete { ref session_id } if session_id == "abc-123")
         );
+    }
+
+    #[tokio::test]
+    async fn rpc_repo_diff_response_emits_diff_state() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "repo_diff_get",
+                "success": true,
+                "data": {
+                    "snapshots": [{
+                        "entryId": "entry-1",
+                        "label": "session-start",
+                        "kind": "session-start",
+                        "createdAt": "2026-04-29T00:00:00.000Z",
+                        "repoRoot": "/repo"
+                    }],
+                    "selectedSnapshot": {
+                        "entryId": "entry-1",
+                        "label": "session-start",
+                        "kind": "session-start",
+                        "createdAt": "2026-04-29T00:00:00.000Z",
+                        "repoRoot": "/repo"
+                    },
+                    "diff": "diff --git a/a b/a\n",
+                    "stat": false
+                }
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("diff state event") {
+            ServerMessage::DiffState { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state["selectedSnapshot"]["entryId"], "entry-1");
+                assert_eq!(state["diff"], "diff --git a/a b/a\n");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_diff_refresh_message() {
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"diff.refresh","sessionId":"abc-123","selector":"session-start","stat":true}"#,
+        )
+        .expect("parse failed");
+        assert!(matches!(
+            msg,
+            ClientMessage::DiffRefresh {
+                ref session_id,
+                ref selector,
+                stat: Some(true)
+            } if session_id == "abc-123" && selector.as_deref() == Some("session-start")
+        ));
     }
 
     #[test]
