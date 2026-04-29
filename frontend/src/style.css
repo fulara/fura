@@ -809,6 +809,15 @@ h2 {
   color: #9ba4b5;
 }
 
+.fork-picker.modal-panel,
+.handoff-picker.modal-panel {
+  width: min(480px, 100%);
+}
+
+.label-optional {
+  color: #6b7280;
+  font-size: 0.78rem;
+}
 
 /* Command palette */
 

@@ -83,6 +83,8 @@ struct AppState {
     sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
     rpc_sessions: Arc<RwLock<HashMap<String, RpcSessionHandle>>>,
     rpc_session_targets: Arc<RwLock<HashMap<String, String>>>,
+    /// Name to apply to the next new session spawned by a fork or handoff on this transport.
+    pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     events: broadcast::Sender<ServerMessage>,
     rpc_config: Arc<RpcConfig>,
     log_frames: bool,
@@ -371,6 +373,7 @@ enum ClientMessage {
     #[serde(rename = "session.create")]
     SessionCreate {
         cwd: Option<String>,
+        name: Option<String>,
         args: Option<Vec<String>>,
     },
     #[serde(rename = "session.attach")]
@@ -409,6 +412,14 @@ enum ClientMessage {
         session_id: String,
         provider: String,
         model_id: String,
+    },
+    #[serde(rename = "session.fork")]
+    SessionFork { session_id: String, name: String },
+    #[serde(rename = "session.handoff")]
+    SessionHandoff {
+        session_id: String,
+        name: String,
+        custom_instructions: Option<String>,
     },
     #[serde(rename = "raw.rpc")]
     RawRpc { session_id: String, command: Value },
@@ -519,6 +530,7 @@ async fn main() -> anyhow::Result<()> {
         sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
+        pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         events,
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
@@ -686,7 +698,9 @@ async fn handle_websocket_frame(
 
 async fn handle_client_message(state: &AppState, message: ClientMessage) -> Vec<ServerMessage> {
     match message {
-        ClientMessage::SessionCreate { cwd, args } => create_session(state, cwd, args).await,
+        ClientMessage::SessionCreate { cwd, name, args } => {
+            create_session(state, cwd, name, args).await
+        }
         ClientMessage::SessionOpen { session_file } => open_session(state, session_file).await,
         ClientMessage::SessionList => {
             info!(action = "session.list");
@@ -771,17 +785,26 @@ async fn handle_client_message(state: &AppState, message: ClientMessage) -> Vec<
                 }],
             }
         }
+        ClientMessage::SessionFork { session_id, name } => {
+            handle_session_fork(state, session_id, name).await
+        }
+        ClientMessage::SessionHandoff {
+            session_id,
+            name,
+            custom_instructions,
+        } => handle_session_handoff(state, session_id, name, custom_instructions).await,
     }
 }
 
 async fn create_session(
     state: &AppState,
     cwd: Option<String>,
+    name: Option<String>,
     args: Option<Vec<String>>,
 ) -> Vec<ServerMessage> {
     let id = Uuid::new_v4().to_string();
     let args = args.unwrap_or_default();
-    info!(action = "session.create", session_id = %id, has_cwd = cwd.is_some(), arg_count = args.len());
+    info!(action = "session.create", session_id = %id, has_cwd = cwd.is_some(), has_name = name.is_some(), arg_count = args.len());
 
     let record = SessionRecord {
         id: id.clone(),
@@ -797,7 +820,7 @@ async fn create_session(
         active_tool_calls: Vec::new(),
         kind: SessionKind::Managed,
         session_file: None,
-        title: None,
+        title: name.clone(),
         timestamp: None,
         model: None,
         thinking_level: None,
@@ -828,6 +851,18 @@ async fn create_session(
                 message: format!("failed to start RPC child for session {id}: {error}"),
             },
         ];
+    }
+
+    // Persist the name in the OMP session file immediately after spawn.
+    if let Some(ref n) = name {
+        let cmd = serde_json::json!({
+            "id": next_rpc_id(),
+            "type": "set_session_name",
+            "name": n,
+        });
+        if let Err(e) = send_rpc_command(state, &id, cmd).await {
+            warn!(session_id = %id, error = %e, "failed to queue initial set_session_name");
+        }
     }
 
     vec![
@@ -1067,7 +1102,7 @@ async fn handle_slash_command(
                     .map(|record| (record.cwd.clone(), Some(record.args.clone())))
                     .unwrap_or((None, None))
             };
-            create_session(state, cwd, args).await
+            create_session(state, cwd, None, args).await
         }
         "abort" => abort_prompt(state, session_id).await,
         "compact" => {
@@ -1156,6 +1191,49 @@ async fn handle_slash_command(
     };
 
     Some(responses)
+}
+
+async fn handle_session_fork(
+    state: &AppState,
+    session_id: String,
+    name: String,
+) -> Vec<ServerMessage> {
+    state
+        .pending_new_session_names
+        .write()
+        .await
+        .insert(session_id.clone(), name);
+    match send_rpc_command(
+        state,
+        &session_id,
+        serde_json::json!({ "id": next_rpc_id(), "type": "fork" }),
+    )
+    .await
+    {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
+async fn handle_session_handoff(
+    state: &AppState,
+    session_id: String,
+    name: String,
+    custom_instructions: Option<String>,
+) -> Vec<ServerMessage> {
+    state
+        .pending_new_session_names
+        .write()
+        .await
+        .insert(session_id.clone(), name);
+    let mut command = serde_json::json!({ "id": next_rpc_id(), "type": "handoff" });
+    if let Some(instructions) = custom_instructions {
+        command["customInstructions"] = Value::String(instructions);
+    }
+    match send_rpc_command(state, &session_id, command).await {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
 }
 
 async fn handle_fork_slash_command(state: &AppState, session_id: String) -> Vec<ServerMessage> {
@@ -2162,6 +2240,28 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                 let _ = state.events.send(snapshot);
                 broadcast_sessions_snapshot(state).await;
             }
+            // Apply the name before refresh so set_session_name reaches OMP before get_state.
+            let pending_name = state
+                .pending_new_session_names
+                .write()
+                .await
+                .remove(session_id);
+            if let Some(ref name) = pending_name {
+                {
+                    let mut sessions = state.sessions.write().await;
+                    if let Some(record) = sessions.get_mut(&current_session_id) {
+                        record.title = Some(name.clone());
+                    }
+                }
+                let cmd = serde_json::json!({
+                    "id": next_rpc_id(),
+                    "type": "set_session_name",
+                    "name": name,
+                });
+                if let Err(e) = send_rpc_command(state, session_id, cmd).await {
+                    warn!(session_id = %session_id, error = %e, "failed to queue set_session_name after handoff");
+                }
+            }
             if let Err(message) = refresh_rpc_state(state, session_id).await {
                 warn!(session_id = %session_id, %message, "post-handoff state refresh failed");
             }
@@ -2178,24 +2278,53 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
             if cancelled {
+                state
+                    .pending_new_session_names
+                    .write()
+                    .await
+                    .remove(session_id);
                 let _ = state.events.send(notice(
                     current_session_id,
                     NoticeLevel::Warning,
                     "Fork cancelled or unavailable for this session.",
                 ));
-            } else if let Err(message) = refresh_rpc_state(state, session_id).await {
-                warn!(session_id = %session_id, %message, "post-fork state refresh failed");
-                let _ = state.events.send(notice(
-                    current_session_id,
-                    NoticeLevel::Error,
-                    format!("Fork completed, but state refresh failed: {message}"),
-                ));
             } else {
-                let _ = state.events.send(notice(
-                    current_session_id,
-                    NoticeLevel::Info,
-                    "Fork complete. New session is active.",
-                ));
+                // Apply the name before refresh so set_session_name reaches OMP before get_state.
+                let pending_name = state
+                    .pending_new_session_names
+                    .write()
+                    .await
+                    .remove(session_id);
+                if let Some(ref name) = pending_name {
+                    {
+                        let mut sessions = state.sessions.write().await;
+                        if let Some(record) = sessions.get_mut(&current_session_id) {
+                            record.title = Some(name.clone());
+                        }
+                    }
+                    let cmd = serde_json::json!({
+                        "id": next_rpc_id(),
+                        "type": "set_session_name",
+                        "name": name,
+                    });
+                    if let Err(e) = send_rpc_command(state, session_id, cmd).await {
+                        warn!(session_id = %session_id, error = %e, "failed to queue set_session_name after fork");
+                    }
+                }
+                if let Err(message) = refresh_rpc_state(state, session_id).await {
+                    warn!(session_id = %session_id, %message, "post-fork state refresh failed");
+                    let _ = state.events.send(notice(
+                        current_session_id,
+                        NoticeLevel::Error,
+                        format!("Fork completed, but state refresh failed: {message}"),
+                    ));
+                } else {
+                    let _ = state.events.send(notice(
+                        current_session_id,
+                        NoticeLevel::Info,
+                        "Fork complete. New session is active.",
+                    ));
+                }
             }
         }
         Some("get_session_stats") => {
@@ -3224,6 +3353,7 @@ mod tests {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
+            pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             events,
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),
@@ -3390,15 +3520,30 @@ mod tests {
 
     #[test]
     fn parses_session_create_message() {
+        // Without name
         let message = serde_json::from_str::<ClientMessage>(
             r#"{"type":"session.create","cwd":"/tmp","args":["--debug"]}"#,
         )
         .expect("message should parse");
-
         match message {
-            ClientMessage::SessionCreate { cwd, args } => {
+            ClientMessage::SessionCreate { cwd, name, args } => {
                 assert_eq!(cwd.as_deref(), Some("/tmp"));
+                assert_eq!(name, None);
                 assert_eq!(args, Some(vec!["--debug".to_string()]));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        // With name
+        let message = serde_json::from_str::<ClientMessage>(
+            r#"{"type":"session.create","cwd":"/tmp","name":"my-project","args":[]}"#,
+        )
+        .expect("message should parse");
+        match message {
+            ClientMessage::SessionCreate { cwd, name, args } => {
+                assert_eq!(cwd.as_deref(), Some("/tmp"));
+                assert_eq!(name.as_deref(), Some("my-project"));
+                assert_eq!(args, Some(vec![] as Vec<String>));
             }
             other => panic!("unexpected message: {other:?}"),
         }

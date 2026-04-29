@@ -137,7 +137,7 @@ type ServerMessage =
   | { type: "error"; requestId?: string | null; message: string };
 
 type ClientMessage =
-  | { type: "session.create"; cwd?: string; args?: string[] }
+  | { type: "session.create"; cwd?: string; name?: string; args?: string[] }
   | { type: "session.open"; sessionFile: string }
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }
@@ -156,7 +156,9 @@ type ClientMessage =
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }
-  | { type: "raw.rpc"; sessionId: string; command: unknown };
+  | { type: "raw.rpc"; sessionId: string; command: unknown }
+  | { type: "session.fork"; sessionId: string; name: string }
+  | { type: "session.handoff"; sessionId: string; name: string; customInstructions?: string };
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
@@ -249,6 +251,8 @@ app.innerHTML = `
         <button id="cwdPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
       </header>
       <div class="cwd-picker-body">
+        <label for="cwdPickerNameInput">Session name</label>
+        <input id="cwdPickerNameInput" autocomplete="off" spellcheck="false" placeholder="my-project" />
         <label for="cwdPickerInput">Working directory</label>
         <input id="cwdPickerInput" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
       </div>
@@ -257,6 +261,54 @@ app.innerHTML = `
         <div class="modal-actions">
           <button id="cwdPickerCancel" type="button">Cancel</button>
           <button id="cwdPickerCreate" type="button">Create session</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <div id="forkPickerOverlay" class="modal-overlay" hidden>
+    <section class="fork-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="forkPickerTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="forkPickerTitle">Fork session</h2>
+          <p>Name the forked session before branching.</p>
+        </div>
+        <button id="forkPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="cwd-picker-body">
+        <label for="forkPickerNameInput">Session name</label>
+        <input id="forkPickerNameInput" autocomplete="off" spellcheck="false" placeholder="my-fork" />
+      </div>
+      <footer class="modal-footer">
+        <span></span>
+        <div class="modal-actions">
+          <button id="forkPickerCancel" type="button">Cancel</button>
+          <button id="forkPickerCreate" type="button">Fork session</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <div id="handoffPickerOverlay" class="modal-overlay" hidden>
+    <section class="handoff-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="handoffPickerTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="handoffPickerTitle">Handoff session</h2>
+          <p>Name the new session and optionally provide focus instructions.</p>
+        </div>
+        <button id="handoffPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="cwd-picker-body">
+        <label for="handoffPickerNameInput">Session name</label>
+        <input id="handoffPickerNameInput" autocomplete="off" spellcheck="false" placeholder="my-handoff" />
+        <label for="handoffPickerInstructions">Focus instructions <span class="label-optional">(optional)</span></label>
+        <textarea id="handoffPickerInstructions" rows="3" placeholder="Focus on the authentication module…"></textarea>
+      </div>
+      <footer class="modal-footer">
+        <span></span>
+        <div class="modal-actions">
+          <button id="handoffPickerCancel" type="button">Cancel</button>
+          <button id="handoffPickerCreate" type="button">Handoff</button>
         </div>
       </footer>
     </section>
@@ -291,9 +343,21 @@ const modelPickerCancel = requireElement<HTMLButtonElement>("modelPickerCancel")
 const modelPickerSelect = requireElement<HTMLButtonElement>("modelPickerSelect");
 const cwdPickerOverlay = requireElement<HTMLDivElement>("cwdPickerOverlay");
 const cwdPickerClose = requireElement<HTMLButtonElement>("cwdPickerClose");
+const cwdPickerNameInput = requireElement<HTMLInputElement>("cwdPickerNameInput");
 const cwdPickerInput = requireElement<HTMLInputElement>("cwdPickerInput");
 const cwdPickerCancel = requireElement<HTMLButtonElement>("cwdPickerCancel");
 const cwdPickerCreate = requireElement<HTMLButtonElement>("cwdPickerCreate");
+const forkPickerOverlay = requireElement<HTMLDivElement>("forkPickerOverlay");
+const forkPickerClose = requireElement<HTMLButtonElement>("forkPickerClose");
+const forkPickerNameInput = requireElement<HTMLInputElement>("forkPickerNameInput");
+const forkPickerCancel = requireElement<HTMLButtonElement>("forkPickerCancel");
+const forkPickerCreate = requireElement<HTMLButtonElement>("forkPickerCreate");
+const handoffPickerOverlay = requireElement<HTMLDivElement>("handoffPickerOverlay");
+const handoffPickerClose = requireElement<HTMLButtonElement>("handoffPickerClose");
+const handoffPickerNameInput = requireElement<HTMLInputElement>("handoffPickerNameInput");
+const handoffPickerInstructions = requireElement<HTMLTextAreaElement>("handoffPickerInstructions");
+const handoffPickerCancel = requireElement<HTMLButtonElement>("handoffPickerCancel");
+const handoffPickerCreate = requireElement<HTMLButtonElement>("handoffPickerCreate");
 
 type PendingImage = { type: "image"; marker: string; data: string; mimeType: string };
 type PendingSnippet = { type: "snippet"; marker: string; text: string };
@@ -375,9 +439,36 @@ cwdPickerCreate.addEventListener("click", submitCwdPicker);
 cwdPickerOverlay.addEventListener("mousedown", event => {
   if (event.target === cwdPickerOverlay) closeCwdPicker();
 });
+cwdPickerNameInput.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); cwdPickerInput.focus(); cwdPickerInput.select(); }
+  if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
+});
 cwdPickerInput.addEventListener("keydown", event => {
   if (event.key === "Enter") { event.preventDefault(); submitCwdPicker(); }
   if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
+});
+forkPickerClose.addEventListener("click", closeForkPicker);
+forkPickerCancel.addEventListener("click", closeForkPicker);
+forkPickerCreate.addEventListener("click", submitForkPicker);
+forkPickerOverlay.addEventListener("mousedown", event => {
+  if (event.target === forkPickerOverlay) closeForkPicker();
+});
+forkPickerNameInput.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); submitForkPicker(); }
+  if (event.key === "Escape") { event.preventDefault(); closeForkPicker(); }
+});
+handoffPickerClose.addEventListener("click", closeHandoffPicker);
+handoffPickerCancel.addEventListener("click", closeHandoffPicker);
+handoffPickerCreate.addEventListener("click", submitHandoffPicker);
+handoffPickerOverlay.addEventListener("mousedown", event => {
+  if (event.target === handoffPickerOverlay) closeHandoffPicker();
+});
+handoffPickerNameInput.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); handoffPickerInstructions.focus(); }
+  if (event.key === "Escape") { event.preventDefault(); closeHandoffPicker(); }
+});
+handoffPickerInstructions.addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); closeHandoffPicker(); }
 });
 promptForm.addEventListener("submit", event => {
   event.preventDefault();
@@ -394,6 +485,16 @@ promptForm.addEventListener("submit", event => {
   if (knownSlashCommand?.name === "new") {
     clearPromptEditor();
     openCwdPicker();
+    return;
+  }
+  if (knownSlashCommand?.name === "fork") {
+    clearPromptEditor();
+    openForkPicker();
+    return;
+  }
+  if (knownSlashCommand?.name === "handoff") {
+    clearPromptEditor();
+    openHandoffPicker();
     return;
   }
 
@@ -2151,11 +2252,12 @@ function isModelPickerCommand(text: string): boolean {
 }
 
 function openCwdPicker(): void {
-  // Pre-fill with the active session's cwd when one is known.
+  // Name always starts blank; pre-fill cwd with the active session's directory when known.
+  cwdPickerNameInput.value = "";
   const activeCwd = activeSessionId ? (projections.get(activeSessionId)?.summary.cwd ?? "") : "";
   cwdPickerInput.value = activeCwd;
   cwdPickerOverlay.hidden = false;
-  window.setTimeout(() => { cwdPickerInput.focus(); cwdPickerInput.select(); }, 0);
+  window.setTimeout(() => cwdPickerNameInput.focus(), 0);
 }
 
 function closeCwdPicker(): void {
@@ -2164,11 +2266,52 @@ function closeCwdPicker(): void {
 }
 
 function submitCwdPicker(): void {
+  const name = cwdPickerNameInput.value.trim();
   const cwd = cwdPickerInput.value.trim();
-  if (!cwd) return;
+  if (!name || !cwd) return;
   pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
-  send({ type: "session.create", cwd });
+  send({ type: "session.create", name, cwd });
   closeCwdPicker();
+}
+
+function openForkPicker(): void {
+  forkPickerNameInput.value = "";
+  forkPickerOverlay.hidden = false;
+  window.setTimeout(() => forkPickerNameInput.focus(), 0);
+}
+
+function closeForkPicker(): void {
+  forkPickerOverlay.hidden = true;
+  promptInput.focus();
+}
+
+function submitForkPicker(): void {
+  if (!activeSessionId) return;
+  const name = forkPickerNameInput.value.trim();
+  if (!name) return;
+  send({ type: "session.fork", sessionId: activeSessionId, name });
+  closeForkPicker();
+}
+
+function openHandoffPicker(): void {
+  handoffPickerNameInput.value = "";
+  handoffPickerInstructions.value = "";
+  handoffPickerOverlay.hidden = false;
+  window.setTimeout(() => handoffPickerNameInput.focus(), 0);
+}
+
+function closeHandoffPicker(): void {
+  handoffPickerOverlay.hidden = true;
+  promptInput.focus();
+}
+
+function submitHandoffPicker(): void {
+  if (!activeSessionId) return;
+  const name = handoffPickerNameInput.value.trim();
+  if (!name) return;
+  const customInstructions = handoffPickerInstructions.value.trim() || undefined;
+  send({ type: "session.handoff", sessionId: activeSessionId, name, customInstructions });
+  closeHandoffPicker();
 }
 
 function openModelPicker(sessionId: string): void {
