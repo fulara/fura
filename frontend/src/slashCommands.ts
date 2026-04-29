@@ -33,7 +33,7 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   { name: "extensions", description: "TUI extension dashboard", support: "tui-only", aliases: ["status"] },
   { name: "agents", description: "TUI agent dashboard", support: "tui-only" },
   { name: "branch", description: "TUI branch picker", support: "tui-only" },
-  { name: "fork", description: "TUI fork flow", support: "tui-only" },
+  { name: "fork", description: "Fork the current session", support: "supported" },
   { name: "tree", description: "TUI session tree", support: "tui-only" },
   { name: "login", description: "TUI OAuth login flow", support: "tui-only" },
   { name: "logout", description: "TUI OAuth logout flow", support: "tui-only" },

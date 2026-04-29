@@ -115,6 +115,14 @@ type SessionProjection = {
   contextPercent?: number | null;
 };
 
+type ModelSummary = {
+  provider: string;
+  id: string;
+  name?: string | null;
+  contextWindow?: number | null;
+  thinking: boolean;
+};
+
 type ServerMessage =
   | { type: "hello"; serverVersion: string; protocolVersion: number }
   | { type: "sessions.snapshot"; sessions: SessionSummary[] }
@@ -123,6 +131,8 @@ type ServerMessage =
   | { type: "dialog.request"; sessionId: string; dialog: unknown }
   | { type: "log.stderr"; sessionId: string; text: string }
   | { type: "session.notice"; sessionId: string; level: "info" | "warning" | "error"; text: string }
+  | { type: "model.list"; sessionId: string; models: ModelSummary[] }
+  | { type: "model.changed"; sessionId: string; model: ModelSummary }
   | { type: "raw.omp"; sessionId: string; frame: unknown }
   | { type: "error"; requestId?: string | null; message: string };
 
@@ -144,6 +154,8 @@ type ClientMessage =
     }
   | { type: "prompt.abort"; sessionId: string }
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
+  | { type: "model.list"; sessionId: string }
+  | { type: "model.set"; sessionId: string; provider: string; modelId: string }
   | { type: "raw.rpc"; sessionId: string; command: unknown };
 
 const app = document.querySelector<HTMLDivElement>("#app");
@@ -205,6 +217,27 @@ app.innerHTML = `
     </section>
 
   </main>
+
+  <div id="modelPickerOverlay" class="modal-overlay" hidden>
+    <section class="model-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="modelPickerTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="modelPickerTitle">Choose model</h2>
+          <p id="modelPickerSubtitle">Select a model for the active OMP session.</p>
+        </div>
+        <button id="modelPickerClose" class="modal-close" type="button" aria-label="Close model picker">×</button>
+      </header>
+      <input id="modelPickerSearch" class="model-picker-search" autocomplete="off" spellcheck="false" placeholder="Filter by provider, model, or name" />
+      <div id="modelPickerList" class="model-picker-list" role="listbox" tabindex="0"></div>
+      <footer class="modal-footer">
+        <span id="modelPickerStatus" class="model-picker-status"></span>
+        <div class="modal-actions">
+          <button id="modelPickerCancel" type="button">Cancel</button>
+          <button id="modelPickerSelect" type="button">Use selected model</button>
+        </div>
+      </footer>
+    </section>
+  </div>
 `;
 
 const connectionStatus = requireElement<HTMLSpanElement>("connectionStatus");
@@ -226,6 +259,13 @@ const commandPalette = requireElement<HTMLDivElement>("commandPalette");
 const imagePreviews = requireElement<HTMLDivElement>("imagePreviews");
 const busyPromptChoice = requireElement<HTMLDivElement>("busyPromptChoice");
 const sendButton = requireElement<HTMLButtonElement>("sendButton");
+const modelPickerOverlay = requireElement<HTMLDivElement>("modelPickerOverlay");
+const modelPickerClose = requireElement<HTMLButtonElement>("modelPickerClose");
+const modelPickerSearch = requireElement<HTMLInputElement>("modelPickerSearch");
+const modelPickerList = requireElement<HTMLDivElement>("modelPickerList");
+const modelPickerStatus = requireElement<HTMLSpanElement>("modelPickerStatus");
+const modelPickerCancel = requireElement<HTMLButtonElement>("modelPickerCancel");
+const modelPickerSelect = requireElement<HTMLButtonElement>("modelPickerSelect");
 
 type PendingImage = { type: "image"; marker: string; data: string; mimeType: string };
 type PendingSnippet = { type: "snippet"; marker: string; text: string };
@@ -250,6 +290,11 @@ const projections = new Map<string, SessionProjection>();
 const sessionNotices = new Map<string, Array<{ level: string; text: string }>>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 const PROMPT_HISTORY_LIMIT = 100;
+let modelPickerSessionId: string | null = null;
+let modelPickerModels: ModelSummary[] = [];
+let modelPickerSelectedIndex = 0;
+let modelPickerLoading = false;
+let modelPickerError: string | null = null;
 const promptHistories = new Map<string, string[]>();
 const promptHistoryMessageIds = new Map<string, Set<string>>();
 let promptHistoryIndex = -1;
@@ -280,12 +325,29 @@ stopButton.addEventListener("click", () => {
     send({ type: "session.stop", sessionId: activeSessionId });
   }
 });
+modelPickerClose.addEventListener("click", closeModelPicker);
+modelPickerCancel.addEventListener("click", closeModelPicker);
+modelPickerSelect.addEventListener("click", selectCurrentModel);
+modelPickerOverlay.addEventListener("mousedown", event => {
+  if (event.target === modelPickerOverlay) closeModelPicker();
+});
+modelPickerSearch.addEventListener("input", () => {
+  modelPickerSelectedIndex = 0;
+  renderModelPicker();
+});
+modelPickerSearch.addEventListener("keydown", handleModelPickerKeydown);
+modelPickerList.addEventListener("keydown", handleModelPickerKeydown);
 promptForm.addEventListener("submit", event => {
   event.preventDefault();
   const editorText = promptInput.value.trim();
   const text = expandSnippetTokens(editorText);
   if ((!text && pendingImages.length === 0) || !activeSessionId) return;
   hidePalette();
+  if (pendingImages.length === 0 && isModelPickerCommand(editorText)) {
+    openModelPicker(activeSessionId);
+    clearPromptEditor();
+    return;
+  }
 
   const projection = projections.get(activeSessionId);
   const isSlashCommandLike = /^\/[^\s:]+/.test(editorText);
@@ -476,6 +538,26 @@ function handleServerMessage(message: ServerMessage): void {
         sessionNotices.set(message.sessionId, notices);
         render();
       }
+      if (modelPickerSessionId === message.sessionId && message.level === "error") {
+        modelPickerLoading = false;
+        modelPickerError = message.text;
+        renderModelPicker();
+      }
+      break;
+    case "model.list":
+      if (modelPickerSessionId === message.sessionId) {
+        modelPickerModels = message.models;
+        modelPickerSelectedIndex = 0;
+        modelPickerLoading = false;
+        modelPickerError = null;
+        renderModelPicker();
+      }
+      break;
+    case "model.changed":
+      if (modelPickerSessionId === message.sessionId) {
+        closeModelPicker();
+      }
+      appendLog(`[${message.sessionId}] model changed: ${formatModelSelector(message.model)}`);
       break;
     case "raw.omp":
       appendLog(`[raw ${message.sessionId}] ${JSON.stringify(message.frame)}`);
@@ -1991,6 +2073,161 @@ function renderImagePreviews(): void {
   }
 }
 
+
+// --- Model picker ---
+
+function isModelPickerCommand(text: string): boolean {
+  return /^\/models?(?:\s+(?:list|ls))?\s*$/i.test(text.trim());
+}
+
+function openModelPicker(sessionId: string): void {
+  modelPickerSessionId = sessionId;
+  modelPickerModels = [];
+  modelPickerSelectedIndex = 0;
+  modelPickerLoading = true;
+  modelPickerError = null;
+  modelPickerSearch.value = "";
+  modelPickerOverlay.hidden = false;
+  renderModelPicker();
+  send({ type: "model.list", sessionId });
+  window.setTimeout(() => modelPickerSearch.focus(), 0);
+}
+
+function closeModelPicker(): void {
+  modelPickerOverlay.hidden = true;
+  modelPickerSessionId = null;
+  modelPickerModels = [];
+  modelPickerSelectedIndex = 0;
+  modelPickerLoading = false;
+  modelPickerError = null;
+  promptInput.focus();
+}
+
+function filteredModelPickerModels(): ModelSummary[] {
+  const query = normalizeModelQuery(modelPickerSearch.value);
+  if (!query) return modelPickerModels;
+  return modelPickerModels.filter(model => normalizeModelQuery(modelSearchText(model)).includes(query));
+}
+
+function normalizeModelQuery(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function modelSearchText(model: ModelSummary): string {
+  return [model.provider, model.id, model.name ?? ""].join(" ");
+}
+
+function handleModelPickerKeydown(event: KeyboardEvent): void {
+  if (modelPickerOverlay.hidden) return;
+  const models = filteredModelPickerModels();
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeModelPicker();
+    return;
+  }
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (models.length > 0) {
+      modelPickerSelectedIndex = Math.min(modelPickerSelectedIndex + 1, models.length - 1);
+      renderModelPicker();
+    }
+    return;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (models.length > 0) {
+      modelPickerSelectedIndex = Math.max(modelPickerSelectedIndex - 1, 0);
+      renderModelPicker();
+    }
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    selectCurrentModel();
+  }
+}
+
+function selectCurrentModel(): void {
+  const sessionId = modelPickerSessionId;
+  if (!sessionId || modelPickerLoading) return;
+  const model = filteredModelPickerModels()[modelPickerSelectedIndex];
+  if (!model) return;
+  modelPickerLoading = true;
+  modelPickerError = null;
+  renderModelPicker();
+  send({ type: "model.set", sessionId, provider: model.provider, modelId: model.id });
+}
+
+function renderModelPicker(): void {
+  const models = filteredModelPickerModels();
+  if (modelPickerSelectedIndex >= models.length) {
+    modelPickerSelectedIndex = Math.max(0, models.length - 1);
+  }
+
+  modelPickerList.replaceChildren();
+  modelPickerSelect.disabled = modelPickerLoading || models.length === 0;
+  modelPickerSearch.disabled = false;
+
+  if (modelPickerError) {
+    modelPickerStatus.textContent = modelPickerError;
+    modelPickerStatus.className = "model-picker-status error";
+  } else if (modelPickerLoading) {
+    modelPickerStatus.textContent = modelPickerModels.length === 0 ? "Loading models…" : "Changing model…";
+    modelPickerStatus.className = "model-picker-status";
+  } else {
+    modelPickerStatus.textContent = `${models.length} model${models.length === 1 ? "" : "s"}`;
+    modelPickerStatus.className = "model-picker-status";
+  }
+
+  if (!modelPickerLoading && models.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "model-picker-empty";
+    empty.textContent = modelPickerSearch.value.trim() ? "No matching models." : "No models available for this session.";
+    modelPickerList.append(empty);
+    return;
+  }
+
+  const currentModel = modelPickerSessionId ? projections.get(modelPickerSessionId)?.model : null;
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    const row = document.createElement("button");
+    row.type = "button";
+    row.disabled = modelPickerLoading;
+    row.className = "model-picker-row";
+    row.classList.toggle("selected", i === modelPickerSelectedIndex);
+    row.classList.toggle("current", currentModel === model.id || currentModel === model.name || currentModel === formatModelSelector(model));
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(i === modelPickerSelectedIndex));
+
+    const title = document.createElement("span");
+    title.className = "model-picker-row-title";
+    title.textContent = formatModelSelector(model);
+
+    const details = document.createElement("span");
+    details.className = "model-picker-row-details";
+    const detailParts = [model.name, formatModelContext(model), model.thinking ? "thinking" : null].filter(Boolean);
+    details.textContent = detailParts.join(" · ");
+
+    row.append(title, details);
+    row.addEventListener("click", () => {
+      modelPickerSelectedIndex = i;
+      renderModelPicker();
+    });
+    row.addEventListener("dblclick", selectCurrentModel);
+    modelPickerList.append(row);
+  }
+}
+
+function formatModelSelector(model: ModelSummary): string {
+  return `${model.provider}/${model.id}`;
+}
+
+function formatModelContext(model: ModelSummary): string | null {
+  if (!model.contextWindow) return null;
+  if (model.contextWindow >= 1_000_000) return `${(model.contextWindow / 1_000_000).toFixed(1)}M context`;
+  if (model.contextWindow >= 1_000) return `${Math.round(model.contextWindow / 1_000)}K context`;
+  return `${model.contextWindow} context`;
+}
 
 // --- Command palette ---
 

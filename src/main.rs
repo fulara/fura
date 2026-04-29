@@ -402,6 +402,14 @@ enum ClientMessage {
         dialog_id: String,
         response: Value,
     },
+    #[serde(rename = "model.list")]
+    ModelList { session_id: String },
+    #[serde(rename = "model.set")]
+    ModelSet {
+        session_id: String,
+        provider: String,
+        model_id: String,
+    },
     #[serde(rename = "raw.rpc")]
     RawRpc { session_id: String, command: Value },
 }
@@ -412,6 +420,16 @@ enum NoticeLevel {
     Info,
     Warning,
     Error,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelSummary {
+    provider: String,
+    id: String,
+    name: Option<String>,
+    context_window: Option<u64>,
+    thinking: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -446,6 +464,16 @@ enum ServerMessage {
         session_id: String,
         level: NoticeLevel,
         text: String,
+    },
+    #[serde(rename = "model.list")]
+    ModelList {
+        session_id: String,
+        models: Vec<ModelSummary>,
+    },
+    #[serde(rename = "model.changed")]
+    ModelChanged {
+        session_id: String,
+        model: ModelSummary,
     },
     #[serde(rename = "raw.omp")]
     RawOmp { session_id: String, frame: Value },
@@ -717,6 +745,14 @@ async fn handle_client_message(state: &AppState, message: ClientMessage) -> Vec<
                 }],
             }
         }
+        ClientMessage::ModelList { session_id } => {
+            handle_model_list_command(state, session_id).await
+        }
+        ClientMessage::ModelSet {
+            session_id,
+            provider,
+            model_id,
+        } => handle_model_set_command(state, session_id, &provider, &model_id).await,
         ClientMessage::RawRpc {
             session_id,
             mut command,
@@ -1021,7 +1057,7 @@ async fn handle_slash_command(
         "help" | "commands" => vec![notice(
             session_id,
             NoticeLevel::Info,
-            "Supported commands: /help, /new, /abort, /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
+            "Supported commands: /help, /new, /abort, /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /fork, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
         )],
         "new" => {
             let (cwd, args) = {
@@ -1089,6 +1125,7 @@ async fn handle_slash_command(
         }
         "model" | "models" => handle_model_slash_command(state, session_id, args).await,
         "thinking" => handle_thinking_slash_command(state, session_id, args).await,
+        "fork" => handle_fork_slash_command(state, session_id).await,
         "session" | "status" | "usage" => {
             send_slash_rpc_command(
                 state,
@@ -1106,9 +1143,9 @@ async fn handle_slash_command(
             send_slash_rpc_command(state, session_id, command, "Requested HTML export.").await
         }
         "settings" | "plan" | "fast" | "browser" | "copy" | "dump" | "share" | "hotkeys"
-        | "tools" | "extensions" | "agents" | "branch" | "fork" | "tree" | "login" | "logout"
-        | "mcp" | "ssh" | "resume" | "btw" | "background" | "bg" | "debug" | "memory" | "move"
-        | "exit" | "quit" | "marketplace" | "plugins" | "reload-plugins" | "force" => vec![notice(
+        | "tools" | "extensions" | "agents" | "branch" | "tree" | "login" | "logout" | "mcp"
+        | "ssh" | "resume" | "btw" | "background" | "bg" | "debug" | "memory" | "move" | "exit"
+        | "quit" | "marketplace" | "plugins" | "reload-plugins" | "force" => vec![notice(
             session_id,
             NoticeLevel::Warning,
             format!(
@@ -1121,6 +1158,19 @@ async fn handle_slash_command(
     Some(responses)
 }
 
+async fn handle_fork_slash_command(state: &AppState, session_id: String) -> Vec<ServerMessage> {
+    match send_rpc_command(
+        state,
+        &session_id,
+        serde_json::json!({ "id": next_rpc_id(), "type": "fork" }),
+    )
+    .await
+    {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
 async fn handle_model_slash_command(
     state: &AppState,
     session_id: String,
@@ -1128,15 +1178,7 @@ async fn handle_model_slash_command(
 ) -> Vec<ServerMessage> {
     let arg = args.trim();
     match arg {
-        "" | "list" | "ls" => {
-            send_slash_rpc_command(
-                state,
-                session_id,
-                serde_json::json!({ "id": next_rpc_id(), "type": "get_available_models" }),
-                "Requested available models.",
-            )
-            .await
-        }
+        "" | "list" | "ls" => handle_model_list_command(state, session_id).await,
         "cycle" | "next" => {
             send_slash_rpc_command(
                 state,
@@ -1161,19 +1203,44 @@ async fn handle_model_slash_command(
                     "Usage: /model [list|cycle|provider/model]",
                 )];
             }
-            send_slash_rpc_command(
-                state,
-                session_id,
-                serde_json::json!({
-                    "id": next_rpc_id(),
-                    "type": "set_model",
-                    "provider": provider,
-                    "modelId": model_id,
-                }),
-                "Requested model change.",
-            )
-            .await
+            handle_model_set_command(state, session_id, provider, model_id).await
         }
+    }
+}
+
+async fn handle_model_list_command(state: &AppState, session_id: String) -> Vec<ServerMessage> {
+    match send_rpc_command(
+        state,
+        &session_id,
+        serde_json::json!({ "id": next_rpc_id(), "type": "get_available_models" }),
+    )
+    .await
+    {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
+async fn handle_model_set_command(
+    state: &AppState,
+    session_id: String,
+    provider: &str,
+    model_id: &str,
+) -> Vec<ServerMessage> {
+    match send_rpc_command(
+        state,
+        &session_id,
+        serde_json::json!({
+            "id": next_rpc_id(),
+            "type": "set_model",
+            "provider": provider,
+            "modelId": model_id,
+        }),
+    )
+    .await
+    {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
     }
 }
 
@@ -1829,23 +1896,85 @@ fn apply_rpc_state_to_record(
     record.context_percent = context_percent;
 }
 
+async fn apply_model_change_response(
+    state: &AppState,
+    session_id: &str,
+    model_value: Option<&Value>,
+    thinking_level: Option<String>,
+) {
+    let Some(model_value) = model_value else {
+        return;
+    };
+    let Some(model) = model_summary(model_value) else {
+        return;
+    };
+    let display_name = model_display_name(model_value)
+        .unwrap_or_else(|| format!("{}/{}", model.provider, model.id));
+
+    let snapshot = {
+        let mut sessions = state.sessions.write().await;
+        sessions.get_mut(session_id).map(|record| {
+            record.model = Some(display_name);
+            if let Some(thinking_level) = thinking_level {
+                record.thinking_level = Some(thinking_level);
+            }
+            ServerMessage::SessionSnapshot {
+                session_id: session_id.to_string(),
+                state: record.projection(),
+            }
+        })
+    };
+
+    if let Some(snapshot) = snapshot {
+        let _ = state.events.send(snapshot);
+    }
+    let _ = state.events.send(ServerMessage::ModelChanged {
+        session_id: session_id.to_string(),
+        model,
+    });
+}
+
 async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
     let command = value_str(frame, "command").or_else(|| value_str(frame, "requestType"));
     let status = value_str(frame, "status");
     let success = frame.get("success").and_then(|value| value.as_bool());
     if status == Some("error") || success == Some(false) {
-        let message = value_str(frame, "error").unwrap_or("RPC command returned error");
+        let message = rpc_error_message(frame);
         warn!(session_id = %session_id, command = command.unwrap_or("unknown"), %message, "RPC command returned error");
-        let _ = state.events.send(notice(
-            session_id.to_string(),
-            NoticeLevel::Error,
-            message.to_string(),
-        ));
+        let _ = state
+            .events
+            .send(notice(session_id.to_string(), NoticeLevel::Error, message));
         return;
     }
 
     let current_session_id = rpc_session_target_id(state, session_id).await;
     match command {
+        Some("get_available_models") => {
+            let data = frame.get("data").or_else(|| frame.get("result"));
+            let models = data
+                .and_then(|data| data.get("models"))
+                .and_then(|models| models.as_array())
+                .map(|models| models.iter().filter_map(model_summary).collect())
+                .unwrap_or_default();
+            let _ = state.events.send(ServerMessage::ModelList {
+                session_id: current_session_id.clone(),
+                models,
+            });
+        }
+        Some("set_model") => {
+            let data = frame.get("data").or_else(|| frame.get("result"));
+            apply_model_change_response(state, &current_session_id, data, None).await;
+        }
+        Some("cycle_model") => {
+            let data = frame.get("data").or_else(|| frame.get("result"));
+            let thinking_level = data
+                .and_then(|data| data.get("thinkingLevel"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let model_value = data.and_then(|data| data.get("model"));
+            apply_model_change_response(state, &current_session_id, model_value, thinking_level)
+                .await;
+        }
         Some("get_messages") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
             let projection = data
@@ -2041,6 +2170,33 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                 NoticeLevel::Info,
                 "Handoff complete. New session context loaded.",
             ));
+        }
+        Some("fork") => {
+            let data = frame.get("data").or_else(|| frame.get("result"));
+            let cancelled = data
+                .and_then(|data| data.get("cancelled"))
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if cancelled {
+                let _ = state.events.send(notice(
+                    current_session_id,
+                    NoticeLevel::Warning,
+                    "Fork cancelled or unavailable for this session.",
+                ));
+            } else if let Err(message) = refresh_rpc_state(state, session_id).await {
+                warn!(session_id = %session_id, %message, "post-fork state refresh failed");
+                let _ = state.events.send(notice(
+                    current_session_id,
+                    NoticeLevel::Error,
+                    format!("Fork completed, but state refresh failed: {message}"),
+                ));
+            } else {
+                let _ = state.events.send(notice(
+                    current_session_id,
+                    NoticeLevel::Info,
+                    "Fork complete. New session is active.",
+                ));
+            }
         }
         Some("get_session_stats") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
@@ -2453,6 +2609,19 @@ fn log_server_message(message: &ServerMessage) {
             level = ?level,
             bytes = text.len()
         ),
+        ServerMessage::ModelList { session_id, models } => info!(
+            direction = "bridge_to_client",
+            message_type = "model.list",
+            session_id = %session_id,
+            model_count = models.len()
+        ),
+        ServerMessage::ModelChanged { session_id, model } => info!(
+            direction = "bridge_to_client",
+            message_type = "model.changed",
+            session_id = %session_id,
+            provider = %model.provider,
+            model_id = %model.id
+        ),
         ServerMessage::RawOmp { session_id, frame } => info!(
             direction = "bridge_to_client",
             message_type = "raw.omp",
@@ -2846,8 +3015,43 @@ fn unknown_session_error(session_id: String) -> ServerMessage {
     }
 }
 
+fn rpc_error_message(frame: &Value) -> String {
+    let error = frame.get("error");
+    error
+        .and_then(|value| {
+            value
+                .as_str()
+                .or_else(|| value.get("message").and_then(|message| message.as_str()))
+        })
+        .unwrap_or("RPC command returned error")
+        .to_string()
+}
+
 fn command_type(command: &Value) -> &str {
     value_str(command, "type").unwrap_or("unknown")
+}
+
+fn model_summary(value: &Value) -> Option<ModelSummary> {
+    let object = value.as_object()?;
+    let provider = object.get("provider")?.as_str()?.to_string();
+    let id = object.get("id")?.as_str()?.to_string();
+    let name = object
+        .get("name")
+        .and_then(|value| value.as_str())
+        .filter(|name| !name.is_empty())
+        .map(str::to_string);
+    let context_window = object.get("contextWindow").and_then(|value| value.as_u64());
+    let thinking = object
+        .get("thinking")
+        .is_some_and(|value| !value.is_null() && value.as_bool() != Some(false));
+
+    Some(ModelSummary {
+        provider,
+        id,
+        name,
+        context_window,
+        thinking,
+    })
 }
 
 fn model_display_name(value: &Value) -> Option<String> {
@@ -3028,6 +3232,136 @@ mod tests {
             log_frames: false,
             bridge_debug_file,
             session_root: env::temp_dir(),
+        }
+    }
+
+    #[tokio::test]
+    async fn slash_fork_sends_rpc_fork_command() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let (stdin, mut commands) = mpsc::channel(4);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("s1".to_string(), "s1".to_string());
+
+        let responses =
+            send_prompt(&state, "s1".to_string(), "/fork".to_string(), None, None).await;
+
+        assert!(
+            responses.is_empty(),
+            "slash fork should be handled by RPC, not sent as prompt"
+        );
+        let command = commands.recv().await.expect("fork command sent");
+        assert_eq!(
+            command.get("type").and_then(|value| value.as_str()),
+            Some("fork")
+        );
+    }
+
+    #[tokio::test]
+    async fn rpc_model_list_response_emits_model_list() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_available_models",
+                "success": true,
+                "data": {
+                    "models": [{
+                        "provider": "mock",
+                        "id": "mock-model",
+                        "name": "Mock Model",
+                        "contextWindow": 200000,
+                        "thinking": null
+                    }]
+                }
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("model list event") {
+            ServerMessage::ModelList { session_id, models } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].provider, "mock");
+                assert_eq!(models[0].id, "mock-model");
+                assert_eq!(models[0].context_window, Some(200000));
+                assert!(!models[0].thinking);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_set_model_response_updates_projection_and_emits_change() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "set_model",
+                "success": true,
+                "data": {
+                    "provider": "mock",
+                    "id": "mock-reasoner",
+                    "name": "Mock Reasoner",
+                    "contextWindow": 1000000,
+                    "thinking": { "efforts": ["low", "medium", "high"] }
+                }
+            }),
+        )
+        .await;
+
+        {
+            let sessions = state.sessions.read().await;
+            let record = sessions.get("s1").expect("record remains");
+            assert_eq!(record.model.as_deref(), Some("Mock Reasoner"));
+        }
+
+        match events.recv().await.expect("snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state.model.as_deref(), Some("Mock Reasoner"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        match events.recv().await.expect("model change event") {
+            ServerMessage::ModelChanged { session_id, model } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(model.provider, "mock");
+                assert_eq!(model.id, "mock-reasoner");
+                assert!(model.thinking);
+            }
+            other => panic!("unexpected event: {other:?}"),
         }
     }
 

@@ -642,6 +642,137 @@ h2 {
   tab-size: 2;
 }
 
+/* Modal model picker */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 8, 14, 0.72);
+  backdrop-filter: blur(8px);
+  padding: 2rem;
+}
+
+.modal-overlay[hidden] {
+  display: none;
+}
+
+.modal-panel {
+  width: min(760px, 100%);
+  max-height: min(760px, calc(100vh - 4rem));
+  border: 1px solid #343a46;
+  border-radius: 1rem;
+  background: #151922;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.modal-header,
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem;
+  border-bottom: 1px solid #252a35;
+}
+
+.modal-footer {
+  border-top: 1px solid #252a35;
+  border-bottom: 0;
+}
+
+.modal-header p {
+  margin-top: 0.25rem;
+  color: #9ba4b5;
+  font-size: 0.86rem;
+}
+
+.modal-close {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.model-picker-search {
+  border: 0;
+  border-bottom: 1px solid #252a35;
+  border-radius: 0;
+  background: #10141d;
+}
+
+.model-picker-search:focus {
+  box-shadow: none;
+}
+
+.model-picker-list {
+  min-height: 260px;
+  overflow: auto;
+  padding: 0.5rem;
+}
+
+.model-picker-row {
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 0.65rem;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.25rem;
+  padding: 0.65rem 0.75rem;
+  text-align: left;
+}
+
+.model-picker-row:hover,
+.model-picker-row.selected {
+  border-color: #6d7cff;
+  background: rgba(127, 140, 255, 0.12);
+}
+
+.model-picker-row.current .model-picker-row-title::after {
+  content: " current";
+  color: #82e6aa;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.model-picker-row-title {
+  color: #eef1f8;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.9rem;
+}
+
+.model-picker-row-details,
+.model-picker-empty,
+.model-picker-status {
+  color: #9ba4b5;
+  font-size: 0.82rem;
+}
+
+.model-picker-empty {
+  padding: 1rem;
+}
+
+.model-picker-status.error {
+  color: #ffaaa6;
+}
+
 /* Command palette */
 
 .prompt-form {
