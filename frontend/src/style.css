@@ -153,8 +153,8 @@ h2 {
 
 .session {
   display: grid;
-  gap: 0.2rem;
-  justify-items: start;
+  gap: 0.32rem;
+  justify-items: stretch;
   text-align: left;
   width: 100%;
   padding-right: 1.75rem;
@@ -218,8 +218,97 @@ h2 {
   color: #ffaaa6;
 }
 
+.session-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  width: 100%;
+  min-width: 0;
+}
+
 .session-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: "SFMono-Regular", Consolas, monospace;
+}
+
+.session-status {
+  flex: 0 0 auto;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 0.12rem 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+  line-height: 1.2;
+  letter-spacing: 0.01em;
+}
+
+.session-status::before {
+  content: '';
+  display: inline-block;
+  width: 0.42rem;
+  height: 0.42rem;
+  margin-right: 0.35rem;
+  border-radius: 999px;
+  vertical-align: 0.02rem;
+}
+
+.session-status-idle {
+  border-color: rgba(130, 230, 170, 0.22);
+  background: rgba(60, 179, 113, 0.13);
+  color: #9df0bd;
+}
+
+.session-status-idle::before {
+  background: #82e6aa;
+  box-shadow: 0 0 8px rgba(130, 230, 170, 0.45);
+}
+
+.session-status-busy,
+.session-status-starting {
+  border-color: rgba(127, 140, 255, 0.28);
+  background: rgba(127, 140, 255, 0.16);
+  color: #b9c0ff;
+}
+
+.session-status-busy::before,
+.session-status-starting::before {
+  background: #7f8cff;
+  box-shadow: 0 0 9px rgba(127, 140, 255, 0.55);
+}
+
+.session-status-available {
+  border-color: rgba(155, 164, 181, 0.18);
+  background: rgba(155, 164, 181, 0.1);
+  color: #c7cedc;
+}
+
+.session-status-available::before {
+  background: #8d96a8;
+}
+
+.session-status-exited {
+  border-color: rgba(255, 196, 87, 0.2);
+  background: rgba(255, 196, 87, 0.11);
+  color: #ffd681;
+}
+
+.session-status-exited::before {
+  background: #ffd681;
+}
+
+.session-status-error {
+  border-color: rgba(255, 107, 107, 0.24);
+  background: rgba(255, 107, 107, 0.12);
+  color: #ffaaa6;
+}
+
+.session-status-error::before {
+  background: #ff6b6b;
+  box-shadow: 0 0 8px rgba(255, 107, 107, 0.45);
 }
 
 .workspace {
@@ -260,11 +349,74 @@ h2 {
   color: #9ba4b5;
 }
 
-.transcript {
+/* Dockview panel host — replaces the old fixed #transcript section */
+.workspace-panel-host {
+  position: relative; /* required by Dockview */
+  min-height: 0;
+  overflow: hidden;
+  /* Match Fura dark theme via dockview CSS variables */
+  --dv-group-view-background-color: #111318;
+  --dv-tabs-and-actions-container-background-color: #151922;
+  --dv-activegroup-visiblepanel-tab-background-color: #111318;
+  --dv-activegroup-hiddenpanel-tab-background-color: #1b2030;
+  --dv-inactivegroup-visiblepanel-tab-background-color: #111318;
+  --dv-inactivegroup-hiddenpanel-tab-background-color: #1b2030;
+  --dv-activegroup-visiblepanel-tab-color: #eef1f8;
+  --dv-activegroup-hiddenpanel-tab-color: #7a8496;
+  --dv-inactivegroup-visiblepanel-tab-color: #7a8496;
+  --dv-inactivegroup-hiddenpanel-tab-color: #5e6a7e;
+  --dv-separator-border: #252a35;
+  --dv-tab-divider-color: #252a35;
+  --dv-sash-color: #252a35;
+  --dv-active-sash-color: #6d7cff;
+  --dv-tabs-and-actions-container-height: 32px;
+  --dv-tabs-and-actions-container-font-size: 0.82rem;
+}
+
+/* Panel content wrapper — fills the panel area, stacks toolbar + scroll */
+.panel-content {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  background: #111318;
+}
+
+/* Minimal per-panel toolbar (pop-out button etc.) */
+.panel-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.4rem;
+  padding: 0.2rem 0.5rem;
+  border-bottom: 1px solid #1e2330;
+  background: #111318;
+  flex: 0 0 auto;
+}
+
+.panel-popout-btn {
+  font-size: 0.72rem;
+  padding: 0.15rem 0.45rem;
+  border-radius: 0.35rem;
+  color: #5e6a7e;
+  background: transparent;
+  border-color: transparent;
+}
+
+.panel-popout-btn:hover:not(:disabled) {
+  color: #c7cedc;
+  border-color: #343a46;
+  background: #1a1f2a;
+}
+
+/* Scrollable panel content area — mirrors old .transcript scroll/grid behaviour */
+.panel-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   display: grid;
   align-content: start;
   gap: 1rem;
-  overflow: auto;
   padding: 1rem;
 }
 

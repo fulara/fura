@@ -1,8 +1,10 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
+import "dockview-core/dist/styles/dockview.css";
 import hljs from "highlight.js/lib/common";
 import { marked, type Token, type Tokens } from "marked";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
+import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
 
 type SessionStatus = "starting" | "idle" | "busy" | "exited" | "error" | "available";
 type MessageRole = "user" | "assistant" | "system" | "tool";
@@ -123,8 +125,13 @@ type ModelSummary = {
   thinking: boolean;
 };
 
+type ServerConfig = {
+  defaultCwd: string;
+};
+
 type ServerMessage =
-  | { type: "hello"; serverVersion: string; protocolVersion: number }
+  | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
+  | { type: "config.updated"; config: ServerConfig }
   | { type: "sessions.snapshot"; sessions: SessionSummary[] }
   | { type: "session.snapshot"; sessionId: string; state: SessionProjection }
   | { type: "session.exited"; sessionId: string; code?: number; signal?: string }
@@ -159,6 +166,13 @@ type ClientMessage =
   | { type: "raw.rpc"; sessionId: string; command: unknown }
   | { type: "session.fork"; sessionId: string; name: string }
   | { type: "session.handoff"; sessionId: string; name: string; customInstructions?: string };
+
+type PersistedDockviewLayout = {
+  version: 1;
+  layout: SerializedDockview;
+};
+
+const DOCKVIEW_LAYOUT_STORAGE_KEY = "fura.dockview.layout";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
@@ -203,7 +217,7 @@ app.innerHTML = `
         </div>
       </header>
 
-      <section id="transcript" class="transcript" aria-live="polite"></section>
+      <div id="workspacePanelHost" class="workspace-panel-host"></div>
 
       <div id="statusBar" class="status-bar" aria-label="Session status"></div>
 
@@ -323,7 +337,6 @@ const refreshSessionsButton = requireElement<HTMLButtonElement>("refreshSessions
 const sessionsList = requireElement<HTMLElement>("sessionsList");
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
 const sessionMeta = requireElement<HTMLParagraphElement>("sessionMeta");
-const transcript = requireElement<HTMLElement>("transcript");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
 const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
@@ -374,6 +387,7 @@ let nextPendingAttachmentId = 1;
 
 let socket: WebSocket | null = null;
 let activeSessionId: string | null = null;
+let serverConfig: ServerConfig | null = null;
 let pendingCreatedSessionBaseline: Set<string> | null = null;
 const unreadSessions = new Set<string>();
 let sessions: SessionSummary[] = [];
@@ -399,6 +413,22 @@ const initialToken = url.searchParams.get("token") ?? window.localStorage.getIte
 tokenInput.value = initialToken;
 let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
 syncToolVisibilityToggle();
+
+// --- Dockview state ---
+
+let dockviewApi: DockviewComponent | null = null;
+// References to the scrollable containers inside each Dockview panel.
+// Set when the panel's init() callback runs; null before Dockview is initialized
+// or while a panel has not yet been created (e.g. during fromJSON before init fires).
+let transcriptPanelEl: HTMLElement | null = null;
+let toolsPanelEl: HTMLElement | null = null;
+
+// Current document owner for panel render functions.
+// Set to container.ownerDocument at the start of renderTranscriptView / renderToolsView
+// so mkEl/mkText/mkFrag create nodes in the correct document (important for popout panels).
+let _renderOwner: Document = document;
+
+// --- Event wiring ---
 
 connectButton.addEventListener("click", connect);
 createSessionButton.addEventListener("click", () => {
@@ -536,7 +566,7 @@ promptInput.addEventListener("paste", async event => {
   const imageItems = items.filter(item => item.type.startsWith("image/"));
   const pastedText = event.clipboardData?.getData("text/plain") ?? "";
   const shouldCaptureSnippet = imageItems.length === 0 && pastedText.length > 500;
-  if (imageItems.length === 0 && !shouldCaptureSnippet) return; // let normal short text paste proceed
+  if (imageItems.length === 0 && !shouldCaptureSnippet) return;
   event.preventDefault();
 
   if (shouldCaptureSnippet) {
@@ -565,7 +595,6 @@ promptInput.addEventListener("input", () => {
   updatePalette();
 });
 promptInput.addEventListener("blur", () => {
-  // Delay so mousedown on a palette item fires before blur hides the palette.
   window.setTimeout(hidePalette, 120);
 });
 promptInput.addEventListener("keydown", event => {
@@ -611,6 +640,9 @@ render();
 if (initialToken) {
   connect();
 }
+initDockview();
+
+// --- Core session logic ---
 
 function connect(): void {
   const token = tokenInput.value.trim();
@@ -666,6 +698,10 @@ function handleServerMessage(message: ServerMessage): void {
   switch (message.type) {
     case "hello":
       appendLog(`Connected to fura ${message.serverVersion} protocol ${message.protocolVersion}`);
+      serverConfig = message.config;
+      break;
+    case "config.updated":
+      serverConfig = message.config;
       break;
     case "sessions.snapshot":
       sessions = message.sessions;
@@ -925,9 +961,46 @@ function sendBusyPromptDraft(behavior: "steer" | "followUp"): void {
   render();
 }
 
+// --- Top-level render ---
+
 function render(): void {
   renderSessions();
   renderActiveSession();
+}
+
+function sessionStatusLabel(session: SessionSummary): string {
+  if (session.kind === "available") return "Saved";
+  switch (session.status) {
+    case "starting":
+      return "Opening";
+    case "idle":
+      return "Ready";
+    case "busy":
+      return "Working";
+    case "exited":
+      return "Ended";
+    case "error":
+      return "Needs attention";
+    case "available":
+      return "Saved";
+  }
+}
+
+function sessionStatusClass(session: SessionSummary): string {
+  return session.kind === "available" ? "available" : session.status;
+}
+
+function sessionKindLabel(kind: SessionSummary["kind"]): string {
+  return kind === "managed" ? "Live" : "Saved";
+}
+
+function formatMessageCount(count: number): string {
+  return `${count} msg${count === 1 ? "" : "s"}`;
+}
+
+function formatSessionMeta(session: SessionSummary): string {
+  const cwdLabel = session.cwd ? shortPath(session.cwd) : "no dir";
+  return `${cwdLabel} · ${sessionKindLabel(session.kind)} · ${formatMessageCount(session.messageCount)}`;
 }
 
 function renderSessions(): void {
@@ -961,16 +1034,23 @@ function renderSessions(): void {
       render();
     });
 
+    const titleRow = document.createElement("span");
+    titleRow.className = "session-title-row";
+
     const title = document.createElement("span");
     title.className = "session-id";
     title.textContent = session.title || shortId(session.sessionId);
 
+    const status = document.createElement("span");
+    status.className = `session-status session-status-${sessionStatusClass(session)}`;
+    status.textContent = sessionStatusLabel(session);
+
     const meta = document.createElement("span");
     meta.className = "session-meta";
-    const cwdLabel = session.cwd ? shortPath(session.cwd) : "no dir";
-    meta.textContent = `${cwdLabel} \u00b7 ${session.status} \u00b7 ${session.messageCount} msgs`;
+    meta.textContent = formatSessionMeta(session);
 
-    button.append(title, meta);
+    titleRow.append(title, status);
+    button.append(titleRow, meta);
 
     const deleteBtn = document.createElement("button");
     deleteBtn.type = "button";
@@ -996,94 +1076,304 @@ function syncToolVisibilityToggle(): void {
   toolVisibilityToggle.title = showToolBubbles ? "Hide tool bubbles in the transcript" : "Show tool bubbles in the transcript";
 }
 
+// Renders the workspace header, status bar, and busy prompt choice.
+// Drives re-render of the Dockview panels via their stored element references.
 function renderActiveSession(): void {
   const sessionChanged = activeSessionId !== lastRenderedSessionId;
   lastRenderedSessionId = activeSessionId;
 
-  // Snapshot scroll position and open thinking-block state before clearing,
-  // so we can restore both after the DOM rebuild.
-  const wasNearBottom =
-    transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
-  const openThinking = new Set<string>();
-  transcript.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
-    if (el.open) openThinking.add(`${el.dataset.messageId}:${el.dataset.blockIndex}`);
-  });
-
-  transcript.replaceChildren();
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
-
   const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
+
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
   promptInput.disabled = !activeSessionId || hasBusyDraft;
   sendButton.disabled = !activeSessionId || hasBusyDraft;
+
   if (!activeSessionId || !projection) {
     sessionTitle.textContent = "No session selected";
     sessionMeta.textContent = "Create or attach to a session to begin.";
     promptInput.placeholder = "Select a session first";
-    renderStatusBar(undefined);
-    renderBusyPromptChoice();
-    return;
+  } else {
+    sessionTitle.textContent = projection.summary.title || `Session ${shortId(activeSessionId)}`;
+    sessionMeta.textContent = `${sessionKindLabel(projection.summary.kind)} · ${sessionStatusLabel(projection.summary)} · ${projection.summary.cwd ?? "no dir"}`;
+    promptInput.placeholder = "Send a prompt… (type / for commands)";
   }
 
-  sessionTitle.textContent = projection.summary.title || `Session ${shortId(activeSessionId)}`;
-  sessionMeta.textContent = `${projection.summary.kind} \u00b7 ${projection.summary.status} \u00b7 ${projection.summary.cwd ?? "no dir"}`;
-  promptInput.placeholder = "Send a prompt… (type / for commands)";
   renderStatusBar(projection);
   renderBusyPromptChoice();
 
-  if (projection.transcript.length === 0) {
-    const empty = document.createElement("p");
+  if (transcriptPanelEl) renderTranscriptView(transcriptPanelEl, projection, sessionChanged);
+  if (toolsPanelEl) renderToolsView(toolsPanelEl, projection);
+}
+
+// --- Panel render functions ---
+
+// Renders the chronological transcript into `container`, including optional inline tool bubbles.
+// Sets _renderOwner from container.ownerDocument so all mkEl calls use the correct document
+// (required for popout panels which live in a separate window document).
+function renderTranscriptView(
+  container: HTMLElement,
+  projection: SessionProjection | undefined,
+  sessionChanged: boolean,
+): void {
+  _renderOwner = container.ownerDocument;
+
+  // Snapshot scroll and open thinking blocks before clearing DOM.
+  const wasNearBottom =
+    container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+  const openThinking = new Set<string>();
+  container.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
+    if (el.open) openThinking.add(`${el.dataset.messageId}:${el.dataset.blockIndex}`);
+  });
+
+  container.replaceChildren();
+
+  if (!projection) {
+    const empty = mkEl("p");
     empty.className = "empty transcript-empty";
-    empty.textContent = "Transcript is empty.";
-    transcript.append(empty);
+    empty.textContent = "No session selected.";
+    container.append(empty);
     return;
   }
 
-  for (let i = 0; i < projection.transcript.length; i++) {
-    const entry = projection.transcript[i];
-    if (entry.kind === "message") {
-      transcript.append(renderMessage(entry));
-      continue;
-    }
-
-    if (!showToolBubbles) {
-      continue;
-    }
-
-    if (isCompactReadCard(entry)) {
-      const readCards = [entry];
-      while (isCompactReadCard(projection.transcript[i + 1])) {
-        readCards.push(projection.transcript[++i] as { kind: "tool" } & ToolCard);
+  if (projection.transcript.length === 0) {
+    const empty = mkEl("p");
+    empty.className = "empty transcript-empty";
+    empty.textContent = "Transcript is empty.";
+    container.append(empty);
+  } else {
+    for (let i = 0; i < projection.transcript.length; i++) {
+      const entry = projection.transcript[i];
+      if (entry.kind === "message") {
+        container.append(renderMessage(entry));
+        continue;
       }
-      transcript.append(readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards));
-      continue;
+
+      if (!showToolBubbles) continue;
+
+      if (isCompactReadCard(entry)) {
+        const readCards = [entry];
+        while (isCompactReadCard(projection.transcript[i + 1])) {
+          readCards.push(projection.transcript[++i] as { kind: "tool" } & ToolCard);
+        }
+        container.append(readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards));
+        continue;
+      }
+
+      container.append(renderToolCard(entry));
     }
 
-    transcript.append(renderToolCard(entry));
+    // Restore thinking blocks that were manually opened before the re-render.
+    container.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
+      const key = `${el.dataset.messageId}:${el.dataset.blockIndex}`;
+      if (openThinking.has(key)) el.open = true;
+    });
   }
 
-  // Restore manually-toggled thinking block open state from before the rebuild.
-  // isNew-driven blocks are already open from renderBlock; this only overrides blocks
-  // the user explicitly opened/closed that aren't covered by isNew.
-  transcript.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
-    const key = `${el.dataset.messageId}:${el.dataset.blockIndex}`;
-    if (openThinking.has(key)) el.open = true;
-  });
-
-  // Scroll to bottom when switching sessions; during live updates, only if already near bottom.
-  const pending = activeSessionId ? (sessionNotices.get(activeSessionId) ?? []) : [];
-  for (const notice of pending) {
-    const bar = document.createElement("div");
+  // Session notices rendered at bottom of transcript.
+  const notices = activeSessionId ? (sessionNotices.get(activeSessionId) ?? []) : [];
+  for (const notice of notices) {
+    const bar = mkEl("div");
     bar.className = `session-notice notice-${notice.level}`;
     bar.textContent = notice.text;
-    transcript.append(bar);
+    container.append(bar);
   }
 
   if (sessionChanged || wasNearBottom) {
-    transcript.scrollTop = transcript.scrollHeight;
+    container.scrollTop = container.scrollHeight;
   }
 }
+
+// Renders all tool executions from `projection` into `container`, independent of
+// transcript order. This is the dedicated Tools panel view.
+function renderToolsView(
+  container: HTMLElement,
+  projection: SessionProjection | undefined,
+): void {
+  _renderOwner = container.ownerDocument;
+  container.replaceChildren();
+
+  if (!projection) {
+    const empty = mkEl("p");
+    empty.className = "empty tools-empty";
+    empty.textContent = "No session selected.";
+    container.append(empty);
+    return;
+  }
+
+  const tools = projection.transcript.filter(
+    (entry): entry is { kind: "tool" } & ToolCard => entry.kind === "tool",
+  );
+
+  if (tools.length === 0) {
+    const empty = mkEl("p");
+    empty.className = "empty tools-empty";
+    empty.textContent = "No tool executions yet.";
+    container.append(empty);
+    return;
+  }
+
+  for (let i = 0; i < tools.length; i++) {
+    const entry = tools[i];
+    if (isCompactReadCard(entry)) {
+      const readCards = [entry];
+      while (i + 1 < tools.length && isCompactReadCard(tools[i + 1])) {
+        readCards.push(tools[++i]);
+      }
+      container.append(readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards));
+      continue;
+    }
+    container.append(renderToolCard(entry));
+  }
+}
+
+// --- Dockview initialization ---
+
+function initDockview(): void {
+  const host = requireElement<HTMLDivElement>("workspacePanelHost");
+
+  const dv = new DockviewComponent(host, {
+    theme: themeDark,
+    createComponent(options) {
+      switch (options.name) {
+        case "transcript": {
+          const el = document.createElement("div");
+          el.className = "panel-content panel-content-transcript";
+          return {
+            element: el,
+            init(params) {
+              const toolbar = makePanelToolbar(params.api.group);
+              const scroll = document.createElement("div");
+              scroll.className = "panel-scroll";
+              el.append(toolbar, scroll);
+              transcriptPanelEl = scroll;
+              renderTranscriptView(
+                scroll,
+                activeSessionId ? projections.get(activeSessionId) : undefined,
+                true,
+              );
+            },
+          };
+        }
+        case "tools": {
+          const el = document.createElement("div");
+          el.className = "panel-content panel-content-tools";
+          return {
+            element: el,
+            init(params) {
+              const toolbar = makePanelToolbar(params.api.group);
+              const scroll = document.createElement("div");
+              scroll.className = "panel-scroll";
+              el.append(toolbar, scroll);
+              toolsPanelEl = scroll;
+              renderToolsView(
+                scroll,
+                activeSessionId ? projections.get(activeSessionId) : undefined,
+              );
+            },
+          };
+        }
+        default: {
+          const el = document.createElement("div");
+          return { element: el, init() {} };
+        }
+      }
+    },
+  });
+
+  dockviewApi = dv;
+
+  // Show a session notice when a popout window is blocked by the browser.
+  dv.onDidOpenPopoutWindowFail(() => {
+    const sid = activeSessionId;
+    if (!sid) return;
+    const notices = sessionNotices.get(sid) ?? [];
+    notices.push({
+      level: "warning",
+      text: "Popup window was blocked. Allow popups for this site to use the pop-out feature.",
+    });
+    sessionNotices.set(sid, notices);
+    render();
+  });
+
+  // Restore persisted layout or fall back to the two-panel default.
+  const stored = localStorage.getItem(DOCKVIEW_LAYOUT_STORAGE_KEY);
+  let layoutRestored = false;
+
+  if (stored) {
+    try {
+      const data = JSON.parse(stored) as PersistedDockviewLayout;
+      if (data.version === 1 && data.layout) {
+        dv.fromJSON(data.layout);
+        layoutRestored = true;
+      }
+    } catch {
+      // Corrupt or incompatible layout — fall through to default.
+    }
+  }
+
+  if (!layoutRestored) {
+    loadDefaultLayout();
+  }
+
+  // Persist layout on change (debounced: avoid rapid writes during drag).
+  let layoutSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  dv.onDidLayoutChange(() => {
+    clearTimeout(layoutSaveTimer);
+    layoutSaveTimer = setTimeout(() => {
+      if (!dockviewApi) return;
+      const data: PersistedDockviewLayout = { version: 1, layout: dockviewApi.toJSON() };
+      localStorage.setItem(DOCKVIEW_LAYOUT_STORAGE_KEY, JSON.stringify(data));
+    }, 300);
+  });
+}
+
+function loadDefaultLayout(): void {
+  if (!dockviewApi) return;
+  dockviewApi.addPanel({
+    id: "transcript",
+    component: "transcript",
+    title: "Transcript",
+    renderer: "always",
+  });
+  dockviewApi.addPanel({
+    id: "tools",
+    component: "tools",
+    title: "Tools",
+    position: { referencePanel: "transcript", direction: "right" },
+    renderer: "always",
+  });
+}
+
+// Creates a minimal panel toolbar with a Pop-out button.
+// `group` is a DockviewGroupPanel used as the target for addPopoutGroup.
+function makePanelToolbar(group: import("dockview-core").DockviewGroupPanel): HTMLElement {
+  const toolbar = document.createElement("div");
+  toolbar.className = "panel-toolbar";
+
+  const popoutBtn = document.createElement("button");
+  popoutBtn.type = "button";
+  popoutBtn.className = "panel-popout-btn";
+  popoutBtn.title = "Open panel in a separate window";
+  popoutBtn.textContent = "Pop out";
+  popoutBtn.addEventListener("click", () => {
+    void dockviewApi?.addPopoutGroup(group, {
+      popoutUrl: "/popout.html",
+      onDidOpen: ({ window: popWin }) => {
+        // Transfer stylesheets from the main window to the popout window so
+        // Fura and dockview CSS is available there.
+        document.querySelectorAll('link[rel="stylesheet"], style').forEach(node => {
+          popWin.document.head.appendChild(popWin.document.importNode(node, true));
+        });
+      },
+    });
+  });
+  toolbar.append(popoutBtn);
+  return toolbar;
+}
+
+// --- Status bar ---
 
 function renderStatusBar(projection?: SessionProjection): void {
   statusBar.replaceChildren();
@@ -1161,27 +1451,45 @@ function formatCost(value: number): string {
   return `$${value.toFixed(2)}`;
 }
 
-function formatContext(percent: number, window: number): string {
+function formatContext(percent: number, windowSize: number): string {
   const pct = percent < 1 ? percent.toFixed(2) : percent.toFixed(1);
-  const win = window >= 1_000_000 ? `${(window / 1_000_000).toFixed(1)}M`
-    : window >= 1_000 ? `${Math.round(window / 1_000)}K`
-    : `${window}`;
+  const win = windowSize >= 1_000_000 ? `${(windowSize / 1_000_000).toFixed(1)}M`
+    : windowSize >= 1_000 ? `${Math.round(windowSize / 1_000)}K`
+    : `${windowSize}`;
   return `${pct}%/${win}`;
 }
 
+// --- Document creation helpers (popout-safe) ---
+// These use _renderOwner instead of the global document so that elements created during
+// renderTranscriptView / renderToolsView belong to the correct window document,
+// even when those panels are popped out into a separate browser window.
+
+function mkEl<K extends keyof HTMLElementTagNameMap>(tag: K): HTMLElementTagNameMap[K] {
+  return _renderOwner.createElement(tag);
+}
+
+function mkText(text: string): Text {
+  return _renderOwner.createTextNode(text);
+}
+
+function mkFrag(): DocumentFragment {
+  return _renderOwner.createDocumentFragment();
+}
+
+// --- Message rendering ---
 
 function renderMessage(message: TranscriptMessage): HTMLElement {
-  const article = document.createElement("article");
+  const article = mkEl("article");
   article.className = `message ${message.role}`;
   article.dataset.messageId = message.id;
 
-  // System-role messages (bash/python executions) carry no header — the fenced code
-  // block header already labels the content type. All other roles get a header row.
+  // System-role messages carry no header — the fenced code block header already
+  // labels the content type. All other roles get a header row.
   if (message.role !== "system") {
-    const header = document.createElement("header");
-    const roleLabel = document.createElement("strong");
+    const header = mkEl("header");
+    const roleLabel = mkEl("strong");
     roleLabel.textContent = message.role === "user" ? "You" : message.role;
-    const copy = document.createElement("button");
+    const copy = mkEl("button");
     copy.type = "button";
     copy.textContent = "Copy";
     copy.addEventListener("click", async () => {
@@ -1207,11 +1515,11 @@ function renderToolCard(card: ToolCard): HTMLElement {
   if (card.toolName === "task") return renderTaskCard(card);
   if (card.toolName === "read") return renderReadToolCard(card);
   if (card.toolName === "grep") return renderGrepToolCard(card);
-  const wrapper = document.createElement("section");
+  const wrapper = mkEl("section");
   wrapper.className = `tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = card.toolName;
 
-  const header = document.createElement("div");
+  const header = mkEl("div");
   header.className = "tool-header";
   header.append(
     toolStatusIcon(card),
@@ -1226,11 +1534,11 @@ function renderToolCard(card: ToolCard): HTMLElement {
 }
 
 function renderReadToolCard(card: ToolCard): HTMLElement {
-  const wrapper = document.createElement("section");
+  const wrapper = mkEl("section");
   wrapper.className = `tool-card read-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${card.isError ? "" : "tool-compact"}`;
   wrapper.dataset.toolName = "read";
 
-  const header = document.createElement("div");
+  const header = mkEl("div");
   header.className = "tool-header read-tool-header";
   header.append(
     toolStatusIcon(card),
@@ -1247,12 +1555,12 @@ function renderReadToolCard(card: ToolCard): HTMLElement {
 }
 
 function renderReadToolGroup(cards: Array<{ kind: "tool" } & ToolCard>): HTMLElement {
-  const wrapper = document.createElement("section");
+  const wrapper = mkEl("section");
   const isActive = cards.some(card => card.isActive);
   wrapper.className = `tool-card read-tool-card read-tool-group ${isActive ? "tool-active" : ""} tool-compact`;
   wrapper.dataset.toolName = "read";
 
-  const header = document.createElement("div");
+  const header = mkEl("div");
   header.className = "tool-header read-tool-header";
   header.append(
     toolStatusIcon({ ...cards[0], isActive }),
@@ -1261,10 +1569,10 @@ function renderReadToolGroup(cards: Array<{ kind: "tool" } & ToolCard>): HTMLEle
   );
   wrapper.append(header);
 
-  const list = document.createElement("div");
+  const list = mkEl("div");
   list.className = "read-tool-list";
   cards.forEach((card, index) => {
-    const row = document.createElement("div");
+    const row = mkEl("div");
     row.className = "read-tool-row";
     row.append(
       toolHeaderText(index === cards.length - 1 ? "└─" : "├─", "read-tool-connector"),
@@ -1308,11 +1616,11 @@ function stringArg(args: Record<string, unknown>, key: string): string | undefin
 }
 
 function renderGrepToolCard(card: ToolCard): HTMLElement {
-  const wrapper = document.createElement("section");
+  const wrapper = mkEl("section");
   wrapper.className = `tool-card grep-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${card.isError ? "" : "tool-compact"}`;
   wrapper.dataset.toolName = "grep";
 
-  const header = document.createElement("div");
+  const header = mkEl("div");
   header.className = "tool-header grep-tool-header";
   header.append(
     toolStatusIcon(card),
@@ -1329,7 +1637,7 @@ function renderGrepToolCard(card: ToolCard): HTMLElement {
 
   const collapsed = grepCollapsedSummary(card);
   if (collapsed) {
-    const row = document.createElement("div");
+    const row = mkEl("div");
     row.className = "grep-tool-row";
     row.append(
       toolHeaderText("└─", "grep-tool-connector"),
@@ -1401,9 +1709,9 @@ function formatCount(noun: string, count: number): string {
 
 function appendToolResultBody(wrapper: HTMLElement, resultText: string): void {
   if (!resultText) return;
-  const body = document.createElement("div");
+  const body = mkEl("div");
   body.className = "tool-result-body";
-  const pre = document.createElement("pre");
+  const pre = mkEl("pre");
   pre.className = "tool-result-text";
   pre.textContent = truncate(resultText, 8000);
   body.append(pre);
@@ -1411,11 +1719,11 @@ function appendToolResultBody(wrapper: HTMLElement, resultText: string): void {
 }
 
 function renderTodoWriteCard(card: ToolCard): HTMLElement {
-  const wrapper = document.createElement("section");
+  const wrapper = mkEl("section");
   wrapper.className = `tool-card todo-write-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = "todo_write";
 
-  const header = document.createElement("div");
+  const header = mkEl("div");
   header.className = "tool-header todo-write-header";
   header.append(
     toolStatusIcon(card),
@@ -1427,7 +1735,7 @@ function renderTodoWriteCard(card: ToolCard): HTMLElement {
   wrapper.append(header);
 
   if (phases.length > 0) {
-    const tree = document.createElement("div");
+    const tree = mkEl("div");
     tree.className = "todo-tree";
     for (const phase of phases) tree.append(renderTodoPhase(phase, phases.length > 1));
     wrapper.append(tree);
@@ -1439,17 +1747,17 @@ function renderTodoWriteCard(card: ToolCard): HTMLElement {
 }
 
 function renderTodoPhase(phase: TodoPhase, showPhaseName: boolean): HTMLElement {
-  const section = document.createElement("section");
+  const section = mkEl("section");
   section.className = "todo-phase";
 
   if (showPhaseName) {
-    const title = document.createElement("div");
+    const title = mkEl("div");
     title.className = "todo-phase-title";
     title.textContent = `└─ ${phase.name}`;
     section.append(title);
   }
 
-  const list = document.createElement("div");
+  const list = mkEl("div");
   list.className = "todo-task-list";
   phase.tasks.forEach((todo, index) => {
     list.append(renderTodoItem(todo, index === 0));
@@ -1459,18 +1767,18 @@ function renderTodoPhase(phase: TodoPhase, showPhaseName: boolean): HTMLElement 
 }
 
 function renderTodoItem(todo: TodoItem, firstInPhase: boolean): HTMLElement {
-  const row = document.createElement("div");
+  const row = mkEl("div");
   row.className = `todo-task todo-${todo.status}`;
 
-  const prefix = document.createElement("span");
+  const prefix = mkEl("span");
   prefix.className = "todo-prefix";
   prefix.textContent = firstInPhase ? "└─" : "  ";
 
-  const icon = document.createElement("span");
+  const icon = mkEl("span");
   icon.className = "todo-icon";
   icon.textContent = todo.status === "completed" ? "☑" : "☐";
 
-  const content = document.createElement("span");
+  const content = mkEl("span");
   content.className = "todo-content";
   content.textContent = todo.content;
 
@@ -1478,7 +1786,7 @@ function renderTodoItem(todo: TodoItem, firstInPhase: boolean): HTMLElement {
 
   if (todo.status === "in_progress" && todo.details) {
     for (const line of todo.details.split("\n")) {
-      const details = document.createElement("div");
+      const details = mkEl("div");
       details.className = "todo-details";
       details.textContent = line;
       row.append(details);
@@ -1515,11 +1823,11 @@ function isTodoStatus(value: unknown): value is TodoStatus {
 }
 
 function renderTaskCard(card: ToolCard): HTMLElement {
-  const wrapper = document.createElement("section");
+  const wrapper = mkEl("section");
   wrapper.className = `tool-card task-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = "task";
 
-  const header = document.createElement("div");
+  const header = mkEl("div");
   header.className = "tool-header task-header";
   header.append(
     toolStatusIcon(card),
@@ -1535,12 +1843,12 @@ function renderTaskCard(card: ToolCard): HTMLElement {
   const shouldRenderProgress = progress.length > 0 && (card.isActive || results.length === 0);
 
   if (shouldRenderProgress) {
-    const list = document.createElement("div");
+    const list = mkEl("div");
     list.className = "task-progress";
     for (const agent of progress) list.append(renderTaskAgent(agent));
     wrapper.append(list);
   } else if (results.length > 0) {
-    const list = document.createElement("div");
+    const list = mkEl("div");
     list.className = "task-progress task-results";
     for (let i = 0; i < results.length; i++) list.append(renderTaskResult(results[i], i === results.length - 1));
     wrapper.append(list);
@@ -1550,7 +1858,7 @@ function renderTaskCard(card: ToolCard): HTMLElement {
 
   const totals = shouldRenderProgress ? taskProgressTotals(progress) : taskResultTotals(results, source);
   if (totals) {
-    const total = document.createElement("div");
+    const total = mkEl("div");
     total.className = "task-total";
     total.textContent = totals;
     wrapper.append(total);
@@ -1560,10 +1868,10 @@ function renderTaskCard(card: ToolCard): HTMLElement {
 }
 
 function renderTaskAgent(agent: AgentProgress): HTMLElement {
-  const row = document.createElement("div");
+  const row = mkEl("div");
   row.className = `task-agent status-${agent.status}`;
 
-  const main = document.createElement("div");
+  const main = mkEl("div");
   main.className = "task-agent-main";
   const status = toolHeaderText(taskStatusGlyph(agent.status), "task-agent-status");
   if (agent.status === "running") status.classList.add("is-running");
@@ -1577,7 +1885,7 @@ function renderTaskAgent(agent: AgentProgress): HTMLElement {
   row.append(main);
 
   if (agent.lastIntent || agent.currentTool) {
-    const activity = document.createElement("div");
+    const activity = mkEl("div");
     activity.className = "task-agent-activity";
     activity.textContent = `└─ ${agent.lastIntent ?? `${agent.currentTool} ${agent.currentToolArgs ?? ""}`}`;
     row.append(activity);
@@ -1588,10 +1896,10 @@ function renderTaskAgent(agent: AgentProgress): HTMLElement {
 
 function renderTaskResult(result: TaskResult, isLast: boolean): HTMLElement {
   const resultStatus = taskResultStatus(result);
-  const row = document.createElement("div");
+  const row = mkEl("div");
   row.className = `task-agent task-result status-${resultStatus} ${isLast ? "task-last" : ""}`;
 
-  const main = document.createElement("div");
+  const main = mkEl("div");
   main.className = "task-agent-main";
   main.append(
     toolHeaderText(taskResultGlyph(result), "task-agent-status"),
@@ -1605,7 +1913,7 @@ function renderTaskResult(result: TaskResult, isLast: boolean): HTMLElement {
 
   const activityText = result.lastIntent ?? result.abortReason ?? result.error;
   if (activityText) {
-    const activity = document.createElement("div");
+    const activity = mkEl("div");
     activity.className = "task-agent-activity";
     activity.textContent = `└─ ${activityText}`;
     row.append(activity);
@@ -1613,7 +1921,7 @@ function renderTaskResult(result: TaskResult, isLast: boolean): HTMLElement {
 
   const outputLines = taskOutputPreview(result.output);
   if (outputLines.length > 0) {
-    const output = document.createElement("pre");
+    const output = mkEl("pre");
     output.className = "task-result-output";
     output.textContent = outputLines.join("\n");
     row.append(output);
@@ -1621,7 +1929,7 @@ function renderTaskResult(result: TaskResult, isLast: boolean): HTMLElement {
 
   const artifactPath = result.patchPath ?? result.branchName ?? result.outputPath;
   if (artifactPath) {
-    const path = document.createElement("div");
+    const path = mkEl("div");
     path.className = "task-result-path";
     path.textContent = `${result.patchPath ? "Patch" : result.branchName ? "Branch" : "Output"}: ${artifactPath}`;
     row.append(path);
@@ -1631,7 +1939,7 @@ function renderTaskResult(result: TaskResult, isLast: boolean): HTMLElement {
 }
 
 function toolStatusIcon(card: ToolCard): HTMLElement {
-  const span = document.createElement("span");
+  const span = mkEl("span");
   span.className = "tool-status-icon";
   if (card.isActive) {
     span.classList.add("is-running");
@@ -1643,12 +1951,11 @@ function toolStatusIcon(card: ToolCard): HTMLElement {
 }
 
 function toolHeaderText(text: string, className: string): HTMLElement {
-  const span = document.createElement("span");
+  const span = mkEl("span");
   span.className = className;
   span.textContent = text;
   return span;
 }
-
 
 function taskProgress(value: unknown): AgentProgress[] {
   if (!isRecord(value)) return [];
@@ -1822,7 +2129,7 @@ function formatDuration(ms: number): string {
 // --- Markdown rendering ---
 
 function renderMarkdown(text: string): HTMLElement {
-  const wrapper = document.createElement("div");
+  const wrapper = mkEl("div");
   wrapper.className = "markdown-body";
 
   const tokens = marked.lexer(text.trim());
@@ -1832,7 +2139,7 @@ function renderMarkdown(text: string): HTMLElement {
   }
 
   if (!wrapper.hasChildNodes() && text.trim()) {
-    const p = document.createElement("p");
+    const p = mkEl("p");
     p.textContent = text.trim();
     wrapper.append(p);
   }
@@ -1857,7 +2164,7 @@ function renderMarkdownToken(token: Token): Node | null {
     case "blockquote":
       return renderBlockquote(token as Tokens.Blockquote);
     case "hr":
-      return document.createElement("hr");
+      return mkEl("hr");
     case "table":
       return renderTable(token as Tokens.Table);
     case "html":
@@ -1871,26 +2178,26 @@ function renderMarkdownToken(token: Token): Node | null {
 
 function renderHeading(token: Tokens.Heading): HTMLElement {
   const depth = Math.min(Math.max(token.depth, 1), 6) as 1 | 2 | 3 | 4 | 5 | 6;
-  const heading = document.createElement(`h${depth}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
+  const heading = mkEl(`h${depth}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
   heading.append(renderInlineTokens(token.tokens));
   return heading;
 }
 
 function renderParagraph(tokens: Token[]): HTMLParagraphElement {
-  const p = document.createElement("p");
+  const p = mkEl("p");
   p.append(renderInlineTokens(tokens));
   return p;
 }
 
 function renderPlainParagraph(text: string): HTMLParagraphElement {
-  const p = document.createElement("p");
+  const p = mkEl("p");
   p.textContent = text;
   return p;
 }
 
 function renderList(token: Tokens.List): HTMLOListElement | HTMLUListElement {
   if (token.ordered) {
-    const list = document.createElement("ol");
+    const list = mkEl("ol");
     if (typeof token.start === "number" && token.start !== 1) {
       list.start = token.start;
     }
@@ -1900,7 +2207,7 @@ function renderList(token: Tokens.List): HTMLOListElement | HTMLUListElement {
     return list;
   }
 
-  const list = document.createElement("ul");
+  const list = mkEl("ul");
   for (const item of token.items) {
     list.append(renderListItem(item));
   }
@@ -1908,9 +2215,9 @@ function renderList(token: Tokens.List): HTMLOListElement | HTMLUListElement {
 }
 
 function renderListItem(item: Tokens.ListItem): HTMLLIElement {
-  const li = document.createElement("li");
+  const li = mkEl("li");
   if (item.task) {
-    const checkbox = document.createElement("input");
+    const checkbox = mkEl("input");
     checkbox.type = "checkbox";
     checkbox.disabled = true;
     checkbox.checked = Boolean(item.checked);
@@ -1940,7 +2247,7 @@ function renderListItem(item: Tokens.ListItem): HTMLLIElement {
 }
 
 function renderBlockquote(token: Tokens.Blockquote): HTMLQuoteElement {
-  const quote = document.createElement("blockquote");
+  const quote = mkEl("blockquote");
   for (const child of token.tokens) {
     const node = renderMarkdownToken(child);
     if (node) quote.append(node);
@@ -1949,11 +2256,11 @@ function renderBlockquote(token: Tokens.Blockquote): HTMLQuoteElement {
 }
 
 function renderTable(token: Tokens.Table): HTMLTableElement {
-  const table = document.createElement("table");
-  const thead = document.createElement("thead");
-  const headerRow = document.createElement("tr");
+  const table = mkEl("table");
+  const thead = mkEl("thead");
+  const headerRow = mkEl("tr");
   token.header.forEach((cell, index) => {
-    const th = document.createElement("th");
+    const th = mkEl("th");
     setTableCellAlignment(th, token.align[index]);
     th.append(renderInlineTokens(cell.tokens));
     headerRow.append(th);
@@ -1961,11 +2268,11 @@ function renderTable(token: Tokens.Table): HTMLTableElement {
   thead.append(headerRow);
   table.append(thead);
 
-  const tbody = document.createElement("tbody");
+  const tbody = mkEl("tbody");
   for (const row of token.rows) {
-    const tr = document.createElement("tr");
+    const tr = mkEl("tr");
     row.forEach((cell, index) => {
-      const td = document.createElement("td");
+      const td = mkEl("td");
       setTableCellAlignment(td, token.align[index]);
       td.append(renderInlineTokens(cell.tokens));
       tr.append(td);
@@ -1982,7 +2289,7 @@ function setTableCellAlignment(cell: HTMLTableCellElement, align: Tokens.TableCe
 }
 
 function renderInlineTokens(tokens: Token[]): DocumentFragment {
-  const fragment = document.createDocumentFragment();
+  const fragment = mkFrag();
   for (const token of tokens) {
     fragment.append(renderInlineToken(token));
   }
@@ -1994,7 +2301,7 @@ function renderInlineToken(token: Token): Node {
     case "text": {
       const text = token as Tokens.Text;
       if (text.tokens && text.tokens.length > 0) return renderInlineTokens(text.tokens);
-      return document.createTextNode(text.text);
+      return mkText(text.text);
     }
     case "strong":
       return wrapInline("strong", (token as Tokens.Strong).tokens ?? []);
@@ -2003,30 +2310,30 @@ function renderInlineToken(token: Token): Node {
     case "del":
       return wrapInline("del", (token as Tokens.Del).tokens ?? []);
     case "codespan": {
-      const code = document.createElement("code");
+      const code = mkEl("code");
       code.textContent = (token as Tokens.Codespan).text;
       return code;
     }
     case "link":
       return renderLink(token as Tokens.Link);
     case "br":
-      return document.createElement("br");
+      return mkEl("br");
     case "html":
-      return document.createTextNode(token.raw);
+      return mkText(token.raw);
     default:
-      return document.createTextNode(tokenText(token));
+      return mkText(tokenText(token));
   }
 }
 
 function wrapInline(tagName: "strong" | "em" | "del", tokens: Token[]): HTMLElement {
-  const el = document.createElement(tagName);
+  const el = mkEl(tagName);
   el.append(renderInlineTokens(tokens));
   return el;
 }
 
 function renderLink(token: Tokens.Link): HTMLElement {
   const href = safeHref(token.href);
-  const el = href ? document.createElement("a") : document.createElement("span");
+  const el = href ? mkEl("a") : mkEl("span");
   el.append(renderInlineTokens(token.tokens));
   if (href && el instanceof HTMLAnchorElement) {
     el.href = href;
@@ -2053,17 +2360,17 @@ function tokenText(token: Token): string {
 }
 
 function renderCodeBlock(lang: string, code: string): HTMLElement {
-  const wrapper = document.createElement("div");
+  const wrapper = mkEl("div");
   wrapper.className = "code-block";
 
-  const header = document.createElement("div");
+  const header = mkEl("div");
   header.className = "code-block-header";
 
-  const langLabel = document.createElement("span");
+  const langLabel = mkEl("span");
   langLabel.className = "code-lang";
   langLabel.textContent = lang || "text";
 
-  const copyBtn = document.createElement("button");
+  const copyBtn = mkEl("button");
   copyBtn.type = "button";
   copyBtn.className = "code-copy";
   copyBtn.textContent = "Copy";
@@ -2076,8 +2383,8 @@ function renderCodeBlock(lang: string, code: string): HTMLElement {
   header.append(langLabel, copyBtn);
   wrapper.append(header);
 
-  const pre = document.createElement("pre");
-  const codeEl = document.createElement("code");
+  const pre = mkEl("pre");
+  const codeEl = mkEl("code");
   if (lang && hljs.getLanguage(lang)) {
     codeEl.innerHTML = hljs.highlight(code, { language: lang }).value;
     codeEl.className = `hljs language-${lang}`;
@@ -2094,7 +2401,7 @@ function renderCodeBlock(lang: string, code: string): HTMLElement {
 
 function renderBlock(block: ContentBlock, isNew: boolean, messageId: string, blockIndex: number): HTMLElement {
   if (block.kind === "text") {
-    const wrapper = document.createElement("div");
+    const wrapper = mkEl("div");
     wrapper.className = "text-block";
     wrapper.dataset.messageId = messageId;
     wrapper.dataset.blockIndex = String(blockIndex);
@@ -2104,19 +2411,20 @@ function renderBlock(block: ContentBlock, isNew: boolean, messageId: string, blo
   }
 
   if (block.kind === "thinking") {
-    const details = document.createElement("details");
+    const details = mkEl("details");
     details.className = "thinking-block";
     details.dataset.messageId = messageId;
     details.dataset.blockIndex = String(blockIndex);
     details.dataset.blockKind = "thinking";
-    details.open = true;
+    // Open live/new thinking blocks; collapse historical ones.
+    details.open = isNew;
 
-    const summary = document.createElement("summary");
+    const summary = mkEl("summary");
     summary.className = "thinking-label";
     summary.textContent = "Thinking\u2026";
     details.append(summary);
 
-    const pre = document.createElement("pre");
+    const pre = mkEl("pre");
     pre.className = "thinking-content";
     pre.textContent = block.thinking;
     details.append(pre);
@@ -2125,7 +2433,7 @@ function renderBlock(block: ContentBlock, isNew: boolean, messageId: string, blo
   }
 
   // redactedthinking — show static label, no data
-  const span = document.createElement("p");
+  const span = mkEl("p");
   span.className = "thinking-label thinking-redacted";
   span.dataset.messageId = messageId;
   span.dataset.blockIndex = String(blockIndex);
@@ -2212,7 +2520,7 @@ function renderImagePreviews(): void {
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "image-remove";
-    remove.textContent = "\u00d7"; // ×
+    remove.textContent = "\u00d7";
     remove.setAttribute("aria-label", "Remove image");
     remove.addEventListener("click", () => {
       pendingImages.splice(i, 1);
@@ -2244,18 +2552,23 @@ function renderImagePreviews(): void {
   }
 }
 
-
 // --- Model picker ---
 
 function isModelPickerCommand(text: string): boolean {
   return /^\/models?(?:\s+(?:list|ls))?\s*$/i.test(text.trim());
 }
 
+function requireServerConfig(): ServerConfig | null {
+  if (serverConfig) return serverConfig;
+  appendLog("Cannot create a session before the bridge sends config; reconnect and try again.");
+  return null;
+}
+
 function openCwdPicker(): void {
-  // Name always starts blank; pre-fill cwd with the active session's directory when known.
+  const config = requireServerConfig();
+  if (!config) return;
   cwdPickerNameInput.value = "";
-  const activeCwd = activeSessionId ? (projections.get(activeSessionId)?.summary.cwd ?? "") : "";
-  cwdPickerInput.value = activeCwd;
+  cwdPickerInput.value = config.defaultCwd;
   cwdPickerOverlay.hidden = false;
   window.setTimeout(() => cwdPickerNameInput.focus(), 0);
 }
@@ -2266,6 +2579,7 @@ function closeCwdPicker(): void {
 }
 
 function submitCwdPicker(): void {
+  if (!requireServerConfig()) return;
   const name = cwdPickerNameInput.value.trim();
   const cwd = cwdPickerInput.value.trim();
   if (!name || !cwd) return;
@@ -2467,7 +2781,6 @@ function formatModelContext(model: ModelSummary): string | null {
 
 function updatePalette(): void {
   const text = promptInput.value;
-  // Show only when text starts with / and no space yet (still typing the command name).
   if (!text.startsWith("/") || text.includes(" ")) {
     hidePalette();
     return;
@@ -2507,7 +2820,7 @@ function renderPaletteItems(): void {
 
     item.append(nameEl, descEl);
     item.addEventListener("mousedown", e => {
-      e.preventDefault(); // keep focus on textarea
+      e.preventDefault();
       selectPaletteCommand(cmd);
     });
     commandPalette.append(item);
@@ -2530,6 +2843,7 @@ function setPaletteSelected(index: number): void {
   }
 }
 
+// --- Utilities ---
 
 function send(message: ClientMessage): void {
   if (!socket || socket.readyState !== WebSocket.OPEN) {

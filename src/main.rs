@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context, anyhow};
@@ -33,6 +33,8 @@ use tokio::{
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{error, info, warn};
 use uuid::Uuid;
+
+const SESSION_CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Parser)]
 #[command(
@@ -83,6 +85,8 @@ struct AppState {
     sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
     rpc_sessions: Arc<RwLock<HashMap<String, RpcSessionHandle>>>,
     rpc_session_targets: Arc<RwLock<HashMap<String, String>>>,
+    /// Metadata for a newly spawned RPC child before OMP reports its real session id.
+    pending_created_sessions: Arc<RwLock<HashMap<String, PendingCreatedSession>>>,
     /// Name to apply to the next new session spawned by a fork or handoff on this transport.
     pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     events: broadcast::Sender<ServerMessage>,
@@ -90,11 +94,33 @@ struct AppState {
     log_frames: bool,
     bridge_debug_file: Option<PathBuf>,
     session_root: PathBuf,
+    default_cwd: Arc<RwLock<String>>,
+    config_path: Option<PathBuf>,
 }
 
 struct RpcSessionHandle {
     stdin: mpsc::Sender<Value>,
     stop: oneshot::Sender<()>,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCreatedSession {
+    cwd: Option<String>,
+    args: Vec<String>,
+    title: Option<String>,
+    created_at: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct FuraConfig {
+    last_cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientConfig {
+    default_cwd: String,
 }
 
 #[derive(Debug)]
@@ -229,7 +255,7 @@ enum SessionKind {
     Available,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum SessionStatus {
     Starting,
@@ -240,7 +266,7 @@ enum SessionStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SessionSummary {
     session_id: String,
@@ -454,7 +480,10 @@ enum ServerMessage {
     Hello {
         server_version: &'static str,
         protocol_version: u32,
+        config: ClientConfig,
     },
+    #[serde(rename = "config.updated")]
+    ConfigUpdated { config: ClientConfig },
     #[serde(rename = "sessions.snapshot")]
     SessionsSnapshot { sessions: Vec<SessionSummary> },
     #[serde(rename = "session.snapshot")]
@@ -495,6 +524,80 @@ enum ServerMessage {
     },
 }
 
+fn default_config_path() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".fura").join("config.yaml"))
+}
+
+fn valid_directory_string(path: &str) -> Option<String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match fs::metadata(trimmed) {
+        Ok(metadata) if metadata.is_dir() => Some(trimmed.to_string()),
+        _ => None,
+    }
+}
+
+fn load_default_cwd(config_path: Option<&Path>, startup_cwd: &Path) -> String {
+    if let Some(path) = config_path {
+        match fs::read_to_string(path) {
+            Ok(text) => match serde_yaml::from_str::<FuraConfig>(&text) {
+                Ok(config) => {
+                    if let Some(cwd) = config.last_cwd.as_deref().and_then(valid_directory_string) {
+                        return cwd;
+                    }
+                }
+                Err(error) => warn!(path = %path.display(), %error, "failed to parse Fura config"),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => warn!(path = %path.display(), %error, "failed to read Fura config"),
+        }
+    }
+
+    startup_cwd.to_string_lossy().into_owned()
+}
+
+async fn client_config(state: &AppState) -> ClientConfig {
+    ClientConfig {
+        default_cwd: state.default_cwd.read().await.clone(),
+    }
+}
+
+async fn broadcast_config(state: &AppState) {
+    let config = client_config(state).await;
+    let _ = state.events.send(ServerMessage::ConfigUpdated { config });
+}
+
+async fn save_default_cwd(state: &AppState, cwd: &str) {
+    *state.default_cwd.write().await = cwd.to_string();
+
+    if let Some(path) = state.config_path.as_ref() {
+        if let Some(parent) = path.parent() {
+            if let Err(error) = async_fs::create_dir_all(parent).await {
+                warn!(path = %parent.display(), %error, "failed to create Fura config directory");
+                broadcast_config(state).await;
+                return;
+            }
+        }
+
+        let config = FuraConfig {
+            last_cwd: Some(cwd.to_string()),
+        };
+        match serde_yaml::to_string(&config) {
+            Ok(text) => {
+                if let Err(error) = async_fs::write(path, text).await {
+                    warn!(path = %path.display(), %error, "failed to write Fura config");
+                }
+            }
+            Err(error) => warn!(%error, "failed to serialize Fura config"),
+        }
+    }
+    broadcast_config(state).await;
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -524,12 +627,16 @@ async fn main() -> anyhow::Result<()> {
     rpc_args.extend(args.rpc_args);
 
     let session_root = args.session_root.unwrap_or_else(default_session_root);
+    let startup_cwd = env::current_dir().context("failed to read bridge working directory")?;
+    let config_path = default_config_path();
+    let default_cwd = load_default_cwd(config_path.as_deref(), &startup_cwd);
     let (events, _) = broadcast::channel(512);
     let state = AppState {
         token: Arc::new(token),
         sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
+        pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         events,
         rpc_config: Arc::new(RpcConfig {
@@ -539,7 +646,11 @@ async fn main() -> anyhow::Result<()> {
         log_frames: args.log_frames,
         bridge_debug_file: args.bridge_debug_file,
         session_root,
+        default_cwd: Arc::new(RwLock::new(default_cwd)),
+        config_path,
     };
+
+    start_session_catalog_watcher(state.clone());
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -558,6 +669,17 @@ async fn main() -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server failed")
+}
+
+fn start_session_catalog_watcher(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SESSION_CATALOG_POLL_INTERVAL).await;
+            if refresh_session_catalog(&state).await {
+                broadcast_sessions_snapshot(&state).await;
+            }
+        }
+    });
 }
 
 fn log_server_ready(state: &AppState, host: std::net::IpAddr, port: u16) {
@@ -602,11 +724,13 @@ async fn handle_socket(mut socket: WebSocket, state: AppState) {
     info!("websocket client connected");
     let mut event_rx = state.events.subscribe();
 
+    let config = client_config(&state).await;
     if send_json(
         &mut socket,
         &ServerMessage::Hello {
             server_version: env!("CARGO_PKG_VERSION"),
             protocol_version: 1,
+            config,
         },
     )
     .await
@@ -802,76 +926,71 @@ async fn create_session(
     name: Option<String>,
     args: Option<Vec<String>>,
 ) -> Vec<ServerMessage> {
-    let id = Uuid::new_v4().to_string();
+    let transport_id = Uuid::new_v4().to_string();
     let args = args.unwrap_or_default();
-    info!(action = "session.create", session_id = %id, has_cwd = cwd.is_some(), has_name = name.is_some(), arg_count = args.len());
-
-    let record = SessionRecord {
-        id: id.clone(),
-        cwd: cwd.clone(),
-        args: args.clone(),
-        status: SessionStatus::Starting,
-        created_at: now_epoch_seconds(),
-        updated_at: now_epoch_seconds(),
-        messages: Vec::new(),
-        live_message_ids: HashSet::new(),
-        streaming_message: None,
-        tool_cards: Vec::new(),
-        active_tool_calls: Vec::new(),
-        kind: SessionKind::Managed,
-        session_file: None,
-        title: name.clone(),
-        timestamp: None,
-        model: None,
-        thinking_level: None,
-        tokens_total: 0,
-        cost_usd: 0.0,
-        context_tokens: None,
-        context_window: None,
-        context_percent: None,
+    let created_at = now_epoch_seconds();
+    let cwd = match cwd.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    }) {
+        Some(cwd) => cwd,
+        None => state.default_cwd.read().await.clone(),
     };
+    info!(
+        action = "session.create",
+        transport_session_id = %transport_id,
+        cwd = %cwd,
+        has_name = name.is_some(),
+        arg_count = args.len()
+    );
 
-    let projection = record.projection();
-    let sessions_snapshot = {
-        let mut sessions = state.sessions.write().await;
-        sessions.insert(id.clone(), record);
-        sessions_snapshot_from_map(&sessions)
-    };
+    state.pending_created_sessions.write().await.insert(
+        transport_id.clone(),
+        PendingCreatedSession {
+            cwd: Some(cwd.clone()),
+            args: args.clone(),
+            title: name.clone(),
+            created_at,
+        },
+    );
 
-    if let Err(error) = spawn_rpc_child(state.clone(), id.clone(), cwd, args, None).await {
-        error!(session_id = %id, %error, "failed to start RPC child");
-        let mut sessions = state.sessions.write().await;
-        if let Some(record) = sessions.get_mut(&id) {
-            record.status = SessionStatus::Error;
-        }
-        return vec![
-            sessions_snapshot_from_map(&sessions),
-            ServerMessage::Error {
-                request_id: None,
-                message: format!("failed to start RPC child for session {id}: {error}"),
-            },
-        ];
+    if let Err(error) = spawn_rpc_child(
+        state.clone(),
+        transport_id.clone(),
+        Some(cwd.clone()),
+        args,
+        None,
+    )
+    .await
+    {
+        state
+            .pending_created_sessions
+            .write()
+            .await
+            .remove(&transport_id);
+        error!(transport_session_id = %transport_id, %error, "failed to start RPC child");
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: format!("failed to start RPC child: {error}"),
+        }];
     }
 
-    // Persist the name in the OMP session file immediately after spawn.
+    save_default_cwd(state, &cwd).await;
+
+    // Persist the name in the OMP session file immediately after spawn. The visible
+    // session appears only after OMP reports its real session id via get_state.
     if let Some(ref n) = name {
         let cmd = serde_json::json!({
             "id": next_rpc_id(),
             "type": "set_session_name",
             "name": n,
         });
-        if let Err(e) = send_rpc_command(state, &id, cmd).await {
-            warn!(session_id = %id, error = %e, "failed to queue initial set_session_name");
+        if let Err(e) = send_rpc_command(state, &transport_id, cmd).await {
+            warn!(transport_session_id = %transport_id, error = %e, "failed to queue initial set_session_name");
         }
     }
 
-    vec![
-        sessions_snapshot,
-        ServerMessage::SessionSnapshot {
-            session_id: id,
-            state: projection,
-        },
-    ]
+    Vec::new()
 }
 
 async fn open_session(state: &AppState, session_file: String) -> Vec<ServerMessage> {
@@ -1686,20 +1805,45 @@ async fn spawn_rpc_child(
             .await
             .remove(&session_id)
             .unwrap_or_else(|| session_id.clone());
+        let pending_create = state
+            .pending_created_sessions
+            .write()
+            .await
+            .remove(&session_id);
         match status {
             Ok(status) => {
                 let code = status.code();
                 info!(action = "rpc.exit", session_id = %session_id, target_session_id = %target_session_id, code = ?code);
-                mark_status_and_broadcast(&state, &target_session_id, SessionStatus::Exited).await;
-                let _ = state.events.send(ServerMessage::SessionExited {
-                    session_id: target_session_id,
-                    code,
-                    signal: None,
-                });
+                if pending_create.is_some() {
+                    let _ = state.events.send(ServerMessage::Error {
+                        request_id: None,
+                        message: format!(
+                            "RPC child exited before reporting a session id (code {}).",
+                            code.map(|value| value.to_string())
+                                .unwrap_or_else(|| "unknown".to_string())
+                        ),
+                    });
+                } else {
+                    mark_status_and_broadcast(&state, &target_session_id, SessionStatus::Exited)
+                        .await;
+                    let _ = state.events.send(ServerMessage::SessionExited {
+                        session_id: target_session_id,
+                        code,
+                        signal: None,
+                    });
+                }
             }
             Err(error) => {
                 warn!(action = "rpc.exit_error", session_id = %session_id, target_session_id = %target_session_id, %error);
-                mark_status_and_broadcast(&state, &target_session_id, SessionStatus::Error).await;
+                if pending_create.is_some() {
+                    let _ = state.events.send(ServerMessage::Error {
+                        request_id: None,
+                        message: format!("RPC child failed before reporting a session id: {error}"),
+                    });
+                } else {
+                    mark_status_and_broadcast(&state, &target_session_id, SessionStatus::Error)
+                        .await;
+                }
             }
         }
     });
@@ -2104,6 +2248,15 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                 .and_then(|cu| cu.get("percent"))
                 .and_then(|v| v.as_f64());
             let target_changed = target_session_id != current_session_id;
+            let pending_create = if target_changed {
+                state
+                    .pending_created_sessions
+                    .write()
+                    .await
+                    .remove(&current_session_id)
+            } else {
+                None
+            };
 
             let (previous_snapshot, target_snapshot) = {
                 let mut sessions = state.sessions.write().await;
@@ -2131,15 +2284,32 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                         })
                         .or_insert_with(|| {
                             let now = now_epoch_seconds();
+                            let created_at = source
+                                .as_ref()
+                                .map(|record| record.created_at)
+                                .or_else(|| {
+                                    pending_create.as_ref().map(|pending| pending.created_at)
+                                })
+                                .unwrap_or(now);
                             SessionRecord {
                                 id: target_session_id.clone(),
-                                cwd: source.as_ref().and_then(|record| record.cwd.clone()),
+                                cwd: source
+                                    .as_ref()
+                                    .and_then(|record| record.cwd.clone())
+                                    .or_else(|| {
+                                        pending_create
+                                            .as_ref()
+                                            .and_then(|pending| pending.cwd.clone())
+                                    }),
                                 args: source
                                     .as_ref()
                                     .map(|record| record.args.clone())
+                                    .or_else(|| {
+                                        pending_create.as_ref().map(|pending| pending.args.clone())
+                                    })
                                     .unwrap_or_default(),
                                 status: SessionStatus::Idle,
-                                created_at: now,
+                                created_at,
                                 updated_at: now,
                                 messages: Vec::new(),
                                 live_message_ids: HashSet::new(),
@@ -2148,7 +2318,9 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                                 active_tool_calls: Vec::new(),
                                 kind: SessionKind::Managed,
                                 session_file: None,
-                                title: None,
+                                title: pending_create
+                                    .as_ref()
+                                    .and_then(|pending| pending.title.clone()),
                                 timestamp: None,
                                 model: None,
                                 thinking_level: None,
@@ -2159,10 +2331,6 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                                 context_percent: None,
                             }
                         });
-
-                    if let Some(record) = sessions.get_mut(&target_session_id) {
-                        record.updated_at = now_epoch_seconds();
-                    }
 
                     if let Some(record) = sessions.get_mut(&target_session_id) {
                         record.updated_at = now_epoch_seconds();
@@ -2462,24 +2630,28 @@ struct DiscoveredSession {
     session_file: String,
     messages: Vec<TranscriptMessage>,
     tool_cards: Vec<ToolCard>,
+    messages_loaded: bool,
 }
 
-async fn refresh_session_catalog(state: &AppState) {
+async fn refresh_session_catalog(state: &AppState) -> bool {
     let discovered = discover_sessions(&state.session_root);
     let mut discovered_ids = HashSet::new();
     let mut sessions = state.sessions.write().await;
+    let before = session_summaries_from_map(&sessions);
 
     for session in discovered {
         discovered_ids.insert(session.id.clone());
         match sessions.get_mut(&session.id) {
             Some(record) if record.kind == SessionKind::Available => {
+                let should_reload_messages = session.messages_loaded
+                    && (record.updated_at != session.updated_at || record.messages.is_empty());
                 record.cwd = session.cwd;
                 record.created_at = session.created_at;
                 record.updated_at = session.updated_at;
                 record.session_file = Some(session.session_file);
                 record.title = session.title;
                 record.timestamp = session.timestamp;
-                if record.messages.is_empty() && !session.messages.is_empty() {
+                if should_reload_messages {
                     record.messages = session.messages.clone();
                     record.tool_cards = session.tool_cards.clone();
                 }
@@ -2530,6 +2702,8 @@ async fn refresh_session_catalog(state: &AppState) {
     sessions.retain(|_, record| {
         record.kind != SessionKind::Available || discovered_ids.contains(&record.id)
     });
+
+    before != session_summaries_from_map(&sessions)
 }
 
 fn discover_sessions(root: &Path) -> Vec<DiscoveredSession> {
@@ -2543,6 +2717,7 @@ fn discover_sessions(root: &Path) -> Vec<DiscoveredSession> {
         let (messages, tool_cards) = read_session_file_messages(path);
         session.messages = messages;
         session.tool_cards = tool_cards;
+        session.messages_loaded = true;
     }
     sessions
 }
@@ -2604,6 +2779,7 @@ fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
         session_file: path.to_string_lossy().to_string(),
         messages: Vec::new(),
         tool_cards: Vec::new(),
+        messages_loaded: false,
     })
 }
 
@@ -2665,14 +2841,18 @@ fn default_session_root() -> PathBuf {
         .join("sessions")
 }
 
-fn sessions_snapshot_from_map(sessions: &HashMap<String, SessionRecord>) -> ServerMessage {
+fn session_summaries_from_map(sessions: &HashMap<String, SessionRecord>) -> Vec<SessionSummary> {
     let mut summaries = sessions
         .values()
         .map(SessionRecord::summary)
         .collect::<Vec<_>>();
     summaries.sort_by(|a, b| a.kind.cmp(&b.kind).then(b.updated_at.cmp(&a.updated_at)));
+    summaries
+}
+
+fn sessions_snapshot_from_map(sessions: &HashMap<String, SessionRecord>) -> ServerMessage {
     ServerMessage::SessionsSnapshot {
-        sessions: summaries,
+        sessions: session_summaries_from_map(sessions),
     }
 }
 
@@ -2697,6 +2877,12 @@ fn log_server_message(message: &ServerMessage) {
     match message {
         ServerMessage::Hello { .. } => {
             info!(direction = "bridge_to_client", message_type = "hello")
+        }
+        ServerMessage::ConfigUpdated { .. } => {
+            info!(
+                direction = "bridge_to_client",
+                message_type = "config.updated"
+            )
         }
         ServerMessage::SessionsSnapshot { sessions } => info!(
             direction = "bridge_to_client",
@@ -3353,6 +3539,7 @@ mod tests {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
+            pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             events,
             rpc_config: Arc::new(RpcConfig {
@@ -3362,7 +3549,66 @@ mod tests {
             log_frames: false,
             bridge_debug_file,
             session_root: env::temp_dir(),
+            default_cwd: Arc::new(RwLock::new(env::temp_dir().to_string_lossy().into_owned())),
+            config_path: None,
         }
+    }
+
+    fn write_test_session(path: &Path, id: &str, title: &str, cwd: &str, text: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("session dir should be created");
+        }
+        let header = serde_json::json!({
+            "type": "session",
+            "id": id,
+            "title": title,
+            "timestamp": "2026-04-29T00:00:00.000Z",
+            "cwd": cwd,
+        });
+        let message = serde_json::json!({
+            "type": "message",
+            "id": format!("{id}-entry"),
+            "parentId": null,
+            "timestamp": "2026-04-29T00:00:01.000Z",
+            "message": {
+                "id": format!("{id}-message"),
+                "role": "user",
+                "content": [{ "type": "text", "text": text }],
+            },
+        });
+        fs::write(path, format!("{header}\n{message}\n")).expect("session file should be written");
+    }
+
+    #[tokio::test]
+    async fn refresh_session_catalog_discovers_external_session_files() {
+        let root = env::temp_dir().join(format!("fura-sessions-test-{}", Uuid::new_v4().simple()));
+        let session_path = root.join("project").join("s1.jsonl");
+        write_test_session(
+            &session_path,
+            "s1",
+            "External session",
+            "/workspace/project",
+            "hello",
+        );
+        let mut state = test_state(8, None);
+        state.session_root = root.clone();
+
+        assert!(refresh_session_catalog(&state).await);
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session should be discovered");
+        assert_eq!(record.kind, SessionKind::Available);
+        assert_eq!(record.status, SessionStatus::Available);
+        assert_eq!(record.title.as_deref(), Some("External session"));
+        assert_eq!(record.cwd.as_deref(), Some("/workspace/project"));
+        assert_eq!(record.messages.len(), 1);
+        assert_eq!(
+            record.session_file.as_deref(),
+            Some(session_path.to_string_lossy().as_ref())
+        );
+        drop(sessions);
+
+        assert!(!refresh_session_catalog(&state).await);
+        let _ = fs::remove_dir_all(root);
     }
 
     #[tokio::test]
@@ -3766,16 +4012,84 @@ mod tests {
     }
 
     #[test]
+    fn load_default_cwd_prefers_valid_config_last_cwd() {
+        let root = env::temp_dir().join(format!("fura-config-test-{}", Uuid::new_v4().simple()));
+        let last_cwd = root.join("last");
+        let startup_cwd = root.join("startup");
+        fs::create_dir_all(&last_cwd).expect("last cwd dir should be created");
+        fs::create_dir_all(&startup_cwd).expect("startup cwd dir should be created");
+        let config_path = root.join("config.yaml");
+        fs::write(
+            &config_path,
+            serde_yaml::to_string(&FuraConfig {
+                last_cwd: Some(last_cwd.to_string_lossy().into_owned()),
+            })
+            .expect("config should serialize"),
+        )
+        .expect("config should be written");
+
+        let loaded = load_default_cwd(Some(&config_path), &startup_cwd);
+
+        assert_eq!(loaded, last_cwd.to_string_lossy());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_default_cwd_falls_back_to_startup_for_missing_last_cwd() {
+        let root = env::temp_dir().join(format!("fura-config-test-{}", Uuid::new_v4().simple()));
+        let startup_cwd = root.join("startup");
+        fs::create_dir_all(&startup_cwd).expect("startup cwd dir should be created");
+        let config_path = root.join("config.yaml");
+        fs::write(
+            &config_path,
+            serde_yaml::to_string(&FuraConfig {
+                last_cwd: Some(root.join("missing").to_string_lossy().into_owned()),
+            })
+            .expect("config should serialize"),
+        )
+        .expect("config should be written");
+
+        let loaded = load_default_cwd(Some(&config_path), &startup_cwd);
+
+        assert_eq!(loaded, startup_cwd.to_string_lossy());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn save_default_cwd_broadcasts_full_client_config() {
+        let state = test_state(8, None);
+        let mut events = state.events.subscribe();
+
+        save_default_cwd(&state, "/workspace/next").await;
+
+        assert_eq!(
+            state.default_cwd.read().await.as_str(),
+            "/workspace/next",
+            "in-memory default cwd should update immediately"
+        );
+        match events.recv().await.expect("config update event") {
+            ServerMessage::ConfigUpdated { config } => {
+                assert_eq!(config.default_cwd, "/workspace/next");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn serializes_hello_message() {
         let json = serde_json::to_value(ServerMessage::Hello {
             server_version: "0.1.0",
             protocol_version: 1,
+            config: ClientConfig {
+                default_cwd: "/workspace".to_string(),
+            },
         })
         .expect("hello should serialize");
 
         assert_eq!(json["type"], "hello");
         assert_eq!(json["serverVersion"], "0.1.0");
         assert_eq!(json["protocolVersion"], 1);
+        assert_eq!(json["config"]["defaultCwd"], "/workspace");
     }
 
     #[test]
@@ -4053,6 +4367,105 @@ mod tests {
             record.tool_cards[0].result.as_ref().unwrap()["details"]["progress"][0]["status"],
             "completed"
         );
+    }
+
+    #[tokio::test]
+    async fn pending_created_session_becomes_visible_only_after_rpc_state() {
+        let state = test_state(8, None);
+        state.pending_created_sessions.write().await.insert(
+            "transport-session".to_string(),
+            PendingCreatedSession {
+                cwd: Some("/workspace/project".to_string()),
+                args: vec!["--debug".to_string()],
+                title: Some("diffs2".to_string()),
+                created_at: 123,
+            },
+        );
+        state.rpc_session_targets.write().await.insert(
+            "transport-session".to_string(),
+            "transport-session".to_string(),
+        );
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "transport-session",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "omp-session",
+                    "sessionFile": "omp-session.jsonl",
+                    "sessionName": "diffs2"
+                }
+            }),
+        )
+        .await;
+
+        {
+            let sessions = state.sessions.read().await;
+            assert!(
+                !sessions.contains_key("transport-session"),
+                "internal transport id must not become a visible session"
+            );
+            let next = sessions.get("omp-session").expect("OMP session is visible");
+            assert!(matches!(next.kind, SessionKind::Managed));
+            assert!(matches!(next.status, SessionStatus::Idle));
+            assert_eq!(next.cwd.as_deref(), Some("/workspace/project"));
+            assert_eq!(next.args, vec!["--debug".to_string()]);
+            assert_eq!(next.created_at, 123);
+            assert_eq!(next.session_file.as_deref(), Some("omp-session.jsonl"));
+            assert_eq!(next.title.as_deref(), Some("diffs2"));
+        }
+
+        assert!(
+            state
+                .pending_created_sessions
+                .read()
+                .await
+                .get("transport-session")
+                .is_none(),
+            "pending create metadata should be consumed once OMP reports the real session id"
+        );
+        assert_eq!(
+            rpc_transport_session_id(&state, "omp-session")
+                .await
+                .as_deref(),
+            Some("transport-session")
+        );
+        assert!(
+            rpc_transport_session_id(&state, "transport-session")
+                .await
+                .is_none(),
+            "frontend actions must use the real OMP session id, not the transport id"
+        );
+
+        match events.recv().await.expect("target snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "omp-session");
+                assert_eq!(state.summary.title.as_deref(), Some("diffs2"));
+            }
+            other => panic!("unexpected first event: {other:?}"),
+        }
+
+        match events.recv().await.expect("session list refresh event") {
+            ServerMessage::SessionsSnapshot { sessions } => {
+                assert!(
+                    sessions
+                        .iter()
+                        .all(|session| session.session_id != "transport-session"),
+                    "session list must not include the internal transport id"
+                );
+                assert!(
+                    sessions
+                        .iter()
+                        .any(|session| session.session_id == "omp-session"),
+                    "session list should include the resolved OMP session"
+                );
+            }
+            other => panic!("unexpected second event: {other:?}"),
+        }
     }
 
     #[tokio::test]
