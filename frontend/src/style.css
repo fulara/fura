@@ -582,6 +582,12 @@ h2 {
   color: #f4d35e;
 }
 
+.diff-line-target {
+  outline: 2px solid rgba(109, 124, 255, 0.75);
+  outline-offset: 2px;
+  background: rgba(109, 124, 255, 0.18);
+}
+
 .diff-line-hunk {
   color: #8bd3ff;
 }
@@ -1189,6 +1195,28 @@ h2 {
 .fork-picker.modal-panel,
 .handoff-picker.modal-panel {
   width: min(480px, 100%);
+}
+
+.diff-preview.modal-panel {
+  width: min(980px, 100%);
+}
+.diff-preview-text {
+  min-height: min(60vh, 36rem);
+  border: 0;
+  border-bottom: 1px solid #252a35;
+  border-radius: 0;
+  background: #0d1117;
+  color: #d7dae4;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  padding: 1rem;
+  resize: vertical;
+  white-space: pre;
+}
+.diff-preview-status {
+  color: #9ba4b5;
+  font-size: 0.84rem;
 }
 
 .label-optional {

@@ -379,6 +379,26 @@ app.innerHTML = `
       </footer>
     </section>
   </div>
+
+  <div id="diffPreviewOverlay" class="modal-overlay" hidden>
+    <section class="diff-preview modal-panel" role="dialog" aria-modal="true" aria-labelledby="diffPreviewTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="diffPreviewTitle">Preview diff comments</h2>
+          <p id="diffPreviewSubtitle">Review the prompt that will be sent to OMP.</p>
+        </div>
+        <button id="diffPreviewClose" class="modal-close" type="button" aria-label="Close">×</button>
+      </header>
+      <textarea id="diffPreviewText" class="diff-preview-text" readonly spellcheck="false"></textarea>
+      <footer class="modal-footer">
+        <span id="diffPreviewStatus" class="diff-preview-status"></span>
+        <div class="modal-actions">
+          <button id="diffPreviewCancel" type="button">Cancel</button>
+          <button id="diffPreviewSend" type="button">Send comments</button>
+        </div>
+      </footer>
+    </section>
+  </div>
 `;
 
 const connectionStatus = requireElement<HTMLSpanElement>("connectionStatus");
@@ -424,9 +444,20 @@ const handoffPickerNameInput = requireElement<HTMLInputElement>("handoffPickerNa
 const handoffPickerInstructions = requireElement<HTMLTextAreaElement>("handoffPickerInstructions");
 const handoffPickerCancel = requireElement<HTMLButtonElement>("handoffPickerCancel");
 const handoffPickerCreate = requireElement<HTMLButtonElement>("handoffPickerCreate");
+const diffPreviewOverlay = requireElement<HTMLDivElement>("diffPreviewOverlay");
+const diffPreviewClose = requireElement<HTMLButtonElement>("diffPreviewClose");
+const diffPreviewText = requireElement<HTMLTextAreaElement>("diffPreviewText");
+const diffPreviewStatus = requireElement<HTMLSpanElement>("diffPreviewStatus");
+const diffPreviewCancel = requireElement<HTMLButtonElement>("diffPreviewCancel");
+const diffPreviewSend = requireElement<HTMLButtonElement>("diffPreviewSend");
 
 type PendingImage = { type: "image"; marker: string; data: string; mimeType: string };
 type PendingSnippet = { type: "snippet"; marker: string; text: string };
+type DiffPreviewDraft = {
+  sessionId: string;
+  state: RepoDiffState;
+  comments: DiffComment[];
+};
 type BusyPromptDraft = {
   sessionId: string;
   text: string;
@@ -459,6 +490,8 @@ let lastDiffsRenderedSessionId: string | null = null;
 let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, Array<{ level: string; text: string }>>();
 let busyPromptDraft: BusyPromptDraft | null = null;
+let diffPreviewDraft: DiffPreviewDraft | null = null;
+const DIFF_COMMENT_CONTEXT_RADIUS = 4;
 const PROMPT_HISTORY_LIMIT = 100;
 let modelPickerSessionId: string | null = null;
 let modelPickerModels: ModelSummary[] = [];
@@ -573,6 +606,12 @@ handoffPickerNameInput.addEventListener("keydown", event => {
 });
 handoffPickerInstructions.addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); closeHandoffPicker(); }
+});
+diffPreviewClose.addEventListener("click", closeDiffPreview);
+diffPreviewCancel.addEventListener("click", closeDiffPreview);
+diffPreviewSend.addEventListener("click", sendDiffPreviewDraft);
+diffPreviewOverlay.addEventListener("mousedown", event => {
+  if (event.target === diffPreviewOverlay) closeDiffPreview();
 });
 promptForm.addEventListener("submit", event => {
   event.preventDefault();
@@ -1545,6 +1584,21 @@ function createDiffSnapshot(sessionId: string): void {
   if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
 }
 
+function rerenderDiffsViewPreservingScroll(sessionId: string): void {
+  if (!diffsPanelEl || !isDiffsPanelActive()) return;
+  const mainBody = diffsPanelEl.querySelector<HTMLElement>(".diffs-main-body");
+  const sidebarScroll = diffsPanelEl.querySelector<HTMLElement>(".diffs-sidebar-scroll");
+  const mainScrollTop = mainBody?.scrollTop ?? 0;
+  const sidebarScrollTop = sidebarScroll?.scrollTop ?? 0;
+
+  renderDiffsView(diffsPanelEl, projections.get(sessionId));
+
+  const nextMainBody = diffsPanelEl.querySelector<HTMLElement>(".diffs-main-body");
+  const nextSidebarScroll = diffsPanelEl.querySelector<HTMLElement>(".diffs-sidebar-scroll");
+  if (nextMainBody) nextMainBody.scrollTop = mainScrollTop;
+  if (nextSidebarScroll) nextSidebarScroll.scrollTop = sidebarScrollTop;
+}
+
 function addDiffComment(
   sessionId: string,
   baseSnapshot: DiffSnapshotSummary,
@@ -1568,7 +1622,7 @@ function addDiffComment(
   });
   diffComments.set(sessionId, comments);
   markDiffsViewDirty();
-  if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+  rerenderDiffsViewPreservingScroll(sessionId);
 }
 
 function isSameDiffComparison(
@@ -1608,16 +1662,89 @@ function formatDiffLocation(comment: DiffComment): string {
   return parts.join(" ");
 }
 
+function diffRowText(row: ParsedDiffRow): string {
+  return row.type === "line" ? row.location.text : row.text;
+}
+
+function isCommentLocation(row: ParsedDiffRow, comment: DiffComment): boolean {
+  return (
+    row.type === "line" &&
+    row.location.filePath === comment.filePath &&
+    row.location.hunk === comment.hunk &&
+    row.location.kind === comment.kind &&
+    row.location.oldLine === comment.oldLine &&
+    row.location.newLine === comment.newLine &&
+    row.location.text === comment.lineText
+  );
+}
+
+function buildDiffCommentContext(rows: ParsedDiffRow[], comment: DiffComment): string {
+  const index = rows.findIndex(row => isCommentLocation(row, comment));
+  if (index === -1) {
+    return [comment.hunk, comment.lineText].filter((line): line is string => Boolean(line)).join("\n");
+  }
+
+  const before: string[] = [];
+  let beforeLineCount = 0;
+  for (let i = index - 1; i >= 0; i--) {
+    const row = rows[i];
+    if (!row) break;
+    if (row.type === "file") break;
+    if (row.type === "hunk") {
+      if (row.filePath === comment.filePath && row.hunk === comment.hunk) before.unshift(row.text);
+      break;
+    }
+    if (
+      row.type === "line" &&
+      row.location.filePath === comment.filePath &&
+      row.location.hunk === comment.hunk
+    ) {
+      if (beforeLineCount >= DIFF_COMMENT_CONTEXT_RADIUS) break;
+      before.unshift(diffRowText(row));
+      beforeLineCount += 1;
+    }
+  }
+
+  if (comment.hunk && !before.some(line => line === comment.hunk)) before.unshift(comment.hunk);
+
+  const after: string[] = [];
+  let afterLineCount = 0;
+  for (let i = index + 1; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) break;
+    if (row.type === "file" || row.type === "hunk") break;
+    if (
+      row.type === "line" &&
+      row.location.filePath === comment.filePath &&
+      row.location.hunk === comment.hunk
+    ) {
+      if (afterLineCount >= DIFF_COMMENT_CONTEXT_RADIUS) break;
+      after.push(diffRowText(row));
+      afterLineCount += 1;
+    }
+  }
+
+  const targetRow = rows[index];
+  return targetRow ? [...before, diffRowText(targetRow), ...after].join("\n") : comment.lineText;
+}
+
 function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffComment[]): string {
   const baseSnapshot = state.selectedSnapshot;
   const headSnapshot = state.headSnapshot;
-  const commentLines = comments
+  const rows = parseDiffRows(state.diff);
+  const commentSections = comments
     .map((comment, index) =>
       [
-        `${index + 1}. ${formatDiffLocation(comment)}`,
-        comment.hunk ? `   hunk: ${comment.hunk}` : undefined,
-        `   diff line: ${comment.lineText}`,
-        `   comment: ${comment.text}`,
+        `### Comment ${index + 1}`,
+        `Location: ${formatDiffLocation(comment)}`,
+        comment.hunk ? `Hunk: ${comment.hunk}` : undefined,
+        `Diff line: ${comment.lineText}`,
+        `Comment: ${comment.text}`,
+        "",
+        "Relevant diff context:",
+        "```diff",
+        buildDiffCommentContext(rows, comment),
+        "```",
       ]
         .filter(Boolean)
         .join("\n"),
@@ -1630,25 +1757,25 @@ function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffComment[]): 
       ? `Compared to snapshot: ${headSnapshot.label} (${headSnapshot.entryId})`
       : "Compared to: current working tree",
     "",
-    "Comments:",
-    commentLines,
+    "Only the diff context around commented lines is included below; the full diff is intentionally omitted.",
     "",
-    "Full diff:",
-    "```diff",
-    state.diff,
-    "```",
+    commentSections,
     "",
     "Please address these comments. Use the file path and old/new diff line metadata to locate each comment precisely.",
   ].join("\n");
 }
 
-function flushDiffComments(sessionId: string, state: RepoDiffState): void {
+function selectedDiffComments(sessionId: string, state: RepoDiffState): DiffComment[] {
   const baseSnapshot = state.selectedSnapshot;
-  if (!baseSnapshot) return;
-  const comments = (diffComments.get(sessionId) ?? []).filter(comment =>
+  if (!baseSnapshot) return [];
+  return (diffComments.get(sessionId) ?? []).filter(comment =>
     isSameDiffComparison(comment, baseSnapshot, state.headSnapshot),
   );
-  if (comments.length === 0) return;
+}
+
+function sendDiffComments(sessionId: string, state: RepoDiffState, comments: DiffComment[]): void {
+  const baseSnapshot = state.selectedSnapshot;
+  if (!baseSnapshot || comments.length === 0) return;
   const headSnapshot = state.headSnapshot;
   const clearFlushedComments = () => {
     diffComments.set(
@@ -1658,7 +1785,7 @@ function flushDiffComments(sessionId: string, state: RepoDiffState): void {
       ),
     );
     markDiffsViewDirty();
-    if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+    rerenderDiffsViewPreservingScroll(sessionId);
   };
   sendPromptWithBusyHandling({
     sessionId,
@@ -1667,6 +1794,50 @@ function flushDiffComments(sessionId: string, state: RepoDiffState): void {
     images: [],
     onSend: clearFlushedComments,
   });
+}
+
+function previewDiffComments(sessionId: string, state: RepoDiffState): void {
+  const comments = selectedDiffComments(sessionId, state);
+  if (comments.length === 0) return;
+  diffPreviewDraft = { sessionId, state, comments };
+  diffPreviewText.value = buildDiffCommentPrompt(state, comments);
+  diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
+  diffPreviewOverlay.hidden = false;
+  diffPreviewText.scrollTop = 0;
+  diffPreviewSend.focus();
+}
+
+function closeDiffPreview(): void {
+  diffPreviewOverlay.hidden = true;
+  diffPreviewText.value = "";
+  diffPreviewStatus.textContent = "";
+  diffPreviewDraft = null;
+}
+
+function sendDiffPreviewDraft(): void {
+  const draft = diffPreviewDraft;
+  if (!draft) return;
+  closeDiffPreview();
+  sendDiffComments(draft.sessionId, draft.state, draft.comments);
+}
+
+function flushDiffComments(sessionId: string, state: RepoDiffState): void {
+  previewDiffComments(sessionId, state);
+}
+
+function scrollDiffsToFile(container: HTMLElement, filePath: string): void {
+  const mainBody = container.querySelector<HTMLElement>(".diffs-main-body");
+  if (!mainBody) return;
+  const targets = [...container.querySelectorAll<HTMLElement>("[data-diff-file-path]")];
+  const target = targets.find(element => element.dataset.diffFilePath === filePath);
+  if (!target) return;
+
+  const targetRect = target.getBoundingClientRect();
+  const bodyRect = mainBody.getBoundingClientRect();
+  const scrollTop = Math.max(0, mainBody.scrollTop + targetRect.top - bodyRect.top - 8);
+  mainBody.scrollTo({ top: scrollTop, behavior: "smooth" });
+  target.classList.add("diff-line-target");
+  window.setTimeout(() => target.classList.remove("diff-line-target"), 1200);
 }
 
 function renderDiffsView(container: HTMLElement, projection: SessionProjection | undefined): void {
@@ -1765,8 +1936,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
       meta.textContent = `+${file.added} -${file.removed}${file.commentCount > 0 ? ` · ${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : ""}`;
       button.append(name, meta);
       button.addEventListener("click", () => {
-        const targets = [...container.querySelectorAll<HTMLElement>("[data-diff-file-path]")];
-        targets.find(target => target.dataset.diffFilePath === file.filePath)?.scrollIntoView({ block: "start" });
+        scrollDiffsToFile(container, file.filePath);
       });
       filesList.append(button);
     }
@@ -1816,14 +1986,21 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     selectedSnapshot?.entryId,
     headSnapshot?.entryId ?? diffSelectedHeads.get(sessionId),
   ));
+  const previewBtn = mkEl("button");
+  previewBtn.type = "button";
+  previewBtn.textContent = "Preview comments";
+  previewBtn.disabled = !state || selectedComments.length === 0;
+  previewBtn.addEventListener("click", () => {
+    if (state) previewDiffComments(sessionId, state);
+  });
   const flushBtn = mkEl("button");
   flushBtn.type = "button";
-  flushBtn.textContent = `Flush comments (${selectedComments.length})`;
+  flushBtn.textContent = `Preview & flush (${selectedComments.length})`;
   flushBtn.disabled = !state || selectedComments.length === 0;
   flushBtn.addEventListener("click", () => {
     if (state) flushDiffComments(sessionId, state);
   });
-  actions.append(headSelect, refreshBtn, flushBtn);
+  actions.append(headSelect, refreshBtn, previewBtn, flushBtn);
   toolbar.append(title, actions);
   main.append(toolbar);
 
