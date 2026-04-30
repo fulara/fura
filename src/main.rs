@@ -443,6 +443,7 @@ enum ClientMessage {
     DiffRefresh {
         session_id: String,
         selector: Option<String>,
+        head_selector: Option<String>,
         stat: Option<bool>,
     },
     #[serde(rename = "diff.snapshot")]
@@ -907,8 +908,18 @@ async fn handle_client_message(state: &AppState, message: ClientMessage) -> Vec<
         ClientMessage::DiffRefresh {
             session_id,
             selector,
+            head_selector,
             stat,
-        } => handle_diff_refresh(state, session_id, selector, stat.unwrap_or(false)).await,
+        } => {
+            handle_diff_refresh(
+                state,
+                session_id,
+                selector,
+                head_selector,
+                stat.unwrap_or(false),
+            )
+            .await
+        }
         ClientMessage::DiffSnapshot { session_id, label } => {
             handle_diff_snapshot(state, session_id, label).await
         }
@@ -1430,12 +1441,14 @@ async fn handle_diff_refresh(
     state: &AppState,
     session_id: String,
     selector: Option<String>,
+    head_selector: Option<String>,
     stat: bool,
 ) -> Vec<ServerMessage> {
     let command = serde_json::json!({
         "id": next_rpc_id(),
         "type": "repo_diff_get",
         "selector": selector,
+        "headSelector": head_selector,
         "stat": stat,
     });
     match send_rpc_command(state, &session_id, command).await {
@@ -3943,6 +3956,7 @@ mod tests {
                         "createdAt": "2026-04-29T00:00:00.000Z",
                         "repoRoot": "/repo"
                     },
+                    "headSnapshot": null,
                     "diff": "diff --git a/a b/a\n",
                     "stat": false
                 }
@@ -3954,6 +3968,7 @@ mod tests {
             ServerMessage::DiffState { session_id, state } => {
                 assert_eq!(session_id, "s1");
                 assert_eq!(state["selectedSnapshot"]["entryId"], "entry-1");
+                assert_eq!(state["headSnapshot"], Value::Null);
                 assert_eq!(state["diff"], "diff --git a/a b/a\n");
             }
             other => panic!("unexpected event: {other:?}"),
@@ -3963,7 +3978,7 @@ mod tests {
     #[test]
     fn parses_diff_refresh_message() {
         let msg: ClientMessage = serde_json::from_str(
-            r#"{"type":"diff.refresh","sessionId":"abc-123","selector":"session-start","stat":true}"#,
+            r#"{"type":"diff.refresh","sessionId":"abc-123","selector":"session-start","headSelector":"manual-2","stat":true}"#,
         )
         .expect("parse failed");
         assert!(matches!(
@@ -3971,8 +3986,11 @@ mod tests {
             ClientMessage::DiffRefresh {
                 ref session_id,
                 ref selector,
+                ref head_selector,
                 stat: Some(true)
-            } if session_id == "abc-123" && selector.as_deref() == Some("session-start")
+            } if session_id == "abc-123"
+                && selector.as_deref() == Some("session-start")
+                && head_selector.as_deref() == Some("manual-2")
         ));
     }
 

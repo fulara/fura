@@ -150,10 +150,20 @@ for await (const line of rl) {
     case "repo_diff_get": {
       const selector = command.selector ?? diffSnapshots.at(-1)?.entryId ?? null;
       const selectedSnapshot = diffSnapshots.find(snapshot => snapshot.entryId === selector) ?? diffSnapshots.at(-1) ?? null;
+      const headSelector = command.headSelector ?? null;
+      const headSnapshot = headSelector
+        ? diffSnapshots.find(snapshot => snapshot.entryId === headSelector) ?? null
+        : null;
+      const diff = !selectedSnapshot
+        ? ""
+        : headSnapshot
+          ? `diff --git a/mock.ts b/mock.ts\n@@ -1 +1 @@\n-console.log('${selectedSnapshot.label}')\n+console.log('${headSnapshot.label}')\n`
+          : "diff --git a/mock.ts b/mock.ts\n@@ -1 +1 @@\n-console.log('old')\n+console.log('new')\n";
       success(command, {
         snapshots: diffSnapshots,
         selectedSnapshot,
-        diff: selectedSnapshot ? "diff --git a/mock.ts b/mock.ts\n@@ -1 +1 @@\n-console.log('old')\n+console.log('new')\n" : "",
+        headSnapshot,
+        diff,
         stat: Boolean(command.stat),
       });
       break;
@@ -170,6 +180,7 @@ for await (const line of rl) {
       success(command, {
         snapshots: diffSnapshots,
         selectedSnapshot: snapshot,
+        headSnapshot: null,
         diff: "",
         stat: false,
       });

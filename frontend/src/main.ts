@@ -128,6 +128,7 @@ type DiffSnapshotSummary = {
 type RepoDiffState = {
   snapshots: DiffSnapshotSummary[];
   selectedSnapshot: DiffSnapshotSummary | null;
+  headSnapshot: DiffSnapshotSummary | null;
   diff: string;
   stat: boolean;
 };
@@ -143,7 +144,8 @@ type DiffLineLocation = {
 
 type DiffComment = {
   id: string;
-  snapshotEntryId: string;
+  baseSnapshotEntryId: string;
+  headSnapshotEntryId: string | null;
   filePath: string;
   hunk: string | null;
   kind: DiffLineLocation["kind"];
@@ -200,7 +202,7 @@ type ClientMessage =
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }
-  | { type: "diff.refresh"; sessionId: string; selector?: string; stat?: boolean }
+  | { type: "diff.refresh"; sessionId: string; selector?: string; headSelector?: string; stat?: boolean }
   | { type: "diff.snapshot"; sessionId: string; label?: string }
   | { type: "raw.rpc"; sessionId: string; command: unknown }
   | { type: "session.fork"; sessionId: string; name: string }
@@ -436,6 +438,7 @@ let paletteSelectedIndex = -1;
 const projections = new Map<string, SessionProjection>();
 const diffStates = new Map<string, RepoDiffState>();
 const diffSelectedSnapshots = new Map<string, string>();
+const diffSelectedHeads = new Map<string, string | null>();
 const diffComments = new Map<string, DiffComment[]>();
 const diffLoadingSessions = new Set<string>();
 const sessionNotices = new Map<string, Array<{ level: string; text: string }>>();
@@ -773,6 +776,7 @@ function handleServerMessage(message: ServerMessage): void {
       if (message.state.selectedSnapshot) {
         diffSelectedSnapshots.set(message.sessionId, message.state.selectedSnapshot.entryId);
       }
+      diffSelectedHeads.set(message.sessionId, message.state.headSnapshot?.entryId ?? null);
       if (message.sessionId === activeSessionId && diffsPanelEl) {
         renderDiffsView(diffsPanelEl, projections.get(message.sessionId));
       }
@@ -1344,10 +1348,54 @@ function parseDiffRows(diffText: string): ParsedDiffRow[] {
   return rows;
 }
 
-function requestDiffState(sessionId: string, selector?: string): void {
+type DiffFileSummary = {
+  filePath: string;
+  added: number;
+  removed: number;
+  commentCount: number;
+};
+
+function summarizeDiffFiles(
+  rows: ParsedDiffRow[],
+  comments: DiffComment[],
+  baseSnapshot: DiffSnapshotSummary | null,
+  headSnapshot: DiffSnapshotSummary | null,
+): DiffFileSummary[] {
+  const byPath = new Map<string, DiffFileSummary>();
+
+  for (const row of rows) {
+    if (row.type !== "line") continue;
+    if (!row.location.filePath) continue;
+    const existing = byPath.get(row.location.filePath) ?? {
+      filePath: row.location.filePath,
+      added: 0,
+      removed: 0,
+      commentCount: 0,
+    };
+    if (row.location.kind === "add") existing.added += 1;
+    if (row.location.kind === "remove") existing.removed += 1;
+    byPath.set(row.location.filePath, existing);
+  }
+
+  for (const comment of comments) {
+    if (!isSameDiffComparison(comment, baseSnapshot, headSnapshot)) continue;
+    const existing = byPath.get(comment.filePath) ?? {
+      filePath: comment.filePath,
+      added: 0,
+      removed: 0,
+      commentCount: 0,
+    };
+    existing.commentCount += 1;
+    byPath.set(comment.filePath, existing);
+  }
+
+  return [...byPath.values()];
+}
+
+function requestDiffState(sessionId: string, selector?: string, headSelector?: string | null): void {
   if (diffLoadingSessions.has(sessionId)) return;
   diffLoadingSessions.add(sessionId);
-  send({ type: "diff.refresh", sessionId, selector });
+  send({ type: "diff.refresh", sessionId, selector, headSelector: headSelector ?? undefined });
   if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
 }
 
@@ -1359,13 +1407,19 @@ function createDiffSnapshot(sessionId: string): void {
   if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
 }
 
-function addDiffComment(sessionId: string, snapshot: DiffSnapshotSummary, location: DiffLineLocation): void {
+function addDiffComment(
+  sessionId: string,
+  baseSnapshot: DiffSnapshotSummary,
+  headSnapshot: DiffSnapshotSummary | null,
+  location: DiffLineLocation,
+): void {
   const comment = window.prompt("Comment on this diff line");
   if (!comment?.trim()) return;
   const comments = diffComments.get(sessionId) ?? [];
   comments.push({
     id: `${Date.now()}-${comments.length}`,
-    snapshotEntryId: snapshot.entryId,
+    baseSnapshotEntryId: baseSnapshot.entryId,
+    headSnapshotEntryId: headSnapshot?.entryId ?? null,
     filePath: location.filePath,
     hunk: location.hunk,
     kind: location.kind,
@@ -1378,6 +1432,36 @@ function addDiffComment(sessionId: string, snapshot: DiffSnapshotSummary, locati
   if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
 }
 
+function isSameDiffComparison(
+  comment: DiffComment,
+  baseSnapshot: DiffSnapshotSummary | null,
+  headSnapshot: DiffSnapshotSummary | null,
+): boolean {
+  if (!baseSnapshot) return false;
+  return (
+    comment.baseSnapshotEntryId === baseSnapshot.entryId &&
+    comment.headSnapshotEntryId === (headSnapshot?.entryId ?? null)
+  );
+}
+
+function commentsForLocation(
+  comments: DiffComment[],
+  baseSnapshot: DiffSnapshotSummary | null,
+  headSnapshot: DiffSnapshotSummary | null,
+  location: DiffLineLocation,
+): DiffComment[] {
+  return comments.filter(
+    comment =>
+      isSameDiffComparison(comment, baseSnapshot, headSnapshot) &&
+      comment.filePath === location.filePath &&
+      comment.hunk === location.hunk &&
+      comment.kind === location.kind &&
+      comment.oldLine === location.oldLine &&
+      comment.newLine === location.newLine &&
+      comment.lineText === location.text,
+  );
+}
+
 function formatDiffLocation(comment: DiffComment): string {
   const parts = [comment.filePath || "unknown file"];
   if (comment.oldLine !== undefined) parts.push(`old:${comment.oldLine}`);
@@ -1386,7 +1470,8 @@ function formatDiffLocation(comment: DiffComment): string {
 }
 
 function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffComment[]): string {
-  const snapshot = state.selectedSnapshot;
+  const baseSnapshot = state.selectedSnapshot;
+  const headSnapshot = state.headSnapshot;
   const commentLines = comments
     .map((comment, index) =>
       [
@@ -1401,7 +1486,10 @@ function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffComment[]): 
     .join("\n\n");
   return [
     "I reviewed the repository diff in Fura and left comments on specific diff lines.",
-    snapshot ? `Snapshot: ${snapshot.label} (${snapshot.entryId})` : "Snapshot: none",
+    baseSnapshot ? `Base snapshot: ${baseSnapshot.label} (${baseSnapshot.entryId})` : "Base snapshot: none",
+    headSnapshot
+      ? `Compared to snapshot: ${headSnapshot.label} (${headSnapshot.entryId})`
+      : "Compared to: current working tree",
     "",
     "Comments:",
     commentLines,
@@ -1416,14 +1504,18 @@ function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffComment[]): 
 }
 
 function flushDiffComments(sessionId: string, state: RepoDiffState): void {
-  const snapshotId = state.selectedSnapshot?.entryId;
-  if (!snapshotId) return;
-  const comments = (diffComments.get(sessionId) ?? []).filter(comment => comment.snapshotEntryId === snapshotId);
+  const baseSnapshot = state.selectedSnapshot;
+  if (!baseSnapshot) return;
+  const comments = (diffComments.get(sessionId) ?? []).filter(comment =>
+    isSameDiffComparison(comment, baseSnapshot, state.headSnapshot),
+  );
   if (comments.length === 0) return;
   sendPromptMessage(sessionId, buildDiffCommentPrompt(state, comments), []);
   diffComments.set(
     sessionId,
-    (diffComments.get(sessionId) ?? []).filter(comment => comment.snapshotEntryId !== snapshotId),
+    (diffComments.get(sessionId) ?? []).filter(
+      comment => !isSameDiffComparison(comment, baseSnapshot, state.headSnapshot),
+    ),
   );
   if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
 }
@@ -1443,10 +1535,13 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const sessionId = activeSessionId;
   const state = diffStates.get(sessionId);
   const selectedSnapshot = state?.selectedSnapshot ?? null;
+  const headSnapshot = state?.headSnapshot ?? null;
   const comments = diffComments.get(sessionId) ?? [];
-  const selectedComments = selectedSnapshot
-    ? comments.filter(comment => comment.snapshotEntryId === selectedSnapshot.entryId)
-    : [];
+  const selectedComments = comments.filter(comment =>
+    isSameDiffComparison(comment, selectedSnapshot, headSnapshot),
+  );
+  const parsedRows = state?.diff.trim() ? parseDiffRows(state.diff) : [];
+  const fileSummaries = summarizeDiffFiles(parsedRows, comments, selectedSnapshot, headSnapshot);
 
   const root = mkEl("div");
   root.className = "diffs-view";
@@ -1464,16 +1559,26 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   sideHeader.append(sideTitle, snapshotBtn);
   sidebar.append(sideHeader);
 
+  const sidebarScroll = mkEl("div");
+  sidebarScroll.className = "diffs-sidebar-scroll";
+  sidebar.append(sidebarScroll);
+
   if (!state && !diffLoadingSessions.has(sessionId)) {
-    requestDiffState(sessionId, diffSelectedSnapshots.get(sessionId));
+    requestDiffState(
+      sessionId,
+      diffSelectedSnapshots.get(sessionId),
+      diffSelectedHeads.get(sessionId),
+    );
   }
 
   const snapshots = state?.snapshots ?? [];
+  const snapshotList = mkEl("div");
+  snapshotList.className = "diffs-snapshot-list";
   if (snapshots.length === 0) {
     const empty = mkEl("p");
     empty.className = "empty diffs-empty";
     empty.textContent = diffLoadingSessions.has(sessionId) ? "Loading snapshots…" : "No snapshots yet.";
-    sidebar.append(empty);
+    snapshotList.append(empty);
   } else {
     for (const snapshot of snapshots) {
       const button = mkEl("button");
@@ -1486,10 +1591,42 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
       button.append(label, meta);
       button.addEventListener("click", () => {
         diffSelectedSnapshots.set(sessionId, snapshot.entryId);
-        requestDiffState(sessionId, snapshot.entryId);
+        requestDiffState(
+          sessionId,
+          snapshot.entryId,
+          diffSelectedHeads.get(sessionId),
+        );
       });
-      sidebar.append(button);
+      snapshotList.append(button);
     }
+  }
+  sidebarScroll.append(snapshotList);
+
+  if (fileSummaries.length > 0) {
+    const filesSection = mkEl("section");
+    filesSection.className = "diffs-files";
+    const filesTitle = mkEl("strong");
+    filesTitle.textContent = `Modified files (${fileSummaries.length})`;
+    filesSection.append(filesTitle);
+    const filesList = mkEl("div");
+    filesList.className = "diffs-file-list";
+    for (const [index, file] of fileSummaries.entries()) {
+      const button = mkEl("button");
+      button.type = "button";
+      button.className = "diffs-file-item";
+      const name = mkEl("code");
+      name.textContent = file.filePath;
+      const meta = mkEl("span");
+      meta.textContent = `+${file.added} -${file.removed}${file.commentCount > 0 ? ` · ${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : ""}`;
+      button.append(name, meta);
+      button.addEventListener("click", () => {
+        const targets = [...container.querySelectorAll<HTMLElement>("[data-diff-file-path]")];
+        targets.find(target => target.dataset.diffFilePath === file.filePath)?.scrollIntoView({ block: "start" });
+      });
+      filesList.append(button);
+    }
+    filesSection.append(filesList);
+    sidebarScroll.append(filesSection);
   }
 
   const main = mkEl("section");
@@ -1497,14 +1634,43 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const toolbar = mkEl("div");
   toolbar.className = "diffs-toolbar";
   const title = mkEl("strong");
-  title.textContent = selectedSnapshot ? `Diff since ${selectedSnapshot.label}` : "Diff";
+  title.textContent = selectedSnapshot
+    ? headSnapshot
+      ? `Diff ${selectedSnapshot.label} → ${headSnapshot.label}`
+      : `Diff ${selectedSnapshot.label} → current`
+    : "Diff";
   const actions = mkEl("div");
   actions.className = "diffs-actions";
+  const headSelect = mkEl("select");
+  headSelect.className = "diff-compare-select";
+  const currentOption = mkEl("option");
+  currentOption.value = "";
+  currentOption.textContent = "Compare to current";
+  headSelect.append(currentOption);
+  for (const snapshot of snapshots) {
+    const option = mkEl("option");
+    option.value = snapshot.entryId;
+    option.textContent = `Compare to ${snapshot.label}`;
+    if (snapshot.entryId === (headSnapshot?.entryId ?? diffSelectedHeads.get(sessionId) ?? null)) {
+      option.selected = true;
+    }
+    headSelect.append(option);
+  }
+  headSelect.disabled = diffLoadingSessions.has(sessionId) || !selectedSnapshot;
+  headSelect.addEventListener("change", () => {
+    const nextHead = headSelect.value || null;
+    diffSelectedHeads.set(sessionId, nextHead);
+    requestDiffState(sessionId, selectedSnapshot?.entryId, nextHead);
+  });
   const refreshBtn = mkEl("button");
   refreshBtn.type = "button";
   refreshBtn.textContent = diffLoadingSessions.has(sessionId) ? "Refreshing…" : "Refresh";
   refreshBtn.disabled = diffLoadingSessions.has(sessionId);
-  refreshBtn.addEventListener("click", () => requestDiffState(sessionId, selectedSnapshot?.entryId));
+  refreshBtn.addEventListener("click", () => requestDiffState(
+    sessionId,
+    selectedSnapshot?.entryId,
+    headSnapshot?.entryId ?? diffSelectedHeads.get(sessionId),
+  ));
   const flushBtn = mkEl("button");
   flushBtn.type = "button";
   flushBtn.textContent = `Flush comments (${selectedComments.length})`;
@@ -1512,55 +1678,90 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   flushBtn.addEventListener("click", () => {
     if (state) flushDiffComments(sessionId, state);
   });
-  actions.append(refreshBtn, flushBtn);
+  actions.append(headSelect, refreshBtn, flushBtn);
   toolbar.append(title, actions);
   main.append(toolbar);
+
+  const mainBody = mkEl("div");
+  mainBody.className = "diffs-main-body";
+  main.append(mainBody);
 
   if (!state || diffLoadingSessions.has(sessionId)) {
     const loading = mkEl("p");
     loading.className = "empty diffs-empty";
     loading.textContent = "Loading diff…";
-    main.append(loading);
+    mainBody.append(loading);
   } else if (!selectedSnapshot) {
     const empty = mkEl("p");
     empty.className = "empty diffs-empty";
     empty.textContent = "Select or create a snapshot.";
-    main.append(empty);
+    mainBody.append(empty);
   } else if (!state.diff.trim()) {
     const empty = mkEl("p");
     empty.className = "empty diffs-empty";
-    empty.textContent = "No changes since this snapshot.";
-    main.append(empty);
+    empty.textContent = "No changes for this comparison.";
+    mainBody.append(empty);
   } else {
     const diff = mkEl("div");
     diff.className = "diff-lines";
-    for (const row of parseDiffRows(state.diff)) {
-      const line = mkEl("div");
+    for (const row of parsedRows) {
       if (row.type === "line") {
+        const lineComments = commentsForLocation(comments, selectedSnapshot, headSnapshot, row.location);
+        const lineWrap = mkEl("div");
+        lineWrap.className = "diff-line-wrap";
+        const line = mkEl("div");
         line.className = `diff-line diff-line-${row.location.kind}`;
         const commentBtn = mkEl("button");
         commentBtn.type = "button";
-        commentBtn.className = "diff-comment-btn";
-        commentBtn.textContent = "+";
+        commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
+        commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
         commentBtn.title = "Comment on this diff line";
-        commentBtn.addEventListener("click", () => addDiffComment(sessionId, selectedSnapshot, row.location));
+        commentBtn.addEventListener("click", () => addDiffComment(
+          sessionId,
+          selectedSnapshot,
+          headSnapshot,
+          row.location,
+        ));
         const gutter = mkEl("span");
         gutter.className = "diff-gutter";
-        gutter.textContent = row.location.newLine !== undefined ? String(row.location.newLine) : String(row.location.oldLine ?? "");
+        gutter.textContent = row.location.newLine !== undefined
+          ? String(row.location.newLine)
+          : String(row.location.oldLine ?? "");
+        const content = mkEl("div");
+        content.className = "diff-line-content";
         const text = mkEl("code");
         text.textContent = row.location.text;
-        line.append(commentBtn, gutter, text);
-      } else {
-        line.className = `diff-line diff-line-${row.type}`;
-        const spacer = mkEl("span");
-        spacer.className = "diff-comment-spacer";
-        const text = mkEl("code");
-        text.textContent = row.text;
-        line.append(spacer, text);
+        content.append(text);
+        line.append(commentBtn, gutter, content);
+        lineWrap.append(line);
+        if (lineComments.length > 0) {
+          const thread = mkEl("div");
+          thread.className = "diff-inline-comments";
+          for (const comment of lineComments) {
+            const item = mkEl("div");
+            item.className = "diff-inline-comment";
+            item.textContent = comment.text;
+            thread.append(item);
+          }
+          lineWrap.append(thread);
+        }
+        diff.append(lineWrap);
+        continue;
       }
+
+      const line = mkEl("div");
+      line.className = `diff-line diff-line-${row.type}`;
+      if (row.type === "file") {
+        line.dataset.diffFilePath = row.filePath;
+      }
+      const spacer = mkEl("span");
+      spacer.className = "diff-comment-spacer";
+      const text = mkEl("code");
+      text.textContent = row.text;
+      line.append(spacer, text);
       diff.append(line);
     }
-    main.append(diff);
+    mainBody.append(diff);
   }
 
   const commentsPanel = mkEl("section");
@@ -1585,7 +1786,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
       commentsPanel.append(item);
     }
   }
-  main.append(commentsPanel);
+  mainBody.append(commentsPanel);
 
   root.append(sidebar, main);
   container.append(root);
