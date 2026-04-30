@@ -2228,16 +2228,19 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
     let command = value_str(frame, "command").or_else(|| value_str(frame, "requestType"));
     let status = value_str(frame, "status");
     let success = frame.get("success").and_then(|value| value.as_bool());
+    let current_session_id = rpc_session_target_id(state, session_id).await;
     if status == Some("error") || success == Some(false) {
         let message = rpc_error_message(frame);
         warn!(session_id = %session_id, command = command.unwrap_or("unknown"), %message, "RPC command returned error");
+        if rpc_prompt_error_settles_turn(command, &message) {
+            settle_prompt_error_and_broadcast(state, &current_session_id).await;
+        }
         let _ = state
             .events
-            .send(notice(session_id.to_string(), NoticeLevel::Error, message));
+            .send(notice(current_session_id, NoticeLevel::Error, message));
         return;
     }
 
-    let current_session_id = rpc_session_target_id(state, session_id).await;
     match command {
         Some("repo_diff_get") | Some("repo_diff_snapshot") => {
             let state_value = frame
@@ -2602,6 +2605,31 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
         }
         Some("prompt") | Some("abort") => {}
         _ => {}
+    }
+}
+
+fn rpc_prompt_error_settles_turn(command: Option<&str>, message: &str) -> bool {
+    matches!(
+        command,
+        Some("prompt" | "abort_and_prompt" | "steer" | "follow_up")
+    ) && !message.contains("Agent is already processing")
+}
+
+async fn settle_prompt_error_and_broadcast(state: &AppState, session_id: &str) {
+    let snapshot = {
+        let mut sessions = state.sessions.write().await;
+        sessions.get_mut(session_id).map(|record| {
+            record.status = SessionStatus::Idle;
+            record.streaming_message = None;
+            ServerMessage::SessionSnapshot {
+                session_id: session_id.to_string(),
+                state: record.projection(),
+            }
+        })
+    };
+    if let Some(snapshot) = snapshot {
+        let _ = state.events.send(snapshot);
+        broadcast_sessions_snapshot(state).await;
     }
 }
 
@@ -3738,6 +3766,70 @@ mod tests {
             command.get("type").and_then(|value| value.as_str()),
             Some("fork")
         );
+    }
+
+    #[tokio::test]
+    async fn rpc_prompt_error_targets_real_session_and_clears_busy_state() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.status = SessionStatus::Busy;
+        record.streaming_message = Some(text_message("streaming", "partial"));
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("transport-1".to_string(), "s1".to_string());
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "prompt",
+                "success": false,
+                "error": "rate limit exceeded"
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("idle snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert!(!state.is_busy);
+                assert_eq!(state.transcript.len(), 0);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        match events.recv().await.expect("sessions snapshot event") {
+            ServerMessage::SessionsSnapshot { sessions } => {
+                assert_eq!(sessions[0].session_id, "s1");
+                assert_eq!(sessions[0].status, SessionStatus::Idle);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        match events.recv().await.expect("error notice event") {
+            ServerMessage::SessionNotice {
+                session_id,
+                level,
+                text,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert!(matches!(level, NoticeLevel::Error));
+                assert_eq!(text, "rate limit exceeded");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert_eq!(record.status, SessionStatus::Idle);
+        assert!(record.streaming_message.is_none());
     }
 
     #[tokio::test]

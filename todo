@@ -21,3 +21,14 @@ we probably want to mimic this somehow.
 
 right now its  abit too spammy
 
+6. Steer, and by the way if i type somthing and i get "agent is busy" my input shouldn't just go into nothingness, i guess this will be sorted after adding steer.
+7. then we need to also like the cycling of all sent prompt in the session, like in console, arrow up when empty should cycle somehow through past prompt or something. i guess maybe its not when empty but when it was empty then you enter this toggle or something.. should copy the cli.
+
+The working directory, i don't really like OMP approach to sessions they are tied to directory.
+so i would like best of both world: 1) i would like sessions to be visible from all the places, butthey also should have "natural" directory to them.
+
+8. in fura, when new messages are receiving it should not force focus on those sessions, maybe a blob (x) new messages - no need for a counter, that new messages appeared?
+9. when omp reads a file of a given type it has a cute icon that represents the like file type, a small crab for rust a snake for python, etc, we can likely clone that.
+10. agent driven 'greps' should prooobably also behave like reads?
+11. it still seems there is no good propagation of errors when agent gets rate limited. yeah, like the bridge things that we are still pending or something when we got an error about being rate limited.
+12 git worktrees approach.
