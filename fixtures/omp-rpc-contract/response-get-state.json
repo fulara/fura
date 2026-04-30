@@ -1,0 +1,57 @@
+{
+  "id": "rpc-1",
+  "type": "response",
+  "command": "get_state",
+  "success": true,
+  "data": {
+    "model": {
+      "id": "claude-sonnet-4-5",
+      "name": "Claude Sonnet 4.5",
+      "api": "anthropic-messages",
+      "provider": "anthropic",
+      "baseUrl": "https://api.anthropic.com",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 3,
+        "output": 15,
+        "cacheRead": 0.3,
+        "cacheWrite": 3.75
+      },
+      "contextWindow": 200000,
+      "maxTokens": 8192,
+      "thinking": {
+        "mode": "effort",
+        "minLevel": "low",
+        "maxLevel": "high"
+      }
+    },
+    "thinkingLevel": "medium",
+    "isStreaming": false,
+    "isCompacting": false,
+    "steeringMode": "all",
+    "followUpMode": "one-at-a-time",
+    "interruptMode": "immediate",
+    "sessionFile": "/tmp/omp/session.jsonl",
+    "sessionId": "session-1",
+    "sessionName": "Fixture session",
+    "autoCompactionEnabled": true,
+    "messageCount": 4,
+    "queuedMessageCount": 0,
+    "todoPhases": [],
+    "planMode": {
+      "enabled": true,
+      "planFilePath": "local://PLAN.md",
+      "workflow": "parallel",
+      "reentry": false
+    },
+    "contextUsage": {
+      "tokens": 1234,
+      "contextWindow": 200000,
+      "percent": 0.617
+    }
+  }
+}

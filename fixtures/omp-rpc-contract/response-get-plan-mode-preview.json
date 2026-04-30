@@ -1,0 +1,12 @@
+{
+  "id": "rpc-6",
+  "type": "response",
+  "command": "get_plan_mode_preview",
+  "success": true,
+  "data": {
+    "planFilePath": "local://PLAN.md",
+    "finalPlanFilePath": "local://APPROVED.md",
+    "title": "APPROVED",
+    "content": "# Plan\n\n- Build safely."
+  }
+}

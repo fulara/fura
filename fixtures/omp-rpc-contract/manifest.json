@@ -1,0 +1,112 @@
+[
+  {
+    "name": "event-agent-end",
+    "category": "event",
+    "file": "event-agent-end.json"
+  },
+  {
+    "name": "event-agent-start",
+    "category": "event",
+    "file": "event-agent-start.json"
+  },
+  {
+    "name": "event-message-end-text",
+    "category": "event",
+    "file": "event-message-end-text.json"
+  },
+  {
+    "name": "event-message-end-thinking",
+    "category": "event",
+    "file": "event-message-end-thinking.json"
+  },
+  {
+    "name": "event-message-end-tool-call",
+    "category": "event",
+    "file": "event-message-end-tool-call.json"
+  },
+  {
+    "name": "event-message-end-tool-result",
+    "category": "event",
+    "file": "event-message-end-tool-result.json"
+  },
+  {
+    "name": "event-message-update-text",
+    "category": "event",
+    "file": "event-message-update-text.json"
+  },
+  {
+    "name": "event-tool-execution-end",
+    "category": "event",
+    "file": "event-tool-execution-end.json"
+  },
+  {
+    "name": "event-tool-execution-start",
+    "category": "event",
+    "file": "event-tool-execution-start.json"
+  },
+  {
+    "name": "event-tool-execution-update",
+    "category": "event",
+    "file": "event-tool-execution-update.json"
+  },
+  {
+    "name": "extension-ui-request-confirm",
+    "category": "extension",
+    "file": "extension-ui-request-confirm.json"
+  },
+  {
+    "name": "host-tool-call",
+    "category": "host-tool",
+    "file": "host-tool-call.json"
+  },
+  {
+    "name": "host-tool-cancel",
+    "category": "host-tool",
+    "file": "host-tool-cancel.json"
+  },
+  {
+    "name": "ready",
+    "category": "lifecycle",
+    "file": "ready.json"
+  },
+  {
+    "name": "response-error",
+    "category": "response",
+    "file": "response-error.json"
+  },
+  {
+    "name": "response-get-available-models",
+    "category": "response",
+    "file": "response-get-available-models.json"
+  },
+  {
+    "name": "response-get-messages",
+    "category": "response",
+    "file": "response-get-messages.json"
+  },
+  {
+    "name": "response-get-plan-mode-preview",
+    "category": "response",
+    "file": "response-get-plan-mode-preview.json"
+  },
+  {
+    "name": "response-get-session-stats",
+    "category": "response",
+    "file": "response-get-session-stats.json"
+  },
+  {
+    "name": "response-get-state",
+    "category": "response",
+    "file": "response-get-state.json"
+  },
+  {
+    "name": "response-repo-diff-get",
+    "category": "response",
+    "file": "response-repo-diff-get.json"
+  },
+  {
+    "name": "response-set-plan-mode",
+    "category": "response",
+    "file": "response-set-plan-mode.json"
+  }
+]

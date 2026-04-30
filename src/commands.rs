@@ -952,13 +952,7 @@ pub(crate) async fn handle_diff_refresh(
     head_selector: Option<String>,
     stat: bool,
 ) -> Vec<ServerMessage> {
-    let command = serde_json::json!({
-        "id": next_rpc_id(),
-        "type": "repo_diff_get",
-        "selector": selector,
-        "headSelector": head_selector,
-        "stat": stat,
-    });
+    let command = repo_diff_get_command(next_rpc_id(), selector, head_selector, stat);
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => Vec::new(),
         Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
@@ -970,11 +964,7 @@ pub(crate) async fn handle_diff_snapshot(
     session_id: String,
     label: Option<String>,
 ) -> Vec<ServerMessage> {
-    let command = serde_json::json!({
-        "id": next_rpc_id(),
-        "type": "repo_diff_snapshot",
-        "label": label,
-    });
+    let command = repo_diff_snapshot_command(next_rpc_id(), label);
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => Vec::new(),
         Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
@@ -988,7 +978,7 @@ pub(crate) async fn handle_model_list_command(
     match send_rpc_command(
         state,
         &session_id,
-        serde_json::json!({ "id": next_rpc_id(), "type": "get_available_models" }),
+        get_available_models_command(next_rpc_id()),
     )
     .await
     {
@@ -1006,12 +996,7 @@ pub(crate) async fn handle_model_set_command(
     match send_rpc_command(
         state,
         &session_id,
-        serde_json::json!({
-            "id": next_rpc_id(),
-            "type": "set_model",
-            "provider": provider,
-            "modelId": model_id,
-        }),
+        set_model_command(next_rpc_id(), provider.to_string(), model_id.to_string()),
     )
     .await
     {
@@ -1138,18 +1123,12 @@ pub(crate) async fn send_prompt(
         return vec![unknown_session_error(session_id)];
     };
 
-    let mut command = serde_json::json!({
-        "id": next_rpc_id(),
-        "type": "prompt",
-        "message": text,
-    });
-    if let Some(images) = images.filter(|images| !images.is_empty()) {
-        command["images"] = Value::Array(images);
-    }
-    if let Some(behavior) = behavior {
-        command["streamingBehavior"] =
-            Value::String(behavior.as_rpc_streaming_behavior().to_string());
-    }
+    let command = prompt_command(
+        next_rpc_id(),
+        text,
+        images.filter(|images| !images.is_empty()),
+        behavior,
+    );
 
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => vec![snapshot],
@@ -1165,10 +1144,7 @@ pub(crate) async fn send_prompt(
 
 pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<ServerMessage> {
     info!(action = "prompt.abort", session_id = %session_id);
-    let command = serde_json::json!({
-        "id": next_rpc_id(),
-        "type": "abort",
-    });
+    let command = abort_command(next_rpc_id());
     let send_result = send_rpc_command(state, &session_id, command).await;
 
     let mut sessions = state.sessions.write().await;
