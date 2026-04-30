@@ -22,7 +22,7 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   { name: "export", description: "Export session HTML", usage: "[path]", support: "supported" },
 
   { name: "settings", description: "TUI settings panel", support: "tui-only" },
-  { name: "plan", description: "TUI plan-mode toggle", support: "tui-only" },
+  { name: "plan", description: "Toggle plan mode or start planning with a prompt", usage: "[prompt]", support: "supported" },
   { name: "fast", description: "TUI fast-mode toggle", support: "tui-only" },
   { name: "browser", description: "TUI browser mode selector", support: "tui-only" },
   { name: "copy", description: "TUI clipboard helper", support: "tui-only" },

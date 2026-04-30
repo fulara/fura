@@ -335,18 +335,27 @@ h2 {
   gap: 0.5rem;
 }
 
-.tool-visibility-toggle {
+.tool-visibility-toggle,
+.thinking-visibility-toggle {
   min-width: 6.5rem;
 }
 
-.tool-visibility-toggle[aria-pressed="true"] {
+.tool-visibility-toggle[aria-pressed="true"],
+.thinking-visibility-toggle[data-state="shown"] {
   border-color: rgba(21, 183, 255, 0.5);
   background: rgba(21, 183, 255, 0.12);
 }
 
-.tool-visibility-toggle[aria-pressed="false"] {
+.tool-visibility-toggle[aria-pressed="false"],
+.thinking-visibility-toggle[data-state="auto"] {
   background: #171b24;
   color: #9ba4b5;
+}
+
+.thinking-visibility-toggle[data-state="hidden"] {
+  border-color: rgba(255, 107, 107, 0.24);
+  background: rgba(255, 107, 107, 0.12);
+  color: #ffaaa6;
 }
 
 /* Dockview panel host — replaces the old fixed #transcript section */

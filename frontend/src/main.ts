@@ -104,6 +104,12 @@ type SessionSummary = {
   timestamp?: string | null;
 };
 
+type PlanModeProjection = {
+  enabled: boolean;
+  planFilePath: string;
+  workflow?: string | null;
+};
+
 type SessionProjection = {
   summary: SessionSummary;
   transcript: TranscriptEntry[];
@@ -115,6 +121,7 @@ type SessionProjection = {
   contextTokens?: number | null;
   contextWindow?: number | null;
   contextPercent?: number | null;
+  planMode?: PlanModeProjection | null;
 };
 
 type DiffSnapshotSummary = {
@@ -177,6 +184,7 @@ type ServerMessage =
   | { type: "log.stderr"; sessionId: string; text: string }
   | { type: "session.notice"; sessionId: string; level: "info" | "warning" | "error"; text: string }
   | { type: "model.list"; sessionId: string; models: ModelSummary[] }
+  | { type: "plan.review"; sessionId: string; planFilePath: string; finalPlanFilePath: string; title?: string | null; content: string }
   | { type: "model.changed"; sessionId: string; model: ModelSummary }
   | { type: "raw.omp"; sessionId: string; frame: unknown }
   | { type: "diff.state"; sessionId: string; state: RepoDiffState }
@@ -212,6 +220,8 @@ type PersistedDockviewLayout = {
   version: 1;
   layout: SerializedDockview;
 };
+
+type ThinkingVisibilityMode = "auto" | "shown" | "hidden";
 
 const DOCKVIEW_LAYOUT_STORAGE_KEY = "fura.dockview.layout";
 
@@ -253,6 +263,7 @@ app.innerHTML = `
         </div>
         <div class="workspace-actions">
           <button id="toolVisibilityToggle" class="tool-visibility-toggle" type="button" aria-pressed="true">Tools: on</button>
+          <button id="thinkingVisibilityToggle" class="thinking-visibility-toggle" type="button" data-state="auto">Thinking: auto</button>
           <button id="abortButton" type="button">Abort</button>
           <button id="stopButton" type="button">Stop</button>
         </div>
@@ -382,6 +393,7 @@ const statusBar = requireElement<HTMLDivElement>("statusBar");
 const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
 const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
+const thinkingVisibilityToggle = requireElement<HTMLButtonElement>("thinkingVisibilityToggle");
 const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const commandPalette = requireElement<HTMLDivElement>("commandPalette");
@@ -421,6 +433,7 @@ type BusyPromptDraft = {
   editorText: string;
   images: PendingImage[];
   snippets: PendingSnippet[];
+  onSend?: () => void;
 };
 let pendingImages: PendingImage[] = [];
 let pendingSnippets: PendingSnippet[] = [];
@@ -458,11 +471,15 @@ const promptHistoryMessageIds = new Map<string, Set<string>>();
 let promptHistoryIndex = -1;
 
 const TOOL_VISIBILITY_STORAGE_KEY = "fura.showTools";
+const THINKING_VISIBILITY_STORAGE_KEY = "fura.showThinking";
 const url = new URL(window.location.href);
 const initialToken = url.searchParams.get("token") ?? window.localStorage.getItem("fura.token") ?? "";
 tokenInput.value = initialToken;
 let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
+let thinkingVisibilityMode = parseThinkingVisibilityMode(window.localStorage.getItem(THINKING_VISIBILITY_STORAGE_KEY));
+let skipThinkingOpenRestoreOnce = false;
 syncToolVisibilityToggle();
+syncThinkingVisibilityToggle();
 
 // --- Dockview state ---
 
@@ -493,6 +510,13 @@ toolVisibilityToggle.addEventListener("click", () => {
   showToolBubbles = !showToolBubbles;
   window.localStorage.setItem(TOOL_VISIBILITY_STORAGE_KEY, String(showToolBubbles));
   syncToolVisibilityToggle();
+  renderActiveSession();
+});
+thinkingVisibilityToggle.addEventListener("click", () => {
+  thinkingVisibilityMode = nextThinkingVisibilityMode(thinkingVisibilityMode);
+  skipThinkingOpenRestoreOnce = true;
+  window.localStorage.setItem(THINKING_VISIBILITY_STORAGE_KEY, thinkingVisibilityMode);
+  syncThinkingVisibilityToggle();
   renderActiveSession();
 });
 abortButton.addEventListener("click", () => {
@@ -582,38 +606,14 @@ promptForm.addEventListener("submit", event => {
     return;
   }
 
-  const projection = projections.get(activeSessionId);
-  const isSlashCommandLike = /^\/[^\s:]+/.test(editorText);
-  if (projection?.isBusy) {
-    if (knownSlashCommand && pendingImages.length === 0) {
-      sendPromptMessage(activeSessionId, text, pendingImages);
-      clearPromptEditor();
-      return;
-    }
-    if (isSlashCommandLike) {
-      const notices = sessionNotices.get(activeSessionId) ?? [];
-      notices.push({
-        level: "warning",
-        text: "Slash commands cannot be sent as steer or follow-up prompts while the agent is busy.",
-      });
-      sessionNotices.set(activeSessionId, notices);
-      render();
-      return;
-    }
-    busyPromptDraft = {
-      sessionId: activeSessionId,
-      text,
-      editorText,
-      images: pendingImages.map(image => ({ ...image })),
-      snippets: pendingSnippets.map(snippet => ({ ...snippet })),
-    };
-    clearPromptEditor();
-    renderBusyPromptChoice();
-    return;
-  }
-
-  sendPromptMessage(activeSessionId, text, pendingImages);
-  clearPromptEditor();
+  const accepted = sendPromptWithBusyHandling({
+    sessionId: activeSessionId,
+    text,
+    editorText,
+    images: pendingImages,
+    snippets: pendingSnippets,
+  });
+  if (accepted) clearPromptEditor();
 });
 promptInput.addEventListener("paste", async event => {
   const items = Array.from(event.clipboardData?.items ?? []);
@@ -797,6 +797,29 @@ function handleServerMessage(message: ServerMessage): void {
       }
       break;
     }
+    case "plan.review": {
+      const preview = message.content.length > 6000 ? `${message.content.slice(0, 6000)}\n\n… truncated …` : message.content;
+      const approved = window.confirm(
+        `Plan ready${message.title ? `: ${message.title}` : ""}\n\n${preview}\n\nApprove and execute this plan? Press Cancel to stay in plan mode.`,
+      );
+      if (approved) {
+        send({
+          type: "raw.rpc",
+          sessionId: message.sessionId,
+          command: {
+            type: "approve_plan_mode",
+            planFilePath: message.planFilePath,
+            finalPlanFilePath: message.finalPlanFilePath,
+          },
+        });
+      } else {
+        const notices = sessionNotices.get(message.sessionId) ?? [];
+        notices.push({ level: "info", text: "Stayed in plan mode. Type a refinement prompt to continue planning." });
+        sessionNotices.set(message.sessionId, notices);
+        render();
+      }
+      break;
+    }
     case "session.exited":
       appendLog(`Session ${message.sessionId} exited with code ${message.code ?? "unknown"}.`);
       render();
@@ -958,6 +981,51 @@ function clearPromptEditor(): void {
   updatePalette();
 }
 
+function sendPromptWithBusyHandling(options: {
+  sessionId: string;
+  text: string;
+  editorText: string;
+  images: PendingImage[];
+  snippets?: PendingSnippet[];
+  onSend?: () => void;
+}): boolean {
+  const projection = projections.get(options.sessionId);
+  const knownSlashCommand = findSlashCommand(options.editorText);
+  const isSlashCommandLike = /^\/[^\s:]+/.test(options.editorText);
+
+  if (projection?.isBusy) {
+    if (knownSlashCommand && options.images.length === 0) {
+      sendPromptMessage(options.sessionId, options.text, options.images);
+      options.onSend?.();
+      return true;
+    }
+    if (isSlashCommandLike) {
+      const notices = sessionNotices.get(options.sessionId) ?? [];
+      notices.push({
+        level: "warning",
+        text: "Slash commands cannot be sent as steer or follow-up prompts while the agent is busy.",
+      });
+      sessionNotices.set(options.sessionId, notices);
+      render();
+      return false;
+    }
+    busyPromptDraft = {
+      sessionId: options.sessionId,
+      text: options.text,
+      editorText: options.editorText,
+      images: options.images.map(image => ({ ...image })),
+      snippets: (options.snippets ?? []).map(snippet => ({ ...snippet })),
+      onSend: options.onSend,
+    };
+    renderBusyPromptChoice();
+    return true;
+  }
+
+  sendPromptMessage(options.sessionId, options.text, options.images);
+  options.onSend?.();
+  return true;
+}
+
 function renderBusyPromptChoice(): void {
   busyPromptChoice.replaceChildren();
   const draft = busyPromptDraft;
@@ -1030,7 +1098,9 @@ function sendBusyPromptDraft(behavior: "steer" | "followUp"): void {
   const draft = busyPromptDraft;
   if (!draft) return;
   sendPromptMessage(draft.sessionId, draft.text, draft.images, behavior);
+  const onSend = draft.onSend;
   busyPromptDraft = null;
+  onSend?.();
   renderBusyPromptChoice();
   render();
 }
@@ -1150,6 +1220,35 @@ function syncToolVisibilityToggle(): void {
   toolVisibilityToggle.title = showToolBubbles ? "Hide tool bubbles in the transcript" : "Show tool bubbles in the transcript";
 }
 
+function parseThinkingVisibilityMode(value: string | null): ThinkingVisibilityMode {
+  if (value === "shown" || value === "true") return "shown";
+  if (value === "hidden") return "hidden";
+  return "auto";
+}
+
+function nextThinkingVisibilityMode(mode: ThinkingVisibilityMode): ThinkingVisibilityMode {
+  if (mode === "auto") return "shown";
+  if (mode === "shown") return "hidden";
+  return "auto";
+}
+
+function syncThinkingVisibilityToggle(): void {
+  const labels: Record<ThinkingVisibilityMode, string> = {
+    auto: "Thinking: auto",
+    shown: "Thinking: shown",
+    hidden: "Thinking: hidden",
+  };
+  const titles: Record<ThinkingVisibilityMode, string> = {
+    auto: "Use Fura's default thinking display: live blocks expanded, historical blocks collapsed",
+    shown: "Show every thinking block expanded",
+    hidden: "Hide thinking blocks in the transcript",
+  };
+  thinkingVisibilityToggle.textContent = labels[thinkingVisibilityMode];
+  thinkingVisibilityToggle.dataset.state = thinkingVisibilityMode;
+  thinkingVisibilityToggle.setAttribute("aria-label", `Thinking display: ${thinkingVisibilityMode}`);
+  thinkingVisibilityToggle.title = titles[thinkingVisibilityMode];
+}
+
 // Renders the workspace header, status bar, and busy prompt choice.
 // Drives re-render of the Dockview panels via their stored element references.
 function renderActiveSession(): void {
@@ -1198,10 +1297,14 @@ function renderTranscriptView(
   // Snapshot scroll and open thinking blocks before clearing DOM.
   const wasNearBottom =
     container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+  const restoreThinkingOpenState = !skipThinkingOpenRestoreOnce;
+  skipThinkingOpenRestoreOnce = false;
   const openThinking = new Set<string>();
-  container.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
-    if (el.open) openThinking.add(`${el.dataset.messageId}:${el.dataset.blockIndex}`);
-  });
+  if (restoreThinkingOpenState) {
+    container.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
+      if (el.open) openThinking.add(`${el.dataset.messageId}:${el.dataset.blockIndex}`);
+    });
+  }
 
   container.replaceChildren();
 
@@ -1241,10 +1344,12 @@ function renderTranscriptView(
     }
 
     // Restore thinking blocks that were manually opened before the re-render.
-    container.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
-      const key = `${el.dataset.messageId}:${el.dataset.blockIndex}`;
-      if (openThinking.has(key)) el.open = true;
-    });
+    if (restoreThinkingOpenState) {
+      container.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
+        const key = `${el.dataset.messageId}:${el.dataset.blockIndex}`;
+        if (openThinking.has(key)) el.open = true;
+      });
+    }
   }
 
   // Session notices rendered at bottom of transcript.
@@ -1551,14 +1656,23 @@ function flushDiffComments(sessionId: string, state: RepoDiffState): void {
     isSameDiffComparison(comment, baseSnapshot, state.headSnapshot),
   );
   if (comments.length === 0) return;
-  sendPromptMessage(sessionId, buildDiffCommentPrompt(state, comments), []);
-  diffComments.set(
+  const headSnapshot = state.headSnapshot;
+  const clearFlushedComments = () => {
+    diffComments.set(
+      sessionId,
+      (diffComments.get(sessionId) ?? []).filter(
+        comment => !isSameDiffComparison(comment, baseSnapshot, headSnapshot),
+      ),
+    );
+    if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+  };
+  sendPromptWithBusyHandling({
     sessionId,
-    (diffComments.get(sessionId) ?? []).filter(
-      comment => !isSameDiffComparison(comment, baseSnapshot, state.headSnapshot),
-    ),
-  );
-  if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+    text: buildDiffCommentPrompt(state, comments),
+    editorText: `Flush ${comments.length} diff comment${comments.length === 1 ? "" : "s"}`,
+    images: [],
+    onSend: clearFlushedComments,
+  });
 }
 
 function renderDiffsView(container: HTMLElement, projection: SessionProjection | undefined): void {
@@ -2035,6 +2149,7 @@ function renderStatusBar(projection?: SessionProjection): void {
   const cwd = projection.summary.cwd ?? "current cwd";
   parts.push(statusPart(projection.model ?? "model unknown", "model"));
   parts.push(statusPart(projection.thinkingLevel ?? "thinking inherit", "thinking"));
+  if (projection.planMode?.enabled) parts.push(statusPart("Plan", "mode"));
   parts.push(statusPart(`📁 ${shortPath(cwd)}`, "cwd"));
   parts.push(statusPart(formatTokens(projection.tokensTotal), "tokens"));
   parts.push(statusPart(formatCost(projection.costUsd), "cost"));
@@ -2124,6 +2239,13 @@ function renderMessage(message: TranscriptMessage): HTMLElement {
   const article = mkEl("article");
   article.className = `message ${message.role}`;
   article.dataset.messageId = message.id;
+  const visibleBlocks = message.blocks
+    .map((block, index) => ({ block, index }))
+    .filter(({ block }) => thinkingVisibilityMode !== "hidden" || block.kind === "text");
+  if (visibleBlocks.length === 0) {
+    article.hidden = true;
+    return article;
+  }
 
   // System-role messages carry no header — the fenced code block header already
   // labels the content type. All other roles get a header row.
@@ -2145,8 +2267,8 @@ function renderMessage(message: TranscriptMessage): HTMLElement {
     article.append(header);
   }
 
-  for (let i = 0; i < message.blocks.length; i++) {
-    article.append(renderBlock(message.blocks[i], message.isNew, message.id, i));
+  for (const { block, index } of visibleBlocks) {
+    article.append(renderBlock(block, message.isNew, message.id, index));
   }
 
   return article;
@@ -3058,8 +3180,8 @@ function renderBlock(block: ContentBlock, isNew: boolean, messageId: string, blo
     details.dataset.messageId = messageId;
     details.dataset.blockIndex = String(blockIndex);
     details.dataset.blockKind = "thinking";
-    // Open live/new thinking blocks; collapse historical ones.
-    details.open = isNew;
+    // The frontend visibility mode is UI-only; OMP still keeps the complete transcript.
+    details.open = thinkingVisibilityMode === "shown" || isNew;
 
     const summary = mkEl("summary");
     summary.className = "thinking-label";

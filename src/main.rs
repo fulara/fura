@@ -161,6 +161,7 @@ struct SessionRecord {
     context_tokens: Option<u64>,
     context_window: Option<u64>,
     context_percent: Option<f64>,
+    plan_mode: Option<PlanModeProjection>,
 }
 
 impl SessionRecord {
@@ -244,6 +245,7 @@ impl SessionRecord {
             context_tokens: self.context_tokens,
             context_window: self.context_window,
             context_percent: self.context_percent,
+            plan_mode: self.plan_mode.clone(),
         }
     }
 }
@@ -294,6 +296,15 @@ struct SessionProjection {
     context_tokens: Option<u64>,
     context_window: Option<u64>,
     context_percent: Option<f64>,
+    plan_mode: Option<PlanModeProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanModeProjection {
+    enabled: bool,
+    plan_file_path: String,
+    workflow: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -526,6 +537,14 @@ enum ServerMessage {
     ModelChanged {
         session_id: String,
         model: ModelSummary,
+    },
+    #[serde(rename = "plan.review")]
+    PlanReview {
+        session_id: String,
+        plan_file_path: String,
+        final_plan_file_path: String,
+        title: Option<String>,
+        content: String,
     },
     #[serde(rename = "diff.state")]
     DiffState { session_id: String, state: Value },
@@ -1078,6 +1097,7 @@ async fn open_session(state: &AppState, session_file: String) -> Vec<ServerMessa
         context_tokens: None,
         context_window: None,
         context_percent: None,
+        plan_mode: None,
     };
     let projection = record.projection();
     let sessions_snapshot = {
@@ -1243,7 +1263,7 @@ async fn handle_slash_command(
         "help" | "commands" => vec![notice(
             session_id,
             NoticeLevel::Info,
-            "Supported commands: /help, /new, /abort, /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /fork, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
+            "Supported commands: /help, /new, /abort, /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /fork, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
         )],
         "new" => {
             let (cwd, args) = {
@@ -1309,6 +1329,7 @@ async fn handle_slash_command(
                 }
             }
         }
+        "plan" => handle_plan_slash_command(state, session_id, args).await,
         "model" | "models" => handle_model_slash_command(state, session_id, args).await,
         "thinking" => handle_thinking_slash_command(state, session_id, args).await,
         "fork" => handle_fork_slash_command(state, session_id).await,
@@ -1328,9 +1349,9 @@ async fn handle_slash_command(
             }
             send_slash_rpc_command(state, session_id, command, "Requested HTML export.").await
         }
-        "settings" | "plan" | "fast" | "browser" | "copy" | "dump" | "share" | "hotkeys"
-        | "tools" | "extensions" | "agents" | "branch" | "tree" | "login" | "logout" | "mcp"
-        | "ssh" | "resume" | "btw" | "background" | "bg" | "debug" | "memory" | "move" | "exit"
+        "settings" | "fast" | "browser" | "copy" | "dump" | "share" | "hotkeys" | "tools"
+        | "extensions" | "agents" | "branch" | "tree" | "login" | "logout" | "mcp" | "ssh"
+        | "resume" | "btw" | "background" | "bg" | "debug" | "memory" | "move" | "exit"
         | "quit" | "marketplace" | "plugins" | "reload-plugins" | "force" => vec![notice(
             session_id,
             NoticeLevel::Warning,
@@ -1383,6 +1404,64 @@ async fn handle_session_handoff(
     }
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
+async fn handle_plan_slash_command(
+    state: &AppState,
+    session_id: String,
+    args: &str,
+) -> Vec<ServerMessage> {
+    let enabled = {
+        let sessions = state.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .and_then(|record| record.plan_mode.as_ref())
+            .is_some_and(|plan_mode| plan_mode.enabled)
+    };
+
+    if enabled {
+        let command = serde_json::json!({
+            "id": next_rpc_id(),
+            "type": "set_plan_mode",
+            "enabled": false,
+        });
+        return send_slash_rpc_command(state, session_id, command, "Requested plan mode exit.")
+            .await;
+    }
+
+    let command = serde_json::json!({
+        "id": next_rpc_id(),
+        "type": "set_plan_mode",
+        "enabled": true,
+        "planFilePath": "local://PLAN.md",
+        "workflow": "parallel",
+    });
+    if let Err(message) = send_rpc_command(state, &session_id, command).await {
+        return vec![notice(session_id, NoticeLevel::Error, message)];
+    }
+
+    if args.is_empty() {
+        return vec![notice(
+            session_id,
+            NoticeLevel::Info,
+            "Requested plan mode. Plan file: local://PLAN.md",
+        )];
+    }
+
+    let prompt_command = serde_json::json!({
+        "id": next_rpc_id(),
+        "type": "prompt",
+        "message": args,
+        "streamingBehavior": "followUp",
+    });
+    match send_rpc_command(state, &session_id, prompt_command).await {
+        Ok(()) => vec![notice(
+            session_id,
+            NoticeLevel::Info,
+            "Requested plan mode and sent the initial planning prompt.",
+        )],
         Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
     }
 }
@@ -2112,6 +2191,7 @@ async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
         }
         "tool_execution_end" => {
             let tool_call_id = value_str(frame, "toolCallId").unwrap_or("");
+            let tool_name = value_str(frame, "toolName").unwrap_or("");
             let is_error = frame
                 .get("isError")
                 .and_then(|v| v.as_bool())
@@ -2131,13 +2211,13 @@ async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
                             let card = &mut record.active_tool_calls[pos];
                             card.is_active = true;
                             card.is_error = false;
-                            card.result = result;
+                            card.result = result.clone();
                             card.partial_result = None;
                         } else {
                             let mut card = record.active_tool_calls.remove(pos);
                             card.is_active = false;
                             card.is_error = is_error;
-                            card.result = result;
+                            card.result = result.clone();
                             card.partial_result = None;
                             record.tool_cards.push(card);
                         }
@@ -2151,9 +2231,50 @@ async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
             if let Some(snapshot) = snapshot {
                 let _ = state.events.send(snapshot);
             }
+            if tool_name == "exit_plan_mode" && !is_error {
+                if let Some(details) = result.as_ref().and_then(|value| value.get("details")) {
+                    let mut command = serde_json::json!({
+                        "id": next_rpc_id(),
+                        "type": "get_plan_mode_preview",
+                    });
+                    if let Some(plan_file_path) = value_str(details, "planFilePath") {
+                        command["planFilePath"] = Value::String(plan_file_path.to_string());
+                    }
+                    if let Some(final_plan_file_path) = value_str(details, "finalPlanFilePath") {
+                        command["finalPlanFilePath"] =
+                            Value::String(final_plan_file_path.to_string());
+                    }
+                    if let Some(title) = value_str(details, "title") {
+                        command["title"] = Value::String(title.to_string());
+                    }
+                    if let Err(message) = send_rpc_command(state, session_id, command).await {
+                        let _ = state.events.send(notice(
+                            target_session_id.clone(),
+                            NoticeLevel::Error,
+                            message,
+                        ));
+                    }
+                }
+            }
         }
         _ => apply_rpc_response(state, session_id, frame).await,
     }
+}
+
+fn map_plan_mode_projection(value: &Value) -> Option<PlanModeProjection> {
+    if value.is_null() {
+        return None;
+    }
+    if value.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    Some(PlanModeProjection {
+        enabled: true,
+        plan_file_path: value_str(value, "planFilePath")
+            .unwrap_or("local://PLAN.md")
+            .to_string(),
+        workflow: value_str(value, "workflow").map(str::to_string),
+    })
 }
 
 fn apply_rpc_state_to_record(
@@ -2165,6 +2286,7 @@ fn apply_rpc_state_to_record(
     context_tokens: Option<u64>,
     context_window: Option<u64>,
     context_percent: Option<f64>,
+    plan_mode: Option<Option<PlanModeProjection>>,
 ) {
     record.status = SessionStatus::Idle;
     if let Some(name) = session_name {
@@ -2184,6 +2306,9 @@ fn apply_rpc_state_to_record(
     record.context_tokens = context_tokens;
     record.context_window = context_window;
     record.context_percent = context_percent;
+    if let Some(plan_mode) = plan_mode {
+        record.plan_mode = plan_mode;
+    }
 }
 
 async fn apply_model_change_response(
@@ -2265,6 +2390,62 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                 models,
             });
         }
+        Some("get_plan_mode_preview") => {
+            let data = frame.get("data").or_else(|| frame.get("result"));
+            let Some(content) = data
+                .and_then(|data| data.get("content"))
+                .and_then(|value| value.as_str())
+            else {
+                return;
+            };
+            let plan_file_path = data
+                .and_then(|data| data.get("planFilePath"))
+                .and_then(|value| value.as_str())
+                .unwrap_or("local://PLAN.md")
+                .to_string();
+            let final_plan_file_path = data
+                .and_then(|data| data.get("finalPlanFilePath"))
+                .and_then(|value| value.as_str())
+                .unwrap_or(&plan_file_path)
+                .to_string();
+            let title = data
+                .and_then(|data| data.get("title"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            let _ = state.events.send(ServerMessage::PlanReview {
+                session_id: current_session_id.clone(),
+                plan_file_path,
+                final_plan_file_path,
+                title,
+                content: content.to_string(),
+            });
+        }
+        Some("approve_plan_mode") => {
+            if let Err(message) = refresh_rpc_state(state, session_id).await {
+                warn!(session_id = %session_id, %message, "post-plan-approval refresh failed");
+            }
+        }
+        Some("set_plan_mode") => {
+            let plan_mode = frame
+                .get("data")
+                .or_else(|| frame.get("result"))
+                .and_then(|data| data.get("planMode"))
+                .map(map_plan_mode_projection)
+                .unwrap_or(None);
+            let snapshot = {
+                let mut sessions = state.sessions.write().await;
+                sessions.get_mut(&current_session_id).map(|record| {
+                    record.plan_mode = plan_mode;
+                    ServerMessage::SessionSnapshot {
+                        session_id: current_session_id.clone(),
+                        state: record.projection(),
+                    }
+                })
+            };
+            if let Some(snapshot) = snapshot {
+                let _ = state.events.send(snapshot);
+            }
+        }
         Some("set_model") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
             apply_model_change_response(state, &current_session_id, data, None).await;
@@ -2329,6 +2510,9 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
             let context_percent = context_usage
                 .and_then(|cu| cu.get("percent"))
                 .and_then(|v| v.as_f64());
+            let plan_mode = data
+                .and_then(|d| d.get("planMode"))
+                .map(map_plan_mode_projection);
             let target_changed = target_session_id != current_session_id;
             let pending_create = if target_changed {
                 state
@@ -2411,6 +2595,7 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                                 context_tokens: None,
                                 context_window: None,
                                 context_percent: None,
+                                plan_mode: None,
                             }
                         });
 
@@ -2425,6 +2610,7 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                             context_tokens,
                             context_window,
                             context_percent,
+                            plan_mode.clone(),
                         );
                     }
 
@@ -2446,6 +2632,7 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                             context_tokens,
                             context_window,
                             context_percent,
+                            plan_mode,
                         );
                     }
                     let target_snapshot = sessions.get(&target_session_id).map(|record| {
@@ -2800,6 +2987,7 @@ async fn refresh_session_catalog(state: &AppState) -> bool {
                         context_tokens: None,
                         context_window: None,
                         context_percent: None,
+                        plan_mode: None,
                     },
                 );
             }
@@ -3043,6 +3231,16 @@ fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             provider = %model.provider,
             model_id = %model.id
+        ),
+        ServerMessage::PlanReview {
+            session_id,
+            content,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "plan.review",
+            session_id = %session_id,
+            bytes = content.len()
         ),
         ServerMessage::DiffState { session_id, state } => info!(
             direction = "bridge_to_client",
@@ -3651,6 +3849,7 @@ mod tests {
             context_tokens: None,
             context_window: None,
             context_percent: None,
+            plan_mode: None,
         }
     }
 
@@ -3766,6 +3965,168 @@ mod tests {
             command.get("type").and_then(|value| value.as_str()),
             Some("fork")
         );
+    }
+
+    #[tokio::test]
+    async fn slash_plan_enters_plan_mode_and_sends_initial_prompt() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let (stdin, mut commands) = mpsc::channel(4);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("s1".to_string(), "s1".to_string());
+
+        let responses = send_prompt(
+            &state,
+            "s1".to_string(),
+            "/plan investigate safely".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        let command = commands.recv().await.expect("plan mode command sent");
+        assert_eq!(
+            command.get("type").and_then(|value| value.as_str()),
+            Some("set_plan_mode")
+        );
+        assert_eq!(
+            command.get("enabled").and_then(|value| value.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            command.get("planFilePath").and_then(|value| value.as_str()),
+            Some("local://PLAN.md")
+        );
+        assert_eq!(
+            command.get("workflow").and_then(|value| value.as_str()),
+            Some("parallel")
+        );
+
+        let prompt = commands.recv().await.expect("initial planning prompt sent");
+        assert_eq!(
+            prompt.get("type").and_then(|value| value.as_str()),
+            Some("prompt")
+        );
+        assert_eq!(
+            prompt.get("message").and_then(|value| value.as_str()),
+            Some("investigate safely")
+        );
+        assert_eq!(
+            prompt
+                .get("streamingBehavior")
+                .and_then(|value| value.as_str()),
+            Some("followUp")
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_plan_exits_when_projection_is_in_plan_mode() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.plan_mode = Some(PlanModeProjection {
+            enabled: true,
+            plan_file_path: "local://PLAN.md".to_string(),
+            workflow: Some("parallel".to_string()),
+        });
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        let (stdin, mut commands) = mpsc::channel(4);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("s1".to_string(), "s1".to_string());
+
+        let responses =
+            send_prompt(&state, "s1".to_string(), "/plan".to_string(), None, None).await;
+
+        assert_eq!(responses.len(), 1);
+        let command = commands.recv().await.expect("plan mode exit command sent");
+        assert_eq!(
+            command.get("type").and_then(|value| value.as_str()),
+            Some("set_plan_mode")
+        );
+        assert_eq!(
+            command.get("enabled").and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert!(
+            commands.try_recv().is_err(),
+            "exit should not send an initial prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn plan_preview_response_emits_review_message() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("transport-1".to_string(), "s1".to_string());
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_plan_mode_preview",
+                "success": true,
+                "data": {
+                    "planFilePath": "local://PLAN.md",
+                    "finalPlanFilePath": "local://APPROVED.md",
+                    "title": "APPROVED",
+                    "content": "# Plan"
+                }
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("plan review event") {
+            ServerMessage::PlanReview {
+                session_id,
+                plan_file_path,
+                final_plan_file_path,
+                title,
+                content,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(plan_file_path, "local://PLAN.md");
+                assert_eq!(final_plan_file_path, "local://APPROVED.md");
+                assert_eq!(title.as_deref(), Some("APPROVED"));
+                assert_eq!(content, "# Plan");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]
