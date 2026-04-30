@@ -19,6 +19,7 @@ use uuid::Uuid;
 mod catalog;
 mod commands;
 mod config;
+mod omp_rpc;
 mod projection;
 mod protocol;
 mod rpc;
@@ -29,6 +30,7 @@ mod web;
 use catalog::*;
 use commands::*;
 use config::*;
+use omp_rpc::*;
 use projection::*;
 use protocol::*;
 use rpc::*;
@@ -296,6 +298,153 @@ mod tests {
             },
         });
         fs::write(path, format!("{header}\n{message}\n")).expect("session file should be written");
+    }
+
+    #[derive(Debug, serde::Deserialize)]
+    struct ContractManifestEntry {
+        name: String,
+        category: String,
+        file: String,
+    }
+
+    fn read_contract_fixture(file: &str) -> Value {
+        let text = fs::read_to_string(Path::new("fixtures/omp-rpc-contract").join(file))
+            .unwrap_or_else(|error| panic!("failed to read contract fixture {file}: {error}"));
+        serde_json::from_str(&text)
+            .unwrap_or_else(|error| panic!("failed to parse contract fixture {file}: {error}"))
+    }
+
+    #[test]
+    fn omp_contract_fixtures_decode_as_typed_frames() {
+        let manifest: Vec<ContractManifestEntry> =
+            serde_json::from_value(read_contract_fixture("manifest.json"))
+                .expect("contract manifest should decode");
+
+        assert!(
+            !manifest.is_empty(),
+            "contract fixture manifest must not be empty"
+        );
+        for entry in manifest {
+            let value = read_contract_fixture(&entry.file);
+            let frame = OmpRpcFrame::decode(value).unwrap_or_else(|error| {
+                panic!(
+                    "{} ({}) failed to decode: {error}",
+                    entry.name, entry.category
+                )
+            });
+
+            match frame {
+                OmpRpcFrame::Response(response) => match response.command.as_str() {
+                    "get_state" => {
+                        let data: OmpSessionState = serde_json::from_value(
+                            response.payload().expect("get_state payload").clone(),
+                        )
+                        .expect("get_state data should decode");
+                        assert!(!data.session_id.is_empty());
+                    }
+                    "get_messages" => {
+                        let data: OmpMessagesResponse = serde_json::from_value(
+                            response.payload().expect("get_messages payload").clone(),
+                        )
+                        .expect("get_messages data should decode");
+                        assert!(!data.messages.is_empty());
+                    }
+                    "get_session_stats" => {
+                        let data: OmpSessionStats = serde_json::from_value(
+                            response
+                                .payload()
+                                .expect("get_session_stats payload")
+                                .clone(),
+                        )
+                        .expect("get_session_stats data should decode");
+                        assert!(data.tokens.total > 0);
+                    }
+                    "get_available_models" => {
+                        let data: OmpAvailableModelsResponse = serde_json::from_value(
+                            response
+                                .payload()
+                                .expect("get_available_models payload")
+                                .clone(),
+                        )
+                        .expect("get_available_models data should decode");
+                        assert!(!data.models.is_empty());
+                    }
+                    "get_plan_mode_preview" => {
+                        let data: OmpPlanPreviewResponse = serde_json::from_value(
+                            response
+                                .payload()
+                                .expect("get_plan_mode_preview payload")
+                                .clone(),
+                        )
+                        .expect("get_plan_mode_preview data should decode");
+                        assert!(!data.content.is_empty());
+                    }
+                    _ if response.is_error() => {
+                        assert!(
+                            response.error.is_some(),
+                            "error response should carry an error"
+                        );
+                    }
+                    _ => {}
+                },
+                OmpRpcFrame::Unknown => panic!("{} decoded as unknown", entry.name),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn typed_omp_commands_serialize_to_canonical_wire_shapes() {
+        assert_eq!(
+            get_state_command("rpc-1".to_string()),
+            serde_json::json!({ "id": "rpc-1", "type": "get_state" })
+        );
+        assert_eq!(
+            prompt_command(
+                "rpc-2".to_string(),
+                "hello".to_string(),
+                None,
+                Some(PromptBehavior::FollowUp),
+            ),
+            serde_json::json!({
+                "id": "rpc-2",
+                "type": "prompt",
+                "message": "hello",
+                "streamingBehavior": "followUp"
+            })
+        );
+        assert_eq!(
+            set_model_command(
+                "rpc-3".to_string(),
+                "anthropic".to_string(),
+                "claude-sonnet-4-5".to_string(),
+            ),
+            serde_json::json!({
+                "id": "rpc-3",
+                "type": "set_model",
+                "provider": "anthropic",
+                "modelId": "claude-sonnet-4-5"
+            })
+        );
+        assert_eq!(
+            repo_diff_get_command(
+                "rpc-4".to_string(),
+                Some("session-start".to_string()),
+                Some("current".to_string()),
+                true,
+            ),
+            serde_json::json!({
+                "id": "rpc-4",
+                "type": "repo_diff_get",
+                "selector": "session-start",
+                "headSelector": "current",
+                "stat": true
+            })
+        );
+        assert_eq!(
+            repo_diff_snapshot_command("rpc-5".to_string(), None),
+            serde_json::json!({ "id": "rpc-5", "type": "repo_diff_snapshot" })
+        );
     }
 
     #[tokio::test]

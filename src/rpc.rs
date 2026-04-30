@@ -13,24 +13,9 @@ use tracing::{info, warn};
 use crate::*;
 
 pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Result<(), String> {
-    send_rpc_command(
-        state,
-        session_id,
-        serde_json::json!({ "id": next_rpc_id(), "type": "get_state" }),
-    )
-    .await?;
-    send_rpc_command(
-        state,
-        session_id,
-        serde_json::json!({ "id": next_rpc_id(), "type": "get_messages" }),
-    )
-    .await?;
-    send_rpc_command(
-        state,
-        session_id,
-        serde_json::json!({ "id": next_rpc_id(), "type": "get_session_stats" }),
-    )
-    .await
+    send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await?;
+    send_rpc_command(state, session_id, get_messages_command(next_rpc_id())).await?;
+    send_rpc_command(state, session_id, get_session_stats_command(next_rpc_id())).await
 }
 
 pub(crate) async fn rpc_session_target_id(state: &AppState, transport_session_id: &str) -> String {
@@ -301,41 +286,39 @@ where
 }
 
 pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {
-    let frame_type = value_str(frame, "type").unwrap_or("unknown");
+    let typed_frame = match OmpRpcFrame::decode(frame.clone()) {
+        Ok(frame) => frame,
+        Err(error) => {
+            warn!(session_id = %session_id, %error, "invalid typed OMP RPC frame");
+            return;
+        }
+    };
     let target_session_id = rpc_session_target_id(state, session_id).await;
-    match frame_type {
-        "ready" => {
+    match typed_frame {
+        OmpRpcFrame::Ready => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
             if let Err(message) = refresh_rpc_state(state, session_id).await {
                 warn!(session_id = %session_id, %message, "initial RPC refresh failed");
             }
         }
-        "agent_start" => {
+        OmpRpcFrame::AgentStart => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Busy).await
         }
-        "agent_end" => {
+        OmpRpcFrame::AgentEnd { .. } => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
-            if let Err(message) = send_rpc_command(
-                state,
-                session_id,
-                serde_json::json!({ "id": next_rpc_id(), "type": "get_messages" }),
-            )
-            .await
+            if let Err(message) =
+                send_rpc_command(state, session_id, get_messages_command(next_rpc_id())).await
             {
                 warn!(session_id = %session_id, %message, "post-agent transcript refresh failed");
             }
-            if let Err(message) = send_rpc_command(
-                state,
-                session_id,
-                serde_json::json!({ "id": next_rpc_id(), "type": "get_session_stats" }),
-            )
-            .await
+            if let Err(message) =
+                send_rpc_command(state, session_id, get_session_stats_command(next_rpc_id())).await
             {
                 warn!(session_id = %session_id, %message, "post-agent stats refresh failed");
             }
         }
-        "message_update" => {
-            if let Some(mut message) = frame.get("message").and_then(map_omp_message) {
+        OmpRpcFrame::MessageUpdate { message, .. } => {
+            if let Some(mut message) = map_omp_message(&message) {
                 message.is_new = true;
                 // Use a stable sentinel ID so the frontend always keyed to the same node
                 // while streaming; the real ID arrives with message_end.
@@ -357,8 +340,8 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 }
             }
         }
-        "message_end" => {
-            if let Some(mut message) = frame.get("message").and_then(map_omp_message) {
+        OmpRpcFrame::MessageEnd { message } => {
+            if let Some(mut message) = map_omp_message(&message) {
                 message.is_new = true;
                 // Clear streaming_message and push the final message atomically in a single
                 // lock so no snapshot can fire showing a gap between the two.
@@ -381,11 +364,12 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 }
             }
         }
-        "tool_execution_start" => {
-            let tool_call_id = value_str(frame, "toolCallId").unwrap_or("").to_string();
-            let tool_name = value_str(frame, "toolName").unwrap_or("").to_string();
-            let intent = value_str(frame, "intent").map(str::to_string);
-            let args = frame.get("args").cloned().unwrap_or(Value::Null);
+        OmpRpcFrame::ToolExecutionStart {
+            tool_call_id,
+            tool_name,
+            args,
+            intent,
+        } => {
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&target_session_id).map(|record| {
@@ -411,9 +395,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 let _ = state.events.send(snapshot);
             }
         }
-        "tool_execution_update" => {
-            let tool_call_id = value_str(frame, "toolCallId").unwrap_or("");
-            let partial_result = frame.get("partialResult").cloned();
+        OmpRpcFrame::ToolExecutionUpdate {
+            tool_call_id,
+            partial_result,
+            ..
+        } => {
             let async_state = partial_result.as_ref().and_then(tool_async_state);
             let is_final_async = matches!(async_state, Some("completed" | "failed"));
             let is_async_error = matches!(async_state, Some("failed"));
@@ -444,14 +430,13 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 let _ = state.events.send(snapshot);
             }
         }
-        "tool_execution_end" => {
-            let tool_call_id = value_str(frame, "toolCallId").unwrap_or("");
-            let tool_name = value_str(frame, "toolName").unwrap_or("");
-            let is_error = frame
-                .get("isError")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            let result = frame.get("result").cloned();
+        OmpRpcFrame::ToolExecutionEnd {
+            tool_call_id,
+            tool_name,
+            result,
+            is_error,
+        } => {
+            let is_error = is_error.unwrap_or(false);
             let is_background_running =
                 matches!(result.as_ref().and_then(tool_async_state), Some("running"));
             let snapshot = {
@@ -512,7 +497,15 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 }
             }
         }
-        _ => apply_rpc_response(state, session_id, frame).await,
+        OmpRpcFrame::Response(response) => {
+            let _ = response.is_error();
+            let _ = response.payload();
+            apply_rpc_response(state, session_id, frame).await
+        }
+        OmpRpcFrame::ExtensionUiRequest { .. }
+        | OmpRpcFrame::HostToolCall { .. }
+        | OmpRpcFrame::HostToolCancel { .. }
+        | OmpRpcFrame::Unknown => apply_rpc_response(state, session_id, frame).await,
     }
 }
 

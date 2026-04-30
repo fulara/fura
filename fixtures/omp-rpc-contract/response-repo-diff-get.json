@@ -1,0 +1,21 @@
+{
+  "id": "rpc-7",
+  "type": "response",
+  "command": "repo_diff_get",
+  "success": true,
+  "data": {
+    "snapshots": [
+      {
+        "entryId": "snap-session-start",
+        "label": "session-start",
+        "kind": "session-start",
+        "createdAt": "2026-04-30T00:00:00.000Z",
+        "repoRoot": "/tmp/repo"
+      }
+    ],
+    "selectedSnapshot": null,
+    "headSnapshot": null,
+    "diff": "",
+    "stat": false
+  }
+}

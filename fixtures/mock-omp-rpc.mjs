@@ -61,11 +61,11 @@ function write(frame) {
 }
 
 function success(command, data = {}) {
-  write({ id: command.id, type: "response", command: command.type, status: "success", data });
+  write({ id: command.id, type: "response", command: command.type, success: true, data });
 }
 
 function error(command, message) {
-  write({ id: command.id, type: "response", command: command.type, status: "error", error: { message } });
+  write({ id: command.id, type: "response", command: command.type, success: false, error: message });
 }
 
 write({ type: "ready" });
