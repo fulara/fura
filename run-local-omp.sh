@@ -57,8 +57,7 @@ exec cargo run --bin fura -- \
   --bridge-debug-file "${FURA_BRIDGE_DEBUG_FILE}" \
   --rpc-program "${BUN_BIN}" \
   --no-default-rpc-args \
-  "--rpc-arg=--cwd=${OMP_REPO}/packages/coding-agent" \
-  --rpc-arg "src/cli.ts" \
+  --rpc-arg "${OMP_REPO}/packages/coding-agent/src/cli.ts" \
   "--rpc-arg=--mode" \
   --rpc-arg "rpc" \
   "$@"

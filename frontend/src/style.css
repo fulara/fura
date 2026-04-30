@@ -472,7 +472,8 @@ h2 {
 
 .diffs-files,
 .diffs-snapshot-list,
-.diff-comments {
+.diff-comments,
+.diffs-repo-selector {
   display: grid;
   align-content: start;
   gap: 0.75rem;
@@ -508,6 +509,20 @@ h2 {
   padding: 0.35rem 0.5rem;
 }
 
+
+.diff-repo-select {
+  width: 100%;
+  border-radius: 0.45rem;
+  border: 1px solid #343a46;
+  background: #111318;
+  color: #d7dae4;
+  padding: 0.35rem 0.5rem;
+}
+
+.diffs-repo-label {
+  color: #8b95a7;
+  font-size: 0.78rem;
+}
 .diff-snapshot {
   display: grid;
   gap: 0.2rem;
@@ -527,6 +542,11 @@ h2 {
 .diff-snapshot span {
   color: #8b95a7;
   font-size: 0.78rem;
+}
+
+.diffs-error {
+  color: #ffaaa6;
+  white-space: pre-wrap;
 }
 
 .diff-lines {
@@ -1177,7 +1197,7 @@ h2 {
 /* CWD picker */
 
 .cwd-picker.modal-panel {
-  width: min(480px, 100%);
+  width: min(560px, 100%);
 }
 
 .cwd-picker-body {
@@ -1190,6 +1210,49 @@ h2 {
 .cwd-picker-body label {
   font-size: 0.86rem;
   color: #9ba4b5;
+}
+
+.field-help {
+  margin: -0.25rem 0 0.25rem;
+  color: #737d91;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: #c7cedc;
+  cursor: pointer;
+}
+
+.checkbox-row input {
+  width: auto;
+}
+
+.worktree-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding: 0.75rem;
+  border: 1px solid #252a35;
+  border-radius: 0.85rem;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.worktree-fields[hidden] {
+  display: none;
+}
+
+.modal-status {
+  min-height: 1.2em;
+  color: #9ba4b5;
+  font-size: 0.82rem;
+}
+
+.modal-status.error {
+  color: #ffaaa6;
 }
 
 .fork-picker.modal-panel,

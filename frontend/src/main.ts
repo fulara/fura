@@ -201,8 +201,14 @@ type ServerMessage =
   | { type: "diff.state"; sessionId: string; state: RepoDiffState }
   | { type: "error"; requestId?: string | null; message: string };
 
+type WorktreeCreateOptions = {
+  sourceRepo: string;
+  directory: string;
+  baseBranch: string;
+  branchName?: string;
+};
 type ClientMessage =
-  | { type: "session.create"; cwd?: string; name?: string; args?: string[] }
+  | { type: "session.create"; cwd?: string; name?: string; args?: string[]; worktree?: WorktreeCreateOptions }
   | { type: "session.open"; sessionFile: string }
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }
@@ -323,18 +329,32 @@ app.innerHTML = `
       <header class="modal-header">
         <div>
           <h2 id="cwdPickerTitle">New session</h2>
-          <p>Choose the working directory for the new OMP session.</p>
+          <p>Choose the working directory for the new OMP session. Optionally create a git worktree first.</p>
         </div>
         <button id="cwdPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
       </header>
       <div class="cwd-picker-body">
         <label for="cwdPickerNameInput">Session name</label>
         <input id="cwdPickerNameInput" autocomplete="off" spellcheck="false" placeholder="my-project" />
-        <label for="cwdPickerInput">Working directory</label>
+        <label id="cwdPickerInputLabel" for="cwdPickerInput">Working directory</label>
         <input id="cwdPickerInput" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+        <p id="cwdPickerInputHelp" class="field-help">For a normal session, this is the directory where OMP starts.</p>
+        <label class="checkbox-row" for="cwdPickerWorktreeEnabled">
+          <input id="cwdPickerWorktreeEnabled" type="checkbox" />
+          <span>Add worktree</span>
+        </label>
+        <div id="cwdPickerWorktreeFields" class="worktree-fields" hidden>
+          <label for="cwdPickerWorktreeSourceRepo">Source repo root</label>
+          <input id="cwdPickerWorktreeSourceRepo" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+          <p class="field-help">Must be the repo root containing .git. Fura runs git worktree add from this repo.</p>
+          <label for="cwdPickerWorktreeBase">Base branch/ref</label>
+          <input id="cwdPickerWorktreeBase" autocomplete="off" spellcheck="false" placeholder="main" />
+          <label for="cwdPickerWorktreeBranch">Branch name</label>
+          <input id="cwdPickerWorktreeBranch" autocomplete="off" spellcheck="false" placeholder="feature/my-work" />
+        </div>
       </div>
       <footer class="modal-footer">
-        <span></span>
+        <span id="cwdPickerStatus" class="modal-status"></span>
         <div class="modal-actions">
           <button id="cwdPickerCancel" type="button">Cancel</button>
           <button id="cwdPickerCreate" type="button">Create session</button>
@@ -442,8 +462,16 @@ const cwdPickerOverlay = requireElement<HTMLDivElement>("cwdPickerOverlay");
 const cwdPickerClose = requireElement<HTMLButtonElement>("cwdPickerClose");
 const cwdPickerNameInput = requireElement<HTMLInputElement>("cwdPickerNameInput");
 const cwdPickerInput = requireElement<HTMLInputElement>("cwdPickerInput");
+const cwdPickerInputLabel = requireElement<HTMLLabelElement>("cwdPickerInputLabel");
+const cwdPickerInputHelp = requireElement<HTMLParagraphElement>("cwdPickerInputHelp");
 const cwdPickerCancel = requireElement<HTMLButtonElement>("cwdPickerCancel");
 const cwdPickerCreate = requireElement<HTMLButtonElement>("cwdPickerCreate");
+const cwdPickerStatus = requireElement<HTMLSpanElement>("cwdPickerStatus");
+const cwdPickerWorktreeEnabled = requireElement<HTMLInputElement>("cwdPickerWorktreeEnabled");
+const cwdPickerWorktreeFields = requireElement<HTMLDivElement>("cwdPickerWorktreeFields");
+const cwdPickerWorktreeSourceRepo = requireElement<HTMLInputElement>("cwdPickerWorktreeSourceRepo");
+const cwdPickerWorktreeBase = requireElement<HTMLInputElement>("cwdPickerWorktreeBase");
+const cwdPickerWorktreeBranch = requireElement<HTMLInputElement>("cwdPickerWorktreeBranch");
 const forkPickerOverlay = requireElement<HTMLDivElement>("forkPickerOverlay");
 const forkPickerClose = requireElement<HTMLButtonElement>("forkPickerClose");
 const forkPickerNameInput = requireElement<HTMLInputElement>("forkPickerNameInput");
@@ -467,6 +495,8 @@ type PendingSnippet = { type: "snippet"; marker: string; text: string };
 type DiffPreviewDraft = {
   sessionId: string;
   state: RepoDiffState;
+  baseSnapshot: DiffSnapshotSummary;
+  headSnapshot: DiffSnapshotSummary | null;
   comments: DiffComment[];
 };
 type BusyPromptDraft = {
@@ -500,9 +530,11 @@ let paletteCommands: SlashCommandSpec[] = [];
 let paletteSelectedIndex = -1;
 const projections = new Map<string, SessionProjection>();
 const diffStates = new Map<string, RepoDiffState>();
+const diffSelectedRepos = new Map<string, string>();
 const diffSelectedSnapshots = new Map<string, string>();
 const diffSelectedHeads = new Map<string, string | null>();
 const diffComments = new Map<string, DiffComment[]>();
+const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
 let lastDiffsRenderedSessionId: string | null = null;
@@ -594,6 +626,7 @@ modelPickerList.addEventListener("keydown", handleModelPickerKeydown);
 cwdPickerClose.addEventListener("click", closeCwdPicker);
 cwdPickerCancel.addEventListener("click", closeCwdPicker);
 cwdPickerCreate.addEventListener("click", submitCwdPicker);
+cwdPickerWorktreeEnabled.addEventListener("change", syncCwdPickerWorktreeFields);
 cwdPickerOverlay.addEventListener("mousedown", event => {
   if (event.target === cwdPickerOverlay) closeCwdPicker();
 });
@@ -602,6 +635,18 @@ cwdPickerNameInput.addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
 });
 cwdPickerInput.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); submitCwdPicker(); }
+  if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
+});
+cwdPickerWorktreeSourceRepo.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); cwdPickerWorktreeBase.focus(); cwdPickerWorktreeBase.select(); }
+  if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
+});
+cwdPickerWorktreeBase.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); cwdPickerWorktreeBranch.focus(); cwdPickerWorktreeBranch.select(); }
+  if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
+});
+cwdPickerWorktreeBranch.addEventListener("keydown", event => {
   if (event.key === "Enter") { event.preventDefault(); submitCwdPicker(); }
   if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
 });
@@ -849,11 +894,22 @@ function handleServerMessage(message: ServerMessage): void {
     }
     case "diff.state": {
       diffLoadingSessions.delete(message.sessionId);
+      diffErrors.delete(message.sessionId);
       diffStates.set(message.sessionId, message.state);
-      if (message.state.selectedSnapshot) {
-        diffSelectedSnapshots.set(message.sessionId, message.state.selectedSnapshot.entryId);
+      const projection = projections.get(message.sessionId);
+      const repoRoot = resolveSelectedDiffRepoRoot(message.sessionId, projection, message.state);
+      const { selectedSnapshot, headSnapshot } = resolveDiffSelection(message.sessionId, message.state, repoRoot);
+      if (selectedSnapshot) diffSelectedSnapshots.set(message.sessionId, selectedSnapshot.entryId);
+      else diffSelectedSnapshots.delete(message.sessionId);
+      diffSelectedHeads.set(message.sessionId, headSnapshot?.entryId ?? null);
+      if (
+        repoRoot &&
+        selectedSnapshot &&
+        message.state.selectedSnapshot?.repoRoot !== repoRoot
+      ) {
+        requestDiffState(message.sessionId, selectedSnapshot.entryId, headSnapshot?.entryId ?? null);
+        break;
       }
-      diffSelectedHeads.set(message.sessionId, message.state.headSnapshot?.entryId ?? null);
       markDiffsViewDirty();
       if (message.sessionId === activeSessionId && diffsPanelEl && isDiffsPanelActive()) {
         renderDiffsView(diffsPanelEl, projections.get(message.sessionId));
@@ -896,6 +952,11 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     case "session.notice":
       appendLog(`[${message.sessionId}] ${message.level}: ${message.text}`);
+      if (message.level === "error" && diffLoadingSessions.has(message.sessionId)) {
+        diffLoadingSessions.delete(message.sessionId);
+        diffErrors.set(message.sessionId, message.text);
+        markDiffsViewDirty();
+      }
       if (message.level === "error" || message.level === "warning") {
         appendSessionNotice(message.sessionId, { level: message.level, text: message.text });
         render();
@@ -1715,8 +1776,81 @@ function summarizeDiffFiles(
   return [...byPath.values()];
 }
 
+function diffRepoRoots(state: RepoDiffState | undefined): string[] {
+  if (!state) return [];
+  const roots: string[] = [];
+  for (const snapshot of state.snapshots) {
+    if (!roots.includes(snapshot.repoRoot)) roots.push(snapshot.repoRoot);
+  }
+  return roots;
+}
+
+function diffSnapshotsForRepo(state: RepoDiffState | undefined, repoRoot: string | null): DiffSnapshotSummary[] {
+  if (!state) return [];
+  if (!repoRoot) return state.snapshots;
+  return state.snapshots.filter(snapshot => snapshot.repoRoot === repoRoot);
+}
+
+function inferDiffRepoRootFromCwd(cwd: string | undefined, repoRoots: string[]): string | null {
+  if (!cwd) return null;
+  const matchingRoots = repoRoots
+    .filter(repoRoot => cwd === repoRoot || cwd.startsWith(`${repoRoot}/`) || cwd.startsWith(`${repoRoot}\\`))
+    .sort((left, right) => right.length - left.length);
+  return matchingRoots[0] ?? null;
+}
+
+function resolveSelectedDiffRepoRoot(
+  sessionId: string,
+  projection: SessionProjection | undefined,
+  state: RepoDiffState | undefined,
+): string | null {
+  const repoRoots = diffRepoRoots(state);
+  const explicit = diffSelectedRepos.get(sessionId);
+  if (explicit && repoRoots.includes(explicit)) return explicit;
+
+  const inferred = inferDiffRepoRootFromCwd(projection?.summary.cwd ?? undefined, repoRoots);
+  if (inferred) {
+    diffSelectedRepos.set(sessionId, inferred);
+    return inferred;
+  }
+
+  const selectedRepoRoot = state?.selectedSnapshot?.repoRoot;
+  if (selectedRepoRoot && repoRoots.includes(selectedRepoRoot)) {
+    diffSelectedRepos.set(sessionId, selectedRepoRoot);
+    return selectedRepoRoot;
+  }
+
+  const fallback = repoRoots[0] ?? null;
+  if (fallback) diffSelectedRepos.set(sessionId, fallback);
+  else diffSelectedRepos.delete(sessionId);
+  return fallback;
+}
+
+function resolveDiffSelection(
+  sessionId: string,
+  state: RepoDiffState | undefined,
+  repoRoot: string | null,
+): { selectedSnapshot: DiffSnapshotSummary | null; headSnapshot: DiffSnapshotSummary | null; snapshots: DiffSnapshotSummary[] } {
+  const snapshots = diffSnapshotsForRepo(state, repoRoot);
+  const selectedSnapshot = snapshots.find(snapshot => snapshot.entryId === diffSelectedSnapshots.get(sessionId))
+    ?? (state?.selectedSnapshot?.repoRoot === repoRoot ? state.selectedSnapshot : null)
+    ?? snapshots[snapshots.length - 1]
+    ?? null;
+  const headSnapshot = snapshots.find(snapshot => snapshot.entryId === diffSelectedHeads.get(sessionId))
+    ?? (state?.headSnapshot?.repoRoot === repoRoot ? state.headSnapshot : null)
+    ?? null;
+  return { selectedSnapshot, headSnapshot, snapshots };
+}
+
+function formatDiffRepoLabel(repoRoot: string): string {
+  const parts = repoRoot.split(/[/\\]/).filter(Boolean);
+  const name = parts[parts.length - 1] ?? repoRoot;
+  return name === repoRoot ? repoRoot : `${name} — ${shortPath(repoRoot)}`;
+}
+
 function requestDiffState(sessionId: string, selector?: string, headSelector?: string | null): void {
   if (diffLoadingSessions.has(sessionId)) return;
+  diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
   send({ type: "diff.refresh", sessionId, selector, headSelector: headSelector ?? undefined });
@@ -1743,10 +1877,20 @@ function requestActiveDiffState(): void {
   if (!activeSessionId || !diffsPanelEl || !isDiffsPanelActive()) return;
   if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
 
+  const projection = projections.get(activeSessionId);
+  const state = diffStates.get(activeSessionId);
+  const repoRoot = resolveSelectedDiffRepoRoot(activeSessionId, projection, state);
+  const { selectedSnapshot, headSnapshot } = resolveDiffSelection(activeSessionId, state, repoRoot);
+  if (!selectedSnapshot && state && diffRepoRoots(state).length > 0) {
+    markDiffsViewDirty();
+    if (diffsPanelEl) renderDiffsView(diffsPanelEl, projection);
+    return;
+  }
+
   requestDiffState(
     activeSessionId,
-    diffSelectedSnapshots.get(activeSessionId),
-    diffSelectedHeads.get(activeSessionId),
+    selectedSnapshot?.entryId,
+    headSnapshot?.entryId ?? diffSelectedHeads.get(activeSessionId),
   );
 }
 
@@ -1754,6 +1898,7 @@ function createDiffSnapshot(sessionId: string): void {
   const label = window.prompt("Snapshot label", "manual");
   if (label === null) return;
   diffLoadingSessions.add(sessionId);
+  diffErrors.delete(sessionId);
   markDiffsViewDirty();
   send({ type: "diff.snapshot", sessionId, label: label.trim() || undefined });
   if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
@@ -1903,9 +2048,12 @@ function buildDiffCommentContext(rows: ParsedDiffRow[], comment: DiffComment): s
   return targetRow ? [...before, diffRowText(targetRow), ...after].join("\n") : comment.lineText;
 }
 
-function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffComment[]): string {
-  const baseSnapshot = state.selectedSnapshot;
-  const headSnapshot = state.headSnapshot;
+function buildDiffCommentPrompt(
+  state: RepoDiffState,
+  comments: DiffComment[],
+  baseSnapshot: DiffSnapshotSummary,
+  headSnapshot: DiffSnapshotSummary | null,
+): string {
   const rows = parseDiffRows(state.diff);
   const commentSections = comments
     .map((comment, index) =>
@@ -1927,7 +2075,7 @@ function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffComment[]): 
     .join("\n\n");
   return [
     "I reviewed the repository diff in Fura and left comments on specific diff lines.",
-    baseSnapshot ? `Base snapshot: ${baseSnapshot.label} (${baseSnapshot.entryId})` : "Base snapshot: none",
+    `Base snapshot: ${baseSnapshot.label} (${baseSnapshot.entryId})`,
     headSnapshot
       ? `Compared to snapshot: ${headSnapshot.label} (${headSnapshot.entryId})`
       : "Compared to: current working tree",
@@ -1940,18 +2088,25 @@ function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffComment[]): 
   ].join("\n");
 }
 
-function selectedDiffComments(sessionId: string, state: RepoDiffState): DiffComment[] {
-  const baseSnapshot = state.selectedSnapshot;
+function selectedDiffComments(
+  sessionId: string,
+  baseSnapshot: DiffSnapshotSummary | null,
+  headSnapshot: DiffSnapshotSummary | null,
+): DiffComment[] {
   if (!baseSnapshot) return [];
   return (diffComments.get(sessionId) ?? []).filter(comment =>
-    isSameDiffComparison(comment, baseSnapshot, state.headSnapshot),
+    isSameDiffComparison(comment, baseSnapshot, headSnapshot),
   );
 }
 
-function sendDiffComments(sessionId: string, state: RepoDiffState, comments: DiffComment[]): void {
-  const baseSnapshot = state.selectedSnapshot;
-  if (!baseSnapshot || comments.length === 0) return;
-  const headSnapshot = state.headSnapshot;
+function sendDiffComments(
+  sessionId: string,
+  state: RepoDiffState,
+  baseSnapshot: DiffSnapshotSummary,
+  headSnapshot: DiffSnapshotSummary | null,
+  comments: DiffComment[],
+): void {
+  if (comments.length === 0) return;
   const clearFlushedComments = () => {
     diffComments.set(
       sessionId,
@@ -1964,18 +2119,24 @@ function sendDiffComments(sessionId: string, state: RepoDiffState, comments: Dif
   };
   sendPromptWithBusyHandling({
     sessionId,
-    text: buildDiffCommentPrompt(state, comments),
+    text: buildDiffCommentPrompt(state, comments, baseSnapshot, headSnapshot),
     editorText: `Flush ${comments.length} diff comment${comments.length === 1 ? "" : "s"}`,
     images: [],
     onSend: clearFlushedComments,
   });
 }
 
-function previewDiffComments(sessionId: string, state: RepoDiffState): void {
-  const comments = selectedDiffComments(sessionId, state);
+function previewDiffComments(
+  sessionId: string,
+  state: RepoDiffState,
+  baseSnapshot: DiffSnapshotSummary | null,
+  headSnapshot: DiffSnapshotSummary | null,
+): void {
+  if (!baseSnapshot) return;
+  const comments = selectedDiffComments(sessionId, baseSnapshot, headSnapshot);
   if (comments.length === 0) return;
-  diffPreviewDraft = { sessionId, state, comments };
-  diffPreviewText.value = buildDiffCommentPrompt(state, comments);
+  diffPreviewDraft = { sessionId, state, baseSnapshot, headSnapshot, comments };
+  diffPreviewText.value = buildDiffCommentPrompt(state, comments, baseSnapshot, headSnapshot);
   diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
   diffPreviewOverlay.hidden = false;
   diffPreviewText.scrollTop = 0;
@@ -1993,11 +2154,16 @@ function sendDiffPreviewDraft(): void {
   const draft = diffPreviewDraft;
   if (!draft) return;
   closeDiffPreview();
-  sendDiffComments(draft.sessionId, draft.state, draft.comments);
+  sendDiffComments(draft.sessionId, draft.state, draft.baseSnapshot, draft.headSnapshot, draft.comments);
 }
 
-function flushDiffComments(sessionId: string, state: RepoDiffState): void {
-  previewDiffComments(sessionId, state);
+function flushDiffComments(
+  sessionId: string,
+  state: RepoDiffState,
+  baseSnapshot: DiffSnapshotSummary | null,
+  headSnapshot: DiffSnapshotSummary | null,
+): void {
+  previewDiffComments(sessionId, state, baseSnapshot, headSnapshot);
 }
 
 function scrollDiffsToFile(container: HTMLElement, filePath: string): void {
@@ -2032,12 +2198,12 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
 
   const sessionId = activeSessionId;
   const state = diffStates.get(sessionId);
-  const selectedSnapshot = state?.selectedSnapshot ?? null;
-  const headSnapshot = state?.headSnapshot ?? null;
+  const repoRoots = diffRepoRoots(state);
+  const selectedRepoRoot = resolveSelectedDiffRepoRoot(sessionId, projection, state);
+  const { selectedSnapshot, headSnapshot, snapshots } = resolveDiffSelection(sessionId, state, selectedRepoRoot);
+  const diffError = diffErrors.get(sessionId) ?? null;
   const comments = diffComments.get(sessionId) ?? [];
-  const selectedComments = comments.filter(comment =>
-    isSameDiffComparison(comment, selectedSnapshot, headSnapshot),
-  );
+  const selectedComments = selectedDiffComments(sessionId, selectedSnapshot, headSnapshot);
   const parsedRows = state?.diff.trim() ? parseDiffRows(state.diff) : [];
   const fileSummaries = summarizeDiffFiles(parsedRows, comments, selectedSnapshot, headSnapshot);
 
@@ -2061,14 +2227,53 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   sidebarScroll.className = "diffs-sidebar-scroll";
   sidebar.append(sidebarScroll);
 
+  if (repoRoots.length > 0) {
+    const repoSection = mkEl("section");
+    repoSection.className = "diffs-repo-selector";
+    const repoLabel = mkEl("label");
+    repoLabel.className = "diffs-repo-label";
+    repoLabel.textContent = "Repository";
+    const repoSelect = mkEl("select");
+    repoSelect.className = "diff-repo-select";
+    repoSelect.disabled = repoRoots.length === 1 || diffLoadingSessions.has(sessionId);
+    for (const repoRoot of repoRoots) {
+      const option = mkEl("option");
+      option.value = repoRoot;
+      option.textContent = formatDiffRepoLabel(repoRoot);
+      option.title = repoRoot;
+      if (repoRoot === selectedRepoRoot) option.selected = true;
+      repoSelect.append(option);
+    }
+    repoSelect.addEventListener("change", () => {
+      const nextRepoRoot = repoSelect.value;
+      diffSelectedRepos.set(sessionId, nextRepoRoot);
+      diffSelectedSnapshots.delete(sessionId);
+      diffSelectedHeads.set(sessionId, null);
+      const nextSnapshots = diffSnapshotsForRepo(state, nextRepoRoot);
+      const nextSelected = nextSnapshots[nextSnapshots.length - 1] ?? null;
+      if (nextSelected) {
+        requestDiffState(sessionId, nextSelected.entryId, null);
+      } else {
+        diffErrors.delete(sessionId);
+        markDiffsViewDirty();
+        rerenderDiffsViewPreservingScroll(sessionId);
+      }
+    });
+    repoSection.append(repoLabel, repoSelect);
+    sidebarScroll.append(repoSection);
+  }
 
-  const snapshots = state?.snapshots ?? [];
   const snapshotList = mkEl("div");
   snapshotList.className = "diffs-snapshot-list";
-  if (snapshots.length === 0) {
+  if (repoRoots.length === 0) {
     const empty = mkEl("p");
     empty.className = "empty diffs-empty";
     empty.textContent = diffLoadingSessions.has(sessionId) ? "Loading snapshots…" : "No snapshots yet.";
+    snapshotList.append(empty);
+  } else if (snapshots.length === 0) {
+    const empty = mkEl("p");
+    empty.className = "empty diffs-empty";
+    empty.textContent = `No snapshots for ${selectedRepoRoot ? formatDiffRepoLabel(selectedRepoRoot) : "the selected repository"}.`;
     snapshotList.append(empty);
   } else {
     for (const snapshot of snapshots) {
@@ -2082,11 +2287,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
       button.append(label, meta);
       button.addEventListener("click", () => {
         diffSelectedSnapshots.set(sessionId, snapshot.entryId);
-        requestDiffState(
-          sessionId,
-          snapshot.entryId,
-          diffSelectedHeads.get(sessionId),
-        );
+        requestDiffState(sessionId, snapshot.entryId, headSnapshot?.entryId ?? null);
       });
       snapshotList.append(button);
     }
@@ -2164,16 +2365,16 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const previewBtn = mkEl("button");
   previewBtn.type = "button";
   previewBtn.textContent = "Preview comments";
-  previewBtn.disabled = !state || selectedComments.length === 0;
+  previewBtn.disabled = !state || !selectedSnapshot || selectedComments.length === 0;
   previewBtn.addEventListener("click", () => {
-    if (state) previewDiffComments(sessionId, state);
+    if (state) previewDiffComments(sessionId, state, selectedSnapshot, headSnapshot);
   });
   const flushBtn = mkEl("button");
   flushBtn.type = "button";
   flushBtn.textContent = `Preview & flush (${selectedComments.length})`;
-  flushBtn.disabled = !state || selectedComments.length === 0;
+  flushBtn.disabled = !state || !selectedSnapshot || selectedComments.length === 0;
   flushBtn.addEventListener("click", () => {
-    if (state) flushDiffComments(sessionId, state);
+    if (state) flushDiffComments(sessionId, state, selectedSnapshot, headSnapshot);
   });
   actions.append(headSelect, refreshBtn, previewBtn, flushBtn);
   toolbar.append(title, actions);
@@ -2188,6 +2389,11 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     loading.className = "empty diffs-empty";
     loading.textContent = "Loading diff…";
     mainBody.append(loading);
+  } else if (diffError) {
+    const error = mkEl("p");
+    error.className = "empty diffs-empty diffs-error";
+    error.textContent = diffError;
+    mainBody.append(error);
   } else if (!selectedSnapshot) {
     const empty = mkEl("p");
     empty.className = "empty diffs-empty";
@@ -3674,27 +3880,107 @@ function requireServerConfig(): ServerConfig | null {
   return null;
 }
 
+function setCwdPickerError(message: string | null): void {
+  cwdPickerStatus.textContent = message ?? "";
+  cwdPickerStatus.classList.toggle("error", Boolean(message));
+}
+
+function syncCwdPickerWorktreeFields(): void {
+  const enabled = cwdPickerWorktreeEnabled.checked;
+  cwdPickerWorktreeFields.hidden = !enabled;
+  if (enabled) {
+    cwdPickerInputLabel.textContent = "Working directory (new worktree path)";
+    cwdPickerInput.placeholder = "/home/user/worktrees/project-feature";
+    cwdPickerInputHelp.textContent = "This is the new worktree path where OMP will start.";
+    const currentWorkingDirectory = cwdPickerInput.value.trim();
+    const currentSourceRepo = cwdPickerWorktreeSourceRepo.value.trim();
+    if (!currentSourceRepo || currentSourceRepo === serverConfig?.defaultCwd) {
+      cwdPickerWorktreeSourceRepo.value = currentWorkingDirectory;
+    }
+    if (cwdPickerInput.value.trim() === cwdPickerWorktreeSourceRepo.value.trim()) {
+      cwdPickerInput.value = "";
+    }
+  } else {
+    cwdPickerInputLabel.textContent = "Working directory";
+    cwdPickerInput.placeholder = "/home/user/project";
+    cwdPickerInputHelp.textContent = "For a normal session, this is the directory where OMP starts.";
+    if (!cwdPickerInput.value.trim()) {
+      cwdPickerInput.value = cwdPickerWorktreeSourceRepo.value.trim() || serverConfig?.defaultCwd || "";
+    }
+  }
+}
+
 function openCwdPicker(): void {
   const config = requireServerConfig();
   if (!config) return;
   cwdPickerNameInput.value = "";
   cwdPickerInput.value = config.defaultCwd;
+  cwdPickerWorktreeEnabled.checked = false;
+  cwdPickerWorktreeSourceRepo.value = config.defaultCwd;
+  cwdPickerWorktreeBase.value = "HEAD";
+  cwdPickerWorktreeBranch.value = "";
+  setCwdPickerError(null);
+  syncCwdPickerWorktreeFields();
   cwdPickerOverlay.hidden = false;
   window.setTimeout(() => cwdPickerNameInput.focus(), 0);
 }
 
 function closeCwdPicker(): void {
   cwdPickerOverlay.hidden = true;
+  setCwdPickerError(null);
   promptInput.focus();
+}
+
+function buildWorktreeCreateOptions(workingDirectory: string): WorktreeCreateOptions | null {
+  if (!cwdPickerWorktreeEnabled.checked) return null;
+  const sourceRepo = cwdPickerWorktreeSourceRepo.value.trim();
+  const directory = workingDirectory;
+  const baseBranch = cwdPickerWorktreeBase.value.trim();
+  const branchName = cwdPickerWorktreeBranch.value.trim();
+  if (!directory) {
+    setCwdPickerError("Worktree working directory is required.");
+    cwdPickerInput.focus();
+    return null;
+  }
+  if (!sourceRepo) {
+    setCwdPickerError("Source repo root is required.");
+    cwdPickerWorktreeSourceRepo.focus();
+    return null;
+  }
+  if (!baseBranch) {
+    setCwdPickerError("Base branch/ref is required.");
+    cwdPickerWorktreeBase.focus();
+    return null;
+  }
+  if (baseBranch.startsWith("-")) {
+    setCwdPickerError("Base branch/ref must not start with '-'.");
+    cwdPickerWorktreeBase.focus();
+    return null;
+  }
+  if (branchName.startsWith("-")) {
+    setCwdPickerError("Branch name must not start with '-'.");
+    cwdPickerWorktreeBranch.focus();
+    return null;
+  }
+  return { sourceRepo, directory, baseBranch, ...(branchName ? { branchName } : {}) };
 }
 
 function submitCwdPicker(): void {
   if (!requireServerConfig()) return;
   const name = cwdPickerNameInput.value.trim();
   const cwd = cwdPickerInput.value.trim();
-  if (!name || !cwd) return;
+  if (!name || !cwd) {
+    setCwdPickerError(
+      cwdPickerWorktreeEnabled.checked
+        ? "Session name and worktree working directory are required."
+        : "Session name and working directory are required.",
+    );
+    return;
+  }
+  const worktree = buildWorktreeCreateOptions(cwd);
+  if (cwdPickerWorktreeEnabled.checked && !worktree) return;
   pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
-  send({ type: "session.create", name, cwd });
+  send(worktree ? { type: "session.create", name, worktree } : { type: "session.create", name, cwd });
   closeCwdPicker();
 }
 
