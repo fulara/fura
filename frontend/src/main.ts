@@ -508,6 +508,14 @@ type BusyPromptDraft = {
   onSend?: () => void;
 };
 type SessionNotice = { level: string; text: string };
+type SessionListItemDom = {
+  item: HTMLDivElement;
+  button: HTMLButtonElement;
+  title: HTMLSpanElement;
+  status: HTMLSpanElement;
+  meta: HTMLSpanElement;
+  deleteBtn: HTMLButtonElement;
+};
 let pendingImages: PendingImage[] = [];
 let pendingSnippets: PendingSnippet[] = [];
 let nextPendingAttachmentId = 1;
@@ -517,6 +525,8 @@ let activeSessionId: string | null = null;
 let serverConfig: ServerConfig | null = null;
 let pendingCreatedSessionBaseline: Set<string> | null = null;
 const unreadSessions = new Set<string>();
+const sessionListItems = new Map<string, SessionListItemDom>();
+let sessionsEmptyEl: HTMLParagraphElement | null = null;
 let sessions: SessionSummary[] = [];
 let lastRenderedSessionId: string | null = null;
 let transcriptPanelDirty = true;
@@ -853,6 +863,18 @@ function appendSessionNotice(sessionId: string, notice: SessionNotice): void {
   if (sessionId === activeSessionId) markTranscriptViewDirty();
 }
 
+function mergeSessionSummary(summary: SessionSummary): void {
+  const index = sessions.findIndex(session => session.sessionId === summary.sessionId);
+  if (index === -1) {
+    sessions = [summary, ...sessions];
+    return;
+  }
+
+  const nextSessions = sessions.slice();
+  nextSessions[index] = summary;
+  sessions = nextSessions;
+}
+
 function shouldActivateSnapshot(sessionId: string): boolean {
   if (pendingCreatedSessionBaseline && !pendingCreatedSessionBaseline.has(sessionId)) {
     pendingCreatedSessionBaseline = null;
@@ -880,6 +902,7 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     case "session.snapshot": {
       projections.set(message.sessionId, message.state);
+      mergeSessionSummary(message.state.summary);
       syncPromptHistoryFromProjection(message.sessionId, message.state);
       if (shouldActivateSnapshot(message.sessionId)) {
         activateSession(message.sessionId);
@@ -1266,70 +1289,124 @@ function formatSessionMeta(session: SessionSummary): string {
   return `${cwdLabel} · ${sessionKindLabel(session.kind)} · ${formatMessageCount(session.messageCount)}`;
 }
 
-function renderSessions(): void {
-  sessionsList.replaceChildren();
+function currentSessionSummary(sessionId: string): SessionSummary | undefined {
+  return sessions.find(session => session.sessionId === sessionId);
+}
 
+function handleSessionButtonClick(sessionId: string): void {
+  const session = currentSessionSummary(sessionId);
+  if (!session) return;
+
+  activateSession(session.sessionId);
+  if (session.kind === "available" && session.sessionFile) {
+    send({ type: "session.open", sessionFile: session.sessionFile });
+  } else {
+    send({ type: "session.attach", sessionId: session.sessionId });
+  }
+  render();
+}
+
+function handleSessionDeleteClick(sessionId: string): void {
+  const session = currentSessionSummary(sessionId);
+  if (!session) return;
+
+  const label = session.title || shortId(session.sessionId);
+  if (window.confirm(`Delete session "${label}"?\n\nThis will stop the session and permanently delete its file.`)) {
+    send({ type: "session.delete", sessionId: session.sessionId });
+  }
+}
+
+function createSessionListItem(sessionId: string): SessionListItemDom {
+  const item = document.createElement("div");
+  item.className = "session-item";
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.addEventListener("click", () => handleSessionButtonClick(sessionId));
+
+  const titleRow = document.createElement("span");
+  titleRow.className = "session-title-row";
+
+  const title = document.createElement("span");
+  title.className = "session-id";
+
+  const status = document.createElement("span");
+
+  const meta = document.createElement("span");
+  meta.className = "session-meta";
+
+  titleRow.append(title, status);
+  button.append(titleRow, meta);
+
+  const deleteBtn = document.createElement("button");
+  deleteBtn.type = "button";
+  deleteBtn.className = "session-delete";
+  deleteBtn.textContent = "\u00d7";
+  deleteBtn.addEventListener("click", e => {
+    e.stopPropagation();
+    handleSessionDeleteClick(sessionId);
+  });
+
+  item.append(button, deleteBtn);
+  return { item, button, title, status, meta, deleteBtn };
+}
+
+function updateSessionListItem(dom: SessionListItemDom, session: SessionSummary): void {
+  const isActive = session.sessionId === activeSessionId;
+  const hasUpdates = !isActive && unreadSessions.has(session.sessionId);
+  const classes = ["session", isActive ? "active" : "", hasUpdates ? "has-updates" : ""].filter(Boolean);
+  const label = session.title || shortId(session.sessionId);
+
+  dom.button.className = classes.join(" ");
+  dom.button.setAttribute("aria-current", isActive ? "page" : "false");
+  dom.title.textContent = label;
+  dom.status.className = `session-status session-status-${sessionStatusClass(session)}`;
+  dom.status.textContent = sessionStatusLabel(session);
+  dom.meta.textContent = formatSessionMeta(session);
+  dom.deleteBtn.setAttribute("aria-label", `Delete session ${label}`);
+}
+
+function renderSessions(): void {
   if (sessions.length === 0) {
-    const empty = document.createElement("p");
-    empty.className = "empty";
-    empty.textContent = "No sessions yet.";
-    sessionsList.append(empty);
+    for (const dom of sessionListItems.values()) dom.item.remove();
+    sessionListItems.clear();
+
+    if (!sessionsEmptyEl) {
+      sessionsEmptyEl = document.createElement("p");
+      sessionsEmptyEl.className = "empty";
+      sessionsEmptyEl.textContent = "No sessions yet.";
+    }
+    if (sessionsEmptyEl.parentNode !== sessionsList) sessionsList.replaceChildren(sessionsEmptyEl);
     return;
   }
 
+  sessionsEmptyEl?.remove();
+
+  const nextSessionIds = new Set(sessions.map(session => session.sessionId));
+  for (const [sessionId, dom] of sessionListItems) {
+    if (!nextSessionIds.has(sessionId)) {
+      dom.item.remove();
+      sessionListItems.delete(sessionId);
+    }
+  }
+
+  let anchor = sessionsList.firstChild;
   for (const session of sessions) {
-    const item = document.createElement("div");
-    item.className = "session-item";
+    let dom = sessionListItems.get(session.sessionId);
+    if (!dom) {
+      dom = createSessionListItem(session.sessionId);
+      sessionListItems.set(session.sessionId, dom);
+    }
 
-    const button = document.createElement("button");
-    button.type = "button";
-    const isActive = session.sessionId === activeSessionId;
-    const hasUpdates = !isActive && unreadSessions.has(session.sessionId);
-    const classes = ["session", isActive ? "active" : "", hasUpdates ? "has-updates" : ""].filter(Boolean);
-    button.className = classes.join(" ");
-    button.addEventListener("click", () => {
-      activateSession(session.sessionId);
-      if (session.kind === "available" && session.sessionFile) {
-        send({ type: "session.open", sessionFile: session.sessionFile });
-      } else {
-        send({ type: "session.attach", sessionId: session.sessionId });
-      }
-      render();
-    });
+    updateSessionListItem(dom, session);
+    if (dom.item !== anchor) sessionsList.insertBefore(dom.item, anchor);
+    anchor = dom.item.nextSibling;
+  }
 
-    const titleRow = document.createElement("span");
-    titleRow.className = "session-title-row";
-
-    const title = document.createElement("span");
-    title.className = "session-id";
-    title.textContent = session.title || shortId(session.sessionId);
-
-    const status = document.createElement("span");
-    status.className = `session-status session-status-${sessionStatusClass(session)}`;
-    status.textContent = sessionStatusLabel(session);
-
-    const meta = document.createElement("span");
-    meta.className = "session-meta";
-    meta.textContent = formatSessionMeta(session);
-
-    titleRow.append(title, status);
-    button.append(titleRow, meta);
-
-    const deleteBtn = document.createElement("button");
-    deleteBtn.type = "button";
-    deleteBtn.className = "session-delete";
-    deleteBtn.textContent = "\u00d7";
-    deleteBtn.setAttribute("aria-label", "Delete session");
-    deleteBtn.addEventListener("click", e => {
-      e.stopPropagation();
-      const label = session.title || shortId(session.sessionId);
-      if (window.confirm(`Delete session "${label}"?\n\nThis will stop the session and permanently delete its file.`)) {
-        send({ type: "session.delete", sessionId: session.sessionId });
-      }
-    });
-
-    item.append(button, deleteBtn);
-    sessionsList.append(item);
+  while (anchor) {
+    const next = anchor.nextSibling;
+    anchor.remove();
+    anchor = next;
   }
 }
 
