@@ -2532,6 +2532,16 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
             } else {
                 None
             };
+            let pending_switch_name = if target_changed {
+                state
+                    .pending_new_session_names
+                    .write()
+                    .await
+                    .remove(&current_session_id)
+            } else {
+                None
+            };
+            let effective_session_name = pending_switch_name.clone().or(session_name);
 
             let (previous_snapshot, target_snapshot) = {
                 let mut sessions = state.sessions.write().await;
@@ -2595,7 +2605,8 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                                 session_file: None,
                                 title: pending_create
                                     .as_ref()
-                                    .and_then(|pending| pending.title.clone()),
+                                    .and_then(|pending| pending.title.clone())
+                                    .or_else(|| pending_switch_name.clone()),
                                 timestamp: None,
                                 model: None,
                                 thinking_level: None,
@@ -2612,7 +2623,7 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                         record.updated_at = now_epoch_seconds();
                         apply_rpc_state_to_record(
                             record,
-                            session_name,
+                            effective_session_name,
                             model,
                             thinking_level,
                             session_file,
@@ -2634,7 +2645,7 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                     if let Some(record) = sessions.get_mut(&target_session_id) {
                         apply_rpc_state_to_record(
                             record,
-                            session_name,
+                            effective_session_name,
                             model,
                             thinking_level,
                             session_file,
@@ -2686,19 +2697,15 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                 let _ = state.events.send(snapshot);
                 broadcast_sessions_snapshot(state).await;
             }
-            // Apply the name before refresh so set_session_name reaches OMP before get_state.
+            // Queue the requested name before refresh so set_session_name reaches OMP before get_state.
+            // Keep the pending name until get_state reports the new OMP session id, then apply it to that target.
             let pending_name = state
                 .pending_new_session_names
-                .write()
+                .read()
                 .await
-                .remove(session_id);
+                .get(session_id)
+                .cloned();
             if let Some(ref name) = pending_name {
-                {
-                    let mut sessions = state.sessions.write().await;
-                    if let Some(record) = sessions.get_mut(&current_session_id) {
-                        record.title = Some(name.clone());
-                    }
-                }
                 let cmd = serde_json::json!({
                     "id": next_rpc_id(),
                     "type": "set_session_name",
@@ -2735,19 +2742,15 @@ async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
                     "Fork cancelled or unavailable for this session.",
                 ));
             } else {
-                // Apply the name before refresh so set_session_name reaches OMP before get_state.
+                // Queue the requested name before refresh so set_session_name reaches OMP before get_state.
+                // Keep the pending name until get_state reports the new OMP session id, then apply it to that target.
                 let pending_name = state
                     .pending_new_session_names
-                    .write()
+                    .read()
                     .await
-                    .remove(session_id);
+                    .get(session_id)
+                    .cloned();
                 if let Some(ref name) = pending_name {
-                    {
-                        let mut sessions = state.sessions.write().await;
-                        if let Some(record) = sessions.get_mut(&current_session_id) {
-                            record.title = Some(name.clone());
-                        }
-                    }
                     let cmd = serde_json::json!({
                         "id": next_rpc_id(),
                         "type": "set_session_name",
@@ -5178,6 +5181,10 @@ mod tests {
             .write()
             .await
             .insert("old-session".to_string(), "old-session".to_string());
+        state.pending_new_session_names.write().await.insert(
+            "old-session".to_string(),
+            "Requested handoff name".to_string(),
+        );
 
         apply_rpc_response(
             &state,
@@ -5189,7 +5196,7 @@ mod tests {
                 "data": {
                     "sessionId": "new-session",
                     "sessionFile": "new-session.jsonl",
-                    "sessionName": "Handoff continuation"
+                    "sessionName": "Model generated fallback"
                 }
             }),
         )
@@ -5213,7 +5220,7 @@ mod tests {
             assert!(matches!(next.kind, SessionKind::Managed));
             assert!(matches!(next.status, SessionStatus::Idle));
             assert_eq!(next.session_file.as_deref(), Some("new-session.jsonl"));
-            assert_eq!(next.title.as_deref(), Some("Handoff continuation"));
+            assert_eq!(next.title.as_deref(), Some("Requested handoff name"));
             assert!(next.messages.is_empty());
         }
 
@@ -5231,6 +5238,15 @@ mod tests {
                 .await
                 .as_deref(),
             Some("old-session")
+        );
+        assert!(
+            state
+                .pending_new_session_names
+                .read()
+                .await
+                .get("old-session")
+                .is_none(),
+            "pending handoff name should be consumed once the new session id is known"
         );
         assert!(
             rpc_transport_session_id(&state, "old-session")

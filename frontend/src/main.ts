@@ -124,6 +124,17 @@ type SessionProjection = {
   planMode?: PlanModeProjection | null;
 };
 
+type PanelRenderItem = {
+  key: string;
+  render: () => HTMLElement;
+};
+
+type CachedPanelRenderState = {
+  keys: string[];
+  nodes: Map<string, HTMLElement>;
+  revision: number;
+};
+
 type DiffSnapshotSummary = {
   entryId: string;
   label: string;
@@ -466,6 +477,7 @@ type BusyPromptDraft = {
   snippets: PendingSnippet[];
   onSend?: () => void;
 };
+type SessionNotice = { level: string; text: string };
 let pendingImages: PendingImage[] = [];
 let pendingSnippets: PendingSnippet[] = [];
 let nextPendingAttachmentId = 1;
@@ -477,6 +489,13 @@ let pendingCreatedSessionBaseline: Set<string> | null = null;
 const unreadSessions = new Set<string>();
 let sessions: SessionSummary[] = [];
 let lastRenderedSessionId: string | null = null;
+let transcriptPanelDirty = true;
+let toolsPanelDirty = true;
+let lastTranscriptRenderedSessionId: string | null = null;
+let lastToolsRenderedSessionId: string | null = null;
+let transcriptRenderRevision = 0;
+const transcriptRenderCaches = new WeakMap<HTMLElement, CachedPanelRenderState>();
+const toolsRenderCaches = new WeakMap<HTMLElement, CachedPanelRenderState>();
 let paletteCommands: SlashCommandSpec[] = [];
 let paletteSelectedIndex = -1;
 const projections = new Map<string, SessionProjection>();
@@ -488,7 +507,7 @@ const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
 let lastDiffsRenderedSessionId: string | null = null;
 let lastDiffsRenderedProjectionPresent = false;
-const sessionNotices = new Map<string, Array<{ level: string; text: string }>>();
+const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
 const DIFF_COMMENT_CONTEXT_RADIUS = 4;
@@ -539,6 +558,7 @@ toolVisibilityToggle.addEventListener("click", () => {
   showToolBubbles = !showToolBubbles;
   window.localStorage.setItem(TOOL_VISIBILITY_STORAGE_KEY, String(showToolBubbles));
   syncToolVisibilityToggle();
+  markTranscriptViewDirty();
   renderActiveSession();
 });
 thinkingVisibilityToggle.addEventListener("click", () => {
@@ -546,6 +566,7 @@ thinkingVisibilityToggle.addEventListener("click", () => {
   skipThinkingOpenRestoreOnce = true;
   window.localStorage.setItem(THINKING_VISIBILITY_STORAGE_KEY, thinkingVisibilityMode);
   syncThinkingVisibilityToggle();
+  markTranscriptViewDirty({ resetCache: true });
   renderActiveSession();
 });
 abortButton.addEventListener("click", () => {
@@ -764,15 +785,27 @@ function connect(): void {
       appendLog("Ignored non-text WebSocket frame.");
       return;
     }
-    appendLog(event.data);
-    handleServerMessage(JSON.parse(event.data) as ServerMessage);
+    const message = JSON.parse(event.data) as ServerMessage;
+    handleServerMessage(message);
   });
 }
 
 function activateSession(sessionId: string): void {
-  if (activeSessionId !== sessionId) resetPromptHistoryNavigation();
+  const sessionChanged = activeSessionId !== sessionId;
+  if (sessionChanged) {
+    resetPromptHistoryNavigation();
+    markTranscriptViewDirty();
+    markToolsViewDirty();
+  }
   activeSessionId = sessionId;
   unreadSessions.delete(sessionId);
+}
+
+function appendSessionNotice(sessionId: string, notice: SessionNotice): void {
+  const notices = sessionNotices.get(sessionId) ?? [];
+  notices.push(notice);
+  sessionNotices.set(sessionId, notices);
+  if (sessionId === activeSessionId) markTranscriptViewDirty();
 }
 
 function shouldActivateSnapshot(sessionId: string): boolean {
@@ -805,6 +838,8 @@ function handleServerMessage(message: ServerMessage): void {
       syncPromptHistoryFromProjection(message.sessionId, message.state);
       if (shouldActivateSnapshot(message.sessionId)) {
         activateSession(message.sessionId);
+        markTranscriptViewDirty();
+        markToolsViewDirty();
         render();
       } else {
         unreadSessions.add(message.sessionId);
@@ -841,9 +876,10 @@ function handleServerMessage(message: ServerMessage): void {
           },
         });
       } else {
-        const notices = sessionNotices.get(message.sessionId) ?? [];
-        notices.push({ level: "info", text: "Stayed in plan mode. Type a refinement prompt to continue planning." });
-        sessionNotices.set(message.sessionId, notices);
+        appendSessionNotice(message.sessionId, {
+          level: "info",
+          text: "Stayed in plan mode. Type a refinement prompt to continue planning.",
+        });
         render();
       }
       break;
@@ -861,9 +897,7 @@ function handleServerMessage(message: ServerMessage): void {
     case "session.notice":
       appendLog(`[${message.sessionId}] ${message.level}: ${message.text}`);
       if (message.level === "error" || message.level === "warning") {
-        const notices = sessionNotices.get(message.sessionId) ?? [];
-        notices.push({ level: message.level, text: message.text });
-        sessionNotices.set(message.sessionId, notices);
+        appendSessionNotice(message.sessionId, { level: message.level, text: message.text });
         render();
       }
       if (modelPickerSessionId === message.sessionId && message.level === "error") {
@@ -894,9 +928,7 @@ function handleServerMessage(message: ServerMessage): void {
       appendLog(`Error: ${message.message}`);
       pendingCreatedSessionBaseline = null;
       if (activeSessionId) {
-        const notices = sessionNotices.get(activeSessionId) ?? [];
-        notices.push({ level: "error", text: message.message });
-        sessionNotices.set(activeSessionId, notices);
+        appendSessionNotice(activeSessionId, { level: "error", text: message.message });
         render();
       }
       break;
@@ -1028,12 +1060,10 @@ function sendPromptWithBusyHandling(options: {
       return true;
     }
     if (isSlashCommandLike) {
-      const notices = sessionNotices.get(options.sessionId) ?? [];
-      notices.push({
+      appendSessionNotice(options.sessionId, {
         level: "warning",
         text: "Slash commands cannot be sent as steer or follow-up prompts while the agent is busy.",
       });
-      sessionNotices.set(options.sessionId, notices);
       render();
       return false;
     }
@@ -1278,10 +1308,15 @@ function syncThinkingVisibilityToggle(): void {
 }
 
 // Renders the workspace header, status bar, and busy prompt choice.
-// Drives re-render of the Dockview panels via their stored element references.
+// Drives re-render of the active Dockview panel via its stored element reference.
 function renderActiveSession(): void {
   const sessionChanged = activeSessionId !== lastRenderedSessionId;
   lastRenderedSessionId = activeSessionId;
+
+  if (sessionChanged) {
+    markTranscriptViewDirty();
+    markToolsViewDirty();
+  }
 
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
   const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
@@ -1303,13 +1338,193 @@ function renderActiveSession(): void {
 
   renderStatusBar(projection);
   renderBusyPromptChoice();
+  renderActiveDockviewPanel(projection);
+}
 
-  if (transcriptPanelEl) renderTranscriptView(transcriptPanelEl, projection, sessionChanged);
-  if (toolsPanelEl) renderToolsView(toolsPanelEl, projection);
+function markTranscriptViewDirty(options: { resetCache?: boolean } = {}): void {
+  transcriptPanelDirty = true;
+  if (options.resetCache) transcriptRenderRevision += 1;
+}
+
+function markToolsViewDirty(): void {
+  toolsPanelDirty = true;
+}
+
+function isTranscriptPanelActive(): boolean {
+  return dockviewApi?.activePanel?.id === "transcript";
+}
+
+function isToolsPanelActive(): boolean {
+  return dockviewApi?.activePanel?.id === "tools";
+}
+
+function renderActiveDockviewPanel(projection: SessionProjection | undefined): void {
+  renderTranscriptPanelIfNeeded(projection);
+  renderToolsPanelIfNeeded(projection);
   if (diffsPanelEl && isDiffsPanelActive() && shouldRenderDiffsView(projection)) renderDiffsView(diffsPanelEl, projection);
 }
 
+function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
+  if (!transcriptPanelEl || !isTranscriptPanelActive()) return;
+  const sessionChanged = activeSessionId !== lastTranscriptRenderedSessionId;
+  if (!force && !transcriptPanelDirty && !sessionChanged) return;
+
+  renderTranscriptView(transcriptPanelEl, projection, sessionChanged);
+  transcriptPanelDirty = false;
+  lastTranscriptRenderedSessionId = activeSessionId;
+}
+
+function renderToolsPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
+  if (!toolsPanelEl || !isToolsPanelActive()) return;
+  const sessionChanged = activeSessionId !== lastToolsRenderedSessionId;
+  if (!force && !toolsPanelDirty && !sessionChanged) return;
+
+  renderToolsView(toolsPanelEl, projection);
+  toolsPanelDirty = false;
+  lastToolsRenderedSessionId = activeSessionId;
+}
+
 // --- Panel render functions ---
+
+function getCachedPanelRenderState(
+  caches: WeakMap<HTMLElement, CachedPanelRenderState>,
+  container: HTMLElement,
+  revision: number,
+): CachedPanelRenderState {
+  let cache = caches.get(container);
+  if (!cache) {
+    cache = { keys: [], nodes: new Map<string, HTMLElement>(), revision };
+    caches.set(container, cache);
+  }
+  return cache;
+}
+
+function clearCachedPanelRenderState(cache: CachedPanelRenderState): void {
+  cache.keys = [];
+  cache.nodes.clear();
+}
+
+function firstChangedPanelItemIndex(previousKeys: string[], items: PanelRenderItem[]): number {
+  const sharedLength = Math.min(previousKeys.length, items.length);
+  for (let i = 0; i < sharedLength; i++) {
+    if (previousKeys[i] !== items[i]?.key) return i;
+  }
+  return previousKeys.length === items.length ? items.length : sharedLength;
+}
+
+function firstPanelItemRenderIndex(cache: CachedPanelRenderState, items: PanelRenderItem[], revision: number): number {
+  if (cache.revision !== revision || cache.keys.length === 0) return 0;
+  const firstChangedIndex = firstChangedPanelItemIndex(cache.keys, items);
+  if (firstChangedIndex === items.length && cache.keys.length === items.length) {
+    return Math.max(0, items.length - 1);
+  }
+  return Math.max(0, Math.min(firstChangedIndex, cache.keys.length - 1));
+}
+
+function renderCachedPanelItems(
+  container: HTMLElement,
+  cache: CachedPanelRenderState,
+  items: PanelRenderItem[],
+  revision: number,
+  trailingNodes: Node[] = [],
+): void {
+  const renderFromIndex = firstPanelItemRenderIndex(cache, items, revision);
+  const fragment = mkFrag();
+  const nextNodes = new Map<string, HTMLElement>();
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const cachedNode = i < renderFromIndex ? cache.nodes.get(item.key) : undefined;
+    const node = cachedNode?.ownerDocument === container.ownerDocument ? cachedNode : item.render();
+    nextNodes.set(item.key, node);
+    fragment.append(node);
+  }
+
+  for (const node of trailingNodes) fragment.append(node);
+
+  container.replaceChildren(fragment);
+  cache.keys = items.map(item => item.key);
+  cache.nodes = nextNodes;
+  cache.revision = revision;
+}
+
+function renderSessionNoticeNodes(notices: SessionNotice[]): HTMLElement[] {
+  return notices.map(notice => {
+    const bar = mkEl("div");
+    bar.className = `session-notice notice-${notice.level}`;
+    bar.textContent = notice.text;
+    return bar;
+  });
+}
+
+function restoreOpenThinkingBlocks(container: HTMLElement, openThinking: Set<string>): void {
+  container.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
+    const key = `${el.dataset.messageId}:${el.dataset.blockIndex}`;
+    if (openThinking.has(key)) el.open = true;
+  });
+}
+
+function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderItem[] {
+  const items: PanelRenderItem[] = [];
+  for (let i = 0; i < projection.transcript.length; i++) {
+    const entry = projection.transcript[i];
+    const startIndex = i;
+
+    if (entry.kind === "message") {
+      items.push({
+        key: `message:${entry.id}:${startIndex}`,
+        render: () => renderMessage(entry),
+      });
+      continue;
+    }
+
+    if (!showToolBubbles) continue;
+
+    if (entry.toolName === "read" && !entry.isError) {
+      const readCards = [entry];
+      while (isCompactReadCard(projection.transcript[i + 1])) {
+        readCards.push(projection.transcript[++i] as { kind: "tool" } & ToolCard);
+      }
+      items.push({
+        key: `read-group:${startIndex}:${readCards.map(card => card.toolCallId).join("|")}`,
+        render: () => (readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards)),
+      });
+      continue;
+    }
+
+    items.push({
+      key: `tool:${entry.toolCallId}:${startIndex}`,
+      render: () => renderToolCard(entry),
+    });
+  }
+  return items;
+}
+
+function buildToolsRenderItems(tools: Array<{ kind: "tool" } & ToolCard>): PanelRenderItem[] {
+  const items: PanelRenderItem[] = [];
+  for (let i = 0; i < tools.length; i++) {
+    const entry = tools[i];
+    const startIndex = i;
+
+    if (entry.toolName === "read" && !entry.isError) {
+      const readCards = [entry];
+      while (i + 1 < tools.length && isCompactReadCard(tools[i + 1])) {
+        readCards.push(tools[++i]);
+      }
+      items.push({
+        key: `read-group:${startIndex}:${readCards.map(card => card.toolCallId).join("|")}`,
+        render: () => (readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards)),
+      });
+      continue;
+    }
+
+    items.push({
+      key: `tool:${entry.toolCallId}:${startIndex}`,
+      render: () => renderToolCard(entry),
+    });
+  }
+  return items;
+}
 
 // Renders the chronological transcript into `container`, including optional inline tool bubbles.
 // Sets _renderOwner from container.ownerDocument so all mkEl calls use the correct document
@@ -1320,8 +1535,8 @@ function renderTranscriptView(
   sessionChanged: boolean,
 ): void {
   _renderOwner = container.ownerDocument;
+  const cache = getCachedPanelRenderState(transcriptRenderCaches, container, transcriptRenderRevision);
 
-  // Snapshot scroll and open thinking blocks before clearing DOM.
   const wasNearBottom =
     container.scrollHeight - container.scrollTop - container.clientHeight < 120;
   const restoreThinkingOpenState = !skipThinkingOpenRestoreOnce;
@@ -1333,59 +1548,28 @@ function renderTranscriptView(
     });
   }
 
-  container.replaceChildren();
-
   if (!projection) {
+    clearCachedPanelRenderState(cache);
     const empty = mkEl("p");
     empty.className = "empty transcript-empty";
     empty.textContent = "No session selected.";
-    container.append(empty);
+    container.replaceChildren(empty);
     return;
   }
 
-  if (projection.transcript.length === 0) {
+  const notices = activeSessionId ? (sessionNotices.get(activeSessionId) ?? []) : [];
+  const noticeNodes = renderSessionNoticeNodes(notices);
+  const items = buildTranscriptRenderItems(projection);
+
+  if (items.length === 0) {
+    clearCachedPanelRenderState(cache);
     const empty = mkEl("p");
     empty.className = "empty transcript-empty";
     empty.textContent = "Transcript is empty.";
-    container.append(empty);
+    container.replaceChildren(empty, ...noticeNodes);
   } else {
-    for (let i = 0; i < projection.transcript.length; i++) {
-      const entry = projection.transcript[i];
-      if (entry.kind === "message") {
-        container.append(renderMessage(entry));
-        continue;
-      }
-
-      if (!showToolBubbles) continue;
-
-      if (isCompactReadCard(entry)) {
-        const readCards = [entry];
-        while (isCompactReadCard(projection.transcript[i + 1])) {
-          readCards.push(projection.transcript[++i] as { kind: "tool" } & ToolCard);
-        }
-        container.append(readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards));
-        continue;
-      }
-
-      container.append(renderToolCard(entry));
-    }
-
-    // Restore thinking blocks that were manually opened before the re-render.
-    if (restoreThinkingOpenState) {
-      container.querySelectorAll<HTMLDetailsElement>("details[data-message-id]").forEach(el => {
-        const key = `${el.dataset.messageId}:${el.dataset.blockIndex}`;
-        if (openThinking.has(key)) el.open = true;
-      });
-    }
-  }
-
-  // Session notices rendered at bottom of transcript.
-  const notices = activeSessionId ? (sessionNotices.get(activeSessionId) ?? []) : [];
-  for (const notice of notices) {
-    const bar = mkEl("div");
-    bar.className = `session-notice notice-${notice.level}`;
-    bar.textContent = notice.text;
-    container.append(bar);
+    renderCachedPanelItems(container, cache, items, transcriptRenderRevision, noticeNodes);
+    if (restoreThinkingOpenState) restoreOpenThinkingBlocks(container, openThinking);
   }
 
   if (sessionChanged || wasNearBottom) {
@@ -1400,13 +1584,14 @@ function renderToolsView(
   projection: SessionProjection | undefined,
 ): void {
   _renderOwner = container.ownerDocument;
-  container.replaceChildren();
+  const cache = getCachedPanelRenderState(toolsRenderCaches, container, 0);
 
   if (!projection) {
+    clearCachedPanelRenderState(cache);
     const empty = mkEl("p");
     empty.className = "empty tools-empty";
     empty.textContent = "No session selected.";
-    container.append(empty);
+    container.replaceChildren(empty);
     return;
   }
 
@@ -1415,25 +1600,15 @@ function renderToolsView(
   );
 
   if (tools.length === 0) {
+    clearCachedPanelRenderState(cache);
     const empty = mkEl("p");
     empty.className = "empty tools-empty";
     empty.textContent = "No tool executions yet.";
-    container.append(empty);
+    container.replaceChildren(empty);
     return;
   }
 
-  for (let i = 0; i < tools.length; i++) {
-    const entry = tools[i];
-    if (isCompactReadCard(entry)) {
-      const readCards = [entry];
-      while (i + 1 < tools.length && isCompactReadCard(tools[i + 1])) {
-        readCards.push(tools[++i]);
-      }
-      container.append(readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards));
-      continue;
-    }
-    container.append(renderToolCard(entry));
-  }
+  renderCachedPanelItems(container, cache, buildToolsRenderItems(tools), 0);
 }
 
 type ParsedDiffRow =
@@ -2134,11 +2309,8 @@ function initDockview(): void {
               scroll.className = "panel-scroll";
               el.append(toolbar, scroll);
               transcriptPanelEl = scroll;
-              renderTranscriptView(
-                scroll,
-                activeSessionId ? projections.get(activeSessionId) : undefined,
-                true,
-              );
+              markTranscriptViewDirty();
+              renderTranscriptPanelIfNeeded(activeSessionId ? projections.get(activeSessionId) : undefined, true);
             },
           };
         }
@@ -2153,10 +2325,8 @@ function initDockview(): void {
               scroll.className = "panel-scroll";
               el.append(toolbar, scroll);
               toolsPanelEl = scroll;
-              renderToolsView(
-                scroll,
-                activeSessionId ? projections.get(activeSessionId) : undefined,
-              );
+              markToolsViewDirty();
+              renderToolsPanelIfNeeded(activeSessionId ? projections.get(activeSessionId) : undefined, true);
             },
           };
         }
@@ -2184,8 +2354,17 @@ function initDockview(): void {
 
   dockviewApi = dv;
   dv.onDidActivePanelChange(panel => {
+    const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
+    if (panel?.id === "transcript") {
+      renderTranscriptPanelIfNeeded(projection, true);
+      return;
+    }
+    if (panel?.id === "tools") {
+      renderToolsPanelIfNeeded(projection, true);
+      return;
+    }
     if (panel?.id === "diffs") {
-      if (diffsPanelEl) renderDiffsView(diffsPanelEl, activeSessionId ? projections.get(activeSessionId) : undefined);
+      if (diffsPanelEl) renderDiffsView(diffsPanelEl, projection);
       requestActiveDiffState();
     }
   });
@@ -2194,12 +2373,10 @@ function initDockview(): void {
   dv.onDidOpenPopoutWindowFail(() => {
     const sid = activeSessionId;
     if (!sid) return;
-    const notices = sessionNotices.get(sid) ?? [];
-    notices.push({
+    appendSessionNotice(sid, {
       level: "warning",
       text: "Popup window was blocked. Allow popups for this site to use the pop-out feature.",
     });
-    sessionNotices.set(sid, notices);
     render();
   });
 
@@ -2232,10 +2409,8 @@ function initDockview(): void {
       renderer: "always",
     });
   }
-  if (isDiffsPanelActive() && diffsPanelEl) {
-    renderDiffsView(diffsPanelEl, activeSessionId ? projections.get(activeSessionId) : undefined);
-    requestActiveDiffState();
-  }
+  renderActiveDockviewPanel(activeSessionId ? projections.get(activeSessionId) : undefined);
+  if (isDiffsPanelActive()) requestActiveDiffState();
 
   // Persist layout on change (debounced: avoid rapid writes during drag).
   let layoutSaveTimer: number | undefined;
@@ -3538,6 +3713,7 @@ function submitForkPicker(): void {
   if (!activeSessionId) return;
   const name = forkPickerNameInput.value.trim();
   if (!name) return;
+  pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
   send({ type: "session.fork", sessionId: activeSessionId, name });
   closeForkPicker();
 }
@@ -3559,6 +3735,7 @@ function submitHandoffPicker(): void {
   const name = handoffPickerNameInput.value.trim();
   if (!name) return;
   const customInstructions = handoffPickerInstructions.value.trim() || undefined;
+  pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
   send({ type: "session.handoff", sessionId: activeSessionId, name, customInstructions });
   closeHandoffPicker();
 }
