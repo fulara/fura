@@ -35,6 +35,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 const SESSION_CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const SESSION_CATALOG_PRELOAD_LIMIT: usize = 30;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -58,6 +59,10 @@ struct Args {
     /// JSONL file that receives every raw RPC stdout frame before Fura maps it.
     #[arg(long, env = "FURA_BRIDGE_DEBUG_FILE")]
     bridge_debug_file: Option<PathBuf>,
+
+    /// Forward raw OMP RPC frames to WebSocket clients. Disabled by default because clients do not render them.
+    #[arg(long, env = "FURA_FORWARD_RAW_FRAMES", default_value_t = false)]
+    forward_raw_frames: bool,
 
     #[arg(long, default_value = "frontend/dist")]
     static_dir: PathBuf,
@@ -93,6 +98,7 @@ struct AppState {
     rpc_config: Arc<RpcConfig>,
     log_frames: bool,
     bridge_debug_file: Option<PathBuf>,
+    forward_raw_frames: bool,
     session_root: PathBuf,
     default_cwd: Arc<RwLock<String>>,
     config_path: Option<PathBuf>,
@@ -678,6 +684,7 @@ async fn main() -> anyhow::Result<()> {
         }),
         log_frames: args.log_frames,
         bridge_debug_file: args.bridge_debug_file,
+        forward_raw_frames: args.forward_raw_frames,
         session_root,
         default_cwd: Arc::new(RwLock::new(default_cwd)),
         config_path,
@@ -2016,11 +2023,13 @@ where
             Ok(frame) => {
                 log_rpc_frame(&session_id, &frame);
                 apply_rpc_frame(&state, &session_id, &frame).await;
-                let raw_session_id = rpc_session_target_id(&state, &session_id).await;
-                let _ = state.events.send(ServerMessage::RawOmp {
-                    session_id: raw_session_id,
-                    frame,
-                });
+                if state.forward_raw_frames {
+                    let raw_session_id = rpc_session_target_id(&state, &session_id).await;
+                    let _ = state.events.send(ServerMessage::RawOmp {
+                        session_id: raw_session_id,
+                        frame,
+                    });
+                }
             }
             Err(error) => {
                 warn!(session_id = %session_id, %error, bytes = line.len(), "invalid RPC JSONL frame")
@@ -2916,6 +2925,7 @@ async fn send_sessions_snapshot(
 #[derive(Debug)]
 struct DiscoveredSession {
     id: String,
+    preload_index: usize,
     cwd: Option<String>,
     title: Option<String>,
     timestamp: Option<String>,
@@ -2933,8 +2943,15 @@ async fn refresh_session_catalog(state: &AppState) -> bool {
     let mut sessions = state.sessions.write().await;
     let before = session_summaries_from_map(&sessions);
 
-    for session in discovered {
+    for mut session in discovered {
         discovered_ids.insert(session.id.clone());
+        if should_preload_discovered_session_messages(&sessions, &session) {
+            let path = Path::new(&session.session_file);
+            let (messages, tool_cards) = read_session_file_messages(path);
+            session.messages = messages;
+            session.tool_cards = tool_cards;
+            session.messages_loaded = true;
+        }
         match sessions.get_mut(&session.id) {
             Some(record) if record.kind == SessionKind::Available => {
                 let should_reload_messages = session.messages_loaded
@@ -3004,17 +3021,28 @@ async fn refresh_session_catalog(state: &AppState) -> bool {
 fn discover_sessions(root: &Path) -> Vec<DiscoveredSession> {
     let mut sessions = Vec::new();
     collect_session_files(root, &mut sessions);
-    // Sort newest-updated first so we preload the most relevant sessions.
     sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
-    // Preload messages for up to 30 most recently updated sessions.
-    for session in sessions.iter_mut().take(30) {
-        let path = Path::new(&session.session_file);
-        let (messages, tool_cards) = read_session_file_messages(path);
-        session.messages = messages;
-        session.tool_cards = tool_cards;
-        session.messages_loaded = true;
+    for (index, session) in sessions.iter_mut().enumerate() {
+        session.preload_index = index;
     }
     sessions
+}
+
+fn should_preload_discovered_session_messages(
+    existing_sessions: &HashMap<String, SessionRecord>,
+    discovered: &DiscoveredSession,
+) -> bool {
+    if discovered.preload_index >= SESSION_CATALOG_PRELOAD_LIMIT {
+        return false;
+    }
+
+    match existing_sessions.get(&discovered.id) {
+        Some(record) if record.kind == SessionKind::Available => {
+            record.updated_at != discovered.updated_at || record.messages.is_empty()
+        }
+        Some(_) => false,
+        None => true,
+    }
 }
 
 fn collect_session_files(path: &Path, sessions: &mut Vec<DiscoveredSession>) {
@@ -3065,6 +3093,7 @@ fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
         .unwrap_or_else(now_epoch_seconds);
 
     Some(DiscoveredSession {
+        preload_index: usize::MAX,
         id: header.id,
         cwd: header.cwd,
         title: header.title,
@@ -3869,6 +3898,7 @@ mod tests {
             }),
             log_frames: false,
             bridge_debug_file,
+            forward_raw_frames: false,
             session_root: env::temp_dir(),
             default_cwd: Arc::new(RwLock::new(env::temp_dir().to_string_lossy().into_owned())),
             config_path: None,
@@ -4286,6 +4316,46 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn rpc_stdout_does_not_forward_raw_frames_by_default() {
+        let state = test_state(8, None);
+        let mut events = state.events.subscribe();
+        let input = b"{\"type\":\"ready\"}\n";
+
+        read_rpc_stdout(state, "transport-1".to_string(), BufReader::new(&input[..])).await;
+
+        let mut saw_raw_frame = false;
+        while let Ok(event) = events.try_recv() {
+            if matches!(event, ServerMessage::RawOmp { .. }) {
+                saw_raw_frame = true;
+            }
+        }
+
+        assert!(!saw_raw_frame, "raw frames should be opt-in");
+    }
+
+    #[tokio::test]
+    async fn rpc_stdout_forwards_raw_frames_when_enabled() {
+        let mut state = test_state(8, None);
+        state.forward_raw_frames = true;
+        let mut events = state.events.subscribe();
+        let input = b"{\"type\":\"ready\"}\n";
+
+        read_rpc_stdout(state, "transport-1".to_string(), BufReader::new(&input[..])).await;
+
+        let mut raw_frame_type = None;
+        while let Ok(event) = events.try_recv() {
+            if let ServerMessage::RawOmp { frame, .. } = event {
+                raw_frame_type = frame
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+            }
+        }
+
+        assert_eq!(raw_frame_type.as_deref(), Some("ready"));
     }
 
     #[tokio::test]

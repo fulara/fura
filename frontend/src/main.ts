@@ -454,10 +454,9 @@ const diffSelectedSnapshots = new Map<string, string>();
 const diffSelectedHeads = new Map<string, string | null>();
 const diffComments = new Map<string, DiffComment[]>();
 const diffLoadingSessions = new Set<string>();
-const diffRefreshTimers = new Map<string, number>();
-const diffLastRefreshRequests = new Map<string, number>();
-const DIFF_AUTO_REFRESH_DEBOUNCE_MS = 400;
-const DIFF_AUTO_REFRESH_MIN_INTERVAL_MS = 1_500;
+let diffPanelDirty = true;
+let lastDiffsRenderedSessionId: string | null = null;
+let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, Array<{ level: string; text: string }>>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 const PROMPT_HISTORY_LIMIT = 100;
@@ -503,9 +502,6 @@ createSessionButton.addEventListener("click", () => {
   openCwdPicker();
 });
 refreshSessionsButton.addEventListener("click", () => send({ type: "session.list" }));
-window.addEventListener("focus", () => {
-  refreshActiveDiffs("window-focus");
-});
 toolVisibilityToggle.addEventListener("click", () => {
   showToolBubbles = !showToolBubbles;
   window.localStorage.setItem(TOOL_VISIBILITY_STORAGE_KEY, String(showToolBubbles));
@@ -766,7 +762,6 @@ function handleServerMessage(message: ServerMessage): void {
       render();
       break;
     case "session.snapshot": {
-      const previousProjection = projections.get(message.sessionId);
       projections.set(message.sessionId, message.state);
       syncPromptHistoryFromProjection(message.sessionId, message.state);
       if (shouldActivateSnapshot(message.sessionId)) {
@@ -775,13 +770,6 @@ function handleServerMessage(message: ServerMessage): void {
       } else {
         unreadSessions.add(message.sessionId);
         renderSessions();
-      }
-      if (
-        message.sessionId === activeSessionId &&
-        previousProjection?.isBusy &&
-        !message.state.isBusy
-      ) {
-        refreshActiveDiffs("session-idle");
       }
       break;
     }
@@ -792,7 +780,8 @@ function handleServerMessage(message: ServerMessage): void {
         diffSelectedSnapshots.set(message.sessionId, message.state.selectedSnapshot.entryId);
       }
       diffSelectedHeads.set(message.sessionId, message.state.headSnapshot?.entryId ?? null);
-      if (message.sessionId === activeSessionId && diffsPanelEl) {
+      markDiffsViewDirty();
+      if (message.sessionId === activeSessionId && diffsPanelEl && isDiffsPanelActive()) {
         renderDiffsView(diffsPanelEl, projections.get(message.sessionId));
       }
       break;
@@ -1278,8 +1267,7 @@ function renderActiveSession(): void {
 
   if (transcriptPanelEl) renderTranscriptView(transcriptPanelEl, projection, sessionChanged);
   if (toolsPanelEl) renderToolsView(toolsPanelEl, projection);
-  if (diffsPanelEl) renderDiffsView(diffsPanelEl, projection);
-  if (sessionChanged) refreshActiveDiffs("panel-active");
+  if (diffsPanelEl && isDiffsPanelActive() && shouldRenderDiffsView(projection)) renderDiffsView(diffsPanelEl, projection);
 }
 
 // --- Panel render functions ---
@@ -1516,41 +1504,45 @@ function summarizeDiffFiles(
 function requestDiffState(sessionId: string, selector?: string, headSelector?: string | null): void {
   if (diffLoadingSessions.has(sessionId)) return;
   diffLoadingSessions.add(sessionId);
-  diffLastRefreshRequests.set(sessionId, Date.now());
+  markDiffsViewDirty();
   send({ type: "diff.refresh", sessionId, selector, headSelector: headSelector ?? undefined });
-  if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+  if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+}
+
+function markDiffsViewDirty(): void {
+  diffPanelDirty = true;
+}
+
+function shouldRenderDiffsView(projection: SessionProjection | undefined): boolean {
+  return (
+    diffPanelDirty ||
+    activeSessionId !== lastDiffsRenderedSessionId ||
+    Boolean(projection) !== lastDiffsRenderedProjectionPresent
+  );
 }
 
 function isDiffsPanelActive(): boolean {
   return dockviewApi?.activePanel?.id === "diffs";
 }
 
-function refreshActiveDiffs(_reason: "panel-active" | "window-focus" | "session-idle"): void {
+function requestActiveDiffState(): void {
   if (!activeSessionId || !diffsPanelEl || !isDiffsPanelActive()) return;
   if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
 
-  const sessionId = activeSessionId;
-  window.clearTimeout(diffRefreshTimers.get(sessionId));
-  const elapsed = Date.now() - (diffLastRefreshRequests.get(sessionId) ?? 0);
-  const delay = elapsed >= DIFF_AUTO_REFRESH_MIN_INTERVAL_MS ? 0 : DIFF_AUTO_REFRESH_DEBOUNCE_MS;
-  const timer = window.setTimeout(() => {
-    diffRefreshTimers.delete(sessionId);
-    if (sessionId !== activeSessionId || !diffsPanelEl || !isDiffsPanelActive()) return;
-    requestDiffState(
-      sessionId,
-      diffSelectedSnapshots.get(sessionId),
-      diffSelectedHeads.get(sessionId),
-    );
-  }, delay);
-  diffRefreshTimers.set(sessionId, timer);
+  requestDiffState(
+    activeSessionId,
+    diffSelectedSnapshots.get(activeSessionId),
+    diffSelectedHeads.get(activeSessionId),
+  );
 }
 
 function createDiffSnapshot(sessionId: string): void {
   const label = window.prompt("Snapshot label", "manual");
   if (label === null) return;
   diffLoadingSessions.add(sessionId);
+  markDiffsViewDirty();
   send({ type: "diff.snapshot", sessionId, label: label.trim() || undefined });
-  if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+  if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
 }
 
 function addDiffComment(
@@ -1575,7 +1567,8 @@ function addDiffComment(
     text: comment.trim(),
   });
   diffComments.set(sessionId, comments);
-  if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+  markDiffsViewDirty();
+  if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
 }
 
 function isSameDiffComparison(
@@ -1664,7 +1657,8 @@ function flushDiffComments(sessionId: string, state: RepoDiffState): void {
         comment => !isSameDiffComparison(comment, baseSnapshot, headSnapshot),
       ),
     );
-    if (diffsPanelEl) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+    markDiffsViewDirty();
+    if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
   };
   sendPromptWithBusyHandling({
     sessionId,
@@ -1677,6 +1671,9 @@ function flushDiffComments(sessionId: string, state: RepoDiffState): void {
 
 function renderDiffsView(container: HTMLElement, projection: SessionProjection | undefined): void {
   _renderOwner = container.ownerDocument;
+  lastDiffsRenderedSessionId = activeSessionId;
+  lastDiffsRenderedProjectionPresent = Boolean(projection);
+  diffPanelDirty = false;
   container.replaceChildren();
 
   if (!activeSessionId || !projection) {
@@ -1718,13 +1715,6 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   sidebarScroll.className = "diffs-sidebar-scroll";
   sidebar.append(sidebarScroll);
 
-  if (!state && !diffLoadingSessions.has(sessionId)) {
-    requestDiffState(
-      sessionId,
-      diffSelectedSnapshots.get(sessionId),
-      diffSelectedHeads.get(sessionId),
-    );
-  }
 
   const snapshots = state?.snapshots ?? [];
   const snapshotList = mkEl("div");
@@ -2004,7 +1994,6 @@ function initDockview(): void {
               scroll.className = "panel-scroll";
               el.append(toolbar, scroll);
               diffsPanelEl = scroll;
-              renderDiffsView(scroll, activeSessionId ? projections.get(activeSessionId) : undefined);
             },
           };
         }
@@ -2019,7 +2008,8 @@ function initDockview(): void {
   dockviewApi = dv;
   dv.onDidActivePanelChange(panel => {
     if (panel?.id === "diffs") {
-      refreshActiveDiffs("panel-active");
+      if (diffsPanelEl) renderDiffsView(diffsPanelEl, activeSessionId ? projections.get(activeSessionId) : undefined);
+      requestActiveDiffState();
     }
   });
 
@@ -2065,9 +2055,13 @@ function initDockview(): void {
       renderer: "always",
     });
   }
+  if (isDiffsPanelActive() && diffsPanelEl) {
+    renderDiffsView(diffsPanelEl, activeSessionId ? projections.get(activeSessionId) : undefined);
+    requestActiveDiffState();
+  }
 
   // Persist layout on change (debounced: avoid rapid writes during drag).
-  let layoutSaveTimer: ReturnType<typeof setTimeout> | undefined;
+  let layoutSaveTimer: number | undefined;
   dv.onDidLayoutChange(() => {
     clearTimeout(layoutSaveTimer);
     layoutSaveTimer = setTimeout(() => {
