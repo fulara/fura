@@ -6,6 +6,7 @@ import { marked, type Token, type Tokens } from "marked";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 import { formatContext, formatCost, formatTokens, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
+import { createFuraConnection, type FuraConnection } from "./connection";
 import type {
   AgentProgress,
   ClientMessage,
@@ -448,7 +449,7 @@ let pendingImages: PendingImage[] = [];
 let pendingSnippets: PendingSnippet[] = [];
 let nextPendingAttachmentId = 1;
 
-let socket: WebSocket | null = null;
+let connection: FuraConnection | null = null;
 let activeSessionId: string | null = null;
 let serverConfig: ServerConfig | null = null;
 let pendingCreatedSessionBaseline: Set<string> | null = null;
@@ -867,37 +868,25 @@ function connect(token: string): void {
   }
 
   window.localStorage.setItem("fura.token", bridgeToken);
-  socket?.close();
-
-  const wsUrl = new URL("/ws", window.location.href);
-  wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-  wsUrl.searchParams.set("token", bridgeToken);
-  setStatus("connecting", "connecting");
-  socket = new WebSocket(wsUrl);
-  socket.addEventListener("open", () => {
-    setStatus("connected", "connected");
-    send({ type: "session.list" });
+  connection?.disconnect();
+  connection = createFuraConnection({
+    token: bridgeToken,
+    onStatus: setStatus,
+    onOpen: () => {
+      send({ type: "session.list" });
+    },
+    onClose: () => {
+      if (cwdPickerCreatePending && cwdPickerPendingRequestId) {
+        handleCwdPickerCreateError(
+          cwdPickerPendingRequestId,
+          "Connection closed before session creation completed.",
+        );
+      }
+    },
+    onMessage: handleServerMessage,
+    onLog: appendLog,
   });
-  socket.addEventListener("close", () => {
-    setStatus("disconnected", "disconnected");
-    if (cwdPickerCreatePending && cwdPickerPendingRequestId) {
-      handleCwdPickerCreateError(
-        cwdPickerPendingRequestId,
-        "Connection closed before session creation completed.",
-      );
-    }
-  });
-  socket.addEventListener("error", () => {
-    appendLog("WebSocket error. Check the token and bridge server.");
-  });
-  socket.addEventListener("message", event => {
-    if (typeof event.data !== "string") {
-      appendLog("Ignored non-text WebSocket frame.");
-      return;
-    }
-    const message = JSON.parse(event.data) as ServerMessage;
-    handleServerMessage(message);
-  });
+  connection.connect();
 }
 
 function activeWorkspaceKey(): string | null {
@@ -1419,7 +1408,7 @@ function clearPromptEditor(): void {
 
 async function startVoiceRecording(): Promise<void> {
   if (voiceIsRecording) return;
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
+  if (!connection?.isOpen()) {
     handleVoiceError("Not connected.");
     return;
   }
@@ -5299,12 +5288,11 @@ function setPaletteSelected(index: number): void {
 // --- Utilities ---
 
 function send(message: ClientMessage): boolean {
-  if (!socket || socket.readyState !== WebSocket.OPEN) {
+  if (!connection) {
     appendLog("Not connected.");
     return false;
   }
-  socket.send(JSON.stringify(message));
-  return true;
+  return connection.send(message);
 }
 
 function setStatus(label: string, className: string): void {
