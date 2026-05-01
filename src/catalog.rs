@@ -138,6 +138,12 @@ pub(crate) fn should_preload_discovered_session_messages(
 }
 
 pub(crate) fn collect_session_files(path: &Path, sessions: &mut Vec<DiscoveredSession>) {
+    let direct_sessions = collect_direct_session_files(path);
+    if !direct_sessions.is_empty() {
+        sessions.extend(direct_sessions);
+        return;
+    }
+
     let Ok(entries) = fs::read_dir(path) else {
         return;
     };
@@ -148,13 +154,51 @@ pub(crate) fn collect_session_files(path: &Path, sessions: &mut Vec<DiscoveredSe
             continue;
         };
         if file_type.is_dir() {
-            collect_session_files(&path, sessions);
-        } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
-            if let Some(session) = read_session_header(&path) {
-                sessions.push(session);
-            }
+            sessions.extend(collect_direct_session_files(&path));
         }
     }
+}
+
+fn collect_direct_session_files(path: &Path) -> Vec<DiscoveredSession> {
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                return None;
+            };
+            if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("jsonl")
+            {
+                read_session_header(&path)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn first_entry_type_after_header<I>(lines: &mut I) -> Option<String>
+where
+    I: Iterator<Item = std::io::Result<String>>,
+{
+    for line in lines.take(8).flatten() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        return value
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+    }
+    None
 }
 
 pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
@@ -163,6 +207,9 @@ pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
     let header_line = lines.next()?.ok()?;
     let header = serde_json::from_str::<SessionHeader>(&header_line).ok()?;
     if header.entry_type != "session" {
+        return None;
+    }
+    if first_entry_type_after_header(&mut lines).as_deref() == Some("session_init") {
         return None;
     }
     let metadata = fs::metadata(path).ok();

@@ -287,6 +287,29 @@ mod tests {
         fs::write(path, format!("{header}\n{message}\n")).expect("session file should be written");
     }
 
+    fn write_test_subagent_session(path: &Path, id: &str, cwd: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("subagent session dir should be created");
+        }
+        let header = serde_json::json!({
+            "type": "session",
+            "id": id,
+            "timestamp": "2026-04-29T00:00:02.000Z",
+            "cwd": cwd,
+        });
+        let session_init = serde_json::json!({
+            "type": "session_init",
+            "id": format!("{id}-init"),
+            "parentId": null,
+            "timestamp": "2026-04-29T00:00:03.000Z",
+            "systemPrompt": "subagent system prompt",
+            "task": "investigate",
+            "tools": ["read"],
+        });
+        fs::write(path, format!("{header}\n{session_init}\n"))
+            .expect("subagent session file should be written");
+    }
+
     #[derive(Debug, serde::Deserialize)]
     struct ContractManifestEntry {
         name: String,
@@ -457,6 +480,55 @@ mod tests {
         drop(sessions);
 
         assert!(!refresh_session_catalog(&state).await);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn refresh_session_catalog_ignores_task_subagent_artifacts() {
+        let root = env::temp_dir().join(format!(
+            "fura-subagent-sessions-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let parent_path = root.join("project").join("parent.jsonl");
+        let subagent_path = root.join("project").join("parent").join("Explore.jsonl");
+        write_test_session(
+            &parent_path,
+            "parent",
+            "Parent session",
+            "/workspace/project",
+            "plan with subagents",
+        );
+        write_test_subagent_session(&subagent_path, "subagent", "/workspace/project");
+        let mut state = test_state(8, None);
+        state.session_root = root.clone();
+
+        assert!(refresh_session_catalog(&state).await);
+        let sessions = state.sessions.read().await;
+        assert!(sessions.contains_key("parent"));
+        assert!(
+            !sessions.contains_key("subagent"),
+            "task subagent artifact session must not appear in the top-level session catalog"
+        );
+        assert_eq!(sessions.len(), 1);
+        drop(sessions);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_session_header_rejects_subagent_session_init_files() {
+        let root = env::temp_dir().join(format!(
+            "fura-subagent-header-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let subagent_path = root.join("Explore.jsonl");
+        write_test_subagent_session(&subagent_path, "subagent", "/workspace/project");
+
+        assert!(
+            read_session_header(&subagent_path).is_none(),
+            "session_init identifies task subagent logs, not resumable top-level sessions"
+        );
+
         let _ = fs::remove_dir_all(root);
     }
 
