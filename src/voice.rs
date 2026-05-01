@@ -180,32 +180,28 @@ async fn run_openai_realtime_transcription_inner(
         .context("failed to connect to OpenAI Realtime transcription")?;
 
     let session_update = json!({
-        "type": "session.update",
+        "type": "transcription_session.update",
         "session": {
-            "type": "transcription",
-            "audio": {
-                "input": {
-                    "format": { "type": "audio/pcm", "rate": 24000 },
-                    "transcription": {
-                        "model": OPENAI_TRANSCRIPTION_MODEL,
-                        "language": language,
-                    },
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500,
-                    },
-                    "noise_reduction": {
-                        "type": "near_field",
-                    },
-                },
+            "input_audio_format": "pcm16",
+            "input_audio_transcription": {
+                "model": OPENAI_TRANSCRIPTION_MODEL,
+                "language": language,
+            },
+            "turn_detection": {
+                "type": "server_vad",
+                "threshold": 0.5,
+                "prefix_padding_ms": 300,
+                "silence_duration_ms": 500,
+            },
+            "input_audio_noise_reduction": {
+                "type": "near_field",
             },
         },
     });
     ws.send(Message::Text(session_update.to_string().into()))
         .await
         .context("failed to configure OpenAI transcription session")?;
+    wait_for_transcription_session_update(&mut ws).await?;
 
     let _ = state.events.send(ServerMessage::VoiceStatus {
         target_client_id: target_client_id.to_string(),
@@ -270,6 +266,34 @@ async fn run_openai_realtime_transcription_inner(
     Ok(())
 }
 
+async fn wait_for_transcription_session_update<S>(ws: &mut S) -> anyhow::Result<()>
+where
+    S: StreamExt<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
+    loop {
+        let Some(frame) = ws.next().await else {
+            return Err(anyhow!(
+                "OpenAI transcription stream closed before session update completed"
+            ));
+        };
+        let frame = frame.context("failed to read OpenAI session update response")?;
+        let Message::Text(text) = frame else {
+            continue;
+        };
+        let event: Value = serde_json::from_str(&text)
+            .context("failed to parse OpenAI session update response")?;
+        match event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+        {
+            "transcription_session.updated" => return Ok(()),
+            "error" => return Err(anyhow!(openai_error_message(&event))),
+            _ => {}
+        }
+    }
+}
+
 async fn handle_openai_message(
     state: &AppState,
     target_client_id: &str,
@@ -319,11 +343,7 @@ async fn handle_openai_message(
             }
         }
         "conversation.item.input_audio_transcription.failed" => {
-            let message = event
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("OpenAI transcription failed");
+            let message = openai_error_message(&event);
             let _ = state.events.send(ServerMessage::VoiceError {
                 target_client_id: target_client_id.to_string(),
                 message: message.to_string(),
@@ -345,14 +365,11 @@ async fn handle_openai_message(
             });
         }
         "error" => {
-            let message = event
-                .get("error")
-                .and_then(|error| error.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("OpenAI Realtime transcription error");
+            let message = openai_error_message(&event);
+            let lower_message = message.to_ascii_lowercase();
             if stopping
-                && message.to_ascii_lowercase().contains("buffer")
-                && message.to_ascii_lowercase().contains("empty")
+                && lower_message.contains("buffer")
+                && (lower_message.contains("empty") || lower_message.contains("too small"))
             {
                 let _ = state.events.send(ServerMessage::VoiceStatus {
                     target_client_id: target_client_id.to_string(),
@@ -386,6 +403,15 @@ fn openai_item_id(event: &Value) -> String {
         .and_then(Value::as_str)
         .filter(|item_id| !item_id.is_empty())
         .unwrap_or("current")
+        .to_string()
+}
+
+fn openai_error_message(event: &Value) -> String {
+    event
+        .get("error")
+        .and_then(|error| error.get("message"))
+        .and_then(Value::as_str)
+        .unwrap_or("OpenAI Realtime transcription error")
         .to_string()
 }
 
