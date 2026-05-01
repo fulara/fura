@@ -3,7 +3,11 @@ use std::collections::HashMap;
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::{ContentBlock, MessageRole, ToolCard, TranscriptMessage};
+use crate::{ContentBlock, MessageRole, Timestamp, ToolCard, TranscriptMessage};
+
+pub(crate) fn value_timestamp(value: &Value) -> Option<Timestamp> {
+    value.get("timestamp").and_then(Timestamp::from_rpc)
+}
 
 pub(crate) fn map_bash_execution_message(value: &Value) -> Option<TranscriptMessage> {
     let command = value.get("command").and_then(|v| v.as_str())?;
@@ -56,6 +60,7 @@ pub(crate) fn map_bash_execution_message(value: &Value) -> Option<TranscriptMess
         blocks: vec![ContentBlock::Text {
             text: format!("```bash\n{body}\n```"),
         }],
+        timestamp: value_timestamp(value),
         is_new: false,
     })
 }
@@ -119,6 +124,7 @@ pub(crate) fn map_python_execution_message(value: &Value) -> Option<TranscriptMe
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
         role: MessageRole::System,
         blocks: vec![ContentBlock::Text { text }],
+        timestamp: value_timestamp(value),
         is_new: false,
     })
 }
@@ -126,8 +132,10 @@ pub(crate) fn map_python_execution_message(value: &Value) -> Option<TranscriptMe
 pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage>, Vec<ToolCard>) {
     let mut messages = Vec::new();
     let mut tool_cards = Vec::new();
-    let mut pending_tool_calls: HashMap<String, (String, Option<String>, Value, usize)> =
-        HashMap::new();
+    let mut pending_tool_calls: HashMap<
+        String,
+        (String, Option<String>, Value, usize, Option<Timestamp>),
+    > = HashMap::new();
     let mut visible_message_count = 0_usize;
 
     for value in values {
@@ -161,7 +169,13 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
                     .unwrap_or_else(|| serde_json::json!({}));
                 pending_tool_calls.insert(
                     tool_call_id.to_string(),
-                    (tool_name, intent, args, visible_message_count),
+                    (
+                        tool_name,
+                        intent,
+                        args,
+                        visible_message_count,
+                        value_timestamp(value),
+                    ),
                 );
             }
         }
@@ -181,12 +195,14 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
             .or_else(|| {
                 pending
                     .as_ref()
-                    .map(|(tool_name, _, _, _)| tool_name.clone())
+                    .map(|(tool_name, _, _, _, _)| tool_name.clone())
             })
             .unwrap_or_default();
-        let (intent, args, insert_after_count) = pending
-            .map(|(_, intent, args, insert_after_count)| (intent, args, insert_after_count))
-            .unwrap_or_else(|| (None, serde_json::json!({}), visible_message_count));
+        let (intent, args, insert_after_count, timestamp) = pending
+            .map(|(_, intent, args, insert_after_count, timestamp)| {
+                (intent, args, insert_after_count, timestamp)
+            })
+            .unwrap_or_else(|| (None, serde_json::json!({}), visible_message_count, None));
         let mut result = serde_json::Map::new();
         if let Some(content) = value.get("content").cloned() {
             result.insert("content".to_string(), content);
@@ -203,6 +219,7 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
             .unwrap_or(false);
         tool_cards.push(ToolCard {
             tool_call_id: tool_call_id.to_string(),
+            timestamp: timestamp.or_else(|| value_timestamp(value)),
             tool_name,
             intent,
             args,
@@ -289,6 +306,7 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
         role,
         blocks,
+        timestamp: value_timestamp(value),
         is_new: false, // caller sets true for live message_end events
     })
 }

@@ -333,7 +333,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             });
         }
         OmpRpcFrame::MessageUpdate { message, .. } => {
+            let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
             if let Some(mut message) = map_omp_message(&message) {
+                if message.timestamp.is_none() {
+                    message.timestamp = Some(event_timestamp);
+                }
                 message.is_new = true;
                 // Use a stable sentinel ID so the frontend always keyed to the same node
                 // while streaming; the real ID arrives with message_end.
@@ -356,7 +360,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             }
         }
         OmpRpcFrame::MessageEnd { message } => {
+            let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
             if let Some(mut message) = map_omp_message(&message) {
+                if message.timestamp.is_none() {
+                    message.timestamp = Some(event_timestamp);
+                }
                 message.is_new = true;
                 // Clear streaming_message and push the final message atomically in a single
                 // lock so no snapshot can fire showing a gap between the two.
@@ -385,12 +393,14 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             args,
             intent,
         } => {
+            let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&target_session_id).map(|record| {
                     let insert_after_count = record.messages.len();
                     record.active_tool_calls.push(ToolCard {
                         tool_call_id,
+                        timestamp: Some(event_timestamp),
                         tool_name,
                         intent,
                         args,

@@ -215,7 +215,16 @@ pub(crate) fn read_session_file_messages(path: &Path) -> (Vec<TranscriptMessage>
             continue;
         };
         if entry.get("type").and_then(|v| v.as_str()) == Some("message") {
-            if let Some(message) = entry.get("message").cloned() {
+            if let Some(mut message) = entry.get("message").cloned() {
+                if let Some(object) = message.as_object_mut() {
+                    if !object.contains_key("timestamp") {
+                        if let Some(timestamp) =
+                            entry.get("timestamp").and_then(Timestamp::from_rpc)
+                        {
+                            object.insert("timestamp".to_string(), Value::from(timestamp.millis()));
+                        }
+                    }
+                }
                 message_values.push(message);
             }
         }

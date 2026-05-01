@@ -153,26 +153,29 @@ for await (const line of rl) {
       break;
     }
     case "prompt": {
+      const now = Date.now();
       const user = {
-        id: `user-${Date.now()}`,
+        id: `user-${now}`,
         role: "user",
         content: [{ type: "text", text: command.message ?? "" }],
+        timestamp: now,
       };
       const assistant = {
-        id: `assistant-${Date.now()}`,
+        id: `assistant-${now + 1}`,
         role: "assistant",
         content: [{ type: "text", text: `Mock assistant received ${String(command.message ?? "").length} bytes.` }],
+        timestamp: now + 1,
       };
       messages.push(user, assistant);
       success(command);
-      write({ type: "agent_start" });
-      write({ type: "message_end", message: assistant });
-      write({ type: "agent_end" });
+      write({ type: "agent_start", timestamp: now });
+      write({ type: "message_end", timestamp: now + 1, message: assistant });
+      write({ type: "agent_end", timestamp: now + 2 });
       break;
     }
     case "abort": {
       success(command);
-      write({ type: "agent_end" });
+      write({ type: "agent_end", timestamp: Date.now() });
       break;
     }
     case "repo_diff_get": {

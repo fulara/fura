@@ -204,6 +204,7 @@ mod tests {
             id: id.into(),
             role: MessageRole::Assistant,
             blocks: vec![ContentBlock::Text { text: text.into() }],
+            timestamp: Timestamp::from_rpc(&serde_json::json!(0)),
             is_new: false,
         }
     }
@@ -1326,7 +1327,8 @@ mod tests {
                     "name": "task",
                     "intent": "launching review",
                     "arguments": { "agent": "reviewer" }
-                }]
+                }],
+                "timestamp": 1770000003000_u64
             }),
             serde_json::json!({
                 "id": "tr1",
@@ -1334,6 +1336,7 @@ mod tests {
                 "toolCallId": "task-call",
                 "toolName": "task",
                 "content": [{ "type": "text", "text": "<task-summary>raw summary</task-summary>" }],
+                "timestamp": 1770000004000_u64,
                 "details": {
                     "results": [{
                         "index": 0,
@@ -1367,6 +1370,7 @@ mod tests {
         assert!(!card.is_active);
         assert!(!card.is_error);
         assert_eq!(card.insert_after_count, 1);
+        assert_eq!(card.timestamp.map(Timestamp::millis), Some(1770000003000));
         assert_eq!(
             card.result.as_ref().unwrap()["details"]["results"][0]["id"],
             "0-Review"
@@ -1629,6 +1633,22 @@ mod tests {
         }
     }
     #[test]
+    fn maps_omp_message_timestamp() {
+        let message = map_omp_message(&serde_json::json!({
+            "id": "timed",
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "timed" }],
+            "timestamp": 1770000001234_u64
+        }))
+        .expect("message should map");
+
+        assert_eq!(
+            message.timestamp.map(Timestamp::millis),
+            Some(1770000001234)
+        );
+    }
+
+    #[test]
     fn maps_thinking_block() {
         let message = map_omp_message(&serde_json::json!({
             "id": "t1",
@@ -1727,6 +1747,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn message_end_uses_top_level_event_timestamp() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "message_end",
+                "timestamp": 1770000005000_u64,
+                "message": {
+                    "id": "assistant-1",
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "done" }]
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert_eq!(
+            record.messages[0].timestamp.map(Timestamp::millis),
+            Some(1770000005000)
+        );
+    }
+
+    #[tokio::test]
     async fn message_end_keeps_session_busy_until_agent_end() {
         let state = test_state(8, None);
         let mut record = test_record();
@@ -1773,6 +1825,7 @@ mod tests {
         record.status = SessionStatus::Idle;
         record.active_tool_calls.push(ToolCard {
             tool_call_id: "tool-1".to_string(),
+            timestamp: Timestamp::from_rpc(&serde_json::json!(0)),
             tool_name: "task".to_string(),
             intent: None,
             args: Value::Null,

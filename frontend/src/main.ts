@@ -18,6 +18,7 @@ type TranscriptMessage = {
   id: string;
   role: MessageRole;
   blocks: ContentBlock[];
+  timestamp?: number | null;
   isNew: boolean;
 };
 
@@ -76,6 +77,7 @@ type TodoPhase = {
 
 type ToolCard = {
   toolCallId: string;
+  timestamp?: number | null;
   toolName: string;
   intent?: string | null;
   args: Record<string, unknown>;
@@ -2938,6 +2940,28 @@ function mkFrag(): DocumentFragment {
 
 // --- Message rendering ---
 
+function renderEventTimestamp(timestamp: number | null | undefined): HTMLTimeElement | null {
+  if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) return null;
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) return null;
+  const iso = date.toISOString();
+  const time = mkEl("time");
+  time.className = "event-timestamp";
+  time.dateTime = iso;
+  time.title = date.toLocaleString();
+  time.textContent = date.toLocaleTimeString(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  return time;
+}
+
+function appendEventTimestamp(container: HTMLElement, timestamp: number | null | undefined): void {
+  const time = renderEventTimestamp(timestamp);
+  if (time) container.append(time);
+}
+
 function renderMessage(message: TranscriptMessage): HTMLElement {
   const article = mkEl("article");
   article.className = `message ${message.role}`;
@@ -2950,25 +2974,25 @@ function renderMessage(message: TranscriptMessage): HTMLElement {
     return article;
   }
 
-  // System-role messages carry no header — the fenced code block header already
-  // labels the content type. All other roles get a header row.
-  if (message.role !== "system") {
-    const header = mkEl("header");
-    const roleLabel = mkEl("strong");
-    roleLabel.textContent = message.role === "user" ? "You" : message.role;
-    const copy = mkEl("button");
-    copy.type = "button";
-    copy.textContent = "Copy";
-    copy.addEventListener("click", async () => {
-      await navigator.clipboard.writeText(messageText(message));
-      copy.textContent = "Copied";
-      window.setTimeout(() => {
-        copy.textContent = "Copy";
-      }, 900);
-    });
-    header.append(roleLabel, copy);
-    article.append(header);
-  }
+  const header = mkEl("header");
+  const heading = mkEl("div");
+  heading.className = "message-heading";
+  const roleLabel = mkEl("strong");
+  roleLabel.textContent = message.role === "user" ? "You" : message.role;
+  heading.append(roleLabel);
+  appendEventTimestamp(heading, message.timestamp);
+  const copy = mkEl("button");
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(messageText(message));
+    copy.textContent = "Copied";
+    window.setTimeout(() => {
+      copy.textContent = "Copy";
+    }, 900);
+  });
+  header.append(heading, copy);
+  article.append(header);
 
   for (const { block, index } of visibleBlocks) {
     article.append(renderBlock(block, message.isNew, message.id, index));
@@ -2993,6 +3017,7 @@ function renderToolCard(card: ToolCard): HTMLElement {
     toolHeaderText(card.toolName, "tool-name"),
     toolHeaderText(toolArgSummary(card.args), "tool-args-summary"),
   );
+  appendEventTimestamp(header, card.timestamp);
   wrapper.append(header);
 
   appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
@@ -3012,6 +3037,7 @@ function renderReadToolCard(card: ToolCard): HTMLElement {
     toolHeaderText("Read", "tool-name"),
     toolHeaderText(readArgSummary(card), "tool-args-summary"),
   );
+  appendEventTimestamp(header, card.timestamp);
   wrapper.append(header);
 
   if (card.isError) {
@@ -3034,6 +3060,7 @@ function renderReadToolGroup(cards: Array<{ kind: "tool" } & ToolCard>): HTMLEle
     toolHeaderText("Read", "tool-name"),
     toolHeaderText(`(${cards.length})`, "tool-count"),
   );
+  appendEventTimestamp(header, cards[0]?.timestamp);
   wrapper.append(header);
 
   const list = mkEl("div");
@@ -3041,10 +3068,12 @@ function renderReadToolGroup(cards: Array<{ kind: "tool" } & ToolCard>): HTMLEle
   cards.forEach((card, index) => {
     const row = mkEl("div");
     row.className = "read-tool-row";
+    const timestamp = renderEventTimestamp(card.timestamp);
     row.append(
       toolHeaderText(index === cards.length - 1 ? "└─" : "├─", "read-tool-connector"),
       toolStatusIcon(card),
       toolHeaderText(readArgSummary(card), "read-tool-path"),
+      ...(timestamp ? [timestamp] : []),
     );
     list.append(row);
   });
@@ -3095,6 +3124,7 @@ function renderGrepToolCard(card: ToolCard): HTMLElement {
     toolHeaderText(grepPatternSummary(card), "grep-pattern"),
     toolHeaderText(grepMetaSummary(card), "tool-args-summary"),
   );
+  appendEventTimestamp(header, card.timestamp);
   wrapper.append(header);
 
   if (card.isError) {
@@ -3219,6 +3249,7 @@ function renderTodoWriteCard(card: ToolCard): HTMLElement {
   const phases = todoPhases(card.partialResult ?? card.result);
   const taskCount = phases.reduce((sum, phase) => sum + phase.tasks.length, 0);
   header.append(toolHeaderText(`${taskCount} ${taskCount === 1 ? "task" : "tasks"}`, "tool-args-summary"));
+  appendEventTimestamp(header, card.timestamp);
   wrapper.append(header);
 
   if (phases.length > 0) {
@@ -3337,6 +3368,7 @@ function renderTaskCard(card: ToolCard): HTMLElement {
     toolHeaderText(String(card.args?.agent ?? card.toolName), "task-agent-name"),
   );
   if (card.intent) header.append(toolHeaderText(card.intent, "task-intent"));
+  appendEventTimestamp(header, card.timestamp);
   wrapper.append(header);
 
   const source = card.partialResult ?? card.result;

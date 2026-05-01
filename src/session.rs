@@ -246,6 +246,9 @@ pub(crate) struct TranscriptMessage {
     pub(crate) id: String,
     pub(crate) role: MessageRole,
     pub(crate) blocks: Vec<ContentBlock>,
+    /// Event timestamp. `None` means the upstream persisted record did not preserve
+    /// a precise event time.
+    pub(crate) timestamp: Option<Timestamp>,
     /// True when this message arrived via a live `message_end` event rather than a historical `get_messages` load.
     pub(crate) is_new: bool,
 }
@@ -278,6 +281,8 @@ pub(crate) enum ContentBlock {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ToolCard {
     pub(crate) tool_call_id: String,
+    /// Event timestamp for the tool start event.
+    pub(crate) timestamp: Option<Timestamp>,
     pub(crate) tool_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) intent: Option<String>,
