@@ -5,15 +5,18 @@ use uuid::Uuid;
 
 use crate::*;
 
-const CONTROLLER_SESSION_TITLE: &str = "Fura Controller";
+pub(crate) const CONTROLLER_SESSION_TITLE: &str = "Fura Controller";
 const FURA_TOOL_NAMES: &[&str] = &[
     "fura_search_sessions",
     "fura_reply",
-    "fura_filter_sessions",
     "fura_select_session",
     "fura_set_prompt_draft",
     "fura_show_notice",
 ];
+
+pub(crate) fn is_controller_session_record(record: &SessionRecord) -> bool {
+    record.title.as_deref() == Some(CONTROLLER_SESSION_TITLE)
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,12 +33,6 @@ struct ReplyArgs {
     candidates: Vec<ControlCandidate>,
     #[serde(default)]
     suggested_actions: Vec<ControlSuggestedAction>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct FilterSessionsArgs {
-    query: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -444,17 +441,6 @@ fn controller_tool_definitions() -> Vec<Value> {
             }
         }),
         json!({
-            "name": "fura_filter_sessions",
-            "label": "Filter session list",
-            "description": "Set the requesting frontend client's session search field. Use only when the user asks to filter the visible sidebar.",
-            "parameters": {
-                "type": "object",
-                "properties": { "query": { "type": "string" } },
-                "required": ["query"],
-                "additionalProperties": false
-            }
-        }),
-        json!({
             "name": "fura_select_session",
             "label": "Select session",
             "description": "Dispatch a non-destructive frontend action to open/select an existing Fura session after explicit user intent.",
@@ -522,7 +508,6 @@ async fn dispatch_controller_tool(
                     .unwrap_or_else(|| FrontendUiSnapshot {
                         active_session_id: run.active_session_id.clone(),
                         focused_area: None,
-                        session_search_query: String::new(),
                         visible_session_ids: Vec::new(),
                         prompt_draft: None,
                         panels: None,
@@ -545,21 +530,15 @@ async fn dispatch_controller_tool(
             });
             Ok("Dispatched Ask Fura reply to the requesting frontend client.".to_string())
         }
-        "fura_filter_sessions" => {
-            let args: FilterSessionsArgs = parse_tool_args(arguments)?;
-            let run = current_run(state).await?;
-            let _ = state.events.send(ServerMessage::FrontendControl {
-                target_client_id: run.target_client_id,
-                action: FrontendControlAction::SetSessionSearch {
-                    query: args.query,
-                    focus: Some(true),
-                },
-            });
-            Ok("Dispatched session-search action to the requesting frontend client.".to_string())
-        }
         "fura_select_session" => {
             let args: SelectSessionArgs = parse_tool_args(arguments)?;
-            if !state.sessions.read().await.contains_key(&args.session_id) {
+            if state
+                .sessions
+                .read()
+                .await
+                .get(&args.session_id)
+                .is_none_or(is_controller_session_record)
+            {
                 return Err(format!("session {} is not available", args.session_id));
             }
             let run = current_run(state).await?;
@@ -643,7 +622,6 @@ Default behavior:
 - If the user asks a question about candidate sessions, answer conversationally with fura_reply.
 - If the user refers to "the first", "the second", "that one", or "open it", resolve the reference from prior candidates. If ambiguous, ask a short clarification using fura_reply.
 - If the user explicitly asks to open/select a session, validate via fura_select_session.
-- Use fura_filter_sessions only when the user asks to filter the visible sidebar; filtering the sidebar is not the default response to discovery questions.
 - If the user asks to talk to the active coding agent, do not send a coding prompt. Offer to stage a prompt draft with fura_set_prompt_draft instead.
 - Use fura_set_prompt_draft to stage text; never send a normal coding prompt.
 - Destructive actions are unavailable.
@@ -678,6 +656,9 @@ async fn search_sessions(state: &AppState, query: &str, limit: usize) -> Vec<Con
     let sessions = state.sessions.read().await;
     let mut scored = Vec::new();
     for record in sessions.values() {
+        if is_controller_session_record(record) {
+            continue;
+        }
         let summary = record.summary();
         let mut score = 0_u32;
         let mut reasons = Vec::new();
@@ -753,7 +734,10 @@ async fn validate_candidates(
     candidates
         .into_iter()
         .filter(|candidate| {
-            candidate.candidate_type == "session" && sessions.contains_key(&candidate.session_id)
+            candidate.candidate_type == "session"
+                && sessions
+                    .get(&candidate.session_id)
+                    .is_some_and(|record| !is_controller_session_record(record))
         })
         .collect()
 }

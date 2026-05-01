@@ -254,6 +254,26 @@ mod tests {
         }
     }
 
+    #[test]
+    fn session_summaries_omit_controller_session() {
+        let mut normal = test_record();
+        normal.id = "normal".into();
+        normal.title = Some("Normal session".into());
+
+        let mut controller = test_record();
+        controller.id = "controller".into();
+        controller.title = Some(CONTROLLER_SESSION_TITLE.into());
+
+        let mut sessions = HashMap::new();
+        sessions.insert(normal.id.clone(), normal);
+        sessions.insert(controller.id.clone(), controller);
+
+        let summaries = session_summaries_from_map(&sessions);
+
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].session_id, "normal");
+    }
+
     fn test_state(channel_capacity: usize, bridge_debug_file: Option<PathBuf>) -> AppState {
         let (events, _) = broadcast::channel(channel_capacity);
         AppState {

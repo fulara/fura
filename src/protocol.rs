@@ -33,7 +33,6 @@ pub(crate) struct WorktreeCreateRequest {
 pub(crate) struct FrontendUiSnapshot {
     pub(crate) active_session_id: Option<String>,
     pub(crate) focused_area: Option<String>,
-    pub(crate) session_search_query: String,
     #[serde(default)]
     pub(crate) visible_session_ids: Vec<String>,
     pub(crate) prompt_draft: Option<PromptDraftSnapshot>,
@@ -94,10 +93,6 @@ pub(crate) struct ControlSuggestedAction {
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum FrontendControlAction {
-    SetSessionSearch {
-        query: String,
-        focus: Option<bool>,
-    },
     SelectSession {
         session_id: String,
     },

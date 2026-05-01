@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::{
     AppState, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader, SessionKind,
     SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard, TranscriptMessage,
-    project_omp_transcript, save_fura_config,
+    is_controller_session_record, project_omp_transcript, save_fura_config,
 };
 
 #[derive(Debug)]
@@ -311,6 +311,7 @@ pub(crate) fn session_summaries_from_map(
 ) -> Vec<SessionSummary> {
     let mut summaries = sessions
         .values()
+        .filter(|record| !is_controller_session_record(record))
         .map(SessionRecord::summary)
         .collect::<Vec<_>>();
     summaries.sort_by(|a, b| a.kind.cmp(&b.kind).then(b.updated_at.cmp(&a.updated_at)));

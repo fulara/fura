@@ -124,6 +124,7 @@ type SessionProjection = {
   planMode?: PlanModeProjection | null;
   todoPhases: TodoPhase[];
 };
+type WorkspaceMode = "session" | "controller";
 
 type PanelRenderItem = {
   key: string;
@@ -188,8 +189,7 @@ type ServerConfig = {
 
 type FrontendUiSnapshot = {
   activeSessionId?: string | null;
-  focusedArea?: "controller" | "sessionSearch" | "sessionList" | "prompt" | "transcript" | "tools" | "unknown";
-  sessionSearchQuery: string;
+  focusedArea?: "controller" | "sessionList" | "prompt" | "transcript" | "tools" | "unknown";
   visibleSessionIds: string[];
   promptDraft?: { sessionId?: string | null; hasText: boolean; textLength: number };
   panels?: { transcriptVisible: boolean; toolsVisible: boolean };
@@ -197,10 +197,9 @@ type FrontendUiSnapshot = {
 };
 
 type FrontendControlAction =
-  | { type: "setSessionSearch"; query: string; focus?: boolean | null }
   | { type: "selectSession"; sessionId: string }
   | { type: "setPromptDraft"; sessionId?: string | null; text: string; focus?: boolean | null }
-  | { type: "focus"; target: "controller" | "sessionSearch" | "prompt" }
+  | { type: "focus"; target: "controller" | "prompt" }
   | { type: "showNotice"; level: "info" | "warning" | "error"; text: string };
 
 type ControlCandidate = {
@@ -306,15 +305,8 @@ app.innerHTML = `
         <span id="connectionStatus" class="status disconnected">disconnected</span>
       </section>
 
-      <section class="card connection-card">
-        <label for="tokenInput">Bridge token</label>
-        <input id="tokenInput" autocomplete="off" spellcheck="false" placeholder="paste startup token" />
-        <button id="connectButton" type="button">Connect</button>
-      </section>
-
       <section class="sidebar-actions">
         <button id="createSessionButton" type="button">New session</button>
-        <button id="refreshSessionsButton" type="button">Refresh</button>
       </section>
 
       <section class="category-filter-card" aria-label="Session category filter">
@@ -324,22 +316,7 @@ app.innerHTML = `
         </select>
       </section>
 
-      <section class="control-card" aria-label="Ask Fura assistant">
-        <div class="control-card-header">
-          <label for="controlPromptInput">Ask Fura</label>
-          <span id="controlStatus" class="control-status idle">idle</span>
-        </div>
-        <div id="controlConversation" class="control-conversation" aria-live="polite"></div>
-        <form id="controlPromptForm" class="control-form">
-          <input id="controlPromptInput" autocomplete="off" spellcheck="true" placeholder="Find or discuss sessions…" />
-          <button id="controlPromptSend" type="submit">Ask</button>
-        </form>
-      </section>
 
-      <section class="session-search-card" aria-label="Session search">
-        <label for="sessionSearchInput">Search sessions</label>
-        <input id="sessionSearchInput" autocomplete="off" spellcheck="false" placeholder="Filter visible sessions" />
-      </section>
 
       <nav id="sessionsList" class="sessions" aria-label="Sessions"></nav>
     </aside>
@@ -351,6 +328,7 @@ app.innerHTML = `
           <p id="sessionMeta">Create or attach to a session to begin.</p>
         </div>
         <div class="workspace-actions">
+          <button id="askFuraButton" class="ask-fura-toggle" type="button" aria-pressed="false">Ask Fura</button>
           <button id="toolVisibilityToggle" class="tool-visibility-toggle" type="button" aria-pressed="true">Tools: on</button>
           <button id="thinkingVisibilityToggle" class="thinking-visibility-toggle" type="button" data-state="auto">Thinking: auto</button>
           <button id="abortButton" type="button">Abort</button>
@@ -570,18 +548,10 @@ app.innerHTML = `
 `;
 
 const connectionStatus = requireElement<HTMLSpanElement>("connectionStatus");
-const tokenInput = requireElement<HTMLInputElement>("tokenInput");
-const connectButton = requireElement<HTMLButtonElement>("connectButton");
 const createSessionButton = requireElement<HTMLButtonElement>("createSessionButton");
-const refreshSessionsButton = requireElement<HTMLButtonElement>("refreshSessionsButton");
 const sessionsList = requireElement<HTMLElement>("sessionsList");
 const sessionCategoryFilter = requireElement<HTMLSelectElement>("sessionCategoryFilter");
-const controlStatus = requireElement<HTMLSpanElement>("controlStatus");
-const controlConversation = requireElement<HTMLDivElement>("controlConversation");
-const controlPromptForm = requireElement<HTMLFormElement>("controlPromptForm");
-const controlPromptInput = requireElement<HTMLInputElement>("controlPromptInput");
-const controlPromptSend = requireElement<HTMLButtonElement>("controlPromptSend");
-const sessionSearchInput = requireElement<HTMLInputElement>("sessionSearchInput");
+const askFuraButton = requireElement<HTMLButtonElement>("askFuraButton");
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
 const sessionMeta = requireElement<HTMLParagraphElement>("sessionMeta");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
@@ -712,6 +682,9 @@ const unreadSessions = new Set<string>();
 const sessionListItems = new Map<string, SessionListItemDom>();
 let sessionsEmptyEl: HTMLParagraphElement | null = null;
 let sessions: SessionSummary[] = [];
+let workspaceMode: WorkspaceMode = "session";
+let sessionPromptDraft = "";
+let controllerPromptDraft = "";
 let selectedCategoryFilter = "";
 let activeCategoryEditorDirty = false;
 let activeCategoryEditorSessionId: string | null = null;
@@ -759,10 +732,11 @@ const controlClientId = getOrCreateControlClientId();
 let controlConversationId: string | null = null;
 let controlMessages: ControlChatMessage[] = [];
 let controlStatusState: ControlStatusProjection = { status: "idle" };
-let sessionSearchQuery = "";
 const url = new URL(window.location.href);
-const initialToken = url.searchParams.get("token") ?? window.localStorage.getItem("fura.token") ?? "";
-tokenInput.value = initialToken;
+const urlToken = url.searchParams.get("token")?.trim() ?? "";
+const storedToken = window.localStorage.getItem("fura.token")?.trim() ?? "";
+const initialToken = urlToken || storedToken;
+if (urlToken) window.localStorage.setItem("fura.token", urlToken);
 let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
 let thinkingVisibilityMode = parseThinkingVisibilityMode(window.localStorage.getItem(THINKING_VISIBILITY_STORAGE_KEY));
 let skipThinkingOpenRestoreOnce = false;
@@ -800,7 +774,7 @@ activeCategoryCombobox = createCategoryCombobox(
 
 // --- Event wiring ---
 
-connectButton.addEventListener("click", connect);
+askFuraButton.addEventListener("click", activateControllerWorkspace);
 createSessionButton.addEventListener("click", () => {
   openCwdPicker();
 });
@@ -808,15 +782,6 @@ sessionCategoryFilter.addEventListener("change", () => {
   selectedCategoryFilter = sessionCategoryFilter.value;
   renderSessions();
 });
-sessionSearchInput.addEventListener("input", () => {
-  sessionSearchQuery = sessionSearchInput.value;
-  renderSessions();
-});
-controlPromptForm.addEventListener("submit", event => {
-  event.preventDefault();
-  submitControlPrompt();
-});
-refreshSessionsButton.addEventListener("click", () => send({ type: "session.list" }));
 toolVisibilityToggle.addEventListener("click", () => {
   showToolBubbles = !showToolBubbles;
   window.localStorage.setItem(TOOL_VISIBILITY_STORAGE_KEY, String(showToolBubbles));
@@ -955,6 +920,18 @@ promptForm.addEventListener("submit", event => {
   event.preventDefault();
   const editorText = promptInput.value.trim();
   const text = expandSnippetTokens(editorText);
+  if (workspaceMode === "controller") {
+    if (!text) return;
+    hidePalette();
+    if (pendingImages.length > 0) {
+      controlMessages.push({ role: "system", text: "Ask Fura does not accept image attachments yet. Remove the image preview before asking Fura." });
+      renderControlConversation();
+      return;
+    }
+    const accepted = submitControlPromptText(text);
+    if (accepted) clearPromptEditor();
+    return;
+  }
   if ((!text && pendingImages.length === 0) || !activeSessionId) return;
   hidePalette();
   if (pendingImages.length === 0 && isModelPickerCommand(editorText)) {
@@ -1031,8 +1008,8 @@ promptInput.addEventListener("keydown", event => {
     return;
   }
   if (commandPalette.hidden) {
-    if (handlePromptHistoryKey(event)) return;
-    if (event.key === "Escape" && activeSessionId && projections.get(activeSessionId)?.isBusy) {
+    if (workspaceMode === "session" && handlePromptHistoryKey(event)) return;
+    if (workspaceMode === "session" && event.key === "Escape" && activeSessionId && projections.get(activeSessionId)?.isBusy) {
       event.preventDefault();
       send({ type: "prompt.abort", sessionId: activeSessionId });
     }
@@ -1057,34 +1034,28 @@ promptInput.addEventListener("keydown", event => {
   }
 });
 
-tokenInput.addEventListener("keydown", event => {
-  if (event.key === "Enter") {
-    connect();
-  }
-});
 
 render();
 if (initialToken) {
-  connect();
+  connect(initialToken);
 }
 initDockview();
 
 // --- Core session logic ---
 
-function connect(): void {
-  const token = tokenInput.value.trim();
-  if (!token) {
-    appendLog("Add the bridge token printed by the Rust server before connecting.");
+function connect(token: string): void {
+  const bridgeToken = token.trim();
+  if (!bridgeToken) {
+    appendLog("No bridge token found. Load Fura with ?token=<token> from the Rust server URL.");
     return;
   }
 
-  window.localStorage.setItem("fura.token", token);
+  window.localStorage.setItem("fura.token", bridgeToken);
   socket?.close();
 
   const wsUrl = new URL("/ws", window.location.href);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-  wsUrl.searchParams.set("token", token);
-
+  wsUrl.searchParams.set("token", bridgeToken);
   setStatus("connecting", "connecting");
   socket = new WebSocket(wsUrl);
   socket.addEventListener("open", () => {
@@ -1113,12 +1084,37 @@ function connect(): void {
   });
 }
 
+function activeWorkspaceKey(): string | null {
+  return workspaceMode === "controller" ? "controller" : activeSessionId;
+}
+
+function activateControllerWorkspace(): void {
+  if (workspaceMode !== "controller") {
+    sessionPromptDraft = promptInput.value;
+    promptInput.value = controllerPromptDraft;
+    workspaceMode = "controller";
+    resetPromptHistoryNavigation();
+    markTranscriptViewDirty({ resetCache: true });
+    markToolsViewDirty();
+    updatePalette();
+  }
+  render();
+  promptInput.focus();
+}
+
 function activateSession(sessionId: string): void {
-  const sessionChanged = activeSessionId !== sessionId;
+  const previousMode = workspaceMode;
+  const sessionChanged = activeSessionId !== sessionId || workspaceMode !== "session";
   if (sessionChanged) {
+    if (previousMode === "controller") {
+      controllerPromptDraft = promptInput.value;
+      promptInput.value = sessionPromptDraft;
+    }
+    workspaceMode = "session";
     resetPromptHistoryNavigation();
     markTranscriptViewDirty();
     markToolsViewDirty();
+    updatePalette();
   }
   activeSessionId = sessionId;
   unreadSessions.delete(sessionId);
@@ -1128,7 +1124,7 @@ function appendSessionNotice(sessionId: string, notice: SessionNotice): void {
   const notices = sessionNotices.get(sessionId) ?? [];
   notices.push(notice);
   sessionNotices.set(sessionId, notices);
-  if (sessionId === activeSessionId) markTranscriptViewDirty();
+  if (workspaceMode === "session" && sessionId === activeSessionId) markTranscriptViewDirty();
 }
 
 function isPendingCreatedSession(sessionId: string): boolean {
@@ -1152,7 +1148,7 @@ function shouldActivateSnapshot(sessionId: string): boolean {
     pendingCreatedSessionBaseline = null;
     return true;
   }
-  return !activeSessionId || activeSessionId === sessionId;
+  return workspaceMode === "session" && (!activeSessionId || activeSessionId === sessionId);
 }
 
 function handleServerMessage(message: ServerMessage): void {
@@ -1314,22 +1310,23 @@ function handleServerMessage(message: ServerMessage): void {
   }
 }
 
-function submitControlPrompt(): void {
-  const text = controlPromptInput.value.trim();
-  if (!text) return;
+function submitControlPromptText(text: string): boolean {
+  const prompt = text.trim();
+  if (!prompt) return false;
   const conversationId = controlConversationId ?? crypto.randomUUID();
-  controlConversationId = conversationId;
-  controlMessages.push({ role: "user", text });
-  controlStatusState = { status: "working", message: "Ask Fura is thinking." };
   const sent = send({
     type: "control.prompt",
     clientId: controlClientId,
     conversationId,
-    text,
+    text: prompt,
     uiSnapshot: captureFrontendUiSnapshot(),
   });
-  if (sent) controlPromptInput.value = "";
+  if (!sent) return false;
+  controlConversationId = conversationId;
+  controlMessages.push({ role: "user", text: prompt });
+  controlStatusState = { status: "working", message: "Ask Fura is thinking." };
   renderControlConversation();
+  return sent;
 }
 
 function handleControlReply(message: Extract<ServerMessage, { type: "control.reply" }>): void {
@@ -1345,18 +1342,18 @@ function handleControlReply(message: Extract<ServerMessage, { type: "control.rep
 
 function handleFrontendControl(action: FrontendControlAction): void {
   switch (action.type) {
-    case "setSessionSearch":
-      sessionSearchQuery = action.query;
-      sessionSearchInput.value = action.query;
-      renderSessions();
-      if (action.focus) sessionSearchInput.focus();
-      break;
     case "selectSession":
       handleSessionButtonClick(action.sessionId);
       break;
     case "setPromptDraft":
-      if (action.sessionId && action.sessionId !== activeSessionId) {
-        handleSessionButtonClick(action.sessionId);
+      {
+        const targetSessionId = action.sessionId ?? activeSessionId;
+        if (targetSessionId && targetSessionId !== activeSessionId) {
+          handleSessionButtonClick(targetSessionId);
+        } else if (targetSessionId) {
+          activateSession(targetSessionId);
+          render();
+        }
       }
       promptInput.value = action.text;
       updatePalette();
@@ -1372,18 +1369,16 @@ function handleFrontendControl(action: FrontendControlAction): void {
   }
 }
 
-function focusControlTarget(target: "controller" | "sessionSearch" | "prompt"): void {
-  if (target === "controller") controlPromptInput.focus();
-  else if (target === "sessionSearch") sessionSearchInput.focus();
-  else if (target === "prompt") promptInput.focus();
+function focusControlTarget(target: "controller" | "prompt"): void {
+  activateControllerWorkspace();
+  if (target === "prompt" || target === "controller") promptInput.focus();
 }
 
 function captureFrontendUiSnapshot(): FrontendUiSnapshot {
   return {
     activeSessionId,
     focusedArea: focusedArea(),
-    sessionSearchQuery,
-    visibleSessionIds: categoryFilteredSessions().map(session => session.sessionId),
+    visibleSessionIds: visibleSessions().map(session => session.sessionId),
     promptDraft: {
       sessionId: activeSessionId,
       hasText: promptInput.value.trim().length > 0,
@@ -1402,8 +1397,7 @@ function captureFrontendUiSnapshot(): FrontendUiSnapshot {
 
 function focusedArea(): FrontendUiSnapshot["focusedArea"] {
   const element = document.activeElement;
-  if (element === controlPromptInput) return "controller";
-  if (element === sessionSearchInput) return "sessionSearch";
+  if (workspaceMode === "controller" && element === promptInput) return "controller";
   if (element === promptInput) return "prompt";
   if (element && sessionsList.contains(element)) return "sessionList";
   if (element && transcriptPanelEl?.contains(element)) return "transcript";
@@ -1412,45 +1406,30 @@ function focusedArea(): FrontendUiSnapshot["focusedArea"] {
 }
 
 function renderControlConversation(): void {
-  controlStatus.textContent = controlStatusState.message || controlStatusState.status;
-  controlStatus.className = `control-status ${controlStatusState.status}`;
-  controlPromptSend.disabled = controlStatusState.status === "working";
-  controlConversation.replaceChildren();
-  for (const message of controlMessages.slice(-8)) {
-    const item = document.createElement("div");
-    item.className = `control-message ${message.role}`;
-    const text = document.createElement("p");
-    text.textContent = message.text;
-    item.append(text);
-    for (const candidate of message.candidates ?? []) {
-      item.append(renderControlCandidate(candidate));
-    }
-    for (const suggestion of message.suggestedActions ?? []) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "control-suggestion";
-      button.textContent = suggestion.label;
-      button.addEventListener("click", () => handleFrontendControl(suggestion.action));
-      item.append(button);
-    }
-    controlConversation.append(item);
+  askFuraButton.className = `ask-fura-toggle ${controlStatusState.status}`;
+  askFuraButton.setAttribute("aria-pressed", String(workspaceMode === "controller"));
+  askFuraButton.title = controlStatusState.message || `Ask Fura is ${controlStatusState.status}`;
+  if (workspaceMode === "controller") {
+    markTranscriptViewDirty();
+    markToolsViewDirty();
+    renderActiveSession();
   }
 }
 
 function renderControlCandidate(candidate: ControlCandidate): HTMLElement {
-  const card = document.createElement("div");
+  const card = mkEl("div");
   card.className = "control-candidate";
-  const title = document.createElement("strong");
+  const title = mkEl("strong");
   title.textContent = candidate.title || shortId(candidate.sessionId);
-  const reason = document.createElement("span");
+  const reason = mkEl("span");
   reason.textContent = candidate.reason;
-  const open = document.createElement("button");
+  const open = mkEl("button");
   open.type = "button";
   open.textContent = "Open";
   open.addEventListener("click", () => handleFrontendControl({ type: "selectSession", sessionId: candidate.sessionId }));
   card.append(title, reason, open);
   for (const snippetText of candidate.snippets ?? []) {
-    const snippet = document.createElement("p");
+    const snippet = mkEl("p");
     snippet.className = "control-snippet";
     snippet.textContent = snippetText;
     card.append(snippet);
@@ -1655,7 +1634,7 @@ function sendPromptWithBusyHandling(options: {
 
 function renderBusyPromptChoice(): void {
   const draft = busyPromptDraft;
-  const shouldShow = Boolean(draft && draft.sessionId === activeSessionId);
+  const shouldShow = Boolean(workspaceMode === "session" && draft && draft.sessionId === activeSessionId);
   const wasHidden = busyPromptOverlay.hidden;
 
   if (!draft || !shouldShow) {
@@ -1946,27 +1925,9 @@ function renderCategoryFilter(): void {
   sessionCategoryFilter.value = selectedCategoryFilter;
 }
 
-function categoryFilteredSessions(): SessionSummary[] {
-  const categoryMatches = selectedCategoryFilter
-    ? sessions.filter(session => normalizedCategory(session.category) === selectedCategoryFilter)
-    : sessions;
-  const query = sessionSearchQuery.trim().toLowerCase();
-  if (!query) return categoryMatches;
-  return categoryMatches.filter(session => sessionMatchesSearch(session, query));
-}
-
-function sessionMatchesSearch(session: SessionSummary, query: string): boolean {
-  return [
-    session.title,
-    session.cwd,
-    session.sessionId,
-    session.timestamp,
-    session.category,
-    session.status,
-    session.kind,
-  ]
-    .filter((value): value is string => Boolean(value))
-    .some(value => value.toLowerCase().includes(query));
+function visibleSessions(): SessionSummary[] {
+  if (!selectedCategoryFilter) return sessions;
+  return sessions.filter(session => normalizedCategory(session.category) === selectedCategoryFilter);
 }
 
 function currentSessionSummary(sessionId: string): SessionSummary | undefined {
@@ -2026,7 +1987,7 @@ function createSessionListItem(sessionId: string): SessionListItemDom {
 }
 
 function updateSessionListItem(dom: SessionListItemDom, session: SessionSummary): void {
-  const isActive = session.sessionId === activeSessionId;
+  const isActive = workspaceMode === "session" && session.sessionId === activeSessionId;
   const hasUpdates = !isActive && unreadSessions.has(session.sessionId);
   const classes = ["session", isActive ? "active" : "", hasUpdates ? "has-updates" : ""].filter(Boolean);
   const label = session.title || shortId(session.sessionId);
@@ -2042,7 +2003,7 @@ function updateSessionListItem(dom: SessionListItemDom, session: SessionSummary)
 
 function renderSessions(): void {
   renderCategoryFilter();
-  const visibleSessions = categoryFilteredSessions();
+  const visibleSessionList = visibleSessions();
   if (sessions.length === 0) {
     for (const dom of sessionListItems.values()) dom.item.remove();
     sessionListItems.clear();
@@ -2056,22 +2017,21 @@ function renderSessions(): void {
     return;
   }
 
-  if (visibleSessions.length === 0) {
+  if (visibleSessionList.length === 0) {
     for (const dom of sessionListItems.values()) dom.item.remove();
     sessionListItems.clear();
     if (!sessionsEmptyEl) {
       sessionsEmptyEl = document.createElement("p");
       sessionsEmptyEl.className = "empty";
     }
-    const filters = [selectedCategoryFilter ? `category ${selectedCategoryFilter}` : null, sessionSearchQuery.trim() ? `search "${sessionSearchQuery.trim()}"` : null].filter(Boolean);
-    sessionsEmptyEl.textContent = filters.length > 0 ? `No sessions match ${filters.join(" and ")}.` : "No sessions match the current filters.";
+    sessionsEmptyEl.textContent = selectedCategoryFilter ? `No sessions in category ${selectedCategoryFilter}.` : "No sessions match the current filters.";
     if (sessionsEmptyEl.parentNode !== sessionsList) sessionsList.replaceChildren(sessionsEmptyEl);
     return;
   }
 
   sessionsEmptyEl?.remove();
 
-  const nextSessionIds = new Set(visibleSessions.map(session => session.sessionId));
+  const nextSessionIds = new Set(visibleSessionList.map(session => session.sessionId));
   for (const [sessionId, dom] of sessionListItems) {
     if (!nextSessionIds.has(sessionId)) {
       dom.item.remove();
@@ -2080,7 +2040,7 @@ function renderSessions(): void {
   }
 
   let anchor = sessionsList.firstChild;
-  for (const session of visibleSessions) {
+  for (const session of visibleSessionList) {
     let dom = sessionListItems.get(session.sessionId);
     if (!dom) {
       dom = createSessionListItem(session.sessionId);
@@ -2137,16 +2097,17 @@ function syncThinkingVisibilityToggle(): void {
 function markActiveCategoryDirty(): void {
   activeCategoryEditorDirty = true;
   activeCategoryEditorSessionId = activeSessionId;
-  activeCategorySave.disabled = !activeSessionId;
+  activeCategorySave.disabled = workspaceMode !== "session" || !activeSessionId;
 }
 
 function syncActiveCategoryEditor(projection: SessionProjection | undefined): void {
+  const canEditCategory = workspaceMode === "session" && Boolean(activeSessionId);
   const category = normalizedCategory(projection?.summary.category);
   const shouldReset = activeCategoryEditorSessionId !== activeSessionId || !activeCategoryEditorDirty;
-  activeCategoryInput.disabled = !activeSessionId;
-  activeCategorySave.disabled = !activeSessionId || (!activeCategoryEditorDirty && activeCategoryInput.value.trim() === category);
-  if (!activeSessionId || shouldReset) {
-    activeCategoryInput.value = activeSessionId ? category : "";
+  activeCategoryInput.disabled = !canEditCategory;
+  activeCategorySave.disabled = !canEditCategory || (!activeCategoryEditorDirty && activeCategoryInput.value.trim() === category);
+  if (!canEditCategory || shouldReset) {
+    activeCategoryInput.value = canEditCategory ? category : "";
     activeCategoryEditorSessionId = activeSessionId;
     activeCategoryEditorDirty = false;
     activeCategorySave.disabled = true;
@@ -2154,7 +2115,7 @@ function syncActiveCategoryEditor(projection: SessionProjection | undefined): vo
 }
 
 function submitActiveCategory(): void {
-  if (!activeSessionId) return;
+  if (workspaceMode !== "session" || !activeSessionId) return;
   const category = normalizedCategory(activeCategoryInput.value);
   send(category
     ? { type: "session.setCategory", sessionId: activeSessionId, category }
@@ -2168,12 +2129,30 @@ function submitActiveCategory(): void {
 // Renders the workspace header, status bar, and busy prompt choice.
 // Drives re-render of the active Dockview panel via its stored element reference.
 function renderActiveSession(): void {
-  const sessionChanged = activeSessionId !== lastRenderedSessionId;
-  lastRenderedSessionId = activeSessionId;
+  const workspaceKey = activeWorkspaceKey();
+  const sessionChanged = workspaceKey !== lastRenderedSessionId;
+  lastRenderedSessionId = workspaceKey;
 
   if (sessionChanged) {
     markTranscriptViewDirty();
     markToolsViewDirty();
+  }
+
+  if (workspaceMode === "controller") {
+    abortButton.disabled = true;
+    stopButton.disabled = true;
+    deleteSessionButton.disabled = true;
+    syncActiveCategoryEditor(undefined);
+    const isWorking = controlStatusState.status === "working";
+    promptInput.disabled = isWorking;
+    sendButton.disabled = isWorking;
+    sessionTitle.textContent = "Ask Fura";
+    sessionMeta.textContent = "Fura controller session · can find, discuss, and open sessions.";
+    promptInput.placeholder = isWorking ? "Ask Fura is working…" : "Ask Fura about sessions…";
+    renderControllerStatusBar();
+    renderBusyPromptChoice();
+    renderActiveDockviewPanel(undefined);
+    return;
   }
 
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
@@ -2228,22 +2207,29 @@ function renderActiveDockviewPanel(projection: SessionProjection | undefined): v
 
 function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
   if (!transcriptPanelEl || !isTranscriptPanelActive()) return;
-  const sessionChanged = activeSessionId !== lastTranscriptRenderedSessionId;
+  const workspaceKey = activeWorkspaceKey();
+  const sessionChanged = workspaceKey !== lastTranscriptRenderedSessionId;
   if (!force && !transcriptPanelDirty && !sessionChanged) return;
 
-  renderTranscriptView(transcriptPanelEl, projection, sessionChanged);
+  if (workspaceMode === "controller") {
+    renderControllerTranscriptView(transcriptPanelEl, sessionChanged);
+  } else {
+    renderTranscriptView(transcriptPanelEl, projection, sessionChanged);
+  }
   transcriptPanelDirty = false;
-  lastTranscriptRenderedSessionId = activeSessionId;
+  lastTranscriptRenderedSessionId = workspaceKey;
 }
 
 function renderToolsPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
   if (!toolsPanelEl || !isToolsPanelActive()) return;
-  const sessionChanged = activeSessionId !== lastToolsRenderedSessionId;
+  const workspaceKey = activeWorkspaceKey();
+  const sessionChanged = workspaceKey !== lastToolsRenderedSessionId;
   if (!force && !toolsPanelDirty && !sessionChanged) return;
 
-  renderToolsView(toolsPanelEl, projection);
+  if (workspaceMode === "controller") renderControllerToolsView(toolsPanelEl);
+  else renderToolsView(toolsPanelEl, projection);
   toolsPanelDirty = false;
-  lastToolsRenderedSessionId = activeSessionId;
+  lastToolsRenderedSessionId = workspaceKey;
 }
 
 // --- Panel render functions ---
@@ -2317,6 +2303,75 @@ function renderSessionNoticeNodes(notices: SessionNotice[]): HTMLElement[] {
     bar.textContent = notice.text;
     return bar;
   });
+}
+
+function controlMessageRenderKey(message: ControlChatMessage, index: number): string {
+  const candidates = (message.candidates ?? []).map(candidate => candidate.sessionId).join(",");
+  const actions = (message.suggestedActions ?? []).map(action => action.label).join(",");
+  return `control:${index}:${message.role}:${message.text}:${candidates}:${actions}`;
+}
+
+function buildControllerTranscriptRenderItems(): PanelRenderItem[] {
+  return controlMessages.map((message, index) => ({
+    key: controlMessageRenderKey(message, index),
+    render: () => renderControlTranscriptMessage(message, index),
+  }));
+}
+
+function renderControlTranscriptMessage(message: ControlChatMessage, index: number): HTMLElement {
+  const article = renderMessage({
+    id: `ask-fura-${index}`,
+    role: message.role,
+    blocks: [{ kind: "text", text: message.text }],
+    timestamp: null,
+    isNew: false,
+  });
+  const roleLabel = article.querySelector(".message-heading strong");
+  if (roleLabel && message.role === "assistant") roleLabel.textContent = "Ask Fura";
+
+  for (const candidate of message.candidates ?? []) {
+    article.append(renderControlCandidate(candidate));
+  }
+  for (const suggestion of message.suggestedActions ?? []) {
+    const button = mkEl("button");
+    button.type = "button";
+    button.className = "control-suggestion";
+    button.textContent = suggestion.label;
+    button.addEventListener("click", () => handleFrontendControl(suggestion.action));
+    article.append(button);
+  }
+  return article;
+}
+
+function renderControllerTranscriptView(container: HTMLElement, sessionChanged: boolean): void {
+  _renderOwner = container.ownerDocument;
+  const cache = getCachedPanelRenderState(transcriptRenderCaches, container, transcriptRenderRevision);
+  const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+  const items = buildControllerTranscriptRenderItems();
+
+  if (items.length === 0) {
+    clearCachedPanelRenderState(cache);
+    const empty = mkEl("p");
+    empty.className = "empty transcript-empty";
+    empty.textContent = "Ask Fura can find sessions, explain candidates, open a session, or stage a prompt draft.";
+    container.replaceChildren(empty);
+  } else {
+    renderCachedPanelItems(container, cache, items, transcriptRenderRevision);
+  }
+
+  if (sessionChanged || wasNearBottom) {
+    container.scrollTop = container.scrollHeight;
+  }
+}
+
+function renderControllerToolsView(container: HTMLElement): void {
+  _renderOwner = container.ownerDocument;
+  const cache = getCachedPanelRenderState(toolsRenderCaches, container, 0);
+  clearCachedPanelRenderState(cache);
+  const empty = mkEl("p");
+  empty.className = "empty tools-empty";
+  empty.textContent = "Ask Fura uses restricted Fura controller tools. Results appear in the transcript.";
+  container.replaceChildren(empty);
 }
 
 function restoreOpenThinkingBlocks(container: HTMLElement, openThinking: Set<string>): void {
@@ -2985,6 +3040,16 @@ function flushDiffComments(
   previewDiffComments(sessionId, state, baseSnapshot, headSnapshot);
 }
 
+function diffTargetOffsetTop(container: HTMLElement, target: HTMLElement): number {
+  let offset = target.offsetTop;
+  let parent = target.offsetParent as HTMLElement | null;
+  while (parent && parent !== container) {
+    offset += parent.offsetTop;
+    parent = parent.offsetParent as HTMLElement | null;
+  }
+  return offset;
+}
+
 function scrollDiffsToFile(container: HTMLElement, filePath: string): void {
   const mainBody = container.querySelector<HTMLElement>(".diffs-main-body");
   if (!mainBody) return;
@@ -2992,10 +3057,11 @@ function scrollDiffsToFile(container: HTMLElement, filePath: string): void {
   const target = targets.find(element => element.dataset.diffFilePath === filePath);
   if (!target) return;
 
-  const targetRect = target.getBoundingClientRect();
-  const bodyRect = mainBody.getBoundingClientRect();
-  const scrollTop = Math.max(0, mainBody.scrollTop + targetRect.top - bodyRect.top - 8);
-  mainBody.scrollTo({ top: scrollTop, behavior: "smooth" });
+  const scrollTop = Math.max(0, diffTargetOffsetTop(mainBody, target));
+  mainBody.scrollTop = scrollTop;
+  requestAnimationFrame(() => {
+    mainBody.scrollTop = scrollTop;
+  });
   target.classList.add("diff-line-target");
   window.setTimeout(() => target.classList.remove("diff-line-target"), 1200);
 }
@@ -3501,6 +3567,19 @@ function makePanelToolbar(group: import("dockview-core").DockviewGroupPanel): HT
 }
 
 // --- Status bar ---
+
+function renderControllerStatusBar(): void {
+  statusBar.replaceChildren();
+  statusBar.classList.toggle("busy", controlStatusState.status === "working");
+  const piSpan = statusPart("π", "status-pi");
+  if (controlStatusState.status === "working") piSpan.classList.add("is-running");
+  const parts = [
+    piSpan,
+    statusPart("Ask Fura", "model"),
+    statusPart(controlStatusState.message || controlStatusState.status, controlStatusState.status === "error" ? "error" : "thinking"),
+  ];
+  statusBar.append(...interleaveStatusParts(parts));
+}
 
 function renderStatusBar(projection?: SessionProjection): void {
   statusBar.replaceChildren();
@@ -5176,6 +5255,10 @@ function formatModelContext(model: ModelSummary): string | null {
 // --- Command palette ---
 
 function updatePalette(): void {
+  if (workspaceMode === "controller") {
+    hidePalette();
+    return;
+  }
   const text = promptInput.value;
   if (!text.startsWith("/") || text.includes(" ")) {
     hidePalette();
