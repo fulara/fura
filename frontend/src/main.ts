@@ -2,7 +2,7 @@ import "./style.css";
 import "highlight.js/styles/github-dark.css";
 import "dockview-core/dist/styles/dockview.css";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
-import { formatContext, formatCost, formatTokens, shortPath } from "./format";
+import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type FuraConnection } from "./connection";
 import { mkEl, mkFrag, requireElement, setRenderDocument } from "./dom";
@@ -18,6 +18,7 @@ import {
   createPendingMarker as createAttachmentMarker,
   expandSnippetTokens as expandSnippetAttachmentTokens,
   removePendingMarkerFromText,
+  insertTextAtSelection,
   renderAttachmentPreviews,
   type PendingImage,
   type PendingSnippet,
@@ -3581,17 +3582,15 @@ function renderMessage(message: TranscriptMessage): HTMLElement {
 
 function insertTextAtCursor(text: string): void {
   resetPromptHistoryNavigation();
-  const start = promptInput.selectionStart ?? promptInput.value.length;
-  const end = promptInput.selectionEnd ?? promptInput.value.length;
-  const prefix = promptInput.value.slice(0, start);
-  const suffix = promptInput.value.slice(end);
-  const separator = prefix && !prefix.endsWith(" ") && !prefix.endsWith("\n") ? " " : "";
-  const trailing = suffix && !suffix.startsWith(" ") && !suffix.startsWith("\n") ? " " : "";
-  const inserted = `${separator}${text}${trailing}`;
-  promptInput.value = `${prefix}${inserted}${suffix}`;
-  const cursor = start + inserted.length;
-  promptInput.selectionStart = cursor;
-  promptInput.selectionEnd = cursor;
+  const insertion = insertTextAtSelection(
+    promptInput.value,
+    promptInput.selectionStart ?? promptInput.value.length,
+    promptInput.selectionEnd ?? promptInput.value.length,
+    text,
+  );
+  promptInput.value = insertion.value;
+  promptInput.selectionStart = insertion.cursor;
+  promptInput.selectionEnd = insertion.cursor;
 }
 
 function createPendingMarker(label: "Image" | "Snippet"): string {
@@ -4136,8 +4135,5 @@ function appendLog(line: string): void {
   console.debug(`[fura] ${line}`);
 }
 
-function shortId(id: string): string {
-  return id.slice(0, 8);
-}
 
 

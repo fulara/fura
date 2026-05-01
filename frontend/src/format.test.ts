@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatContext, formatCost, formatTokens, shortPath } from "./format";
+import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 
 describe("shortPath", () => {
   it("keeps short and relative paths intact", () => {
@@ -44,5 +44,13 @@ describe("formatContext", () => {
     expect(formatContext(0.236, 900)).toBe("0.24%/900");
     expect(formatContext(2.84, 12_300)).toBe("2.8%/12K");
     expect(formatContext(19.99, 1_000_000)).toBe("20.0%/1.0M");
+  });
+});
+
+
+describe("shortId", () => {
+  it("returns the first eight characters", () => {
+    expect(shortId("abcdefghi")).toBe("abcdefgh");
+    expect(shortId("abc")).toBe("abc");
   });
 });

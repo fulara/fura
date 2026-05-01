@@ -23,3 +23,8 @@ export function formatContext(percent: number, windowSize: number): string {
     : `${windowSize}`;
   return `${pct}%/${win}`;
 }
+
+
+export function shortId(id: string): string {
+  return id.slice(0, 8);
+}

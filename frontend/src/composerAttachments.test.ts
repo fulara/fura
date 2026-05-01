@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createPendingMarker,
   expandSnippetTokens,
+  insertTextAtSelection,
   removePendingMarkerFromText,
   renderAttachmentPreviews,
   stripDataUrlPrefix,
@@ -37,6 +38,22 @@ describe("removePendingMarkerFromText", () => {
 
   it("returns original text when marker is absent", () => {
     expect(removePendingMarkerFromText("hello", "[Image 1]")).toBe("hello");
+  });
+});
+
+describe("insertTextAtSelection", () => {
+  it("inserts text with spacing around existing content", () => {
+    expect(insertTextAtSelection("hello world", 5, 5, "[Image 1]")).toEqual({
+      value: "hello [Image 1] world",
+      cursor: 15,
+    });
+  });
+
+  it("replaces selected text", () => {
+    expect(insertTextAtSelection("hello old world", 6, 9, "new")).toEqual({
+      value: "hello new world",
+      cursor: 9,
+    });
   });
 });
 

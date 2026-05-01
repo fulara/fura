@@ -38,6 +38,23 @@ export function removePendingMarkerFromText(value: string, marker: string): stri
   return `${value.slice(0, start)}${value.slice(end)}`;
 }
 
+export type TextInsertion = {
+  value: string;
+  cursor: number;
+};
+
+export function insertTextAtSelection(value: string, start: number, end: number, text: string): TextInsertion {
+  const prefix = value.slice(0, start);
+  const suffix = value.slice(end);
+  const separator = prefix && !prefix.endsWith(" ") && !prefix.endsWith("\n") ? " " : "";
+  const trailing = suffix && !suffix.startsWith(" ") && !suffix.startsWith("\n") ? " " : "";
+  const inserted = `${separator}${text}${trailing}`;
+  return {
+    value: `${prefix}${inserted}${suffix}`,
+    cursor: start + inserted.length,
+  };
+}
+
 export function expandSnippetTokens(text: string, snippets: PendingSnippet[]): string {
   let expanded = text;
   for (const snippet of snippets) {
