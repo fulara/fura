@@ -46,6 +46,15 @@ let currentSessionId = "mock-session";
 let currentSessionFile = "mock-session.jsonl";
 let forkCount = 0;
 let planMode = null;
+const todoPhases = [
+  {
+    name: "Mock Verification",
+    tasks: [
+      { content: "Confirm todo projection", status: "completed" },
+      { content: "Keep current todos visible", status: "in_progress", notes: ["Rendered from get_state.todoPhases"] },
+    ],
+  },
+];
 
 const diffSnapshots = [
   {
@@ -92,6 +101,7 @@ for await (const line of rl) {
         sessionFile: currentSessionFile,
         sessionName: "Mock RPC Session",
         planMode,
+        todoPhases,
       });
       break;
     }

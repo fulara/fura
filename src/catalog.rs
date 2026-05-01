@@ -3,14 +3,13 @@ use std::{
     env, fs,
     io::{BufRead, BufReader as StdBufReader},
     path::{Path, PathBuf},
-    time::UNIX_EPOCH,
 };
 
 use serde_json::Value;
 
 use crate::{
     AppState, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader, SessionKind,
-    SessionRecord, SessionStatus, SessionSummary, ToolCard, TranscriptMessage, now_epoch_seconds,
+    SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard, TranscriptMessage,
     project_omp_transcript,
 };
 
@@ -21,8 +20,8 @@ pub(crate) struct DiscoveredSession {
     pub(crate) cwd: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) timestamp: Option<String>,
-    pub(crate) created_at: u64,
-    pub(crate) updated_at: u64,
+    pub(crate) created_at: Timestamp,
+    pub(crate) updated_at: Timestamp,
     pub(crate) session_file: String,
     pub(crate) messages: Vec<TranscriptMessage>,
     pub(crate) tool_cards: Vec<ToolCard>,
@@ -85,6 +84,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                         streaming_message: None,
                         tool_cards: session.tool_cards.clone(),
                         active_tool_calls: Vec::new(),
+                        todo_phases: None,
                         kind: SessionKind::Available,
                         session_file: Some(session.session_file),
                         title: session.title,
@@ -169,20 +169,19 @@ pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
     let updated_at = metadata
         .as_ref()
         .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or_else(now_epoch_seconds);
+        .and_then(|time| Timestamp::try_from(time).ok())
+        .unwrap_or_else(Timestamp::now);
     let created_at = header
         .timestamp
         .as_deref()
-        .and_then(parse_timestamp_seconds)
+        .and_then(Timestamp::from_rpc)
         .or_else(|| {
             metadata
+                .as_ref()
                 .and_then(|metadata| metadata.modified().ok())
-                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_secs())
+                .and_then(|time| Timestamp::try_from(time).ok())
         })
-        .unwrap_or_else(now_epoch_seconds);
+        .unwrap_or_else(Timestamp::now);
 
     Some(DiscoveredSession {
         preload_index: usize::MAX,
@@ -222,30 +221,6 @@ pub(crate) fn read_session_file_messages(path: &Path) -> (Vec<TranscriptMessage>
         }
     }
     project_omp_transcript(&message_values)
-}
-
-pub(crate) fn parse_timestamp_seconds(timestamp: &str) -> Option<u64> {
-    let date_time = timestamp.split_once('T')?.0;
-    let mut parts = date_time.split('-');
-    let year = parts.next()?.parse::<i32>().ok()?;
-    let month = parts.next()?.parse::<u32>().ok()?;
-    let day = parts.next()?.parse::<u32>().ok()?;
-    days_from_civil(year, month, day).map(|days| days.saturating_mul(86_400))
-}
-
-pub(crate) fn days_from_civil(year: i32, month: u32, day: u32) -> Option<u64> {
-    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    let year = year - i32::from(month <= 2);
-    let era = if year >= 0 { year } else { year - 399 } / 400;
-    let yoe = year - era * 400;
-    let month = month as i32;
-    let day = day as i32;
-    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let days = era * 146_097 + doe - 719_468;
-    u64::try_from(days).ok()
 }
 
 pub(crate) fn default_session_root() -> PathBuf {

@@ -380,7 +380,7 @@ pub(crate) async fn create_session(
 ) -> Vec<ServerMessage> {
     let transport_id = Uuid::new_v4().to_string();
     let args = args.unwrap_or_default();
-    let created_at = now_epoch_seconds();
+    let created_at = Timestamp::now();
     let requested_cwd = match normalize_optional_field(cwd) {
         Some(cwd) => cwd,
         None => state.default_cwd.read().await.clone(),
@@ -512,6 +512,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
         streaming_message: None,
         tool_cards: Vec::new(),
         active_tool_calls: Vec::new(),
+        todo_phases: None,
         session_file: Some(session_file.clone()),
         title: discovered.title.clone(),
         timestamp: discovered.timestamp.clone(),

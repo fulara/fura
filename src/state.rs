@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use serde_json::Value;
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
-use crate::{ServerMessage, SessionRecord};
+use crate::{ServerMessage, SessionRecord, Timestamp};
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -37,7 +37,7 @@ pub(crate) struct PendingCreatedSession {
     pub(crate) cwd: Option<String>,
     pub(crate) args: Vec<String>,
     pub(crate) title: Option<String>,
-    pub(crate) created_at: u64,
+    pub(crate) created_at: Timestamp,
 }
 
 #[derive(Debug, Clone)]

@@ -1,9 +1,4 @@
-use std::{
-    collections::HashMap,
-    env,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use axum::{Router, routing::get};
@@ -25,6 +20,7 @@ mod protocol;
 mod rpc;
 mod session;
 mod state;
+mod timestamp;
 mod web;
 
 use catalog::*;
@@ -36,6 +32,7 @@ use protocol::*;
 use rpc::*;
 use session::*;
 use state::*;
+use timestamp::*;
 use web::*;
 
 const SESSION_CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -153,26 +150,12 @@ async fn broadcast_sessions_snapshot(state: &AppState) {
     let _ = state.events.send(sessions_snapshot_from_map(&sessions));
 }
 
-fn now_epoch_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_millis()
-}
-
 fn next_rpc_id() -> String {
     Uuid::new_v4().to_string()
 }
 
 fn generate_token() -> String {
     Uuid::new_v4().simple().to_string()
-}
-
-fn now_epoch_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_secs()
 }
 
 async fn shutdown_signal() {
@@ -231,13 +214,14 @@ mod tests {
             cwd: None,
             args: Vec::new(),
             status: SessionStatus::Idle,
-            created_at: 0,
-            updated_at: 0,
+            created_at: Timestamp::from_rpc(&serde_json::json!(0)).expect("valid test timestamp"),
+            updated_at: Timestamp::from_rpc(&serde_json::json!(0)).expect("valid test timestamp"),
             messages: Vec::new(),
             live_message_ids: HashSet::new(),
             streaming_message: None,
             tool_cards: Vec::new(),
             active_tool_calls: Vec::new(),
+            todo_phases: None,
             kind: SessionKind::Managed,
             session_file: None,
             title: None,
@@ -343,6 +327,10 @@ mod tests {
                         )
                         .expect("get_state data should decode");
                         assert!(!data.session_id.is_empty());
+                        assert!(
+                            !data.todo_phases.is_empty(),
+                            "get_state fixture must cover todoPhases compatibility"
+                        );
                     }
                     "get_messages" => {
                         let data: OmpMessagesResponse = serde_json::from_value(
@@ -1386,6 +1374,60 @@ mod tests {
     }
 
     #[test]
+    fn projects_current_todos_from_historical_todo_write_card() {
+        let raw_messages = vec![
+            serde_json::json!({
+                "id": "a1",
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "todo-call",
+                    "name": "todo_write",
+                    "arguments": { "ops": [{ "op": "done", "task": "Check UI" }] }
+                }]
+            }),
+            serde_json::json!({
+                "id": "tr1",
+                "role": "toolResult",
+                "toolCallId": "todo-call",
+                "toolName": "todo_write",
+                "content": [{ "type": "text", "text": "Remaining items: none." }],
+                "details": {
+                    "phases": [{
+                        "name": "Investigation",
+                        "tasks": [
+                            { "content": "Check UI", "status": "completed" },
+                            { "content": "Run smoke", "status": "in_progress", "notes": ["Use mock RPC"] }
+                        ]
+                    }],
+                    "storage": "session"
+                },
+                "isError": false
+            }),
+        ];
+
+        let (_messages, tool_cards) = project_omp_transcript(&raw_messages);
+        let mut record = test_record();
+        record.tool_cards = tool_cards;
+        let projection = record.projection();
+
+        assert_eq!(projection.todo_phases.len(), 1);
+        assert_eq!(projection.todo_phases[0].name, "Investigation");
+        assert_eq!(
+            projection.todo_phases[0].tasks[0].status,
+            TodoStatusProjection::Completed
+        );
+        assert_eq!(
+            projection.todo_phases[0].tasks[1].status,
+            TodoStatusProjection::InProgress
+        );
+        assert_eq!(
+            projection.todo_phases[0].tasks[1].notes,
+            vec!["Use mock RPC".to_string()]
+        );
+    }
+
+    #[test]
     fn suppresses_file_mention_and_compaction() {
         for role in ["fileMention", "compactionSummary", "branchSummary"] {
             let result = map_omp_message(&serde_json::json!({ "role": role }));
@@ -1848,6 +1890,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_state_updates_current_todo_projection() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "s1",
+                    "todoPhases": [{
+                        "name": "Verification",
+                        "tasks": [
+                            { "content": "Run frontend build", "status": "completed" },
+                            { "content": "Smoke current todos", "status": "pending" }
+                        ]
+                    }]
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let projection = sessions.get("s1").expect("session exists").projection();
+        assert_eq!(projection.todo_phases.len(), 1);
+        assert_eq!(
+            projection.todo_phases[0].tasks[0].status,
+            TodoStatusProjection::Completed
+        );
+        assert_eq!(
+            projection.todo_phases[0].tasks[1].content,
+            "Smoke current todos"
+        );
+    }
+
+    #[tokio::test]
     async fn pending_created_session_becomes_visible_only_after_rpc_state() {
         let state = test_state(8, None);
         state.pending_created_sessions.write().await.insert(
@@ -1856,7 +1941,8 @@ mod tests {
                 cwd: Some("/workspace/project".to_string()),
                 args: vec!["--debug".to_string()],
                 title: Some("diffs2".to_string()),
-                created_at: 123,
+                created_at: Timestamp::from_rpc(&serde_json::json!(123_000))
+                    .expect("valid test timestamp"),
             },
         );
         state.rpc_session_targets.write().await.insert(
@@ -1892,7 +1978,7 @@ mod tests {
             assert!(matches!(next.status, SessionStatus::Idle));
             assert_eq!(next.cwd.as_deref(), Some("/workspace/project"));
             assert_eq!(next.args, vec!["--debug".to_string()]);
-            assert_eq!(next.created_at, 123);
+            assert_eq!(next.created_at.millis(), 123_000);
             assert_eq!(next.session_file.as_deref(), Some("omp-session.jsonl"));
             assert_eq!(next.title.as_deref(), Some("diffs2"));
         }

@@ -366,7 +366,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         record.streaming_message = None;
                         record.live_message_ids.insert(message.id.clone());
                         record.messages.push(message);
-                        record.updated_at = now_epoch_seconds();
+                        record.updated_at = Timestamp::now();
                         ServerMessage::SessionSnapshot {
                             session_id: target_session_id.clone(),
                             state: record.projection(),
@@ -429,8 +429,16 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         let mut card = record.active_tool_calls.remove(pos);
                         card.is_active = false;
                         card.is_error = is_async_error;
+                        let todo_phases = if card.tool_name == "todo_write" && !card.is_error {
+                            todo_phases_from_tool_result_value(partial_result.as_ref())
+                        } else {
+                            None
+                        };
                         card.result = partial_result;
                         card.partial_result = None;
+                        if let Some(todo_phases) = todo_phases {
+                            record.todo_phases = Some(todo_phases);
+                        }
                         record.tool_cards.push(card);
                     } else {
                         record.active_tool_calls[pos].partial_result = partial_result;
@@ -463,6 +471,15 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         .position(|c| c.tool_call_id == tool_call_id)
                     {
                         if is_background_running {
+                            let is_todo_write =
+                                record.active_tool_calls[pos].tool_name == "todo_write";
+                            if is_todo_write {
+                                if let Some(todo_phases) =
+                                    todo_phases_from_tool_result_value(result.as_ref())
+                                {
+                                    record.todo_phases = Some(todo_phases);
+                                }
+                            }
                             let card = &mut record.active_tool_calls[pos];
                             card.is_active = true;
                             card.is_error = false;
@@ -472,6 +489,13 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             let mut card = record.active_tool_calls.remove(pos);
                             card.is_active = false;
                             card.is_error = is_error;
+                            if card.tool_name == "todo_write" && !card.is_error {
+                                if let Some(todo_phases) =
+                                    todo_phases_from_tool_result_value(result.as_ref())
+                                {
+                                    record.todo_phases = Some(todo_phases);
+                                }
+                            }
                             card.result = result.clone();
                             card.partial_result = None;
                             record.tool_cards.push(card);
@@ -525,6 +549,7 @@ pub(crate) fn apply_rpc_state_to_record(
     context_window: Option<u64>,
     context_percent: Option<f64>,
     plan_mode: Option<Option<PlanModeProjection>>,
+    todo_phases: Option<Vec<TodoPhaseProjection>>,
 ) {
     record.status = SessionStatus::Idle;
     if let Some(name) = session_name {
@@ -546,6 +571,9 @@ pub(crate) fn apply_rpc_state_to_record(
     record.context_percent = context_percent;
     if let Some(plan_mode) = plan_mode {
         record.plan_mode = plan_mode;
+    }
+    if let Some(todo_phases) = todo_phases {
+        record.todo_phases = Some(todo_phases);
     }
 }
 
@@ -727,6 +755,12 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let plan_mode = data
                 .and_then(|d| d.get("planMode"))
                 .map(map_plan_mode_projection);
+            let todo_phases = data.and_then(|d| d.get("todoPhases")).map(|value| {
+                parse_todo_phases_value(value).unwrap_or_else(|error| {
+                    warn!(session_id = %current_session_id, %error, "invalid todoPhases in get_state response");
+                    Vec::new()
+                })
+            });
             let target_changed = target_session_id != current_session_id;
             let pending_create = if target_changed {
                 state
@@ -773,7 +807,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                             record.live_message_ids.clear();
                         })
                         .or_insert_with(|| {
-                            let now = now_epoch_seconds();
+                            let now = Timestamp::now();
                             let created_at = source
                                 .as_ref()
                                 .map(|record| record.created_at)
@@ -806,6 +840,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                                 streaming_message: None,
                                 tool_cards: Vec::new(),
                                 active_tool_calls: Vec::new(),
+                                todo_phases: None,
                                 kind: SessionKind::Managed,
                                 session_file: None,
                                 title: pending_create
@@ -825,7 +860,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                         });
 
                     if let Some(record) = sessions.get_mut(&target_session_id) {
-                        record.updated_at = now_epoch_seconds();
+                        record.updated_at = Timestamp::now();
                         apply_rpc_state_to_record(
                             record,
                             effective_session_name,
@@ -836,6 +871,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                             context_window,
                             context_percent,
                             plan_mode.clone(),
+                            todo_phases.clone(),
                         );
                     }
 
@@ -858,6 +894,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                             context_window,
                             context_percent,
                             plan_mode,
+                            todo_phases,
                         );
                     }
                     let target_snapshot = sessions.get(&target_session_id).map(|record| {
@@ -1256,7 +1293,7 @@ pub(crate) async fn append_bridge_debug_rpc_line(state: &AppState, session_id: &
     }
 
     let record = serde_json::json!({
-        "timestampMs": now_epoch_millis(),
+        "timestampMs": Timestamp::now().millis(),
         "sessionId": session_id,
         "direction": "rpc_to_bridge",
         "rawLine": line,

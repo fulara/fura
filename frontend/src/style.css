@@ -1582,6 +1582,11 @@ h2 {
   background: linear-gradient(180deg, rgba(12, 15, 22, 0.94), rgba(14, 17, 24, 0.9));
 }
 
+.todo-current-card {
+  border-color: rgba(21, 183, 255, 0.32);
+  box-shadow: 0 0 0 1px rgba(21, 183, 255, 0.08);
+}
+
 .todo-tree {
   display: grid;
   gap: 0.45rem;
@@ -1620,6 +1625,13 @@ h2 {
 
 .todo-icon {
   width: 1.2rem;
+}
+
+.todo-note-marker {
+  display: inline-block;
+  margin-left: 0.45rem;
+  color: #737f93;
+  font-size: 0.78rem;
 }
 
 .todo-completed .todo-icon,

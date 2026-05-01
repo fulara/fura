@@ -41,7 +41,24 @@
     "autoCompactionEnabled": true,
     "messageCount": 4,
     "queuedMessageCount": 0,
-    "todoPhases": [],
+    "todoPhases": [
+      {
+        "name": "Compatibility",
+        "tasks": [
+          {
+            "content": "Decode get_state todos",
+            "status": "completed"
+          },
+          {
+            "content": "Render current todos",
+            "status": "in_progress",
+            "notes": [
+              "Covers notes as string arrays"
+            ]
+          }
+        ]
+      }
+    ],
     "planMode": {
       "enabled": true,
       "planFilePath": "local://PLAN.md",

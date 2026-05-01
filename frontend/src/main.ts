@@ -64,15 +64,12 @@ type TaskResult = {
 type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
 
 type TodoItem = {
-  id: string;
   content: string;
   status: TodoStatus;
-  notes?: string;
-  details?: string;
+  notes?: string[];
 };
 
 type TodoPhase = {
-  id: string;
   name: string;
   tasks: TodoItem[];
 };
@@ -122,6 +119,7 @@ type SessionProjection = {
   contextWindow?: number | null;
   contextPercent?: number | null;
   planMode?: PlanModeProjection | null;
+  todoPhases: TodoPhase[];
 };
 
 type PanelRenderItem = {
@@ -1660,6 +1658,17 @@ function restoreOpenThinkingBlocks(container: HTMLElement, openThinking: Set<str
   });
 }
 
+function nonEmptyTodoPhases(phases: TodoPhase[]): TodoPhase[] {
+  return phases.filter(phase => phase.tasks.length > 0);
+}
+
+function todoPhasesRenderKey(phases: TodoPhase[]): string {
+  return JSON.stringify(phases.map(phase => [
+    phase.name,
+    phase.tasks.map(task => [task.content, task.status, task.notes ?? []]),
+  ]));
+}
+
 function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderItem[] {
   const items: PanelRenderItem[] = [];
   for (let i = 0; i < projection.transcript.length; i++) {
@@ -1691,6 +1700,13 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
     items.push({
       key: `tool:${entry.toolCallId}:${startIndex}`,
       render: () => renderToolCard(entry),
+    });
+  }
+  const currentTodos = nonEmptyTodoPhases(projection.todoPhases ?? []);
+  if (currentTodos.length > 0) {
+    items.push({
+      key: `current-todos:${todoPhasesRenderKey(currentTodos)}`,
+      render: () => renderCurrentTodoCard(currentTodos),
     });
   }
   return items;
@@ -3169,6 +3185,26 @@ function appendToolResultBody(wrapper: HTMLElement, resultText: string): void {
   wrapper.append(body);
 }
 
+function renderCurrentTodoCard(phases: TodoPhase[]): HTMLElement {
+  const wrapper = mkEl("section");
+  wrapper.className = "tool-card todo-write-card todo-current-card";
+  wrapper.dataset.toolName = "todo_write";
+
+  const header = mkEl("div");
+  header.className = "tool-header todo-write-header";
+  header.append(toolHeaderText("Todos", "tool-name"));
+  const tasks = phases.flatMap(phase => phase.tasks);
+  const remaining = tasks.filter(todo => todo.status === "pending" || todo.status === "in_progress").length;
+  header.append(toolHeaderText(`${remaining} remaining · ${tasks.length} total`, "tool-args-summary"));
+  wrapper.append(header);
+
+  const tree = mkEl("div");
+  tree.className = "todo-tree";
+  for (const phase of phases) tree.append(renderTodoPhase(phase, phases.length > 1));
+  wrapper.append(tree);
+  return wrapper;
+}
+
 function renderTodoWriteCard(card: ToolCard): HTMLElement {
   const wrapper = mkEl("section");
   wrapper.className = `tool-card todo-write-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
@@ -3227,7 +3263,7 @@ function renderTodoItem(todo: TodoItem, firstInPhase: boolean): HTMLElement {
 
   const icon = mkEl("span");
   icon.className = "todo-icon";
-  icon.textContent = todo.status === "completed" ? "☑" : "☐";
+  icon.textContent = todoStatusGlyph(todo.status);
 
   const content = mkEl("span");
   content.className = "todo-content";
@@ -3235,16 +3271,34 @@ function renderTodoItem(todo: TodoItem, firstInPhase: boolean): HTMLElement {
 
   row.append(prefix, icon, content);
 
-  if (todo.status === "in_progress" && todo.details) {
-    for (const line of todo.details.split("\n")) {
-      const details = mkEl("div");
-      details.className = "todo-details";
-      details.textContent = line;
-      row.append(details);
+  if (todo.notes && todo.notes.length > 0) {
+    const marker = mkEl("span");
+    marker.className = "todo-note-marker";
+    marker.textContent = `+${todo.notes.length}`;
+    row.append(marker);
+  }
+
+  if (todo.status === "in_progress" && todo.notes) {
+    for (const note of todo.notes) {
+      for (const line of note.split("\n")) {
+        const details = mkEl("div");
+        details.className = "todo-details";
+        details.textContent = line;
+        row.append(details);
+      }
     }
   }
 
   return row;
+}
+
+function todoStatusGlyph(status: TodoStatus): string {
+  switch (status) {
+    case "completed": return "✓";
+    case "in_progress": return "→";
+    case "abandoned": return "✗";
+    default: return "○";
+  }
 }
 
 function todoPhases(value: unknown): TodoPhase[] {
@@ -3254,7 +3308,6 @@ function todoPhases(value: unknown): TodoPhase[] {
 
 function isTodoPhase(value: unknown): value is TodoPhase {
   return isRecord(value)
-    && typeof value.id === "string"
     && typeof value.name === "string"
     && Array.isArray(value.tasks)
     && value.tasks.every(isTodoItem);
@@ -3262,11 +3315,9 @@ function isTodoPhase(value: unknown): value is TodoPhase {
 
 function isTodoItem(value: unknown): value is TodoItem {
   return isRecord(value)
-    && typeof value.id === "string"
     && typeof value.content === "string"
     && isTodoStatus(value.status)
-    && (value.details === undefined || typeof value.details === "string")
-    && (value.notes === undefined || typeof value.notes === "string");
+    && (value.notes === undefined || (Array.isArray(value.notes) && value.notes.every(note => typeof note === "string")));
 }
 
 function isTodoStatus(value: unknown): value is TodoStatus {

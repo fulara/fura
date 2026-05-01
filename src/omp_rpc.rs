@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::PromptBehavior;
+use crate::{PromptBehavior, TodoPhaseProjection};
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
@@ -130,6 +130,7 @@ pub(crate) struct OmpSessionState {
     pub(crate) message_count: usize,
     pub(crate) queued_message_count: usize,
     pub(crate) plan_mode: Option<OmpPlanModeState>,
+    pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) context_usage: Option<OmpContextUsage>,
 }
 

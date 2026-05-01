@@ -1,3 +1,4 @@
+use crate::Timestamp;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -10,8 +11,8 @@ pub(crate) struct SessionRecord {
     pub(crate) cwd: Option<String>,
     pub(crate) args: Vec<String>,
     pub(crate) status: SessionStatus,
-    pub(crate) created_at: u64,
-    pub(crate) updated_at: u64,
+    pub(crate) created_at: Timestamp,
+    pub(crate) updated_at: Timestamp,
     pub(crate) messages: Vec<TranscriptMessage>,
     /// IDs of messages that arrived live via `message_end`; preserved across `get_messages` reconciliation.
     pub(crate) live_message_ids: HashSet<String>,
@@ -24,6 +25,9 @@ pub(crate) struct SessionRecord {
     /// Tool-execution cards currently in progress.
     #[serde(skip)]
     pub(crate) active_tool_calls: Vec<ToolCard>,
+    /// Current OMP todo state. `None` means not loaded yet; `Some([])` means explicitly empty.
+    #[serde(skip)]
+    pub(crate) todo_phases: Option<Vec<TodoPhaseProjection>>,
     pub(crate) kind: SessionKind,
     pub(crate) session_file: Option<String>,
     pub(crate) title: Option<String>,
@@ -64,6 +68,13 @@ impl SessionRecord {
             _ if self.has_active_work() => SessionStatus::Busy,
             status => status,
         }
+    }
+
+    fn effective_todo_phases(&self) -> Vec<TodoPhaseProjection> {
+        self.todo_phases
+            .clone()
+            .or_else(|| latest_todo_phases_from_tool_cards(&self.tool_cards))
+            .unwrap_or_default()
     }
 
     pub(crate) fn projection(&self) -> SessionProjection {
@@ -120,6 +131,7 @@ impl SessionRecord {
             context_window: self.context_window,
             context_percent: self.context_percent,
             plan_mode: self.plan_mode.clone(),
+            todo_phases: self.effective_todo_phases(),
         }
     }
 }
@@ -148,8 +160,8 @@ pub(crate) struct SessionSummary {
     pub(crate) session_id: String,
     pub(crate) cwd: Option<String>,
     pub(crate) status: SessionStatus,
-    pub(crate) created_at: u64,
-    pub(crate) updated_at: u64,
+    pub(crate) created_at: Timestamp,
+    pub(crate) updated_at: Timestamp,
     pub(crate) message_count: usize,
     pub(crate) kind: SessionKind,
     pub(crate) session_file: Option<String>,
@@ -171,6 +183,7 @@ pub(crate) struct SessionProjection {
     pub(crate) context_window: Option<u64>,
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<PlanModeProjection>,
+    pub(crate) todo_phases: Vec<TodoPhaseProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -179,6 +192,52 @@ pub(crate) struct PlanModeProjection {
     pub(crate) enabled: bool,
     pub(crate) plan_file_path: String,
     pub(crate) workflow: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TodoPhaseProjection {
+    pub(crate) name: String,
+    pub(crate) tasks: Vec<TodoItemProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TodoItemProjection {
+    pub(crate) content: String,
+    pub(crate) status: TodoStatusProjection,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TodoStatusProjection {
+    Pending,
+    InProgress,
+    Completed,
+    Abandoned,
+}
+
+pub(crate) fn parse_todo_phases_value(
+    value: &Value,
+) -> serde_json::Result<Vec<TodoPhaseProjection>> {
+    serde_json::from_value(value.clone())
+}
+
+pub(crate) fn todo_phases_from_tool_result_value(
+    value: Option<&Value>,
+) -> Option<Vec<TodoPhaseProjection>> {
+    let phases = value?.get("details")?.get("phases")?;
+    parse_todo_phases_value(phases).ok()
+}
+
+fn latest_todo_phases_from_tool_cards(cards: &[ToolCard]) -> Option<Vec<TodoPhaseProjection>> {
+    cards
+        .iter()
+        .rev()
+        .filter(|card| card.tool_name == "todo_write" && !card.is_error)
+        .find_map(|card| todo_phases_from_tool_result_value(card.result.as_ref()))
 }
 
 #[derive(Debug, Clone, Serialize)]
