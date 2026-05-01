@@ -1,6 +1,7 @@
 import hljs from "highlight.js/lib/common";
 import { marked, type Token, type Tokens } from "marked";
 import { mkEl, mkFrag, mkText } from "./dom";
+import { appendEventTimestamp } from "./eventTime";
 import type { ContentBlock, TranscriptMessage } from "./protocol";
 import type { ThinkingVisibilityMode } from "./uiPreferences";
 
@@ -13,6 +14,51 @@ export function messageText(message: TranscriptMessage): string {
     })
     .filter(Boolean)
     .join("\n\n");
+}
+
+type RenderMessageOptions = {
+  thinkingVisibilityMode: ThinkingVisibilityMode;
+};
+
+export function renderMessage(message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
+  const article = mkEl("article");
+  article.className = `message ${message.role}`;
+  article.dataset.messageId = message.id;
+  const visibleBlocks = message.blocks
+    .map((block, index) => ({ block, index }))
+    .filter(({ block }) => options.thinkingVisibilityMode !== "hidden" || block.kind === "text");
+  if (visibleBlocks.length === 0) {
+    article.hidden = true;
+    return article;
+  }
+
+  const header = mkEl("header");
+  const heading = mkEl("div");
+  heading.className = "message-heading";
+  const roleLabel = mkEl("strong");
+  roleLabel.textContent = message.role === "user" ? "You" : message.role;
+  heading.append(roleLabel);
+  appendEventTimestamp(heading, message.timestamp);
+  const copy = mkEl("button");
+  copy.type = "button";
+  copy.textContent = "Copy";
+  copy.addEventListener("click", async () => {
+    await navigator.clipboard.writeText(messageText(message));
+    copy.textContent = "Copied";
+    window.setTimeout(() => {
+      copy.textContent = "Copy";
+    }, 900);
+  });
+  header.append(heading, copy);
+  article.append(header);
+
+  for (const { block, index } of visibleBlocks) {
+    article.append(renderBlock(block, message.isNew, message.id, index, {
+      thinkingVisibilityMode: options.thinkingVisibilityMode,
+    }));
+  }
+
+  return article;
 }
 
 export function renderMarkdown(text: string): HTMLElement {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { messageText, renderBlock, renderCodeBlock, renderMarkdown } from "./transcriptView";
+import { messageText, renderBlock, renderCodeBlock, renderMarkdown, renderMessage } from "./transcriptView";
 import type { TranscriptMessage } from "./protocol";
 
 describe("messageText", () => {
@@ -16,6 +16,57 @@ describe("messageText", () => {
     } satisfies TranscriptMessage;
 
     expect(messageText(message)).toBe("Answer\n\n<thinking>\nprivate chain\n</thinking>");
+  });
+});
+
+describe("renderMessage", () => {
+  it("renders header, visible text blocks, and stable message id", () => {
+    const node = renderMessage({
+      id: "m1",
+      role: "user",
+      isNew: false,
+      timestamp: Date.UTC(2026, 4, 1, 12, 34),
+      blocks: [{ kind: "text", text: "Hello" }],
+    }, { thinkingVisibilityMode: "auto" });
+
+    expect(node.className).toBe("message user");
+    expect(node.dataset.messageId).toBe("m1");
+    expect(node.querySelector("strong")?.textContent).toBe("You");
+    expect(node.querySelector("time")?.dateTime).toBe("2026-05-01T12:34:00.000Z");
+    expect(node.querySelector(".text-block")?.textContent).toContain("Hello");
+  });
+
+  it("hides messages whose only block is hidden thinking", () => {
+    const node = renderMessage({
+      id: "m2",
+      role: "assistant",
+      isNew: false,
+      blocks: [{ kind: "thinking", thinking: "not shown" }],
+    }, { thinkingVisibilityMode: "hidden" });
+
+    expect(node.hidden).toBe(true);
+  });
+
+  it("copies complete message text", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    vi.useFakeTimers();
+    const node = renderMessage({
+      id: "m3",
+      role: "assistant",
+      isNew: false,
+      blocks: [{ kind: "text", text: "Copy me" }],
+    }, { thinkingVisibilityMode: "auto" });
+
+    const button = node.querySelector<HTMLButtonElement>("header button");
+    button?.click();
+    await Promise.resolve();
+
+    expect(writeText).toHaveBeenCalledWith("Copy me");
+    expect(button?.textContent).toBe("Copied");
+    vi.runAllTimers();
+    expect(button?.textContent).toBe("Copy");
+    vi.useRealTimers();
   });
 });
 

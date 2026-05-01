@@ -6,7 +6,8 @@ import { formatContext, formatCost, formatTokens, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type FuraConnection } from "./connection";
 import { mkEl, mkFrag, requireElement, setRenderDocument } from "./dom";
-import { messageText, renderBlock } from "./transcriptView";
+import { appendEventTimestamp, renderEventTimestamp } from "./eventTime";
+import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
 import type {
   AgentProgress,
   ClientMessage,
@@ -3629,65 +3630,8 @@ function statusInterruptButton(): HTMLButtonElement {
 
 // --- Message rendering ---
 
-function renderEventTimestamp(timestamp: number | null | undefined): HTMLTimeElement | null {
-  if (typeof timestamp !== "number" || !Number.isFinite(timestamp) || timestamp <= 0) return null;
-  const date = new Date(timestamp);
-  if (Number.isNaN(date.getTime())) return null;
-  const iso = date.toISOString();
-  const time = mkEl("time");
-  time.className = "event-timestamp";
-  time.dateTime = iso;
-  time.title = date.toLocaleString();
-  time.textContent = date.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-  return time;
-}
-
-function appendEventTimestamp(container: HTMLElement, timestamp: number | null | undefined): void {
-  const time = renderEventTimestamp(timestamp);
-  if (time) container.append(time);
-}
-
 function renderMessage(message: TranscriptMessage): HTMLElement {
-  const article = mkEl("article");
-  article.className = `message ${message.role}`;
-  article.dataset.messageId = message.id;
-  const visibleBlocks = message.blocks
-    .map((block, index) => ({ block, index }))
-    .filter(({ block }) => thinkingVisibilityMode !== "hidden" || block.kind === "text");
-  if (visibleBlocks.length === 0) {
-    article.hidden = true;
-    return article;
-  }
-
-  const header = mkEl("header");
-  const heading = mkEl("div");
-  heading.className = "message-heading";
-  const roleLabel = mkEl("strong");
-  roleLabel.textContent = message.role === "user" ? "You" : message.role;
-  heading.append(roleLabel);
-  appendEventTimestamp(heading, message.timestamp);
-  const copy = mkEl("button");
-  copy.type = "button";
-  copy.textContent = "Copy";
-  copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(messageText(message));
-    copy.textContent = "Copied";
-    window.setTimeout(() => {
-      copy.textContent = "Copy";
-    }, 900);
-  });
-  header.append(heading, copy);
-  article.append(header);
-
-  for (const { block, index } of visibleBlocks) {
-    article.append(renderBlock(block, message.isNew, message.id, index, { thinkingVisibilityMode }));
-  }
-
-  return article;
+  return renderTranscriptMessage(message, { thinkingVisibilityMode });
 }
 
 function renderToolCard(card: ToolCard): HTMLElement {
