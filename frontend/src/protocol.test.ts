@@ -1,0 +1,42 @@
+import { describe, expect, it } from "vitest";
+import type { ClientMessage, ServerMessage, SessionProjection } from "./protocol";
+
+const emptyProjection = {
+  summary: {
+    kind: "managed",
+    sessionId: "session-1",
+    status: "idle",
+    createdAt: 1,
+    messageCount: 0,
+  },
+  transcript: [],
+  isBusy: false,
+  tokensTotal: 0,
+  costUsd: 0,
+  todoPhases: [],
+} satisfies SessionProjection;
+
+describe("protocol type fixtures", () => {
+  it("preserves the session snapshot server message shape", () => {
+    const message = {
+      type: "session.snapshot",
+      sessionId: "session-1",
+      state: emptyProjection,
+    } satisfies ServerMessage;
+
+    expect(message.type).toBe("session.snapshot");
+    expect(message.state.summary.sessionId).toBe("session-1");
+  });
+
+  it("preserves prompt send client message shape", () => {
+    const message = {
+      type: "prompt.send",
+      sessionId: "session-1",
+      text: "continue",
+      behavior: "followUp",
+    } satisfies ClientMessage;
+
+    expect(message.type).toBe("prompt.send");
+    expect(message.behavior).toBe("followUp");
+  });
+});
