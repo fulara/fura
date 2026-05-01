@@ -1688,7 +1688,7 @@ async function startVoiceRecording(): Promise<void> {
     voiceProcessor.onaudioprocess = event => {
       if (!voiceIsRecording || !voiceAudioContext) return;
       const input = event.inputBuffer.getChannelData(0);
-      const audio = encodePcm16Base64(input, voiceAudioContext.sampleRate, 16000);
+      const audio = encodePcm16Base64(input, voiceAudioContext.sampleRate, 24000);
       if (audio) send({ type: "voice.audio", clientId: controlClientId, audio });
     };
     voiceSource.connect(voiceProcessor);

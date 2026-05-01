@@ -180,20 +180,27 @@ async fn run_openai_realtime_transcription_inner(
         .context("failed to connect to OpenAI Realtime transcription")?;
 
     let session_update = json!({
-        "type": "transcription_session.update",
-        "input_audio_format": "pcm16",
-        "input_audio_transcription": {
-            "model": OPENAI_TRANSCRIPTION_MODEL,
-            "language": language,
-        },
-        "turn_detection": {
-            "type": "server_vad",
-            "threshold": 0.5,
-            "prefix_padding_ms": 300,
-            "silence_duration_ms": 500,
-        },
-        "input_audio_noise_reduction": {
-            "type": "near_field",
+        "type": "session.update",
+        "session": {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "format": { "type": "audio/pcm", "rate": 24000 },
+                    "transcription": {
+                        "model": OPENAI_TRANSCRIPTION_MODEL,
+                        "language": language,
+                    },
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.5,
+                        "prefix_padding_ms": 300,
+                        "silence_duration_ms": 500,
+                    },
+                    "noise_reduction": {
+                        "type": "near_field",
+                    },
+                },
+            },
         },
     });
     ws.send(Message::Text(session_update.to_string().into()))
