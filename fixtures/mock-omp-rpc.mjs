@@ -106,15 +106,6 @@ for await (const line of rl) {
       success(command, { planMode });
       break;
     }
-    case "get_plan_mode_preview": {
-      success(command, {
-        planFilePath: command.planFilePath ?? planMode?.planFilePath ?? "local://PLAN.md",
-        finalPlanFilePath: command.finalPlanFilePath ?? "local://MOCK_PLAN.md",
-        title: command.title ?? "MOCK_PLAN",
-        content: "# Mock plan\n\n- Verify the browser approval flow.",
-      });
-      break;
-    }
     case "approve_plan_mode": {
       planMode = null;
       success(command, { finalPlanFilePath: command.finalPlanFilePath });

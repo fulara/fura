@@ -317,6 +317,20 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 warn!(session_id = %session_id, %message, "post-agent stats refresh failed");
             }
         }
+        OmpRpcFrame::PlanReview {
+            plan_file_path,
+            final_plan_file_path,
+            title,
+            content,
+        } => {
+            let _ = state.events.send(ServerMessage::PlanReview {
+                session_id: target_session_id.clone(),
+                plan_file_path,
+                final_plan_file_path,
+                title,
+                content,
+            });
+        }
         OmpRpcFrame::MessageUpdate { message, .. } => {
             if let Some(mut message) = map_omp_message(&message) {
                 message.is_new = true;
@@ -432,7 +446,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         }
         OmpRpcFrame::ToolExecutionEnd {
             tool_call_id,
-            tool_name,
+            tool_name: _,
             result,
             is_error,
         } => {
@@ -470,31 +484,6 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             };
             if let Some(snapshot) = snapshot {
                 let _ = state.events.send(snapshot);
-            }
-            if tool_name == "exit_plan_mode" && !is_error {
-                if let Some(details) = result.as_ref().and_then(|value| value.get("details")) {
-                    let mut command = serde_json::json!({
-                        "id": next_rpc_id(),
-                        "type": "get_plan_mode_preview",
-                    });
-                    if let Some(plan_file_path) = value_str(details, "planFilePath") {
-                        command["planFilePath"] = Value::String(plan_file_path.to_string());
-                    }
-                    if let Some(final_plan_file_path) = value_str(details, "finalPlanFilePath") {
-                        command["finalPlanFilePath"] =
-                            Value::String(final_plan_file_path.to_string());
-                    }
-                    if let Some(title) = value_str(details, "title") {
-                        command["title"] = Value::String(title.to_string());
-                    }
-                    if let Err(message) = send_rpc_command(state, session_id, command).await {
-                        let _ = state.events.send(notice(
-                            target_session_id.clone(),
-                            NoticeLevel::Error,
-                            message,
-                        ));
-                    }
-                }
             }
         }
         OmpRpcFrame::Response(response) => {
@@ -636,36 +625,6 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let _ = state.events.send(ServerMessage::ModelList {
                 session_id: current_session_id.clone(),
                 models,
-            });
-        }
-        Some("get_plan_mode_preview") => {
-            let data = frame.get("data").or_else(|| frame.get("result"));
-            let Some(content) = data
-                .and_then(|data| data.get("content"))
-                .and_then(|value| value.as_str())
-            else {
-                return;
-            };
-            let plan_file_path = data
-                .and_then(|data| data.get("planFilePath"))
-                .and_then(|value| value.as_str())
-                .unwrap_or("local://PLAN.md")
-                .to_string();
-            let final_plan_file_path = data
-                .and_then(|data| data.get("finalPlanFilePath"))
-                .and_then(|value| value.as_str())
-                .unwrap_or(&plan_file_path)
-                .to_string();
-            let title = data
-                .and_then(|data| data.get("title"))
-                .and_then(|value| value.as_str())
-                .map(str::to_string);
-            let _ = state.events.send(ServerMessage::PlanReview {
-                session_id: current_session_id.clone(),
-                plan_file_path,
-                final_plan_file_path,
-                title,
-                content: content.to_string(),
             });
         }
         Some("approve_plan_mode") => {

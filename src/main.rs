@@ -369,16 +369,6 @@ mod tests {
                         .expect("get_available_models data should decode");
                         assert!(!data.models.is_empty());
                     }
-                    "get_plan_mode_preview" => {
-                        let data: OmpPlanPreviewResponse = serde_json::from_value(
-                            response
-                                .payload()
-                                .expect("get_plan_mode_preview payload")
-                                .clone(),
-                        )
-                        .expect("get_plan_mode_preview data should decode");
-                        assert!(!data.content.is_empty());
-                    }
                     _ if response.is_error() => {
                         assert!(
                             response.error.is_some(),
@@ -627,7 +617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn plan_preview_response_emits_review_message() {
+    async fn plan_review_event_emits_review_message() {
         let state = test_state(8, None);
         state
             .sessions
@@ -641,19 +631,16 @@ mod tests {
             .insert("transport-1".to_string(), "s1".to_string());
         let mut events = state.events.subscribe();
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport-1",
             &serde_json::json!({
-                "type": "response",
-                "command": "get_plan_mode_preview",
-                "success": true,
-                "data": {
-                    "planFilePath": "local://PLAN.md",
-                    "finalPlanFilePath": "local://APPROVED.md",
-                    "title": "APPROVED",
-                    "content": "# Plan"
-                }
+                "type": "plan_review",
+                "sessionId": "omp-session-id",
+                "planFilePath": "local://PLAN.md",
+                "finalPlanFilePath": "local://APPROVED.md",
+                "title": "APPROVED",
+                "content": "# Plan"
             }),
         )
         .await;
@@ -674,6 +661,52 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn exit_plan_mode_tool_end_does_not_request_preview() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let (stdin, mut commands) = mpsc::channel(4);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("transport-1".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("transport-1".to_string(), "s1".to_string());
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "tool_execution_end",
+                "toolCallId": "tool-1",
+                "toolName": "exit_plan_mode",
+                "isError": false,
+                "result": {
+                    "details": {
+                        "planFilePath": "local://PLAN.md",
+                        "finalPlanFilePath": "local://APPROVED.md",
+                        "title": "APPROVED"
+                    }
+                }
+            }),
+        )
+        .await;
+
+        assert!(
+            commands.try_recv().is_err(),
+            "plan review should arrive as an OMP RPC event, not as a bridge-synthesized preview request"
+        );
     }
 
     #[tokio::test]

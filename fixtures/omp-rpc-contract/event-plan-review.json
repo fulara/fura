@@ -1,0 +1,8 @@
+{
+  "type": "plan_review",
+  "sessionId": "session-123",
+  "planFilePath": "local://PLAN.md",
+  "finalPlanFilePath": "local://APPROVED_PLAN.md",
+  "title": "APPROVED_PLAN",
+  "content": "# Plan\n\nImplement the approved design."
+}

@@ -15,6 +15,15 @@ pub(crate) enum OmpRpcFrame {
     AgentStart,
     #[serde(rename = "agent_end")]
     AgentEnd { messages: Option<Vec<Value>> },
+    #[serde(rename = "plan_review")]
+    PlanReview {
+        #[serde(rename = "planFilePath")]
+        plan_file_path: String,
+        #[serde(rename = "finalPlanFilePath")]
+        final_plan_file_path: String,
+        title: Option<String>,
+        content: String,
+    },
     #[serde(rename = "message_update")]
     MessageUpdate {
         message: Value,
@@ -170,15 +179,6 @@ pub(crate) struct OmpTokenStats {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpAvailableModelsResponse {
     pub(crate) models: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OmpPlanPreviewResponse {
-    pub(crate) plan_file_path: String,
-    pub(crate) final_plan_file_path: String,
-    pub(crate) title: Option<String>,
-    pub(crate) content: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

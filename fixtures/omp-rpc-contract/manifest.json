@@ -10,6 +10,11 @@
     "file": "event-agent-start.json"
   },
   {
+    "name": "event-plan-review",
+    "category": "event",
+    "file": "event-plan-review.json"
+  },
+  {
     "name": "event-message-end-text",
     "category": "event",
     "file": "event-message-end-text.json"
@@ -84,12 +89,6 @@
     "category": "response",
     "file": "response-get-messages.json"
   },
-  {
-    "name": "response-get-plan-mode-preview",
-    "category": "response",
-    "file": "response-get-plan-mode-preview.json"
-  },
-  {
     "name": "response-get-session-stats",
     "category": "response",
     "file": "response-get-session-stats.json"
