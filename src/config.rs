@@ -58,18 +58,35 @@ pub(crate) struct Args {
     pub(crate) session_root: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct FuraConfig {
     pub(crate) last_cwd: Option<String>,
+    #[serde(default = "default_voice_language")]
+    pub(crate) voice_language: String,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) session_categories: HashMap<String, String>,
+}
+
+impl Default for FuraConfig {
+    fn default() -> Self {
+        Self {
+            last_cwd: None,
+            voice_language: default_voice_language(),
+            session_categories: HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ClientConfig {
     pub(crate) default_cwd: String,
+    pub(crate) voice_language: String,
+}
+
+pub(crate) fn default_voice_language() -> String {
+    "pl-PL".to_string()
 }
 
 pub(crate) fn default_config_path() -> Option<PathBuf> {
@@ -126,6 +143,7 @@ pub(crate) fn default_cwd_from_config(config: &FuraConfig, startup_cwd: &Path) -
 pub(crate) async fn client_config(state: &AppState) -> ClientConfig {
     ClientConfig {
         default_cwd: state.default_cwd.read().await.clone(),
+        voice_language: state.voice_language.read().await.clone(),
     }
 }
 
@@ -148,6 +166,7 @@ pub(crate) async fn save_fura_config(state: &AppState) {
 
     let config = FuraConfig {
         last_cwd: Some(state.default_cwd.read().await.clone()),
+        voice_language: state.voice_language.read().await.clone(),
         session_categories: state.session_categories.read().await.clone(),
     };
     match serde_yaml::to_string(&config) {

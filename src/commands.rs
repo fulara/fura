@@ -79,6 +79,14 @@ pub(crate) async fn handle_client_message(
             client_id,
             conversation_id,
         } => handle_control_abort(state, client_id, conversation_id).await,
+        ClientMessage::VoiceStart {
+            client_id,
+            language,
+        } => start_voice_session(state, client_id, language).await,
+        ClientMessage::VoiceAudio { client_id, audio } => {
+            handle_voice_audio(state, client_id, audio).await
+        }
+        ClientMessage::VoiceStop { client_id } => stop_voice_session(state, client_id).await,
         ClientMessage::DialogRespond {
             session_id,
             dialog_id,

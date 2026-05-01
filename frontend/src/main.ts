@@ -185,6 +185,7 @@ type ModelSummary = {
 
 type ServerConfig = {
   defaultCwd: string;
+  voiceLanguage: string;
 };
 
 type FrontendUiSnapshot = {
@@ -243,6 +244,10 @@ type ServerMessage =
   | { type: "control.reply"; targetClientId: string; conversationId: string; message: string; candidates?: ControlCandidate[]; suggestedActions?: ControlSuggestedAction[] }
   | { type: "control.status"; targetClientId?: string | null; status: ControlStatusProjection }
   | { type: "frontend.control"; targetClientId: string; action: FrontendControlAction }
+  | { type: "voice.status"; targetClientId: string; status: "connecting" | "listening" | "transcribing" | "stopping" | "idle" | string; message?: string | null }
+  | { type: "voice.delta"; targetClientId: string; itemId: string; text: string }
+  | { type: "voice.final"; targetClientId: string; itemId: string; text: string }
+  | { type: "voice.error"; targetClientId: string; message: string }
   | { type: "error"; requestId?: string | null; message: string };
 
 type WorktreeCreateOptions = {
@@ -278,6 +283,9 @@ type ClientMessage =
   | { type: "session.fork"; sessionId: string; name: string }
   | { type: "control.prompt"; clientId: string; conversationId?: string; text: string; uiSnapshot: FrontendUiSnapshot }
   | { type: "control.abort"; clientId: string; conversationId?: string }
+  | { type: "voice.start"; clientId: string; language?: string }
+  | { type: "voice.audio"; clientId: string; audio: string }
+  | { type: "voice.stop"; clientId: string }
   | { type: "session.handoff"; sessionId: string; name: string; customInstructions?: string };
 
 type PersistedDockviewLayout = {
@@ -355,7 +363,11 @@ app.innerHTML = `
           <div id="imagePreviews" class="image-previews" hidden></div>
           <textarea id="promptInput" rows="4" placeholder="Send a prompt…"></textarea>
         </div>
-        <button id="sendButton" type="submit">Send</button>
+        <div class="prompt-actions">
+          <button id="voiceButton" class="voice-button" type="button" aria-pressed="false" title="Hold to dictate. Alt+M starts while held.">Hold mic</button>
+          <span id="voiceStatus" class="voice-status" aria-live="polite">voice idle</span>
+          <button id="sendButton" type="submit">Send</button>
+        </div>
       </form>
     </section>
 
@@ -574,6 +586,8 @@ const busyPromptAttachmentNote = requireElement<HTMLParagraphElement>("busyPromp
 const busyPromptCancel = requireElement<HTMLButtonElement>("busyPromptCancel");
 const busyPromptSteer = requireElement<HTMLButtonElement>("busyPromptSteer");
 const busyPromptFollowUp = requireElement<HTMLButtonElement>("busyPromptFollowUp");
+const voiceButton = requireElement<HTMLButtonElement>("voiceButton");
+const voiceStatus = requireElement<HTMLSpanElement>("voiceStatus");
 const sendButton = requireElement<HTMLButtonElement>("sendButton");
 const modelPickerOverlay = requireElement<HTMLDivElement>("modelPickerOverlay");
 const modelPickerClose = requireElement<HTMLButtonElement>("modelPickerClose");
@@ -663,6 +677,12 @@ type CategoryCombobox = {
   accept: (value: string) => void;
   fallbackEnter: () => void;
 };
+type VoiceSegmentDraft = {
+  target: HTMLInputElement | HTMLTextAreaElement;
+  start: number;
+  end: number;
+  text: string;
+};
 let pendingImages: PendingImage[] = [];
 let pendingSnippets: PendingSnippet[] = [];
 let nextPendingAttachmentId = 1;
@@ -724,6 +744,14 @@ let modelPickerError: string | null = null;
 const promptHistories = new Map<string, string[]>();
 const promptHistoryMessageIds = new Map<string, Set<string>>();
 let promptHistoryIndex = -1;
+let voiceAudioContext: AudioContext | null = null;
+let voiceProcessor: ScriptProcessorNode | null = null;
+let voiceSource: MediaStreamAudioSourceNode | null = null;
+let voiceStream: MediaStream | null = null;
+let voiceIsRecording = false;
+let voiceHotkeyActive = false;
+let voiceTarget: HTMLInputElement | HTMLTextAreaElement | null = null;
+const voiceSegments = new Map<string, VoiceSegmentDraft>();
 
 const TOOL_VISIBILITY_STORAGE_KEY = "fura.showTools";
 const THINKING_VISIBILITY_STORAGE_KEY = "fura.showThinking";
@@ -805,6 +833,33 @@ abortButton.addEventListener("click", () => {
 stopButton.addEventListener("click", () => {
   if (activeSessionId) {
     send({ type: "session.stop", sessionId: activeSessionId });
+  }
+});
+voiceButton.addEventListener("pointerdown", event => {
+  event.preventDefault();
+  voiceButton.setPointerCapture(event.pointerId);
+  void startVoiceRecording();
+});
+voiceButton.addEventListener("pointerup", event => {
+  event.preventDefault();
+  if (voiceButton.hasPointerCapture(event.pointerId)) voiceButton.releasePointerCapture(event.pointerId);
+  void stopVoiceRecording();
+});
+voiceButton.addEventListener("pointercancel", () => { void stopVoiceRecording(); });
+voiceButton.addEventListener("lostpointercapture", () => { void stopVoiceRecording(); });
+voiceButton.addEventListener("contextmenu", event => event.preventDefault());
+window.addEventListener("keydown", event => {
+  if (event.altKey && event.key.toLowerCase() === "m" && !event.repeat && !voiceHotkeyActive) {
+    event.preventDefault();
+    voiceHotkeyActive = true;
+    void startVoiceRecording();
+  }
+});
+window.addEventListener("keyup", event => {
+  if (voiceHotkeyActive && (event.key.toLowerCase() === "m" || event.key === "Alt")) {
+    event.preventDefault();
+    voiceHotkeyActive = false;
+    void stopVoiceRecording();
   }
 });
 busyPromptClose.addEventListener("click", restoreBusyPromptDraft);
@@ -1293,6 +1348,18 @@ function handleServerMessage(message: ServerMessage): void {
     case "frontend.control":
       if (message.targetClientId === controlClientId) handleFrontendControl(message.action);
       break;
+    case "voice.status":
+      if (message.targetClientId === controlClientId) handleVoiceStatus(message.status, message.message ?? null);
+      break;
+    case "voice.delta":
+      if (message.targetClientId === controlClientId) applyVoiceTranscript(message.itemId, message.text, false);
+      break;
+    case "voice.final":
+      if (message.targetClientId === controlClientId) applyVoiceTranscript(message.itemId, message.text, true);
+      break;
+    case "voice.error":
+      if (message.targetClientId === controlClientId) handleVoiceError(message.message);
+      break;
     case "raw.omp":
       appendLog(`[raw ${message.sessionId}] ${JSON.stringify(message.frame)}`);
       break;
@@ -1587,6 +1654,188 @@ function clearPromptEditor(): void {
   renderImagePreviews();
   promptInput.value = "";
   updatePalette();
+}
+
+async function startVoiceRecording(): Promise<void> {
+  if (voiceIsRecording) return;
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    handleVoiceError("Not connected.");
+    return;
+  }
+  const AudioContextCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+  if (!AudioContextCtor || !navigator.mediaDevices?.getUserMedia) {
+    handleVoiceError("Voice input is not supported by this browser.");
+    return;
+  }
+
+  voiceTarget = currentVoiceTarget();
+  voiceSegments.clear();
+  handleVoiceStatus("connecting", "Requesting microphone.");
+
+  try {
+    voiceStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    voiceAudioContext = new AudioContextCtor();
+    if (voiceAudioContext.state === "suspended") await voiceAudioContext.resume();
+    voiceSource = voiceAudioContext.createMediaStreamSource(voiceStream);
+    voiceProcessor = voiceAudioContext.createScriptProcessor(4096, 1, 1);
+    voiceProcessor.onaudioprocess = event => {
+      if (!voiceIsRecording || !voiceAudioContext) return;
+      const input = event.inputBuffer.getChannelData(0);
+      const audio = encodePcm16Base64(input, voiceAudioContext.sampleRate, 16000);
+      if (audio) send({ type: "voice.audio", clientId: controlClientId, audio });
+    };
+    voiceSource.connect(voiceProcessor);
+    voiceProcessor.connect(voiceAudioContext.destination);
+
+    voiceIsRecording = true;
+    voiceButton.setAttribute("aria-pressed", "true");
+    voiceButton.classList.add("recording");
+    const started = send({
+      type: "voice.start",
+      clientId: controlClientId,
+      language: serverConfig?.voiceLanguage ?? "pl-PL",
+    });
+    if (!started) {
+      await stopVoiceRecording(false);
+      return;
+    }
+    handleVoiceStatus("listening", "Listening.");
+  } catch (error) {
+    await stopVoiceRecording(false);
+    handleVoiceError(error instanceof Error ? error.message : "Failed to start microphone capture.");
+  }
+}
+
+async function stopVoiceRecording(notifyBridge = true): Promise<void> {
+  if (!voiceIsRecording && !voiceAudioContext && !voiceStream) return;
+  voiceIsRecording = false;
+  voiceButton.setAttribute("aria-pressed", "false");
+  voiceButton.classList.remove("recording");
+
+  if (voiceProcessor) {
+    voiceProcessor.onaudioprocess = null;
+    voiceProcessor.disconnect();
+    voiceProcessor = null;
+  }
+  if (voiceSource) {
+    voiceSource.disconnect();
+    voiceSource = null;
+  }
+  if (voiceStream) {
+    for (const track of voiceStream.getTracks()) track.stop();
+    voiceStream = null;
+  }
+  if (voiceAudioContext) {
+    const context = voiceAudioContext;
+    voiceAudioContext = null;
+    await context.close().catch(() => undefined);
+  }
+
+  if (notifyBridge) {
+    send({ type: "voice.stop", clientId: controlClientId });
+    handleVoiceStatus("transcribing", "Finishing transcription.");
+  } else {
+    handleVoiceStatus("idle", "voice idle");
+  }
+}
+
+function handleVoiceStatus(status: string, message: string | null): void {
+  voiceStatus.textContent = message ?? `voice ${status}`;
+  voiceStatus.dataset.status = status;
+  if (status === "idle") {
+    voiceButton.classList.remove("recording");
+    voiceButton.setAttribute("aria-pressed", "false");
+  }
+}
+
+function handleVoiceError(message: string): void {
+  void stopVoiceRecording(false).finally(() => {
+    voiceStatus.textContent = message;
+    voiceStatus.dataset.status = "error";
+    voiceButton.classList.remove("recording");
+    voiceButton.setAttribute("aria-pressed", "false");
+    appendLog(`Voice error: ${message}`);
+  });
+}
+
+function currentVoiceTarget(): HTMLInputElement | HTMLTextAreaElement {
+  const active = document.activeElement;
+  if (isEditableTextElement(active)) return active;
+  return promptInput;
+}
+
+function isEditableTextElement(element: Element | null): element is HTMLInputElement | HTMLTextAreaElement {
+  if (element instanceof HTMLTextAreaElement) return !element.readOnly && !element.disabled;
+  if (!(element instanceof HTMLInputElement) || element.readOnly || element.disabled) return false;
+  const type = element.type.toLowerCase();
+  return ["", "text", "search", "email", "url", "tel", "password"].includes(type);
+}
+
+function applyVoiceTranscript(itemId: string, text: string, isFinal: boolean): void {
+  const target = voiceSegments.get(itemId)?.target ?? (voiceTarget && !voiceTarget.disabled ? voiceTarget : currentVoiceTarget());
+  const existing = voiceSegments.get(itemId);
+  const draft = existing ?? createVoiceSegmentDraft(target);
+  const nextText = isFinal ? text : draft.text + text;
+  replaceVoiceSegmentText(draft, nextText);
+  if (isFinal) {
+    voiceSegments.delete(itemId);
+  } else {
+    voiceSegments.set(itemId, draft);
+  }
+  if (target === promptInput) {
+    resetPromptHistoryNavigation();
+    updatePalette();
+  }
+}
+
+function createVoiceSegmentDraft(target: HTMLInputElement | HTMLTextAreaElement): VoiceSegmentDraft {
+  const start = target.selectionStart ?? target.value.length;
+  const end = target.selectionEnd ?? start;
+  const prefix = target.value.slice(0, start);
+  const lead = prefix && !/\s$/.test(prefix) ? " " : "";
+  return { target, start, end, text: lead };
+}
+
+function replaceVoiceSegmentText(draft: VoiceSegmentDraft, text: string): void {
+  const before = draft.target.value.slice(0, draft.start);
+  const after = draft.target.value.slice(draft.end);
+  draft.target.value = `${before}${text}${after}`;
+  draft.text = text;
+  draft.end = draft.start + text.length;
+  draft.target.selectionStart = draft.end;
+  draft.target.selectionEnd = draft.end;
+  draft.target.focus();
+}
+
+function encodePcm16Base64(input: Float32Array, inputSampleRate: number, outputSampleRate: number): string {
+  const ratio = inputSampleRate / outputSampleRate;
+  const outputLength = Math.floor(input.length / ratio);
+  if (outputLength <= 0) return "";
+  const bytes = new Uint8Array(outputLength * 2);
+  const view = new DataView(bytes.buffer);
+  for (let i = 0; i < outputLength; i += 1) {
+    const sample = input[Math.min(input.length - 1, Math.floor(i * ratio))] ?? 0;
+    const clamped = Math.max(-1, Math.min(1, sample));
+    const pcm = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff;
+    view.setInt16(i * 2, pcm, true);
+  }
+  return bytesToBase64(bytes);
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return window.btoa(binary);
 }
 
 function sendPromptWithBusyHandling(options: {

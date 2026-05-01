@@ -177,6 +177,15 @@ pub(crate) enum ClientMessage {
         client_id: String,
         conversation_id: Option<String>,
     },
+    #[serde(rename = "voice.start")]
+    VoiceStart {
+        client_id: String,
+        language: Option<String>,
+    },
+    #[serde(rename = "voice.audio")]
+    VoiceAudio { client_id: String, audio: String },
+    #[serde(rename = "voice.stop")]
+    VoiceStop { client_id: String },
     #[serde(rename = "dialog.respond")]
     DialogRespond {
         session_id: String,
@@ -317,6 +326,29 @@ pub(crate) enum ServerMessage {
     },
     #[serde(rename = "raw.omp")]
     RawOmp { session_id: String, frame: Value },
+    #[serde(rename = "voice.status")]
+    VoiceStatus {
+        target_client_id: String,
+        status: String,
+        message: Option<String>,
+    },
+    #[serde(rename = "voice.delta")]
+    VoiceDelta {
+        target_client_id: String,
+        item_id: String,
+        text: String,
+    },
+    #[serde(rename = "voice.final")]
+    VoiceFinal {
+        target_client_id: String,
+        item_id: String,
+        text: String,
+    },
+    #[serde(rename = "voice.error")]
+    VoiceError {
+        target_client_id: String,
+        message: String,
+    },
     #[serde(rename = "error")]
     Error {
         request_id: Option<String>,

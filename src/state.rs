@@ -3,7 +3,9 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use serde_json::Value;
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
-use crate::{ControlCandidate, FrontendUiSnapshot, ServerMessage, SessionRecord, Timestamp};
+use crate::{
+    ControlCandidate, FrontendUiSnapshot, ServerMessage, SessionRecord, Timestamp, VoiceCommand,
+};
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -20,6 +22,7 @@ pub(crate) struct AppState {
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
     pub(crate) bridge_controller: Arc<RwLock<BridgeControllerState>>,
+    pub(crate) voice_sessions: Arc<RwLock<HashMap<String, VoiceSessionHandle>>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
@@ -28,11 +31,17 @@ pub(crate) struct AppState {
     pub(crate) session_root: PathBuf,
     pub(crate) default_cwd: Arc<RwLock<String>>,
     pub(crate) config_path: Option<PathBuf>,
+    pub(crate) voice_language: Arc<RwLock<String>>,
 }
 
 pub(crate) struct RpcSessionHandle {
     pub(crate) stdin: mpsc::Sender<Value>,
     pub(crate) stop: oneshot::Sender<()>,
+}
+
+pub(crate) struct VoiceSessionHandle {
+    pub(crate) commands: mpsc::Sender<VoiceCommand>,
+    pub(crate) run_id: String,
 }
 
 #[derive(Debug, Clone)]

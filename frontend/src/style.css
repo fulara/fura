@@ -880,9 +880,49 @@ h2 {
   max-height: 18rem;
 }
 
-.prompt-form button {
+.prompt-actions {
   align-self: end;
+  display: grid;
+  gap: 0.45rem;
+  justify-items: stretch;
+  min-width: 7rem;
+}
+
+.prompt-form button {
   min-width: 5.5rem;
+}
+
+.voice-button {
+  border-color: #3b4a64;
+  background: #172033;
+}
+
+.voice-button.recording,
+.voice-button[aria-pressed="true"] {
+  border-color: #ef4444;
+  background: #4a1820;
+  color: #fee2e2;
+}
+
+.voice-status {
+  color: #8f9bb0;
+  font-size: 0.72rem;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.voice-status[data-status="error"] {
+  color: #fca5a5;
+}
+
+.voice-status[data-status="listening"] {
+  color: #93c5fd;
+}
+
+.voice-status[data-status="transcribing"],
+.voice-status[data-status="stopping"],
+.voice-status[data-status="connecting"] {
+  color: #facc15;
 }
 
 .busy-prompt.modal-panel {

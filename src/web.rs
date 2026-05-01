@@ -300,6 +300,47 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             frame_type = frame.get("type").and_then(|value| value.as_str()).unwrap_or("unknown")
         ),
+        ServerMessage::VoiceStatus {
+            target_client_id,
+            status,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "voice.status",
+            target_client_id = %target_client_id,
+            status = %status
+        ),
+        ServerMessage::VoiceDelta {
+            target_client_id,
+            item_id,
+            text,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "voice.delta",
+            target_client_id = %target_client_id,
+            item_id = %item_id,
+            bytes = text.len()
+        ),
+        ServerMessage::VoiceFinal {
+            target_client_id,
+            item_id,
+            text,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "voice.final",
+            target_client_id = %target_client_id,
+            item_id = %item_id,
+            bytes = text.len()
+        ),
+        ServerMessage::VoiceError {
+            target_client_id,
+            message,
+        } => warn!(
+            direction = "bridge_to_client",
+            message_type = "voice.error",
+            target_client_id = %target_client_id,
+            bytes = message.len()
+        ),
         ServerMessage::Error { message, .. } => warn!(
             direction = "bridge_to_client",
             message_type = "error",

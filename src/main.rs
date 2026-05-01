@@ -22,6 +22,7 @@ mod rpc;
 mod session;
 mod state;
 mod timestamp;
+mod voice;
 mod web;
 
 use catalog::*;
@@ -35,6 +36,7 @@ use rpc::*;
 use session::*;
 use state::*;
 use timestamp::*;
+use voice::*;
 use web::*;
 
 const SESSION_CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -73,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     let config_path = default_config_path();
     let fura_config = load_fura_config(config_path.as_deref());
     let default_cwd = default_cwd_from_config(&fura_config, &startup_cwd);
+    let voice_language = fura_config.voice_language.clone();
     let session_categories = fura_config
         .session_categories
         .into_iter()
@@ -94,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
         bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
+        voice_sessions: Arc::new(RwLock::new(HashMap::new())),
         events,
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
@@ -105,6 +109,7 @@ async fn main() -> anyhow::Result<()> {
         session_root,
         default_cwd: Arc::new(RwLock::new(default_cwd)),
         config_path,
+        voice_language: Arc::new(RwLock::new(voice_language)),
     };
 
     start_session_catalog_watcher(state.clone());
@@ -286,6 +291,7 @@ mod tests {
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
             bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
+            voice_sessions: Arc::new(RwLock::new(HashMap::new())),
             events,
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),
@@ -297,6 +303,7 @@ mod tests {
             session_root: env::temp_dir(),
             default_cwd: Arc::new(RwLock::new(env::temp_dir().to_string_lossy().into_owned())),
             config_path: None,
+            voice_language: Arc::new(RwLock::new(default_voice_language())),
         }
     }
 
@@ -1872,6 +1879,7 @@ mod tests {
             &config_path,
             serde_yaml::to_string(&FuraConfig {
                 last_cwd: Some(last_cwd.to_string_lossy().into_owned()),
+                voice_language: default_voice_language(),
                 session_categories: HashMap::new(),
             })
             .expect("config should serialize"),
@@ -1894,6 +1902,7 @@ mod tests {
             &config_path,
             serde_yaml::to_string(&FuraConfig {
                 last_cwd: Some(root.join("missing").to_string_lossy().into_owned()),
+                voice_language: default_voice_language(),
                 session_categories: HashMap::new(),
             })
             .expect("config should serialize"),
@@ -1921,6 +1930,7 @@ mod tests {
         match events.recv().await.expect("config update event") {
             ServerMessage::ConfigUpdated { config } => {
                 assert_eq!(config.default_cwd, "/workspace/next");
+                assert_eq!(config.voice_language, "pl-PL");
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -1933,6 +1943,7 @@ mod tests {
             protocol_version: 1,
             config: ClientConfig {
                 default_cwd: "/workspace".to_string(),
+                voice_language: "pl-PL".to_string(),
             },
         })
         .expect("hello should serialize");
@@ -1941,6 +1952,7 @@ mod tests {
         assert_eq!(json["serverVersion"], "0.1.0");
         assert_eq!(json["protocolVersion"], 1);
         assert_eq!(json["config"]["defaultCwd"], "/workspace");
+        assert_eq!(json["config"]["voiceLanguage"], "pl-PL");
     }
 
     #[test]
