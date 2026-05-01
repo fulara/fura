@@ -1123,22 +1123,37 @@ pub(crate) async fn send_prompt(
         return vec![unknown_session_error(session_id)];
     };
 
-    let command = prompt_command(
-        next_rpc_id(),
-        text,
-        images.filter(|images| !images.is_empty()),
-        behavior,
-    );
+    let command_id = next_rpc_id();
+    let command_images = images.filter(|images| !images.is_empty());
+    if behavior.is_none() {
+        state.pending_prompt_drafts.write().await.insert(
+            command_id.clone(),
+            PendingPromptDraft {
+                session_id: session_id.clone(),
+                text: text.clone(),
+                images: command_images.clone(),
+            },
+        );
+    }
+
+    let command = prompt_command(command_id.clone(), text, command_images, behavior);
 
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => vec![snapshot],
-        Err(message) => vec![
-            snapshot,
-            ServerMessage::Error {
-                request_id: None,
-                message,
-            },
-        ],
+        Err(message) => {
+            state
+                .pending_prompt_drafts
+                .write()
+                .await
+                .remove(&command_id);
+            vec![
+                snapshot,
+                ServerMessage::Error {
+                    request_id: None,
+                    message,
+                },
+            ]
+        }
     }
 }
 

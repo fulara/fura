@@ -216,6 +216,17 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             level = ?level,
             bytes = text.len()
         ),
+        ServerMessage::PromptBusy {
+            session_id,
+            text,
+            images,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "prompt.busy",
+            session_id = %session_id,
+            bytes = text.len(),
+            image_count = images.as_ref().map(Vec::len).unwrap_or(0)
+        ),
         ServerMessage::ModelList { session_id, models } => info!(
             direction = "bridge_to_client",
             message_type = "model.list",

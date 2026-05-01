@@ -15,6 +15,8 @@ pub(crate) struct AppState {
     pub(crate) pending_created_sessions: Arc<RwLock<HashMap<String, PendingCreatedSession>>>,
     /// Name to apply to the next new session spawned by a fork or handoff on this transport.
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
+    /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
+    pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
@@ -36,6 +38,13 @@ pub(crate) struct PendingCreatedSession {
     pub(crate) args: Vec<String>,
     pub(crate) title: Option<String>,
     pub(crate) created_at: u64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingPromptDraft {
+    pub(crate) session_id: String,
+    pub(crate) text: String,
+    pub(crate) images: Option<Vec<Value>>,
 }
 
 #[derive(Debug)]

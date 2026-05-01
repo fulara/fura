@@ -786,58 +786,36 @@ h2 {
   min-width: 5.5rem;
 }
 
-.busy-prompt-choice {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: stretch;
-  justify-content: space-between;
-  gap: 1rem;
-  padding: 0.85rem;
-  border: 1px solid rgba(255, 191, 105, 0.35);
-  border-radius: 0.85rem;
-  background: rgba(255, 191, 105, 0.08);
+.busy-prompt.modal-panel {
+  width: min(840px, 100%);
 }
 
-.busy-prompt-choice[hidden] {
-  display: none;
-}
-
-.busy-prompt-copy {
+.busy-prompt-body {
   display: grid;
-  gap: 0.25rem;
-  min-width: 0;
+  gap: 0.65rem;
+  padding: 1rem;
 }
 
-.busy-prompt-copy strong {
-  color: #ffcf88;
-}
-
-.busy-prompt-copy span {
+.busy-prompt-body label {
   color: #c9d3e6;
-  font-size: 0.9rem;
+  font-size: 0.86rem;
+  font-weight: 600;
 }
 
-.busy-prompt-preview {
-  margin: 0.2rem 0 0;
-  max-width: 52rem;
-  color: #9ba4b5;
-  font-size: 0.85rem;
-  line-height: 1.45;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.busy-prompt-text {
+  min-height: 14rem;
+  max-height: min(42vh, 28rem);
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  line-height: 1.5;
+  background: #10141d;
+  border-color: rgba(255, 191, 105, 0.35);
 }
 
-.busy-prompt-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-  flex-shrink: 0;
-}
-
-.prompt-form .busy-prompt-actions button {
-  align-self: center;
-  min-width: auto;
+.busy-prompt-attachment-note {
+  margin: 0;
+  color: #ffcf88;
+  font-size: 0.86rem;
 }
 
 

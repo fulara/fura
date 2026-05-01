@@ -158,6 +158,12 @@ pub(crate) enum ServerMessage {
         level: NoticeLevel,
         text: String,
     },
+    #[serde(rename = "prompt.busy")]
+    PromptBusy {
+        session_id: String,
+        text: String,
+        images: Option<Vec<Value>>,
+    },
     #[serde(rename = "model.list")]
     ModelList {
         session_id: String,
