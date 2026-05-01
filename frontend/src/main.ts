@@ -209,7 +209,7 @@ type WorktreeCreateOptions = {
   branchName?: string;
 };
 type ClientMessage =
-  | { type: "session.create"; cwd?: string; name?: string; args?: string[]; worktree?: WorktreeCreateOptions }
+  | { type: "session.create"; requestId?: string; cwd?: string; name?: string; args?: string[]; worktree?: WorktreeCreateOptions }
   | { type: "session.open"; sessionFile: string }
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }
@@ -380,7 +380,7 @@ app.innerHTML = `
         </div>
       </div>
       <footer class="modal-footer">
-        <span id="cwdPickerStatus" class="modal-status"></span>
+        <span id="cwdPickerStatus" class="modal-status" aria-live="polite" aria-atomic="true"></span>
         <div class="modal-actions">
           <button id="cwdPickerCancel" type="button">Cancel</button>
           <button id="cwdPickerCreate" type="button">Create session</button>
@@ -591,6 +591,8 @@ let socket: WebSocket | null = null;
 let activeSessionId: string | null = null;
 let serverConfig: ServerConfig | null = null;
 let pendingCreatedSessionBaseline: Set<string> | null = null;
+let cwdPickerCreatePending = false;
+let cwdPickerPendingRequestId: string | null = null;
 let deleteSessionTargetId: string | null = null;
 let cwdPickerDirectoryAutofill = true;
 let cwdPickerBranchAutofill = true;
@@ -934,6 +936,12 @@ function connect(): void {
   });
   socket.addEventListener("close", () => {
     setStatus("disconnected", "disconnected");
+    if (cwdPickerCreatePending && cwdPickerPendingRequestId) {
+      handleCwdPickerCreateError(
+        cwdPickerPendingRequestId,
+        "Connection closed before session creation completed.",
+      );
+    }
   });
   socket.addEventListener("error", () => {
     appendLog("WebSocket error. Check the token and bridge server.");
@@ -966,6 +974,10 @@ function appendSessionNotice(sessionId: string, notice: SessionNotice): void {
   if (sessionId === activeSessionId) markTranscriptViewDirty();
 }
 
+function isPendingCreatedSession(sessionId: string): boolean {
+  return Boolean(pendingCreatedSessionBaseline && !pendingCreatedSessionBaseline.has(sessionId));
+}
+
 function mergeSessionSummary(summary: SessionSummary): void {
   const index = sessions.findIndex(session => session.sessionId === summary.sessionId);
   if (index === -1) {
@@ -979,7 +991,7 @@ function mergeSessionSummary(summary: SessionSummary): void {
 }
 
 function shouldActivateSnapshot(sessionId: string): boolean {
-  if (pendingCreatedSessionBaseline && !pendingCreatedSessionBaseline.has(sessionId)) {
+  if (isPendingCreatedSession(sessionId)) {
     pendingCreatedSessionBaseline = null;
     return true;
   }
@@ -1007,11 +1019,16 @@ function handleServerMessage(message: ServerMessage): void {
       projections.set(message.sessionId, message.state);
       mergeSessionSummary(message.state.summary);
       syncPromptHistoryFromProjection(message.sessionId, message.state);
+      const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
       if (shouldActivateSnapshot(message.sessionId)) {
         activateSession(message.sessionId);
         markTranscriptViewDirty();
         markToolsViewDirty();
         render();
+        if (createdByPendingRequest && cwdPickerCreatePending) {
+          setCwdPickerCreatePending(false);
+          closeCwdPicker();
+        }
       } else {
         unreadSessions.add(message.sessionId);
         renderSessions();
@@ -1116,6 +1133,9 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     case "error":
       appendLog(`Error: ${message.message}`);
+      if (handleCwdPickerCreateError(message.requestId ?? null, message.message)) {
+        break;
+      }
       pendingCreatedSessionBaseline = null;
       if (activeSessionId) {
         appendSessionNotice(activeSessionId, { level: "error", text: message.message });
@@ -4188,9 +4208,52 @@ function requireServerConfig(): ServerConfig | null {
   return null;
 }
 
-function setCwdPickerError(message: string | null): void {
+function setCwdPickerStatus(message: string | null, state: "idle" | "loading" | "error" = "idle"): void {
   cwdPickerStatus.textContent = message ?? "";
-  cwdPickerStatus.classList.toggle("error", Boolean(message));
+  cwdPickerStatus.classList.toggle("loading", state === "loading");
+  cwdPickerStatus.classList.toggle("error", state === "error");
+}
+
+function setCwdPickerError(message: string | null): void {
+  setCwdPickerStatus(message, message ? "error" : "idle");
+}
+
+function setCwdPickerCreatePending(pending: boolean, requestId: string | null = null): void {
+  cwdPickerCreatePending = pending;
+  cwdPickerPendingRequestId = pending ? requestId : null;
+  cwdPickerNameInput.disabled = pending;
+  cwdPickerInput.disabled = pending;
+  cwdPickerWorktreeEnabled.disabled = pending;
+  cwdPickerWorktreeSourceRepo.disabled = pending;
+  cwdPickerWorktreeBase.disabled = pending;
+  cwdPickerWorktreeBranch.disabled = pending;
+  cwdPickerClose.disabled = pending;
+  cwdPickerCancel.disabled = pending;
+  cwdPickerCreate.disabled = pending;
+  cwdPickerCreate.textContent = pending ? "Creating…" : "Create session";
+  cwdPickerCreate.toggleAttribute("aria-busy", pending);
+  if (pending) {
+    setCwdPickerStatus("Creating session…", "loading");
+  }
+}
+
+function nextClientRequestId(prefix: string): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function handleCwdPickerCreateError(requestId: string | null, message: string): boolean {
+  if (!cwdPickerCreatePending || !cwdPickerPendingRequestId || requestId !== cwdPickerPendingRequestId) {
+    return false;
+  }
+  pendingCreatedSessionBaseline = null;
+  setCwdPickerCreatePending(false);
+  setCwdPickerError(message);
+  cwdPickerOverlay.hidden = false;
+  window.setTimeout(() => cwdPickerCreate.focus(), 0);
+  return true;
 }
 
 function trimTrailingPathSeparators(value: string): string {
@@ -4277,6 +4340,7 @@ function openCwdPicker(): void {
   cwdPickerBranchAutofill = true;
   lastAutofilledWorktreeDirectory = "";
   lastAutofilledWorktreeBranch = "";
+  setCwdPickerCreatePending(false);
   setCwdPickerError(null);
   syncCwdPickerWorktreeFields();
   cwdPickerOverlay.hidden = false;
@@ -4284,6 +4348,7 @@ function openCwdPicker(): void {
 }
 
 function closeCwdPicker(): void {
+  if (cwdPickerCreatePending) return;
   cwdPickerOverlay.hidden = true;
   setCwdPickerError(null);
   promptInput.focus();
@@ -4329,6 +4394,7 @@ function buildWorktreeCreateOptions(workingDirectory: string): WorktreeCreateOpt
 }
 
 function submitCwdPicker(): void {
+  if (cwdPickerCreatePending) return;
   if (!requireServerConfig()) return;
   const name = cwdPickerNameInput.value.trim();
   const cwd = cwdPickerInput.value.trim();
@@ -4342,9 +4408,17 @@ function submitCwdPicker(): void {
   }
   const worktree = buildWorktreeCreateOptions(cwd);
   if (cwdPickerWorktreeEnabled.checked && !worktree) return;
+  const requestId = nextClientRequestId("session-create");
   pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
-  send(worktree ? { type: "session.create", name, worktree } : { type: "session.create", name, cwd });
-  closeCwdPicker();
+  setCwdPickerCreatePending(true, requestId);
+  const message: ClientMessage = worktree
+    ? { type: "session.create", requestId, name, worktree }
+    : { type: "session.create", requestId, name, cwd };
+  if (!send(message)) {
+    pendingCreatedSessionBaseline = null;
+    setCwdPickerCreatePending(false);
+    setCwdPickerError("Not connected to the Fura bridge.");
+  }
 }
 
 function openForkPicker(): void {
@@ -4606,12 +4680,13 @@ function setPaletteSelected(index: number): void {
 
 // --- Utilities ---
 
-function send(message: ClientMessage): void {
+function send(message: ClientMessage): boolean {
   if (!socket || socket.readyState !== WebSocket.OPEN) {
     appendLog("Not connected.");
-    return;
+    return false;
   }
   socket.send(JSON.stringify(message));
+  return true;
 }
 
 function setStatus(label: string, className: string): void {

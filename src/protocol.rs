@@ -38,6 +38,7 @@ pub(crate) struct WorktreeCreateRequest {
 pub(crate) enum ClientMessage {
     #[serde(rename = "session.create")]
     SessionCreate {
+        request_id: Option<String>,
         cwd: Option<String>,
         name: Option<String>,
         args: Option<Vec<String>>,

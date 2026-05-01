@@ -199,9 +199,9 @@ pub(crate) async fn spawn_rpc_child(
             Ok(status) => {
                 let code = status.code();
                 info!(action = "rpc.exit", session_id = %session_id, target_session_id = %target_session_id, code = ?code);
-                if pending_create.is_some() {
+                if let Some(pending_create) = pending_create {
                     let _ = state.events.send(ServerMessage::Error {
-                        request_id: None,
+                        request_id: pending_create.request_id,
                         message: format!(
                             "RPC child exited before reporting a session id (code {}).",
                             code.map(|value| value.to_string())
@@ -220,9 +220,9 @@ pub(crate) async fn spawn_rpc_child(
             }
             Err(error) => {
                 warn!(action = "rpc.exit_error", session_id = %session_id, target_session_id = %target_session_id, %error);
-                if pending_create.is_some() {
+                if let Some(pending_create) = pending_create {
                     let _ = state.events.send(ServerMessage::Error {
-                        request_id: None,
+                        request_id: pending_create.request_id,
                         message: format!("RPC child failed before reporting a session id: {error}"),
                     });
                 } else {

@@ -17,11 +17,12 @@ pub(crate) async fn handle_client_message(
 ) -> Vec<ServerMessage> {
     match message {
         ClientMessage::SessionCreate {
+            request_id,
             cwd,
             name,
             args,
             worktree,
-        } => create_session(state, cwd, name, args, worktree).await,
+        } => create_session(state, request_id, cwd, name, args, worktree).await,
         ClientMessage::SessionOpen { session_file } => open_session(state, session_file).await,
         ClientMessage::SessionList => {
             info!(action = "session.list");
@@ -442,6 +443,7 @@ pub(crate) async fn create_git_worktree(
 }
 pub(crate) async fn create_session(
     state: &AppState,
+    request_id: Option<String>,
     cwd: Option<String>,
     name: Option<String>,
     args: Option<Vec<String>>,
@@ -474,7 +476,7 @@ pub(crate) async fn create_session(
             Err(error) => {
                 warn!(transport_session_id = %transport_id, %error, "worktree creation failed");
                 return vec![ServerMessage::Error {
-                    request_id: None,
+                    request_id,
                     message: format!("worktree creation failed: {error}"),
                 }];
             }
@@ -496,6 +498,7 @@ pub(crate) async fn create_session(
             cwd: Some(session_cwd.clone()),
             args: args.clone(),
             title: name.clone(),
+            request_id: request_id.clone(),
             created_at,
         },
     );
@@ -516,7 +519,7 @@ pub(crate) async fn create_session(
             .remove(&transport_id);
         error!(transport_session_id = %transport_id, %error, "failed to start RPC child");
         return vec![ServerMessage::Error {
-            request_id: None,
+            request_id,
             message: format!("failed to start RPC child: {error}"),
         }];
     }
@@ -808,7 +811,7 @@ pub(crate) async fn handle_slash_command(
                     .map(|record| (record.cwd.clone(), Some(record.args.clone())))
                     .unwrap_or((None, None))
             };
-            create_session(state, cwd, None, args, None).await
+            create_session(state, None, cwd, None, args, None).await
         }
         "abort" => abort_prompt(state, session_id).await,
         "compact" => {

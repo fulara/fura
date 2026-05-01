@@ -1259,6 +1259,10 @@ h2 {
   color: #ffaaa6;
 }
 
+.modal-status.loading {
+  color: #ffd166;
+}
+
 
 /* Delete session picker */
 

@@ -37,6 +37,7 @@ pub(crate) struct PendingCreatedSession {
     pub(crate) cwd: Option<String>,
     pub(crate) args: Vec<String>,
     pub(crate) title: Option<String>,
+    pub(crate) request_id: Option<String>,
     pub(crate) created_at: Timestamp,
 }
 

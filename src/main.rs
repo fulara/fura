@@ -1115,19 +1115,21 @@ mod tests {
                 name,
                 args,
                 worktree,
+                request_id,
                 ..
             } => {
                 assert_eq!(cwd.as_deref(), Some("/tmp"));
                 assert_eq!(name, None);
                 assert_eq!(args, Some(vec!["--debug".to_string()]));
                 assert!(worktree.is_none());
+                assert_eq!(request_id, None);
             }
             other => panic!("unexpected message: {other:?}"),
         }
 
         // With name
         let message = serde_json::from_str::<ClientMessage>(
-            r#"{"type":"session.create","cwd":"/tmp","name":"my-project","args":[]}"#,
+            r#"{"type":"session.create","requestId":"create-1","cwd":"/tmp","name":"my-project","args":[]}"#,
         )
         .expect("message should parse");
         match message {
@@ -1136,12 +1138,14 @@ mod tests {
                 name,
                 args,
                 worktree,
+                request_id,
                 ..
             } => {
                 assert_eq!(cwd.as_deref(), Some("/tmp"));
                 assert_eq!(name.as_deref(), Some("my-project"));
                 assert_eq!(args, Some(vec![] as Vec<String>));
                 assert!(worktree.is_none());
+                assert_eq!(request_id.as_deref(), Some("create-1"));
             }
             other => panic!("unexpected message: {other:?}"),
         }
@@ -1164,6 +1168,51 @@ mod tests {
                 assert_eq!(worktree.branch_name.as_deref(), Some("feature/work"));
             }
             other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_create_worktree_error_preserves_request_id() {
+        let state = test_state(8, None);
+        let missing_repo = env::temp_dir().join(format!(
+            "fura-missing-worktree-source-{}",
+            Uuid::new_v4().simple()
+        ));
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::SessionCreate {
+                request_id: Some("create-1".to_string()),
+                cwd: None,
+                name: Some("feature".to_string()),
+                args: None,
+                worktree: Some(WorktreeCreateRequest {
+                    source_repo: missing_repo.to_string_lossy().into_owned(),
+                    directory: env::temp_dir()
+                        .join(format!("fura-worktree-target-{}", Uuid::new_v4().simple()))
+                        .to_string_lossy()
+                        .into_owned(),
+                    base_branch: "HEAD".to_string(),
+                    branch_name: Some("feature/request-id".to_string()),
+                }),
+            },
+        )
+        .await;
+
+        match responses.as_slice() {
+            [
+                ServerMessage::Error {
+                    request_id,
+                    message,
+                },
+            ] => {
+                assert_eq!(request_id.as_deref(), Some("create-1"));
+                assert!(
+                    message.starts_with("worktree creation failed:"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("unexpected responses: {other:?}"),
         }
     }
 
@@ -2140,6 +2189,7 @@ mod tests {
                 cwd: Some("/workspace/project".to_string()),
                 args: vec!["--debug".to_string()],
                 title: Some("diffs2".to_string()),
+                request_id: Some("create-1".to_string()),
                 created_at: Timestamp::from_rpc(&serde_json::json!(123_000))
                     .expect("valid test timestamp"),
             },
