@@ -2179,13 +2179,6 @@ function markToolsViewDirty(): void {
   toolsPanelDirty = true;
 }
 
-function isTranscriptPanelActive(): boolean {
-  return dockviewApi?.activePanel?.id === "transcript";
-}
-
-function isToolsPanelActive(): boolean {
-  return dockviewApi?.activePanel?.id === "tools";
-}
 
 function renderActiveDockviewPanel(projection: SessionProjection | undefined): void {
   renderTranscriptPanelIfNeeded(projection);
@@ -2194,7 +2187,7 @@ function renderActiveDockviewPanel(projection: SessionProjection | undefined): v
 }
 
 function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
-  if (!transcriptPanelEl || !isTranscriptPanelActive()) return;
+  if (!transcriptPanelEl) return;
   const workspaceKey = activeWorkspaceKey();
   const sessionChanged = workspaceKey !== lastTranscriptRenderedSessionId;
   if (!force && !transcriptPanelDirty && !sessionChanged) return;
@@ -2209,7 +2202,7 @@ function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined
 }
 
 function renderToolsPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
-  if (!toolsPanelEl || !isToolsPanelActive()) return;
+  if (!toolsPanelEl) return;
   const workspaceKey = activeWorkspaceKey();
   const sessionChanged = workspaceKey !== lastToolsRenderedSessionId;
   if (!force && !toolsPanelDirty && !sessionChanged) return;

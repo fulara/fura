@@ -211,7 +211,8 @@ function booleanDetail(details: Record<string, unknown> | undefined, key: string
 }
 
 function formatCount(noun: string, count: number): string {
-  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+  const plural = noun === "match" ? "matches" : `${noun}s`;
+  return `${count} ${count === 1 ? noun : plural}`;
 }
 
 function appendToolResultBody(wrapper: HTMLElement, resultText: string): void {

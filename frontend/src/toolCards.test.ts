@@ -120,7 +120,7 @@ describe("grep cards", () => {
     }));
 
     expect(node.querySelector(".grep-pattern")?.textContent).toBe("needle");
-    expect(node.querySelector(".tool-args-summary")?.textContent).toContain("0 matchs");
+    expect(node.querySelector(".tool-args-summary")?.textContent).toContain("0 matches");
     expect(node.querySelector(".grep-tool-summary")?.textContent).toBe("No matches found");
   });
 });
