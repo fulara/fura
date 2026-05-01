@@ -4,6 +4,8 @@ import "dockview-core/dist/styles/dockview.css";
 import hljs from "highlight.js/lib/common";
 import { marked, type Token, type Tokens } from "marked";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
+import { formatContext, formatCost, formatTokens, shortPath } from "./format";
+import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
 import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
 
 type SessionStatus = "starting" | "idle" | "busy" | "exited" | "error" | "available";
@@ -293,7 +295,6 @@ type PersistedDockviewLayout = {
   layout: SerializedDockview;
 };
 
-type ThinkingVisibilityMode = "auto" | "shown" | "hidden";
 
 const DOCKVIEW_LAYOUT_STORAGE_KEY = "fura.dockview.layout";
 
@@ -2314,17 +2315,6 @@ function syncToolVisibilityToggle(): void {
   toolVisibilityToggle.title = showToolBubbles ? "Hide tool bubbles in the transcript" : "Show tool bubbles in the transcript";
 }
 
-function parseThinkingVisibilityMode(value: string | null): ThinkingVisibilityMode {
-  if (value === "shown" || value === "true") return "shown";
-  if (value === "hidden") return "hidden";
-  return "auto";
-}
-
-function nextThinkingVisibilityMode(mode: ThinkingVisibilityMode): ThinkingVisibilityMode {
-  if (mode === "auto") return "shown";
-  if (mode === "shown") return "hidden";
-  return "auto";
-}
 
 function syncThinkingVisibilityToggle(): void {
   const labels: Record<ThinkingVisibilityMode, string> = {
@@ -3889,31 +3879,6 @@ function statusInterruptButton(): HTMLButtonElement {
   return button;
 }
 
-function shortPath(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  if (path.startsWith("/") && parts.length > 2) return `…/${parts.slice(-2).join("/")}`;
-  return path;
-}
-
-function formatTokens(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0 tokens";
-  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${Math.round(value / 1_000)}K`;
-  return `${value}`;
-}
-
-function formatCost(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "$0.00";
-  return `$${value.toFixed(2)}`;
-}
-
-function formatContext(percent: number, windowSize: number): string {
-  const pct = percent < 1 ? percent.toFixed(2) : percent.toFixed(1);
-  const win = windowSize >= 1_000_000 ? `${(windowSize / 1_000_000).toFixed(1)}M`
-    : windowSize >= 1_000 ? `${Math.round(windowSize / 1_000)}K`
-    : `${windowSize}`;
-  return `${pct}%/${win}`;
-}
 
 // --- Document creation helpers (popout-safe) ---
 // These use _renderOwner instead of the global document so that elements created during
