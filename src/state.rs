@@ -11,6 +11,8 @@ pub(crate) struct AppState {
     pub(crate) sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
     pub(crate) rpc_sessions: Arc<RwLock<HashMap<String, RpcSessionHandle>>>,
     pub(crate) rpc_session_targets: Arc<RwLock<HashMap<String, String>>>,
+    /// Persisted Fura-owned session metadata, keyed by OMP session id.
+    pub(crate) session_categories: Arc<RwLock<HashMap<String, String>>>,
     /// Metadata for a newly spawned RPC child before OMP reports its real session id.
     pub(crate) pending_created_sessions: Arc<RwLock<HashMap<String, PendingCreatedSession>>>,
     /// Name to apply to the next new session spawned by a fork or handoff on this transport.
@@ -38,6 +40,7 @@ pub(crate) struct PendingCreatedSession {
     pub(crate) args: Vec<String>,
     pub(crate) title: Option<String>,
     pub(crate) request_id: Option<String>,
+    pub(crate) category: Option<String>,
     pub(crate) created_at: Timestamp,
 }
 

@@ -1,11 +1,11 @@
+use clap::Parser;
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     env, fs,
     net::IpAddr,
     path::{Path, PathBuf},
 };
-
-use clap::Parser;
-use serde::{Deserialize, Serialize};
 use tokio::fs as async_fs;
 use tracing::warn;
 
@@ -62,6 +62,8 @@ pub(crate) struct Args {
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct FuraConfig {
     pub(crate) last_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) session_categories: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,20 +89,35 @@ pub(crate) fn valid_directory_string(path: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn load_default_cwd(config_path: Option<&Path>, startup_cwd: &Path) -> String {
-    if let Some(path) = config_path {
-        match fs::read_to_string(path) {
-            Ok(text) => match serde_yaml::from_str::<FuraConfig>(&text) {
-                Ok(config) => {
-                    if let Some(cwd) = config.last_cwd.as_deref().and_then(valid_directory_string) {
-                        return cwd;
-                    }
-                }
-                Err(error) => warn!(path = %path.display(), %error, "failed to parse Fura config"),
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => warn!(path = %path.display(), %error, "failed to read Fura config"),
+pub(crate) fn load_fura_config(config_path: Option<&Path>) -> FuraConfig {
+    let Some(path) = config_path else {
+        return FuraConfig::default();
+    };
+
+    match fs::read_to_string(path) {
+        Ok(text) => match serde_yaml::from_str::<FuraConfig>(&text) {
+            Ok(config) => config,
+            Err(error) => {
+                warn!(path = %path.display(), %error, "failed to parse Fura config");
+                FuraConfig::default()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => FuraConfig::default(),
+        Err(error) => {
+            warn!(path = %path.display(), %error, "failed to read Fura config");
+            FuraConfig::default()
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn load_default_cwd(config_path: Option<&Path>, startup_cwd: &Path) -> String {
+    default_cwd_from_config(&load_fura_config(config_path), startup_cwd)
+}
+
+pub(crate) fn default_cwd_from_config(config: &FuraConfig, startup_cwd: &Path) -> String {
+    if let Some(cwd) = config.last_cwd.as_deref().and_then(valid_directory_string) {
+        return cwd;
     }
 
     startup_cwd.to_string_lossy().into_owned()
@@ -117,29 +134,35 @@ pub(crate) async fn broadcast_config(state: &AppState) {
     let _ = state.events.send(ServerMessage::ConfigUpdated { config });
 }
 
+pub(crate) async fn save_fura_config(state: &AppState) {
+    let Some(path) = state.config_path.as_ref() else {
+        return;
+    };
+
+    if let Some(parent) = path.parent() {
+        if let Err(error) = async_fs::create_dir_all(parent).await {
+            warn!(path = %parent.display(), %error, "failed to create Fura config directory");
+            return;
+        }
+    }
+
+    let config = FuraConfig {
+        last_cwd: Some(state.default_cwd.read().await.clone()),
+        session_categories: state.session_categories.read().await.clone(),
+    };
+    match serde_yaml::to_string(&config) {
+        Ok(text) => {
+            if let Err(error) = async_fs::write(path, text).await {
+                warn!(path = %path.display(), %error, "failed to write Fura config");
+            }
+        }
+        Err(error) => warn!(%error, "failed to serialize Fura config"),
+    }
+}
+
 pub(crate) async fn save_default_cwd(state: &AppState, cwd: &str) {
     *state.default_cwd.write().await = cwd.to_string();
 
-    if let Some(path) = state.config_path.as_ref() {
-        if let Some(parent) = path.parent() {
-            if let Err(error) = async_fs::create_dir_all(parent).await {
-                warn!(path = %parent.display(), %error, "failed to create Fura config directory");
-                broadcast_config(state).await;
-                return;
-            }
-        }
-
-        let config = FuraConfig {
-            last_cwd: Some(cwd.to_string()),
-        };
-        match serde_yaml::to_string(&config) {
-            Ok(text) => {
-                if let Err(error) = async_fs::write(path, text).await {
-                    warn!(path = %path.display(), %error, "failed to write Fura config");
-                }
-            }
-            Err(error) => warn!(%error, "failed to serialize Fura config"),
-        }
-    }
+    save_fura_config(state).await;
     broadcast_config(state).await;
 }

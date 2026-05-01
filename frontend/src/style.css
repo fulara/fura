@@ -23,6 +23,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -58,6 +59,7 @@ textarea:disabled {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border: 1px solid #343a46;
@@ -69,6 +71,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   border-color: #7f8cff;
   box-shadow: 0 0 0 3px rgba(127, 140, 255, 0.16);
@@ -141,7 +144,8 @@ h2 {
 }
 
 .card,
-.sidebar-actions {
+.sidebar-actions,
+.category-filter-card {
   display: grid;
   gap: 0.65rem;
   margin-bottom: 1rem;
@@ -154,6 +158,16 @@ h2 {
 
 .sidebar-actions {
   grid-template-columns: 1fr 1fr;
+}
+
+.category-filter-card label {
+  color: #c7cedc;
+  font-size: 0.82rem;
+}
+
+.category-filter-card select {
+  background: #151922;
+  color: #eef1f8;
 }
 
 .sessions {
@@ -343,6 +357,27 @@ h2 {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.5rem;
+}
+
+.category-editor {
+  display: grid;
+  grid-template-columns: auto minmax(9rem, 14rem) auto;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.category-editor label {
+  color: #9ba4b5;
+  font-size: 0.78rem;
+}
+
+.category-editor input {
+  min-width: 0;
+  padding: 0.55rem 0.65rem;
+}
+
+.category-editor button {
+  padding: 0.55rem 0.7rem;
 }
 
 .tool-visibility-toggle,
@@ -1214,6 +1249,50 @@ h2 {
 .cwd-picker-body label {
   font-size: 0.86rem;
   color: #9ba4b5;
+}
+
+.optional-label {
+  color: #737d91;
+  font-size: 0.76rem;
+  font-weight: 400;
+}
+
+.category-combobox {
+  position: relative;
+}
+
+.category-suggestions {
+  position: absolute;
+  z-index: 130;
+  left: 0;
+  right: 0;
+  top: calc(100% + 0.25rem);
+  display: grid;
+  gap: 0.2rem;
+  max-height: 14rem;
+  overflow: auto;
+  padding: 0.3rem;
+  border: 1px solid #343a46;
+  border-radius: 0.75rem;
+  background: #10141d;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+.category-suggestions[hidden] {
+  display: none;
+}
+
+.category-suggestion {
+  border-radius: 0.5rem;
+  padding: 0.45rem 0.55rem;
+  color: #eef1f8;
+  cursor: pointer;
+  font-size: 0.86rem;
+}
+
+.category-suggestion:hover,
+.category-suggestion.selected {
+  background: rgba(127, 140, 255, 0.16);
 }
 
 .field-help {

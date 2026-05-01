@@ -858,6 +858,14 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                                     .and_then(|pending| pending.title.clone())
                                     .or_else(|| pending_switch_name.clone()),
                                 timestamp: None,
+                                category: source
+                                    .as_ref()
+                                    .and_then(|record| record.category.clone())
+                                    .or_else(|| {
+                                        pending_create
+                                            .as_ref()
+                                            .and_then(|pending| pending.category.clone())
+                                    }),
                                 model: None,
                                 thinking_level: None,
                                 tokens_total: 0,
@@ -917,12 +925,29 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 }
             };
 
+            let target_category = if target_changed {
+                let sessions = state.sessions.read().await;
+                sessions
+                    .get(&target_session_id)
+                    .and_then(|record| record.category.clone())
+            } else {
+                None
+            };
             if target_changed {
                 state
                     .rpc_session_targets
                     .write()
                     .await
-                    .insert(session_id.to_string(), target_session_id);
+                    .insert(session_id.to_string(), target_session_id.clone());
+                {
+                    let mut categories = state.session_categories.write().await;
+                    if let Some(category) = target_category {
+                        categories.insert(target_session_id.clone(), category);
+                    } else {
+                        categories.remove(&target_session_id);
+                    }
+                }
+                save_fura_config(state).await;
             }
 
             if let Some(snapshot) = previous_snapshot {

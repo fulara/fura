@@ -69,13 +69,25 @@ async fn main() -> anyhow::Result<()> {
     let session_root = args.session_root.unwrap_or_else(default_session_root);
     let startup_cwd = env::current_dir().context("failed to read bridge working directory")?;
     let config_path = default_config_path();
-    let default_cwd = load_default_cwd(config_path.as_deref(), &startup_cwd);
+    let fura_config = load_fura_config(config_path.as_deref());
+    let default_cwd = default_cwd_from_config(&fura_config, &startup_cwd);
+    let session_categories = fura_config
+        .session_categories
+        .into_iter()
+        .filter_map(|(session_id, category)| {
+            normalize_session_category(Some(category))
+                .ok()
+                .flatten()
+                .map(|category| (session_id, category))
+        })
+        .collect();
     let (events, _) = broadcast::channel(512);
     let state = AppState {
         token: Arc::new(token),
         sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
+        session_categories: Arc::new(RwLock::new(session_categories)),
         pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
@@ -227,6 +239,7 @@ mod tests {
             session_file: None,
             title: None,
             timestamp: None,
+            category: None,
             model: None,
             thinking_level: None,
             tokens_total: 0,
@@ -245,6 +258,7 @@ mod tests {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
+            session_categories: Arc::new(RwLock::new(HashMap::new())),
             pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
@@ -464,6 +478,11 @@ mod tests {
         );
         let mut state = test_state(8, None);
         state.session_root = root.clone();
+        state.config_path = Some(root.join("config.yaml"));
+        state.session_categories.write().await.extend([
+            ("s1".to_string(), "infra".to_string()),
+            ("missing-session".to_string(), "stale".to_string()),
+        ]);
 
         assert!(refresh_session_catalog(&state).await);
         let sessions = state.sessions.read().await;
@@ -472,12 +491,33 @@ mod tests {
         assert_eq!(record.status, SessionStatus::Available);
         assert_eq!(record.title.as_deref(), Some("External session"));
         assert_eq!(record.cwd.as_deref(), Some("/workspace/project"));
+        assert_eq!(record.category.as_deref(), Some("infra"));
         assert_eq!(record.messages.len(), 1);
         assert_eq!(
             record.session_file.as_deref(),
             Some(session_path.to_string_lossy().as_ref())
         );
         drop(sessions);
+        let categories = state.session_categories.read().await;
+        assert_eq!(categories.get("s1").map(String::as_str), Some("infra"));
+        assert!(!categories.contains_key("missing-session"));
+        drop(categories);
+        let saved_config_text = fs::read_to_string(root.join("config.yaml"))
+            .expect("category pruning should save Fura config");
+        let saved_config: FuraConfig =
+            serde_yaml::from_str(&saved_config_text).expect("saved config should parse");
+        assert_eq!(
+            saved_config
+                .session_categories
+                .get("s1")
+                .map(String::as_str),
+            Some("infra"),
+        );
+        assert!(
+            !saved_config
+                .session_categories
+                .contains_key("missing-session")
+        );
 
         assert!(!refresh_session_catalog(&state).await);
         let _ = fs::remove_dir_all(root);
@@ -530,6 +570,50 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn session_set_category_updates_record_and_persisted_map() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        let responses =
+            set_session_category(&state, "s1".to_string(), Some(" infra ".to_string())).await;
+        assert_eq!(responses.len(), 2);
+        let sessions = state.sessions.read().await;
+        assert_eq!(
+            sessions
+                .get("s1")
+                .and_then(|record| record.category.as_deref()),
+            Some("infra"),
+        );
+        drop(sessions);
+        assert_eq!(
+            state
+                .session_categories
+                .read()
+                .await
+                .get("s1")
+                .map(String::as_str),
+            Some("infra"),
+        );
+
+        let responses =
+            set_session_category(&state, "s1".to_string(), Some("   ".to_string())).await;
+        assert_eq!(responses.len(), 2);
+        let sessions = state.sessions.read().await;
+        assert_eq!(
+            sessions
+                .get("s1")
+                .and_then(|record| record.category.as_ref()),
+            None
+        );
+        drop(sessions);
+        assert!(!state.session_categories.read().await.contains_key("s1"));
     }
 
     #[tokio::test]
@@ -1129,7 +1213,7 @@ mod tests {
 
         // With name
         let message = serde_json::from_str::<ClientMessage>(
-            r#"{"type":"session.create","requestId":"create-1","cwd":"/tmp","name":"my-project","args":[]}"#,
+            r#"{"type":"session.create","requestId":"create-1","cwd":"/tmp","name":"my-project","category":"infra","args":[]}"#,
         )
         .expect("message should parse");
         match message {
@@ -1137,6 +1221,7 @@ mod tests {
                 cwd,
                 name,
                 args,
+                category,
                 worktree,
                 request_id,
                 ..
@@ -1144,8 +1229,28 @@ mod tests {
                 assert_eq!(cwd.as_deref(), Some("/tmp"));
                 assert_eq!(name.as_deref(), Some("my-project"));
                 assert_eq!(args, Some(vec![] as Vec<String>));
+                assert_eq!(category.as_deref(), Some("infra"));
                 assert!(worktree.is_none());
                 assert_eq!(request_id.as_deref(), Some("create-1"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_session_set_category_message() {
+        let message = serde_json::from_str::<ClientMessage>(
+            r#"{"type":"session.setCategory","sessionId":"abc-123","category":"ops"}"#,
+        )
+        .expect("message should parse");
+
+        match message {
+            ClientMessage::SessionSetCategory {
+                session_id,
+                category,
+            } => {
+                assert_eq!(session_id, "abc-123");
+                assert_eq!(category.as_deref(), Some("ops"));
             }
             other => panic!("unexpected message: {other:?}"),
         }
@@ -1186,6 +1291,7 @@ mod tests {
                 cwd: None,
                 name: Some("feature".to_string()),
                 args: None,
+                category: None,
                 worktree: Some(WorktreeCreateRequest {
                     source_repo: missing_repo.to_string_lossy().into_owned(),
                     directory: env::temp_dir()
@@ -1742,6 +1848,7 @@ mod tests {
             &config_path,
             serde_yaml::to_string(&FuraConfig {
                 last_cwd: Some(last_cwd.to_string_lossy().into_owned()),
+                session_categories: HashMap::new(),
             })
             .expect("config should serialize"),
         )
@@ -1763,6 +1870,7 @@ mod tests {
             &config_path,
             serde_yaml::to_string(&FuraConfig {
                 last_cwd: Some(root.join("missing").to_string_lossy().into_owned()),
+                session_categories: HashMap::new(),
             })
             .expect("config should serialize"),
         )
@@ -2190,6 +2298,7 @@ mod tests {
                 args: vec!["--debug".to_string()],
                 title: Some("diffs2".to_string()),
                 request_id: Some("create-1".to_string()),
+                category: Some("infra".to_string()),
                 created_at: Timestamp::from_rpc(&serde_json::json!(123_000))
                     .expect("valid test timestamp"),
             },
@@ -2230,6 +2339,7 @@ mod tests {
             assert_eq!(next.created_at.millis(), 123_000);
             assert_eq!(next.session_file.as_deref(), Some("omp-session.jsonl"));
             assert_eq!(next.title.as_deref(), Some("diffs2"));
+            assert_eq!(next.category.as_deref(), Some("infra"));
         }
 
         assert!(
@@ -2247,6 +2357,15 @@ mod tests {
                 .as_deref(),
             Some("transport-session")
         );
+        assert_eq!(
+            state
+                .session_categories
+                .read()
+                .await
+                .get("omp-session")
+                .map(String::as_str),
+            Some("infra"),
+        );
         assert!(
             rpc_transport_session_id(&state, "transport-session")
                 .await
@@ -2258,6 +2377,7 @@ mod tests {
             ServerMessage::SessionSnapshot { session_id, state } => {
                 assert_eq!(session_id, "omp-session");
                 assert_eq!(state.summary.title.as_deref(), Some("diffs2"));
+                assert_eq!(state.summary.category.as_deref(), Some("infra"));
             }
             other => panic!("unexpected first event: {other:?}"),
         }

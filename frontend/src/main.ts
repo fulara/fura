@@ -101,6 +101,7 @@ type SessionSummary = {
   sessionFile?: string | null;
   title?: string | null;
   timestamp?: string | null;
+  category?: string | null;
 };
 
 type PlanModeProjection = {
@@ -209,7 +210,8 @@ type WorktreeCreateOptions = {
   branchName?: string;
 };
 type ClientMessage =
-  | { type: "session.create"; requestId?: string; cwd?: string; name?: string; args?: string[]; worktree?: WorktreeCreateOptions }
+  | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; args?: string[]; worktree?: WorktreeCreateOptions }
+  | { type: "session.setCategory"; sessionId: string; category?: string }
   | { type: "session.open"; sessionFile: string }
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }
@@ -270,6 +272,13 @@ app.innerHTML = `
         <button id="refreshSessionsButton" type="button">Refresh</button>
       </section>
 
+      <section class="category-filter-card" aria-label="Session category filter">
+        <label for="sessionCategoryFilter">Category</label>
+        <select id="sessionCategoryFilter">
+          <option value="">All sessions</option>
+        </select>
+      </section>
+
       <nav id="sessionsList" class="sessions" aria-label="Sessions"></nav>
     </aside>
 
@@ -284,6 +293,14 @@ app.innerHTML = `
           <button id="thinkingVisibilityToggle" class="thinking-visibility-toggle" type="button" data-state="auto">Thinking: auto</button>
           <button id="abortButton" type="button">Abort</button>
           <button id="stopButton" type="button">Stop</button>
+          <div class="category-editor">
+            <label for="activeCategoryInput">Category</label>
+            <div class="category-combobox">
+              <input id="activeCategoryInput" autocomplete="off" spellcheck="false" maxlength="80" placeholder="category" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="activeCategorySuggestions" />
+              <div id="activeCategorySuggestions" class="category-suggestions" role="listbox" hidden></div>
+            </div>
+            <button id="activeCategorySave" type="button">Save</button>
+          </div>
           <button id="deleteSessionButton" class="danger-action" type="button">Delete session</button>
         </div>
       </header>
@@ -362,6 +379,11 @@ app.innerHTML = `
       <div class="cwd-picker-body">
         <label for="cwdPickerNameInput">Session name</label>
         <input id="cwdPickerNameInput" autocomplete="off" spellcheck="false" placeholder="my-project" />
+        <label for="cwdPickerCategoryInput">Category <span class="optional-label">optional</span></label>
+        <div class="category-combobox">
+          <input id="cwdPickerCategoryInput" autocomplete="off" spellcheck="false" maxlength="80" placeholder="infra, client, research…" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="cwdPickerCategorySuggestions" />
+          <div id="cwdPickerCategorySuggestions" class="category-suggestions" role="listbox" hidden></div>
+        </div>
         <label id="cwdPickerInputLabel" for="cwdPickerInput">Working directory</label>
         <input id="cwdPickerInput" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
         <p id="cwdPickerInputHelp" class="field-help">For a normal session, this is the directory where OMP starts.</p>
@@ -491,6 +513,7 @@ const connectButton = requireElement<HTMLButtonElement>("connectButton");
 const createSessionButton = requireElement<HTMLButtonElement>("createSessionButton");
 const refreshSessionsButton = requireElement<HTMLButtonElement>("refreshSessionsButton");
 const sessionsList = requireElement<HTMLElement>("sessionsList");
+const sessionCategoryFilter = requireElement<HTMLSelectElement>("sessionCategoryFilter");
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
 const sessionMeta = requireElement<HTMLParagraphElement>("sessionMeta");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
@@ -501,6 +524,9 @@ const thinkingVisibilityToggle = requireElement<HTMLButtonElement>("thinkingVisi
 const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const deleteSessionButton = requireElement<HTMLButtonElement>("deleteSessionButton");
+const activeCategoryInput = requireElement<HTMLInputElement>("activeCategoryInput");
+const activeCategorySuggestions = requireElement<HTMLDivElement>("activeCategorySuggestions");
+const activeCategorySave = requireElement<HTMLButtonElement>("activeCategorySave");
 const commandPalette = requireElement<HTMLDivElement>("commandPalette");
 const imagePreviews = requireElement<HTMLDivElement>("imagePreviews");
 const busyPromptOverlay = requireElement<HTMLDivElement>("busyPromptOverlay");
@@ -521,6 +547,8 @@ const modelPickerSelect = requireElement<HTMLButtonElement>("modelPickerSelect")
 const cwdPickerOverlay = requireElement<HTMLDivElement>("cwdPickerOverlay");
 const cwdPickerClose = requireElement<HTMLButtonElement>("cwdPickerClose");
 const cwdPickerNameInput = requireElement<HTMLInputElement>("cwdPickerNameInput");
+const cwdPickerCategoryInput = requireElement<HTMLInputElement>("cwdPickerCategoryInput");
+const cwdPickerCategorySuggestions = requireElement<HTMLDivElement>("cwdPickerCategorySuggestions");
 const cwdPickerInput = requireElement<HTMLInputElement>("cwdPickerInput");
 const cwdPickerInputLabel = requireElement<HTMLLabelElement>("cwdPickerInputLabel");
 const cwdPickerInputHelp = requireElement<HTMLParagraphElement>("cwdPickerInputHelp");
@@ -583,6 +611,14 @@ type SessionListItemDom = {
   meta: HTMLSpanElement;
   deleteBtn: HTMLButtonElement;
 };
+type CategoryCombobox = {
+  input: HTMLInputElement;
+  list: HTMLDivElement;
+  selectedIndex: number;
+  options: string[];
+  accept: (value: string) => void;
+  fallbackEnter: () => void;
+};
 let pendingImages: PendingImage[] = [];
 let pendingSnippets: PendingSnippet[] = [];
 let nextPendingAttachmentId = 1;
@@ -602,6 +638,9 @@ const unreadSessions = new Set<string>();
 const sessionListItems = new Map<string, SessionListItemDom>();
 let sessionsEmptyEl: HTMLParagraphElement | null = null;
 let sessions: SessionSummary[] = [];
+let selectedCategoryFilter = "";
+let activeCategoryEditorDirty = false;
+let activeCategoryEditorSessionId: string | null = null;
 let lastRenderedSessionId: string | null = null;
 let transcriptPanelDirty = true;
 let toolsPanelDirty = true;
@@ -612,6 +651,8 @@ const transcriptRenderCaches = new WeakMap<HTMLElement, CachedPanelRenderState>(
 const toolsRenderCaches = new WeakMap<HTMLElement, CachedPanelRenderState>();
 let paletteCommands: SlashCommandSpec[] = [];
 let paletteSelectedIndex = -1;
+let cwdCategoryCombobox: CategoryCombobox;
+let activeCategoryCombobox: CategoryCombobox;
 const projections = new Map<string, SessionProjection>();
 const diffStates = new Map<string, RepoDiffState>();
 const diffSelectedRepos = new Map<string, string>();
@@ -663,11 +704,29 @@ let diffsPanelEl: HTMLElement | null = null;
 // so mkEl/mkText/mkFrag create nodes in the correct document (important for popout panels).
 let _renderOwner: Document = document;
 
+cwdCategoryCombobox = createCategoryCombobox(
+  cwdPickerCategoryInput,
+  cwdPickerCategorySuggestions,
+  value => { cwdPickerCategoryInput.value = value; },
+  () => { cwdPickerInput.focus(); cwdPickerInput.select(); },
+);
+activeCategoryCombobox = createCategoryCombobox(
+  activeCategoryInput,
+  activeCategorySuggestions,
+  value => { activeCategoryInput.value = value; markActiveCategoryDirty(); },
+  submitActiveCategory,
+);
+
+
 // --- Event wiring ---
 
 connectButton.addEventListener("click", connect);
 createSessionButton.addEventListener("click", () => {
   openCwdPicker();
+});
+sessionCategoryFilter.addEventListener("change", () => {
+  selectedCategoryFilter = sessionCategoryFilter.value;
+  renderSessions();
 });
 refreshSessionsButton.addEventListener("click", () => send({ type: "session.list" }));
 toolVisibilityToggle.addEventListener("click", () => {
@@ -708,6 +767,11 @@ busyPromptOverlay.addEventListener("keydown", event => {
 deleteSessionButton.addEventListener("click", () => {
   if (activeSessionId) openDeleteSessionPicker(activeSessionId);
 });
+activeCategoryInput.addEventListener("input", markActiveCategoryDirty);
+activeCategoryInput.addEventListener("keydown", event => {
+  handleCategoryComboboxKeydown(activeCategoryCombobox, event);
+});
+activeCategorySave.addEventListener("click", submitActiveCategory);
 modelPickerClose.addEventListener("click", closeModelPicker);
 modelPickerCancel.addEventListener("click", closeModelPicker);
 modelPickerSelect.addEventListener("click", selectCurrentModel);
@@ -746,6 +810,11 @@ deleteSessionOverlay.addEventListener("mousedown", event => {
   if (event.target === deleteSessionOverlay) closeDeleteSessionPicker();
 });
 cwdPickerNameInput.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); cwdPickerCategoryInput.focus(); cwdPickerCategoryInput.select(); }
+  if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
+});
+cwdPickerCategoryInput.addEventListener("keydown", event => {
+  if (handleCategoryComboboxKeydown(cwdCategoryCombobox, event)) return;
   if (event.key === "Enter") { event.preventDefault(); cwdPickerInput.focus(); cwdPickerInput.select(); }
   if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
 });
@@ -1459,7 +1528,174 @@ function formatMessageCount(count: number): string {
 
 function formatSessionMeta(session: SessionSummary): string {
   const cwdLabel = session.cwd ? shortPath(session.cwd) : "no dir";
-  return `${cwdLabel} · ${sessionKindLabel(session.kind)} · ${formatMessageCount(session.messageCount)}`;
+  const category = normalizedCategory(session.category);
+  const parts = [cwdLabel, sessionKindLabel(session.kind), formatMessageCount(session.messageCount)];
+  if (category) parts.unshift(category);
+  return parts.join(" · ");
+}
+
+function normalizedCategory(value: string | null | undefined): string {
+  return (value ?? "").trim();
+}
+
+function sessionCategories(): string[] {
+  const seen = new Map<string, string>();
+  for (const session of sessions) {
+    const category = normalizedCategory(session.category);
+    if (!category) continue;
+    const key = category.toLocaleLowerCase();
+    if (!seen.has(key)) seen.set(key, category);
+  }
+  return Array.from(seen.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
+}
+
+function fuzzyCategoryScore(category: string, query: string): number | null {
+  const normalizedCategory = category.toLocaleLowerCase();
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return 0;
+
+  let score = 0;
+  let categoryIndex = 0;
+  let previousMatch = -1;
+  for (const queryChar of normalizedQuery) {
+    const matchIndex = normalizedCategory.indexOf(queryChar, categoryIndex);
+    if (matchIndex === -1) return null;
+    score += matchIndex === previousMatch + 1 ? 1 : 4 + matchIndex - categoryIndex;
+    previousMatch = matchIndex;
+    categoryIndex = matchIndex + 1;
+  }
+  return score;
+}
+
+function fuzzyMatchCategories(query: string): string[] {
+  return sessionCategories()
+    .map(category => ({ category, score: fuzzyCategoryScore(category, query) }))
+    .filter((match): match is { category: string; score: number } => match.score !== null)
+    .sort((a, b) => a.score - b.score || a.category.localeCompare(b.category, undefined, { sensitivity: "base" }))
+    .map(match => match.category);
+}
+
+function createCategoryCombobox(
+  input: HTMLInputElement,
+  list: HTMLDivElement,
+  accept: (value: string) => void,
+  fallbackEnter: () => void,
+): CategoryCombobox {
+  const combobox: CategoryCombobox = { input, list, selectedIndex: -1, options: [], accept, fallbackEnter };
+  input.addEventListener("input", () => updateCategoryCombobox(combobox));
+  input.addEventListener("focus", () => updateCategoryCombobox(combobox, true));
+  input.addEventListener("blur", () => window.setTimeout(() => hideCategoryCombobox(combobox), 120));
+  return combobox;
+}
+
+function updateCategoryCombobox(combobox: CategoryCombobox, showAll = false): void {
+  const query = combobox.input.value;
+  const options = fuzzyMatchCategories(showAll ? "" : query).slice(0, 8);
+  combobox.options = options;
+  combobox.selectedIndex = options.length > 0 ? 0 : -1;
+  renderCategoryCombobox(combobox);
+}
+
+function hideCategoryCombobox(combobox: CategoryCombobox): void {
+  combobox.list.hidden = true;
+  combobox.input.setAttribute("aria-expanded", "false");
+  combobox.input.removeAttribute("aria-activedescendant");
+}
+
+function renderCategoryCombobox(combobox: CategoryCombobox): void {
+  combobox.list.replaceChildren();
+  if (combobox.options.length === 0) {
+    hideCategoryCombobox(combobox);
+    return;
+  }
+
+  for (const [index, option] of combobox.options.entries()) {
+    const row = document.createElement("div");
+    const optionId = `${combobox.list.id}-option-${index}`;
+    row.id = optionId;
+    row.className = `category-suggestion${index === combobox.selectedIndex ? " selected" : ""}`;
+    row.role = "option";
+    row.setAttribute("aria-selected", String(index === combobox.selectedIndex));
+    row.textContent = option;
+    row.addEventListener("mousedown", event => {
+      event.preventDefault();
+      combobox.accept(option);
+      hideCategoryCombobox(combobox);
+    });
+    combobox.list.append(row);
+  }
+  combobox.list.hidden = false;
+  combobox.input.setAttribute("aria-expanded", "true");
+  const active = combobox.selectedIndex >= 0 ? `${combobox.list.id}-option-${combobox.selectedIndex}` : null;
+  if (active) combobox.input.setAttribute("aria-activedescendant", active);
+  else combobox.input.removeAttribute("aria-activedescendant");
+}
+
+function handleCategoryComboboxKeydown(combobox: CategoryCombobox, event: KeyboardEvent): boolean {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    if (combobox.list.hidden) updateCategoryCombobox(combobox, true);
+    else if (combobox.options.length > 0) {
+      combobox.selectedIndex = (combobox.selectedIndex + 1) % combobox.options.length;
+      renderCategoryCombobox(combobox);
+    }
+    return true;
+  }
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (combobox.list.hidden) updateCategoryCombobox(combobox, true);
+    else if (combobox.options.length > 0) {
+      combobox.selectedIndex = (combobox.selectedIndex - 1 + combobox.options.length) % combobox.options.length;
+      renderCategoryCombobox(combobox);
+    }
+    return true;
+  }
+  if (event.key === "Enter" && !combobox.list.hidden && combobox.selectedIndex >= 0) {
+    event.preventDefault();
+    combobox.accept(combobox.options[combobox.selectedIndex]);
+    hideCategoryCombobox(combobox);
+    return true;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    combobox.fallbackEnter();
+    return true;
+  }
+  if (event.key === "Escape" && !combobox.list.hidden) {
+    event.preventDefault();
+    hideCategoryCombobox(combobox);
+    return true;
+  }
+  return false;
+}
+
+function renderCategoryFilter(): void {
+  const categories = sessionCategories();
+  if (selectedCategoryFilter && !categories.includes(selectedCategoryFilter)) {
+    selectedCategoryFilter = "";
+  }
+
+  const currentOptions = Array.from(sessionCategoryFilter.options).map(option => option.value);
+  const nextOptions = ["", ...categories];
+  if (currentOptions.length !== nextOptions.length || currentOptions.some((value, index) => value !== nextOptions[index])) {
+    sessionCategoryFilter.replaceChildren();
+    const all = document.createElement("option");
+    all.value = "";
+    all.textContent = "All sessions";
+    sessionCategoryFilter.append(all);
+    for (const category of categories) {
+      const option = document.createElement("option");
+      option.value = category;
+      option.textContent = category;
+      sessionCategoryFilter.append(option);
+    }
+  }
+  sessionCategoryFilter.value = selectedCategoryFilter;
+}
+
+function categoryFilteredSessions(): SessionSummary[] {
+  if (!selectedCategoryFilter) return sessions;
+  return sessions.filter(session => normalizedCategory(session.category) === selectedCategoryFilter);
 }
 
 function currentSessionSummary(sessionId: string): SessionSummary | undefined {
@@ -1534,6 +1770,8 @@ function updateSessionListItem(dom: SessionListItemDom, session: SessionSummary)
 }
 
 function renderSessions(): void {
+  renderCategoryFilter();
+  const visibleSessions = categoryFilteredSessions();
   if (sessions.length === 0) {
     for (const dom of sessionListItems.values()) dom.item.remove();
     sessionListItems.clear();
@@ -1547,9 +1785,21 @@ function renderSessions(): void {
     return;
   }
 
+  if (visibleSessions.length === 0) {
+    for (const dom of sessionListItems.values()) dom.item.remove();
+    sessionListItems.clear();
+    if (!sessionsEmptyEl) {
+      sessionsEmptyEl = document.createElement("p");
+      sessionsEmptyEl.className = "empty";
+    }
+    sessionsEmptyEl.textContent = `No sessions in ${selectedCategoryFilter}.`;
+    if (sessionsEmptyEl.parentNode !== sessionsList) sessionsList.replaceChildren(sessionsEmptyEl);
+    return;
+  }
+
   sessionsEmptyEl?.remove();
 
-  const nextSessionIds = new Set(sessions.map(session => session.sessionId));
+  const nextSessionIds = new Set(visibleSessions.map(session => session.sessionId));
   for (const [sessionId, dom] of sessionListItems) {
     if (!nextSessionIds.has(sessionId)) {
       dom.item.remove();
@@ -1558,7 +1808,7 @@ function renderSessions(): void {
   }
 
   let anchor = sessionsList.firstChild;
-  for (const session of sessions) {
+  for (const session of visibleSessions) {
     let dom = sessionListItems.get(session.sessionId);
     if (!dom) {
       dom = createSessionListItem(session.sessionId);
@@ -1612,6 +1862,37 @@ function syncThinkingVisibilityToggle(): void {
   thinkingVisibilityToggle.title = titles[thinkingVisibilityMode];
 }
 
+function markActiveCategoryDirty(): void {
+  activeCategoryEditorDirty = true;
+  activeCategoryEditorSessionId = activeSessionId;
+  activeCategorySave.disabled = !activeSessionId;
+}
+
+function syncActiveCategoryEditor(projection: SessionProjection | undefined): void {
+  const category = normalizedCategory(projection?.summary.category);
+  const shouldReset = activeCategoryEditorSessionId !== activeSessionId || !activeCategoryEditorDirty;
+  activeCategoryInput.disabled = !activeSessionId;
+  activeCategorySave.disabled = !activeSessionId || (!activeCategoryEditorDirty && activeCategoryInput.value.trim() === category);
+  if (!activeSessionId || shouldReset) {
+    activeCategoryInput.value = activeSessionId ? category : "";
+    activeCategoryEditorSessionId = activeSessionId;
+    activeCategoryEditorDirty = false;
+    activeCategorySave.disabled = true;
+  }
+}
+
+function submitActiveCategory(): void {
+  if (!activeSessionId) return;
+  const category = normalizedCategory(activeCategoryInput.value);
+  send(category
+    ? { type: "session.setCategory", sessionId: activeSessionId, category }
+    : { type: "session.setCategory", sessionId: activeSessionId });
+  activeCategoryEditorDirty = false;
+  activeCategoryEditorSessionId = activeSessionId;
+  activeCategorySave.disabled = true;
+}
+
+
 // Renders the workspace header, status bar, and busy prompt choice.
 // Drives re-render of the active Dockview panel via its stored element reference.
 function renderActiveSession(): void {
@@ -1629,6 +1910,7 @@ function renderActiveSession(): void {
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
   deleteSessionButton.disabled = !activeSessionId;
+  syncActiveCategoryEditor(projection);
   promptInput.disabled = !activeSessionId || hasBusyDraft;
   sendButton.disabled = !activeSessionId || hasBusyDraft;
 
@@ -1638,7 +1920,9 @@ function renderActiveSession(): void {
     promptInput.placeholder = "Select a session first";
   } else {
     sessionTitle.textContent = projection.summary.title || `Session ${shortId(activeSessionId)}`;
-    sessionMeta.textContent = `${sessionKindLabel(projection.summary.kind)} · ${sessionStatusLabel(projection.summary)} · ${projection.summary.cwd ?? "no dir"}`;
+    const category = normalizedCategory(projection.summary.category);
+    const categoryPart = category ? ` · ${category}` : "";
+    sessionMeta.textContent = `${sessionKindLabel(projection.summary.kind)} · ${sessionStatusLabel(projection.summary)}${categoryPart} · ${projection.summary.cwd ?? "no dir"}`;
     promptInput.placeholder = "Send a prompt… (type / for commands)";
   }
 
@@ -4331,6 +4615,8 @@ function openCwdPicker(): void {
   const config = requireServerConfig();
   if (!config) return;
   cwdPickerNameInput.value = "";
+  cwdPickerCategoryInput.value = "";
+  hideCategoryCombobox(cwdCategoryCombobox);
   cwdPickerInput.value = config.defaultCwd;
   cwdPickerWorktreeEnabled.checked = false;
   cwdPickerWorktreeSourceRepo.value = config.defaultCwd;
@@ -4351,6 +4637,7 @@ function closeCwdPicker(): void {
   if (cwdPickerCreatePending) return;
   cwdPickerOverlay.hidden = true;
   setCwdPickerError(null);
+  hideCategoryCombobox(cwdCategoryCombobox);
   promptInput.focus();
 }
 
@@ -4398,6 +4685,7 @@ function submitCwdPicker(): void {
   if (!requireServerConfig()) return;
   const name = cwdPickerNameInput.value.trim();
   const cwd = cwdPickerInput.value.trim();
+  const category = normalizedCategory(cwdPickerCategoryInput.value);
   if (!name || !cwd) {
     setCwdPickerError(
       cwdPickerWorktreeEnabled.checked
@@ -4411,9 +4699,10 @@ function submitCwdPicker(): void {
   const requestId = nextClientRequestId("session-create");
   pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
   setCwdPickerCreatePending(true, requestId);
+  const categoryPayload = category ? { category } : {};
   const message: ClientMessage = worktree
-    ? { type: "session.create", requestId, name, worktree }
-    : { type: "session.create", requestId, name, cwd };
+    ? { type: "session.create", requestId, name, ...categoryPayload, worktree }
+    : { type: "session.create", requestId, name, ...categoryPayload, cwd };
   if (!send(message)) {
     pendingCreatedSessionBaseline = null;
     setCwdPickerCreatePending(false);

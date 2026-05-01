@@ -21,8 +21,13 @@ pub(crate) async fn handle_client_message(
             cwd,
             name,
             args,
+            category,
             worktree,
-        } => create_session(state, request_id, cwd, name, args, worktree).await,
+        } => create_session(state, request_id, cwd, name, args, category, worktree).await,
+        ClientMessage::SessionSetCategory {
+            session_id,
+            category,
+        } => set_session_category(state, session_id, category).await,
         ClientMessage::SessionOpen { session_file } => open_session(state, session_file).await,
         ClientMessage::SessionList => {
             info!(action = "session.list");
@@ -144,6 +149,25 @@ pub(crate) fn normalize_optional_field(value: Option<String>) -> Option<String> 
         let trimmed = value.trim().to_string();
         (!trimmed.is_empty()).then_some(trimmed)
     })
+}
+
+const MAX_SESSION_CATEGORY_LEN: usize = 80;
+
+pub(crate) fn normalize_session_category(value: Option<String>) -> Result<Option<String>, String> {
+    let Some(value) = normalize_optional_field(value) else {
+        return Ok(None);
+    };
+    if value.chars().count() > MAX_SESSION_CATEGORY_LEN {
+        return Err(format!(
+            "session category must be {MAX_SESSION_CATEGORY_LEN} characters or fewer",
+        ));
+    }
+    if value.chars().any(|ch| ch.is_control()) {
+        return Err(
+            "session category must be a single line without control characters".to_string(),
+        );
+    }
+    Ok(Some(value))
 }
 
 pub(crate) fn ensure_worktree_directory_available(path: &Path) -> anyhow::Result<()> {
@@ -447,8 +471,18 @@ pub(crate) async fn create_session(
     cwd: Option<String>,
     name: Option<String>,
     args: Option<Vec<String>>,
+    category: Option<String>,
     worktree: Option<WorktreeCreateRequest>,
 ) -> Vec<ServerMessage> {
+    let category = match normalize_session_category(category) {
+        Ok(category) => category,
+        Err(message) => {
+            return vec![ServerMessage::Error {
+                request_id: request_id.clone(),
+                message,
+            }];
+        }
+    };
     let transport_id = Uuid::new_v4().to_string();
     let args = args.unwrap_or_default();
     let created_at = Timestamp::now();
@@ -499,6 +533,7 @@ pub(crate) async fn create_session(
             args: args.clone(),
             title: name.clone(),
             request_id: request_id.clone(),
+            category: category.clone(),
             created_at,
         },
     );
@@ -542,6 +577,51 @@ pub(crate) async fn create_session(
     Vec::new()
 }
 
+pub(crate) async fn set_session_category(
+    state: &AppState,
+    session_id: String,
+    category: Option<String>,
+) -> Vec<ServerMessage> {
+    let category = match normalize_session_category(category) {
+        Ok(category) => category,
+        Err(message) => {
+            return vec![ServerMessage::Error {
+                request_id: None,
+                message,
+            }];
+        }
+    };
+
+    info!(action = "session.set_category", session_id = %session_id, has_category = category.is_some());
+
+    let (snapshot, sessions_snapshot) = {
+        let mut sessions = state.sessions.write().await;
+        let Some(record) = sessions.get_mut(&session_id) else {
+            return vec![unknown_session_error(session_id)];
+        };
+        record.category = category.clone();
+        (
+            ServerMessage::SessionSnapshot {
+                session_id: session_id.clone(),
+                state: record.projection(),
+            },
+            sessions_snapshot_from_map(&sessions),
+        )
+    };
+
+    {
+        let mut categories = state.session_categories.write().await;
+        if let Some(category) = category {
+            categories.insert(session_id, category);
+        } else {
+            categories.remove(&session_id);
+        }
+    }
+    save_fura_config(state).await;
+
+    vec![snapshot, sessions_snapshot]
+}
+
 pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<ServerMessage> {
     info!(action = "session.open", session_file = %session_file);
     let session_path = PathBuf::from(&session_file);
@@ -572,6 +652,12 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
         }
     }
 
+    let category = state
+        .session_categories
+        .read()
+        .await
+        .get(&session_id)
+        .cloned();
     let record = SessionRecord {
         id: session_id.clone(),
         cwd: discovered.cwd.clone(),
@@ -588,6 +674,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
         session_file: Some(session_file.clone()),
         title: discovered.title.clone(),
         timestamp: discovered.timestamp.clone(),
+        category,
         kind: SessionKind::Managed,
         model: None,
         thinking_level: None,
@@ -811,7 +898,7 @@ pub(crate) async fn handle_slash_command(
                     .map(|record| (record.cwd.clone(), Some(record.args.clone())))
                     .unwrap_or((None, None))
             };
-            create_session(state, None, cwd, None, args, None).await
+            create_session(state, None, cwd, None, args, None, None).await
         }
         "abort" => abort_prompt(state, session_id).await,
         "compact" => {

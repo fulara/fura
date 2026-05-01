@@ -42,7 +42,13 @@ pub(crate) enum ClientMessage {
         cwd: Option<String>,
         name: Option<String>,
         args: Option<Vec<String>>,
+        category: Option<String>,
         worktree: Option<WorktreeCreateRequest>,
+    },
+    #[serde(rename = "session.setCategory")]
+    SessionSetCategory {
+        session_id: String,
+        category: Option<String>,
     },
     #[serde(rename = "session.attach")]
     SessionAttach { session_id: String },

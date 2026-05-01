@@ -32,6 +32,7 @@ pub(crate) struct SessionRecord {
     pub(crate) session_file: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) timestamp: Option<String>,
+    pub(crate) category: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) thinking_level: Option<String>,
     pub(crate) tokens_total: u64,
@@ -55,6 +56,7 @@ impl SessionRecord {
             session_file: self.session_file.clone(),
             title: self.title.clone(),
             timestamp: self.timestamp.clone(),
+            category: self.category.clone(),
         }
     }
 
@@ -167,6 +169,7 @@ pub(crate) struct SessionSummary {
     pub(crate) session_file: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) timestamp: Option<String>,
+    pub(crate) category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
