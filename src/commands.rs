@@ -69,6 +69,16 @@ pub(crate) async fn handle_client_message(
             behavior,
         } => send_prompt(state, session_id, text, images, behavior).await,
         ClientMessage::PromptAbort { session_id } => abort_prompt(state, session_id).await,
+        ClientMessage::ControlPrompt {
+            client_id,
+            conversation_id,
+            text,
+            ui_snapshot,
+        } => handle_control_prompt(state, client_id, conversation_id, text, ui_snapshot).await,
+        ClientMessage::ControlAbort {
+            client_id,
+            conversation_id,
+        } => handle_control_abort(state, client_id, conversation_id).await,
         ClientMessage::DialogRespond {
             session_id,
             dialog_id,

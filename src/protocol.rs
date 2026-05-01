@@ -28,6 +28,99 @@ pub(crate) struct WorktreeCreateRequest {
     pub(crate) base_branch: String,
     pub(crate) branch_name: Option<String>,
 }
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FrontendUiSnapshot {
+    pub(crate) active_session_id: Option<String>,
+    pub(crate) focused_area: Option<String>,
+    pub(crate) session_search_query: String,
+    #[serde(default)]
+    pub(crate) visible_session_ids: Vec<String>,
+    pub(crate) prompt_draft: Option<PromptDraftSnapshot>,
+    pub(crate) panels: Option<PanelSnapshot>,
+    pub(crate) blocking_ui: Option<BlockingUiSnapshot>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PromptDraftSnapshot {
+    pub(crate) session_id: Option<String>,
+    pub(crate) has_text: bool,
+    pub(crate) text_length: usize,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PanelSnapshot {
+    pub(crate) transcript_visible: bool,
+    pub(crate) tools_visible: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BlockingUiSnapshot {
+    pub(crate) modal_open: bool,
+    pub(crate) dialog_open: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControlCandidate {
+    #[serde(rename = "type")]
+    pub(crate) candidate_type: String,
+    pub(crate) candidate_id: String,
+    pub(crate) session_id: String,
+    pub(crate) title: Option<String>,
+    pub(crate) cwd: Option<String>,
+    pub(crate) timestamp: Option<String>,
+    pub(crate) status: String,
+    pub(crate) kind: String,
+    pub(crate) reason: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) snippets: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControlSuggestedAction {
+    pub(crate) label: String,
+    pub(crate) action: FrontendControlAction,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum FrontendControlAction {
+    SetSessionSearch {
+        query: String,
+        focus: Option<bool>,
+    },
+    SelectSession {
+        session_id: String,
+    },
+    SetPromptDraft {
+        session_id: Option<String>,
+        text: String,
+        focus: Option<bool>,
+    },
+    Focus {
+        target: String,
+    },
+    ShowNotice {
+        level: NoticeLevel,
+        text: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ControlStatusProjection {
+    pub(crate) status: String,
+    pub(crate) message: Option<String>,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(
@@ -77,6 +170,18 @@ pub(crate) enum ClientMessage {
     },
     #[serde(rename = "prompt.abort")]
     PromptAbort { session_id: String },
+    #[serde(rename = "control.prompt")]
+    ControlPrompt {
+        client_id: String,
+        conversation_id: Option<String>,
+        text: String,
+        ui_snapshot: FrontendUiSnapshot,
+    },
+    #[serde(rename = "control.abort")]
+    ControlAbort {
+        client_id: String,
+        conversation_id: Option<String>,
+    },
     #[serde(rename = "dialog.respond")]
     DialogRespond {
         session_id: String,
@@ -115,7 +220,7 @@ pub(crate) enum ClientMessage {
     RawRpc { session_id: String, command: Value },
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum NoticeLevel {
     Info,
@@ -195,6 +300,26 @@ pub(crate) enum ServerMessage {
     },
     #[serde(rename = "diff.state")]
     DiffState { session_id: String, state: Value },
+    #[serde(rename = "control.reply")]
+    ControlReply {
+        target_client_id: String,
+        conversation_id: String,
+        message: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        candidates: Vec<ControlCandidate>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        suggested_actions: Vec<ControlSuggestedAction>,
+    },
+    #[serde(rename = "control.status")]
+    ControlStatus {
+        target_client_id: Option<String>,
+        status: ControlStatusProjection,
+    },
+    #[serde(rename = "frontend.control")]
+    FrontendControl {
+        target_client_id: String,
+        action: FrontendControlAction,
+    },
     #[serde(rename = "raw.omp")]
     RawOmp { session_id: String, frame: Value },
     #[serde(rename = "error")]

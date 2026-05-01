@@ -46,6 +46,8 @@ let currentSessionId = "mock-session";
 let currentSessionFile = "mock-session.jsonl";
 let forkCount = 0;
 let planMode = null;
+let hostTools = [];
+let activeTools = [];
 const todoPhases = [
   {
     name: "Mock Verification",
@@ -152,7 +154,68 @@ for await (const line of rl) {
       success(command, { cancelled: false });
       break;
     }
+    case "set_session_name": {
+      success(command, { name: command.name });
+      break;
+    }
+    case "set_host_tools": {
+      hostTools = Array.isArray(command.tools) ? command.tools : [];
+      success(command, { toolNames: hostTools.map(tool => tool.name).filter(Boolean) });
+      break;
+    }
+    case "set_active_tools": {
+      activeTools = Array.isArray(command.toolNames) ? command.toolNames : [];
+      success(command, { toolNames: activeTools });
+      break;
+    }
+    case "host_tool_result": {
+      // The deterministic mock does not need tool results to continue; real OMP does.
+      break;
+    }
     case "prompt": {
+      if (String(command.message ?? "").includes("Fura Controller")) {
+        const now = Date.now();
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        const userRequest = String(command.message ?? "").split("User request:").pop() ?? "";
+        const wantsOpen = /open|select/i.test(userRequest);
+        if (wantsOpen) {
+          write({
+            type: "host_tool_call",
+            id: `mock-host-${now}` ,
+            toolCallId: `mock-tool-${now}`,
+            toolName: "fura_select_session",
+            arguments: { sessionId: currentSessionId },
+          });
+        } else {
+          write({
+            type: "host_tool_call",
+            id: `mock-host-${now}` ,
+            toolCallId: `mock-tool-${now}`,
+            toolName: "fura_reply",
+            arguments: {
+              message: "I found one mock session that matches.",
+              candidates: [
+                {
+                  type: "session",
+                  candidateId: "session-1",
+                  sessionId: currentSessionId,
+                  title: "Mock RPC Session",
+                  cwd: "/mock/repo",
+                  timestamp: "2026-04-29T00:00:00.000Z",
+                  status: "idle",
+                  kind: "managed",
+                  reason: "matched mock session",
+                  snippets: ["Mock assistant received prompts in this session."],
+                },
+              ],
+              suggestedActions: [],
+            },
+          });
+        }
+        write({ type: "agent_end", timestamp: now + 1 });
+        break;
+      }
       const now = Date.now();
       const user = {
         id: `user-${now}`,

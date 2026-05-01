@@ -265,6 +265,35 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
                 .map(str::len)
                 .unwrap_or(0)
         ),
+        ServerMessage::ControlReply {
+            target_client_id,
+            message,
+            candidates,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "control.reply",
+            target_client_id = %target_client_id,
+            bytes = message.len(),
+            candidate_count = candidates.len()
+        ),
+        ServerMessage::ControlStatus {
+            target_client_id,
+            status,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "control.status",
+            target_client_id = ?target_client_id,
+            status = %status.status
+        ),
+        ServerMessage::FrontendControl {
+            target_client_id,
+            action: _,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "frontend.control",
+            target_client_id = %target_client_id
+        ),
         ServerMessage::RawOmp { session_id, frame } => info!(
             direction = "bridge_to_client",
             message_type = "raw.omp",

@@ -14,6 +14,7 @@ use uuid::Uuid;
 mod catalog;
 mod commands;
 mod config;
+mod control;
 mod omp_rpc;
 mod projection;
 mod protocol;
@@ -26,6 +27,7 @@ mod web;
 use catalog::*;
 use commands::*;
 use config::*;
+use control::*;
 use omp_rpc::*;
 use projection::*;
 use protocol::*;
@@ -91,6 +93,7 @@ async fn main() -> anyhow::Result<()> {
         pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
+        bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
         events,
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
@@ -262,6 +265,7 @@ mod tests {
             pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
+            bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
             events,
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),

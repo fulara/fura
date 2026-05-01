@@ -190,6 +190,9 @@ pub(crate) async fn spawn_rpc_child(
             .await
             .remove(&session_id)
             .unwrap_or_else(|| session_id.clone());
+        if reset_controller_if_transport_exited(&state, &session_id).await {
+            return;
+        }
         let pending_create = state
             .pending_created_sessions
             .write()
@@ -294,6 +297,48 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         }
     };
     let target_session_id = rpc_session_target_id(state, session_id).await;
+    if is_controller_transport(state, session_id).await {
+        match typed_frame {
+            OmpRpcFrame::Ready => {}
+            OmpRpcFrame::AgentStart => {
+                let run = state.bridge_controller.read().await.active_run.clone();
+                if let Some(run) = run {
+                    let _ = state.events.send(ServerMessage::ControlStatus {
+                        target_client_id: Some(run.target_client_id),
+                        status: ControlStatusProjection {
+                            status: "working".to_string(),
+                            message: Some("Ask Fura is working.".to_string()),
+                        },
+                    });
+                }
+            }
+            OmpRpcFrame::AgentEnd { .. } => handle_controller_agent_end(state).await,
+            OmpRpcFrame::HostToolCall {
+                id,
+                tool_call_id,
+                tool_name,
+                arguments,
+            } => {
+                handle_controller_host_tool_call(state, id, tool_call_id, tool_name, arguments)
+                    .await
+            }
+            OmpRpcFrame::Response(response) => {
+                let _ = response.is_error();
+                let _ = response.payload();
+                apply_rpc_response(state, session_id, frame).await;
+            }
+            OmpRpcFrame::HostToolCancel { .. }
+            | OmpRpcFrame::ExtensionUiRequest { .. }
+            | OmpRpcFrame::MessageUpdate { .. }
+            | OmpRpcFrame::MessageEnd { .. }
+            | OmpRpcFrame::ToolExecutionStart { .. }
+            | OmpRpcFrame::ToolExecutionUpdate { .. }
+            | OmpRpcFrame::ToolExecutionEnd { .. }
+            | OmpRpcFrame::PlanReview { .. }
+            | OmpRpcFrame::Unknown => {}
+        }
+        return;
+    }
     match typed_frame {
         OmpRpcFrame::Ready => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
@@ -630,9 +675,14 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
     let status = value_str(frame, "status");
     let success = frame.get("success").and_then(|value| value.as_bool());
     let current_session_id = rpc_session_target_id(state, session_id).await;
+    let is_controller = is_controller_transport(state, session_id).await;
     if status == Some("error") || success == Some(false) {
         let message = rpc_error_message(frame);
         warn!(session_id = %session_id, command = command.unwrap_or("unknown"), %message, "RPC command returned error");
+        if is_controller {
+            handle_controller_rpc_error(state, message).await;
+            return;
+        }
         if rpc_prompt_busy_needs_client_choice(command, &message) {
             if let Some(prompt_busy) = take_pending_prompt_busy_message(state, frame).await {
                 let _ = state.events.send(prompt_busy);
@@ -730,6 +780,10 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             }
         }
         Some("get_state") => {
+            if is_controller {
+                apply_controller_get_state(state, session_id, frame).await;
+                return;
+            }
             let data = frame.get("data").or_else(|| frame.get("result"));
             let rpc_session_id = data
                 .and_then(|d| d.get("sessionId"))

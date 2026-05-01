@@ -3,7 +3,7 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use serde_json::Value;
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
-use crate::{ServerMessage, SessionRecord, Timestamp};
+use crate::{ControlCandidate, FrontendUiSnapshot, ServerMessage, SessionRecord, Timestamp};
 
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -19,6 +19,7 @@ pub(crate) struct AppState {
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
+    pub(crate) bridge_controller: Arc<RwLock<BridgeControllerState>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
@@ -49,6 +50,29 @@ pub(crate) struct PendingPromptDraft {
     pub(crate) session_id: String,
     pub(crate) text: String,
     pub(crate) images: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct BridgeControllerState {
+    pub(crate) transport_session_id: Option<String>,
+    pub(crate) tools_registered: bool,
+    pub(crate) tools_restricted: bool,
+    pub(crate) active_run: Option<BridgeControllerRun>,
+    pub(crate) conversations: HashMap<String, ControlConversationState>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct BridgeControllerRun {
+    pub(crate) target_client_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) active_session_id: Option<String>,
+    pub(crate) prompt_started_at: Timestamp,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ControlConversationState {
+    pub(crate) last_candidates: Vec<ControlCandidate>,
+    pub(crate) last_ui_snapshot: FrontendUiSnapshot,
 }
 
 #[derive(Debug)]

@@ -186,6 +186,46 @@ type ServerConfig = {
   defaultCwd: string;
 };
 
+type FrontendUiSnapshot = {
+  activeSessionId?: string | null;
+  focusedArea?: "controller" | "sessionSearch" | "sessionList" | "prompt" | "transcript" | "tools" | "unknown";
+  sessionSearchQuery: string;
+  visibleSessionIds: string[];
+  promptDraft?: { sessionId?: string | null; hasText: boolean; textLength: number };
+  panels?: { transcriptVisible: boolean; toolsVisible: boolean };
+  blockingUi?: { modalOpen: boolean; dialogOpen: boolean };
+};
+
+type FrontendControlAction =
+  | { type: "setSessionSearch"; query: string; focus?: boolean | null }
+  | { type: "selectSession"; sessionId: string }
+  | { type: "setPromptDraft"; sessionId?: string | null; text: string; focus?: boolean | null }
+  | { type: "focus"; target: "controller" | "sessionSearch" | "prompt" }
+  | { type: "showNotice"; level: "info" | "warning" | "error"; text: string };
+
+type ControlCandidate = {
+  type: "session";
+  candidateId: string;
+  sessionId: string;
+  title?: string | null;
+  cwd?: string | null;
+  timestamp?: string | null;
+  status: string;
+  kind: string;
+  reason: string;
+  snippets?: string[];
+};
+
+type ControlSuggestedAction = {
+  label: string;
+  action: FrontendControlAction;
+};
+
+type ControlStatusProjection = {
+  status: "idle" | "working" | "error" | string;
+  message?: string | null;
+};
+
 type ServerMessage =
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
   | { type: "config.updated"; config: ServerConfig }
@@ -201,6 +241,9 @@ type ServerMessage =
   | { type: "model.changed"; sessionId: string; model: ModelSummary }
   | { type: "raw.omp"; sessionId: string; frame: unknown }
   | { type: "diff.state"; sessionId: string; state: RepoDiffState }
+  | { type: "control.reply"; targetClientId: string; conversationId: string; message: string; candidates?: ControlCandidate[]; suggestedActions?: ControlSuggestedAction[] }
+  | { type: "control.status"; targetClientId?: string | null; status: ControlStatusProjection }
+  | { type: "frontend.control"; targetClientId: string; action: FrontendControlAction }
   | { type: "error"; requestId?: string | null; message: string };
 
 type WorktreeCreateOptions = {
@@ -234,6 +277,8 @@ type ClientMessage =
   | { type: "diff.snapshot"; sessionId: string; label?: string }
   | { type: "raw.rpc"; sessionId: string; command: unknown }
   | { type: "session.fork"; sessionId: string; name: string }
+  | { type: "control.prompt"; clientId: string; conversationId?: string; text: string; uiSnapshot: FrontendUiSnapshot }
+  | { type: "control.abort"; clientId: string; conversationId?: string }
   | { type: "session.handoff"; sessionId: string; name: string; customInstructions?: string };
 
 type PersistedDockviewLayout = {
@@ -277,6 +322,23 @@ app.innerHTML = `
         <select id="sessionCategoryFilter">
           <option value="">All sessions</option>
         </select>
+      </section>
+
+      <section class="control-card" aria-label="Ask Fura assistant">
+        <div class="control-card-header">
+          <label for="controlPromptInput">Ask Fura</label>
+          <span id="controlStatus" class="control-status idle">idle</span>
+        </div>
+        <div id="controlConversation" class="control-conversation" aria-live="polite"></div>
+        <form id="controlPromptForm" class="control-form">
+          <input id="controlPromptInput" autocomplete="off" spellcheck="true" placeholder="Find or discuss sessions…" />
+          <button id="controlPromptSend" type="submit">Ask</button>
+        </form>
+      </section>
+
+      <section class="session-search-card" aria-label="Session search">
+        <label for="sessionSearchInput">Search sessions</label>
+        <input id="sessionSearchInput" autocomplete="off" spellcheck="false" placeholder="Filter visible sessions" />
       </section>
 
       <nav id="sessionsList" class="sessions" aria-label="Sessions"></nav>
@@ -514,6 +576,12 @@ const createSessionButton = requireElement<HTMLButtonElement>("createSessionButt
 const refreshSessionsButton = requireElement<HTMLButtonElement>("refreshSessionsButton");
 const sessionsList = requireElement<HTMLElement>("sessionsList");
 const sessionCategoryFilter = requireElement<HTMLSelectElement>("sessionCategoryFilter");
+const controlStatus = requireElement<HTMLSpanElement>("controlStatus");
+const controlConversation = requireElement<HTMLDivElement>("controlConversation");
+const controlPromptForm = requireElement<HTMLFormElement>("controlPromptForm");
+const controlPromptInput = requireElement<HTMLInputElement>("controlPromptInput");
+const controlPromptSend = requireElement<HTMLButtonElement>("controlPromptSend");
+const sessionSearchInput = requireElement<HTMLInputElement>("sessionSearchInput");
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
 const sessionMeta = requireElement<HTMLParagraphElement>("sessionMeta");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
@@ -603,6 +671,12 @@ type BusyPromptDraft = {
   onSend?: () => void;
 };
 type SessionNotice = { level: string; text: string };
+type ControlChatMessage = {
+  role: "user" | "assistant" | "system";
+  text: string;
+  candidates?: ControlCandidate[];
+  suggestedActions?: ControlSuggestedAction[];
+};
 type SessionListItemDom = {
   item: HTMLDivElement;
   button: HTMLButtonElement;
@@ -680,6 +754,12 @@ let promptHistoryIndex = -1;
 
 const TOOL_VISIBILITY_STORAGE_KEY = "fura.showTools";
 const THINKING_VISIBILITY_STORAGE_KEY = "fura.showThinking";
+const CONTROL_CLIENT_ID_STORAGE_KEY = "fura.controlClientId";
+const controlClientId = getOrCreateControlClientId();
+let controlConversationId: string | null = null;
+let controlMessages: ControlChatMessage[] = [];
+let controlStatusState: ControlStatusProjection = { status: "idle" };
+let sessionSearchQuery = "";
 const url = new URL(window.location.href);
 const initialToken = url.searchParams.get("token") ?? window.localStorage.getItem("fura.token") ?? "";
 tokenInput.value = initialToken;
@@ -727,6 +807,14 @@ createSessionButton.addEventListener("click", () => {
 sessionCategoryFilter.addEventListener("change", () => {
   selectedCategoryFilter = sessionCategoryFilter.value;
   renderSessions();
+});
+sessionSearchInput.addEventListener("input", () => {
+  sessionSearchQuery = sessionSearchInput.value;
+  renderSessions();
+});
+controlPromptForm.addEventListener("submit", event => {
+  event.preventDefault();
+  submitControlPrompt();
 });
 refreshSessionsButton.addEventListener("click", () => send({ type: "session.list" }));
 toolVisibilityToggle.addEventListener("click", () => {
@@ -1197,6 +1285,18 @@ function handleServerMessage(message: ServerMessage): void {
       }
       appendLog(`[${message.sessionId}] model changed: ${formatModelSelector(message.model)}`);
       break;
+    case "control.reply":
+      if (message.targetClientId === controlClientId) handleControlReply(message);
+      break;
+    case "control.status":
+      if (!message.targetClientId || message.targetClientId === controlClientId) {
+        controlStatusState = message.status;
+        renderControlConversation();
+      }
+      break;
+    case "frontend.control":
+      if (message.targetClientId === controlClientId) handleFrontendControl(message.action);
+      break;
     case "raw.omp":
       appendLog(`[raw ${message.sessionId}] ${JSON.stringify(message.frame)}`);
       break;
@@ -1212,6 +1312,158 @@ function handleServerMessage(message: ServerMessage): void {
       }
       break;
   }
+}
+
+function submitControlPrompt(): void {
+  const text = controlPromptInput.value.trim();
+  if (!text) return;
+  const conversationId = controlConversationId ?? crypto.randomUUID();
+  controlConversationId = conversationId;
+  controlMessages.push({ role: "user", text });
+  controlStatusState = { status: "working", message: "Ask Fura is thinking." };
+  const sent = send({
+    type: "control.prompt",
+    clientId: controlClientId,
+    conversationId,
+    text,
+    uiSnapshot: captureFrontendUiSnapshot(),
+  });
+  if (sent) controlPromptInput.value = "";
+  renderControlConversation();
+}
+
+function handleControlReply(message: Extract<ServerMessage, { type: "control.reply" }>): void {
+  controlConversationId = message.conversationId;
+  controlMessages.push({
+    role: "assistant",
+    text: message.message,
+    candidates: message.candidates ?? [],
+    suggestedActions: message.suggestedActions ?? [],
+  });
+  renderControlConversation();
+}
+
+function handleFrontendControl(action: FrontendControlAction): void {
+  switch (action.type) {
+    case "setSessionSearch":
+      sessionSearchQuery = action.query;
+      sessionSearchInput.value = action.query;
+      renderSessions();
+      if (action.focus) sessionSearchInput.focus();
+      break;
+    case "selectSession":
+      handleSessionButtonClick(action.sessionId);
+      break;
+    case "setPromptDraft":
+      if (action.sessionId && action.sessionId !== activeSessionId) {
+        handleSessionButtonClick(action.sessionId);
+      }
+      promptInput.value = action.text;
+      updatePalette();
+      if (action.focus) promptInput.focus();
+      break;
+    case "focus":
+      focusControlTarget(action.target);
+      break;
+    case "showNotice":
+      controlMessages.push({ role: "system", text: action.text });
+      renderControlConversation();
+      break;
+  }
+}
+
+function focusControlTarget(target: "controller" | "sessionSearch" | "prompt"): void {
+  if (target === "controller") controlPromptInput.focus();
+  else if (target === "sessionSearch") sessionSearchInput.focus();
+  else if (target === "prompt") promptInput.focus();
+}
+
+function captureFrontendUiSnapshot(): FrontendUiSnapshot {
+  return {
+    activeSessionId,
+    focusedArea: focusedArea(),
+    sessionSearchQuery,
+    visibleSessionIds: categoryFilteredSessions().map(session => session.sessionId),
+    promptDraft: {
+      sessionId: activeSessionId,
+      hasText: promptInput.value.trim().length > 0,
+      textLength: promptInput.value.length,
+    },
+    panels: {
+      transcriptVisible: Boolean(transcriptPanelEl),
+      toolsVisible: Boolean(toolsPanelEl),
+    },
+    blockingUi: {
+      modalOpen: Boolean(document.querySelector(".modal-overlay:not([hidden])")),
+      dialogOpen: false,
+    },
+  };
+}
+
+function focusedArea(): FrontendUiSnapshot["focusedArea"] {
+  const element = document.activeElement;
+  if (element === controlPromptInput) return "controller";
+  if (element === sessionSearchInput) return "sessionSearch";
+  if (element === promptInput) return "prompt";
+  if (element && sessionsList.contains(element)) return "sessionList";
+  if (element && transcriptPanelEl?.contains(element)) return "transcript";
+  if (element && toolsPanelEl?.contains(element)) return "tools";
+  return "unknown";
+}
+
+function renderControlConversation(): void {
+  controlStatus.textContent = controlStatusState.message || controlStatusState.status;
+  controlStatus.className = `control-status ${controlStatusState.status}`;
+  controlPromptSend.disabled = controlStatusState.status === "working";
+  controlConversation.replaceChildren();
+  for (const message of controlMessages.slice(-8)) {
+    const item = document.createElement("div");
+    item.className = `control-message ${message.role}`;
+    const text = document.createElement("p");
+    text.textContent = message.text;
+    item.append(text);
+    for (const candidate of message.candidates ?? []) {
+      item.append(renderControlCandidate(candidate));
+    }
+    for (const suggestion of message.suggestedActions ?? []) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "control-suggestion";
+      button.textContent = suggestion.label;
+      button.addEventListener("click", () => handleFrontendControl(suggestion.action));
+      item.append(button);
+    }
+    controlConversation.append(item);
+  }
+}
+
+function renderControlCandidate(candidate: ControlCandidate): HTMLElement {
+  const card = document.createElement("div");
+  card.className = "control-candidate";
+  const title = document.createElement("strong");
+  title.textContent = candidate.title || shortId(candidate.sessionId);
+  const reason = document.createElement("span");
+  reason.textContent = candidate.reason;
+  const open = document.createElement("button");
+  open.type = "button";
+  open.textContent = "Open";
+  open.addEventListener("click", () => handleFrontendControl({ type: "selectSession", sessionId: candidate.sessionId }));
+  card.append(title, reason, open);
+  for (const snippetText of candidate.snippets ?? []) {
+    const snippet = document.createElement("p");
+    snippet.className = "control-snippet";
+    snippet.textContent = snippetText;
+    card.append(snippet);
+  }
+  return card;
+}
+
+function getOrCreateControlClientId(): string {
+  const existing = window.sessionStorage.getItem(CONTROL_CLIENT_ID_STORAGE_KEY);
+  if (existing) return existing;
+  const next = crypto.randomUUID();
+  window.sessionStorage.setItem(CONTROL_CLIENT_ID_STORAGE_KEY, next);
+  return next;
 }
 
 function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" }>): void {
@@ -1494,6 +1746,7 @@ function submitDeleteSessionPicker(): void {
 function render(): void {
   renderSessions();
   renderActiveSession();
+  renderControlConversation();
 }
 
 function sessionStatusLabel(session: SessionSummary): string {
@@ -1694,8 +1947,26 @@ function renderCategoryFilter(): void {
 }
 
 function categoryFilteredSessions(): SessionSummary[] {
-  if (!selectedCategoryFilter) return sessions;
-  return sessions.filter(session => normalizedCategory(session.category) === selectedCategoryFilter);
+  const categoryMatches = selectedCategoryFilter
+    ? sessions.filter(session => normalizedCategory(session.category) === selectedCategoryFilter)
+    : sessions;
+  const query = sessionSearchQuery.trim().toLowerCase();
+  if (!query) return categoryMatches;
+  return categoryMatches.filter(session => sessionMatchesSearch(session, query));
+}
+
+function sessionMatchesSearch(session: SessionSummary, query: string): boolean {
+  return [
+    session.title,
+    session.cwd,
+    session.sessionId,
+    session.timestamp,
+    session.category,
+    session.status,
+    session.kind,
+  ]
+    .filter((value): value is string => Boolean(value))
+    .some(value => value.toLowerCase().includes(query));
 }
 
 function currentSessionSummary(sessionId: string): SessionSummary | undefined {
@@ -1792,7 +2063,8 @@ function renderSessions(): void {
       sessionsEmptyEl = document.createElement("p");
       sessionsEmptyEl.className = "empty";
     }
-    sessionsEmptyEl.textContent = `No sessions in ${selectedCategoryFilter}.`;
+    const filters = [selectedCategoryFilter ? `category ${selectedCategoryFilter}` : null, sessionSearchQuery.trim() ? `search "${sessionSearchQuery.trim()}"` : null].filter(Boolean);
+    sessionsEmptyEl.textContent = filters.length > 0 ? `No sessions match ${filters.join(" and ")}.` : "No sessions match the current filters.";
     if (sessionsEmptyEl.parentNode !== sessionsList) sessionsList.replaceChildren(sessionsEmptyEl);
     return;
   }
