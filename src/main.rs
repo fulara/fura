@@ -81,6 +81,7 @@ async fn main() -> anyhow::Result<()> {
         rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
         pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
+        pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
         events,
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
@@ -261,6 +262,7 @@ mod tests {
             rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
             pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
+            pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
             events,
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),
@@ -771,6 +773,114 @@ mod tests {
         let record = sessions.get("s1").expect("record remains");
         assert_eq!(record.status, SessionStatus::Idle);
         assert!(record.streaming_message.is_none());
+    }
+
+    #[tokio::test]
+    async fn rpc_agent_busy_prompt_error_returns_busy_choice_without_notice() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let (stdin, mut commands) = mpsc::channel(4);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("s1".to_string(), "s1".to_string());
+
+        let responses = send_prompt(
+            &state,
+            "s1".to_string(),
+            "queue this safely".to_string(),
+            Some(vec![serde_json::json!({
+                "type": "image",
+                "data": "abc123",
+                "mimeType": "image/png"
+            })]),
+            None,
+        )
+        .await;
+
+        assert_eq!(responses.len(), 1);
+        match &responses[0] {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert!(state.is_busy);
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        let command = commands.recv().await.expect("prompt command sent");
+        let command_id = command
+            .get("id")
+            .and_then(|value| value.as_str())
+            .expect("prompt command id")
+            .to_string();
+        assert_eq!(
+            command.get("type").and_then(|value| value.as_str()),
+            Some("prompt")
+        );
+        assert!(
+            state
+                .pending_prompt_drafts
+                .read()
+                .await
+                .contains_key(&command_id),
+            "regular prompt draft should be retained until OMP accepts or rejects it"
+        );
+
+        let mut events = state.events.subscribe();
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "id": command_id,
+                "type": "response",
+                "command": "prompt",
+                "success": false,
+                "error": "Agent is already processing. Use steer() or followUp() to queue messages, or wait for completion."
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("prompt busy event") {
+            ServerMessage::PromptBusy {
+                session_id,
+                text,
+                images,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(text, "queue this safely");
+                let images = images.expect("image attachments are preserved");
+                assert_eq!(images.len(), 1);
+                assert_eq!(
+                    images[0].get("mimeType").and_then(|value| value.as_str()),
+                    Some("image/png")
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            events.try_recv().is_err(),
+            "busy prompt path should not also surface a generic error notice"
+        );
+        assert!(
+            state.pending_prompt_drafts.read().await.is_empty(),
+            "busy prompt draft should be consumed after notifying the client"
+        );
+        let sessions = state.sessions.read().await;
+        assert_eq!(
+            sessions.get("s1").expect("record remains").status,
+            SessionStatus::Busy,
+            "AgentBusyError means OMP is still processing, not that the turn settled"
+        );
     }
 
     #[tokio::test]

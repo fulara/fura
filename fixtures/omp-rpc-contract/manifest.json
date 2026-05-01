@@ -89,6 +89,7 @@
     "category": "response",
     "file": "response-get-messages.json"
   },
+  {
     "name": "response-get-session-stats",
     "category": "response",
     "file": "response-get-session-stats.json"

@@ -194,6 +194,7 @@ type ServerMessage =
   | { type: "dialog.request"; sessionId: string; dialog: unknown }
   | { type: "log.stderr"; sessionId: string; text: string }
   | { type: "session.notice"; sessionId: string; level: "info" | "warning" | "error"; text: string }
+  | { type: "prompt.busy"; sessionId: string; text: string; images?: unknown[] | null }
   | { type: "model.list"; sessionId: string; models: ModelSummary[] }
   | { type: "plan.review"; sessionId: string; planFilePath: string; finalPlanFilePath: string; title?: string | null; content: string }
   | { type: "model.changed"; sessionId: string; model: ModelSummary }
@@ -291,7 +292,6 @@ app.innerHTML = `
       <div id="statusBar" class="status-bar" aria-label="Session status"></div>
 
       <form id="promptForm" class="prompt-form">
-        <div id="busyPromptChoice" class="busy-prompt-choice" hidden></div>
         <div class="prompt-field">
           <div id="commandPalette" class="command-palette" hidden></div>
           <div id="imagePreviews" class="image-previews" hidden></div>
@@ -302,6 +302,31 @@ app.innerHTML = `
     </section>
 
   </main>
+
+  <div id="busyPromptOverlay" class="modal-overlay" hidden>
+    <section class="busy-prompt modal-panel" role="dialog" aria-modal="true" aria-labelledby="busyPromptTitle" aria-describedby="busyPromptDescription">
+      <header class="modal-header">
+        <div>
+          <h2 id="busyPromptTitle">Agent is busy</h2>
+          <p id="busyPromptDescription">Choose whether to interrupt with steer or queue this as a follow-up.</p>
+        </div>
+        <button id="busyPromptClose" class="modal-close" type="button" aria-label="Cancel busy prompt">×</button>
+      </header>
+      <div class="busy-prompt-body">
+        <label for="busyPromptText">Prompt to send</label>
+        <textarea id="busyPromptText" class="busy-prompt-text" readonly spellcheck="false"></textarea>
+        <p id="busyPromptAttachmentNote" class="busy-prompt-attachment-note"></p>
+      </div>
+      <footer class="modal-footer">
+        <span></span>
+        <div class="modal-actions">
+          <button id="busyPromptCancel" type="button">Cancel</button>
+          <button id="busyPromptSteer" type="button">Steer</button>
+          <button id="busyPromptFollowUp" type="button">Follow-up</button>
+        </div>
+      </footer>
+    </section>
+  </div>
 
   <div id="modelPickerOverlay" class="modal-overlay" hidden>
     <section class="model-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="modelPickerTitle">
@@ -449,7 +474,13 @@ const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const commandPalette = requireElement<HTMLDivElement>("commandPalette");
 const imagePreviews = requireElement<HTMLDivElement>("imagePreviews");
-const busyPromptChoice = requireElement<HTMLDivElement>("busyPromptChoice");
+const busyPromptOverlay = requireElement<HTMLDivElement>("busyPromptOverlay");
+const busyPromptClose = requireElement<HTMLButtonElement>("busyPromptClose");
+const busyPromptText = requireElement<HTMLTextAreaElement>("busyPromptText");
+const busyPromptAttachmentNote = requireElement<HTMLParagraphElement>("busyPromptAttachmentNote");
+const busyPromptCancel = requireElement<HTMLButtonElement>("busyPromptCancel");
+const busyPromptSteer = requireElement<HTMLButtonElement>("busyPromptSteer");
+const busyPromptFollowUp = requireElement<HTMLButtonElement>("busyPromptFollowUp");
 const sendButton = requireElement<HTMLButtonElement>("sendButton");
 const modelPickerOverlay = requireElement<HTMLDivElement>("modelPickerOverlay");
 const modelPickerClose = requireElement<HTMLButtonElement>("modelPickerClose");
@@ -620,6 +651,16 @@ stopButton.addEventListener("click", () => {
   if (activeSessionId) {
     send({ type: "session.stop", sessionId: activeSessionId });
   }
+});
+busyPromptClose.addEventListener("click", restoreBusyPromptDraft);
+busyPromptCancel.addEventListener("click", restoreBusyPromptDraft);
+busyPromptSteer.addEventListener("click", () => sendBusyPromptDraft("steer"));
+busyPromptFollowUp.addEventListener("click", () => sendBusyPromptDraft("followUp"));
+busyPromptOverlay.addEventListener("mousedown", event => {
+  if (event.target === busyPromptOverlay) restoreBusyPromptDraft();
+});
+busyPromptOverlay.addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); restoreBusyPromptDraft(); }
 });
 modelPickerClose.addEventListener("click", closeModelPicker);
 modelPickerCancel.addEventListener("click", closeModelPicker);
@@ -990,6 +1031,9 @@ function handleServerMessage(message: ServerMessage): void {
         renderModelPicker();
       }
       break;
+    case "prompt.busy":
+      handlePromptBusy(message);
+      break;
     case "model.list":
       if (modelPickerSessionId === message.sessionId) {
         modelPickerModels = message.models;
@@ -1017,6 +1061,44 @@ function handleServerMessage(message: ServerMessage): void {
       }
       break;
   }
+}
+
+function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" }>): void {
+  appendLog(`[${message.sessionId}] prompt needs steer or follow-up choice`);
+  busyPromptDraft = {
+    sessionId: message.sessionId,
+    text: message.text,
+    editorText: message.text,
+    images: restorePromptBusyImages(message.images ?? []),
+    snippets: [],
+  };
+  if (message.sessionId === activeSessionId) {
+    render();
+    promptInput.focus();
+  } else {
+    unreadSessions.add(message.sessionId);
+    renderSessions();
+  }
+}
+
+function restorePromptBusyImages(images: unknown[]): PendingImage[] {
+  const restored: PendingImage[] = [];
+  for (const image of images) {
+    if (!isImagePayload(image)) continue;
+    restored.push({
+      type: "image",
+      marker: createPendingMarker("Image"),
+      data: image.data,
+      mimeType: image.mimeType,
+    });
+  }
+  return restored;
+}
+
+function isImagePayload(value: unknown): value is { type: "image"; data: string; mimeType: string } {
+  if (!value || typeof value !== "object") return false;
+  const image = value as Record<string, unknown>;
+  return image.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string";
 }
 
 function sendPromptMessage(
@@ -1169,55 +1251,31 @@ function sendPromptWithBusyHandling(options: {
 }
 
 function renderBusyPromptChoice(): void {
-  busyPromptChoice.replaceChildren();
   const draft = busyPromptDraft;
-  if (!draft || draft.sessionId !== activeSessionId) {
-    busyPromptChoice.hidden = true;
+  const shouldShow = Boolean(draft && draft.sessionId === activeSessionId);
+  const wasHidden = busyPromptOverlay.hidden;
+
+  if (!draft || !shouldShow) {
+    busyPromptOverlay.hidden = true;
+    busyPromptText.value = "";
+    busyPromptAttachmentNote.textContent = "";
     return;
   }
 
-  busyPromptChoice.hidden = false;
-
-  const copy = document.createElement("div");
-  copy.className = "busy-prompt-copy";
-
-  const title = document.createElement("strong");
-  title.textContent = "Agent is busy";
-
-  const summary = document.createElement("span");
   const attachmentCount = draft.images.length + draft.snippets.length;
-  const suffix = attachmentCount > 0 ? ` · ${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"}` : "";
-  summary.textContent = `Choose how to handle the submitted prompt${suffix}.`;
+  busyPromptText.value = draft.editorText || draft.text || (draft.images.length > 0 ? "[Image prompt]" : "");
+  busyPromptAttachmentNote.textContent =
+    attachmentCount > 0 ? `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"} will be sent with this prompt.` : "";
+  busyPromptAttachmentNote.hidden = attachmentCount === 0;
+  busyPromptOverlay.hidden = false;
 
-  const preview = document.createElement("p");
-  preview.className = "busy-prompt-preview";
-  preview.textContent = draft.editorText || (draft.images.length > 0 ? "[Image prompt]" : "");
-
-  copy.append(title, summary, preview);
-
-  const actions = document.createElement("div");
-  actions.className = "busy-prompt-actions";
-
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.textContent = "Cancel";
-  cancel.title = "Move the prompt back to the editor";
-  cancel.addEventListener("click", restoreBusyPromptDraft);
-
-  const steer = document.createElement("button");
-  steer.type = "button";
-  steer.textContent = "Steer";
-  steer.title = "Interrupt the running agent after the current tool";
-  steer.addEventListener("click", () => sendBusyPromptDraft("steer"));
-
-  const followUp = document.createElement("button");
-  followUp.type = "button";
-  followUp.textContent = "Follow-up";
-  followUp.title = "Run this prompt after the current turn finishes";
-  followUp.addEventListener("click", () => sendBusyPromptDraft("followUp"));
-
-  actions.append(cancel, steer, followUp);
-  busyPromptChoice.append(copy, actions);
+  if (wasHidden) {
+    requestAnimationFrame(() => {
+      if (busyPromptOverlay.hidden) return;
+      busyPromptText.focus();
+      busyPromptText.select();
+    });
+  }
 }
 
 function restoreBusyPromptDraft(): void {

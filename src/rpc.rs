@@ -302,6 +302,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             }
         }
         OmpRpcFrame::AgentStart => {
+            discard_pending_prompt_drafts_for_session(state, &target_session_id).await;
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Busy).await
         }
         OmpRpcFrame::AgentEnd { .. } => {
@@ -594,6 +595,12 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
     if status == Some("error") || success == Some(false) {
         let message = rpc_error_message(frame);
         warn!(session_id = %session_id, command = command.unwrap_or("unknown"), %message, "RPC command returned error");
+        if rpc_prompt_busy_needs_client_choice(command, &message) {
+            if let Some(prompt_busy) = take_pending_prompt_busy_message(state, frame).await {
+                let _ = state.events.send(prompt_busy);
+                return;
+            }
+        }
         if rpc_prompt_error_settles_turn(command, &message) {
             settle_prompt_error_and_broadcast(state, &current_session_id).await;
         }
@@ -1003,6 +1010,35 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         Some("prompt") | Some("abort") => {}
         _ => {}
     }
+}
+
+pub(crate) fn rpc_prompt_busy_needs_client_choice(command: Option<&str>, message: &str) -> bool {
+    matches!(command, Some("prompt")) && message.contains("Agent is already processing")
+}
+
+pub(crate) async fn take_pending_prompt_busy_message(
+    state: &AppState,
+    frame: &Value,
+) -> Option<ServerMessage> {
+    let command_id = value_str(frame, "id")?;
+    let draft = state
+        .pending_prompt_drafts
+        .write()
+        .await
+        .remove(command_id)?;
+    Some(ServerMessage::PromptBusy {
+        session_id: draft.session_id,
+        text: draft.text,
+        images: draft.images,
+    })
+}
+
+pub(crate) async fn discard_pending_prompt_drafts_for_session(state: &AppState, session_id: &str) {
+    state
+        .pending_prompt_drafts
+        .write()
+        .await
+        .retain(|_, draft| draft.session_id != session_id);
 }
 
 pub(crate) fn rpc_prompt_error_settles_turn(command: Option<&str>, message: &str) -> bool {
