@@ -7,6 +7,7 @@ import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./s
 import { formatContext, formatCost, formatTokens, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type FuraConnection } from "./connection";
+import { mkEl, mkFrag, mkText, requireElement, setRenderDocument } from "./dom";
 import type {
   AgentProgress,
   ClientMessage,
@@ -543,10 +544,8 @@ let transcriptPanelEl: HTMLElement | null = null;
 let toolsPanelEl: HTMLElement | null = null;
 let diffsPanelEl: HTMLElement | null = null;
 
-// Current document owner for panel render functions.
-// Set to container.ownerDocument at the start of renderTranscriptView / renderToolsView
-// so mkEl/mkText/mkFrag create nodes in the correct document (important for popout panels).
-let _renderOwner: Document = document;
+// Current document owner for panel render functions is set in dom.ts before panel rendering.
+// This keeps Dockview popout panels creating nodes in their own window document.
 
 cwdCategoryCombobox = createCategoryCombobox(
   cwdPickerCategoryInput,
@@ -2332,7 +2331,7 @@ function renderControlTranscriptMessage(message: ControlChatMessage, index: numb
 }
 
 function renderControllerTranscriptView(container: HTMLElement, sessionChanged: boolean): void {
-  _renderOwner = container.ownerDocument;
+  setRenderDocument(container.ownerDocument);
   const cache = getCachedPanelRenderState(transcriptRenderCaches, container, transcriptRenderRevision);
   const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
   const items = buildControllerTranscriptRenderItems();
@@ -2353,7 +2352,7 @@ function renderControllerTranscriptView(container: HTMLElement, sessionChanged: 
 }
 
 function renderControllerToolsView(container: HTMLElement): void {
-  _renderOwner = container.ownerDocument;
+  setRenderDocument(container.ownerDocument);
   const cache = getCachedPanelRenderState(toolsRenderCaches, container, 0);
   clearCachedPanelRenderState(cache);
   const empty = mkEl("p");
@@ -2450,14 +2449,14 @@ function buildToolsRenderItems(tools: Array<{ kind: "tool" } & ToolCard>): Panel
 }
 
 // Renders the chronological transcript into `container`, including optional inline tool bubbles.
-// Sets _renderOwner from container.ownerDocument so all mkEl calls use the correct document
+// Sets the render document from container.ownerDocument so all mkEl calls use the correct document
 // (required for popout panels which live in a separate window document).
 function renderTranscriptView(
   container: HTMLElement,
   projection: SessionProjection | undefined,
   sessionChanged: boolean,
 ): void {
-  _renderOwner = container.ownerDocument;
+  setRenderDocument(container.ownerDocument);
   const cache = getCachedPanelRenderState(transcriptRenderCaches, container, transcriptRenderRevision);
 
   const wasNearBottom =
@@ -2506,7 +2505,7 @@ function renderToolsView(
   container: HTMLElement,
   projection: SessionProjection | undefined,
 ): void {
-  _renderOwner = container.ownerDocument;
+  setRenderDocument(container.ownerDocument);
   const cache = getCachedPanelRenderState(toolsRenderCaches, container, 0);
 
   if (!projection) {
@@ -3055,7 +3054,7 @@ function scrollDiffsToFile(container: HTMLElement, filePath: string): void {
 }
 
 function renderDiffsView(container: HTMLElement, projection: SessionProjection | undefined): void {
-  _renderOwner = container.ownerDocument;
+  setRenderDocument(container.ownerDocument);
   lastDiffsRenderedSessionId = activeSessionId;
   lastDiffsRenderedProjectionPresent = Boolean(projection);
   diffPanelDirty = false;
@@ -3629,22 +3628,6 @@ function statusInterruptButton(): HTMLButtonElement {
 }
 
 
-// --- Document creation helpers (popout-safe) ---
-// These use _renderOwner instead of the global document so that elements created during
-// renderTranscriptView / renderToolsView belong to the correct window document,
-// even when those panels are popped out into a separate browser window.
-
-function mkEl<K extends keyof HTMLElementTagNameMap>(tag: K): HTMLElementTagNameMap[K] {
-  return _renderOwner.createElement(tag);
-}
-
-function mkText(text: string): Text {
-  return _renderOwner.createTextNode(text);
-}
-
-function mkFrag(): DocumentFragment {
-  return _renderOwner.createDocumentFragment();
-}
 
 // --- Message rendering ---
 
@@ -5319,10 +5302,3 @@ function messageText(message: TranscriptMessage): string {
     .join("\n\n");
 }
 
-function requireElement<T extends HTMLElement>(id: string): T {
-  const element = document.getElementById(id);
-  if (!element) {
-    throw new Error(`#${id} missing`);
-  }
-  return element as T;
-}
