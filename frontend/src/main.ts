@@ -13,6 +13,15 @@ import {
   renderReadToolGroup,
   renderToolCard,
 } from "./toolCards";
+import {
+  blobToBase64,
+  createPendingMarker as createAttachmentMarker,
+  expandSnippetTokens as expandSnippetAttachmentTokens,
+  removePendingMarkerFromText,
+  renderAttachmentPreviews,
+  type PendingImage,
+  type PendingSnippet,
+} from "./composerAttachments";
 import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
 import type {
   ClientMessage,
@@ -401,8 +410,6 @@ const diffPreviewStatus = requireElement<HTMLSpanElement>("diffPreviewStatus");
 const diffPreviewCancel = requireElement<HTMLButtonElement>("diffPreviewCancel");
 const diffPreviewSend = requireElement<HTMLButtonElement>("diffPreviewSend");
 
-type PendingImage = { type: "image"; marker: string; data: string; mimeType: string };
-type PendingSnippet = { type: "snippet"; marker: string; text: string };
 type DiffPreviewDraft = {
   sessionId: string;
   state: RepoDiffState;
@@ -3633,18 +3640,6 @@ function renderMessage(message: TranscriptMessage): HTMLElement {
 
 // --- Image attachments ---
 
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result as string;
-      // result is "data:<mimeType>;base64,<data>" — strip the prefix
-      resolve(result.slice(result.indexOf(",") + 1));
-    };
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
 
 function insertTextAtCursor(text: string): void {
   resetPromptHistoryNavigation();
@@ -3662,83 +3657,35 @@ function insertTextAtCursor(text: string): void {
 }
 
 function createPendingMarker(label: "Image" | "Snippet"): string {
-  return `[${label} ${nextPendingAttachmentId++}]`;
+  return createAttachmentMarker(label, nextPendingAttachmentId++);
 }
 
 function removePendingMarker(marker: string): void {
-  const index = promptInput.value.indexOf(marker);
-  if (index === -1) return;
-
-  let start = index;
-  let end = index + marker.length;
-  if (start > 0 && promptInput.value[start - 1] === " " && (end === promptInput.value.length || promptInput.value[end] === " ")) {
-    start--;
-  } else if (end < promptInput.value.length && promptInput.value[end] === " ") {
-    end++;
-  }
+  const nextValue = removePendingMarkerFromText(promptInput.value, marker);
+  if (nextValue === promptInput.value) return;
 
   resetPromptHistoryNavigation();
-  promptInput.value = `${promptInput.value.slice(0, start)}${promptInput.value.slice(end)}`;
+  promptInput.value = nextValue;
   updatePalette();
 }
 
 function expandSnippetTokens(text: string): string {
-  let expanded = text;
-  for (const snippet of pendingSnippets) {
-    expanded = expanded.split(snippet.marker).join(`\n\n--- ${snippet.marker.slice(1, -1)} ---\n${snippet.text}\n---`);
-  }
-  return expanded;
+  return expandSnippetAttachmentTokens(text, pendingSnippets);
 }
 
 function renderImagePreviews(): void {
-  imagePreviews.replaceChildren();
-  if (pendingImages.length === 0 && pendingSnippets.length === 0) {
-    imagePreviews.hidden = true;
-    return;
-  }
-  imagePreviews.hidden = false;
-  for (let i = 0; i < pendingImages.length; i++) {
-    const img = pendingImages[i];
-    const thumb = document.createElement("div");
-    thumb.className = "image-thumb";
-
-    const el = document.createElement("img");
-    el.src = `data:${img.mimeType};base64,${img.data}`;
-    el.alt = img.marker.slice(1, -1);
-
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "image-remove";
-    remove.textContent = "\u00d7";
-    remove.setAttribute("aria-label", "Remove image");
-    remove.addEventListener("click", () => {
-      pendingImages.splice(i, 1);
-      removePendingMarker(img.marker);
+  renderAttachmentPreviews(imagePreviews, pendingImages, pendingSnippets, {
+    onRemoveImage: (index, image) => {
+      pendingImages.splice(index, 1);
+      removePendingMarker(image.marker);
       renderImagePreviews();
-    });
-
-    thumb.append(el, remove);
-    imagePreviews.append(thumb);
-  }
-
-  for (let i = 0; i < pendingSnippets.length; i++) {
-    const snippet = pendingSnippets[i];
-    const chip = document.createElement("div");
-    chip.className = "snippet-chip";
-    chip.textContent = `${snippet.marker} ${snippet.text.split(/\s+/).slice(0, 8).join(" ")}`;
-    const remove = document.createElement("button");
-    remove.type = "button";
-    remove.className = "image-remove";
-    remove.textContent = "\u00d7";
-    remove.setAttribute("aria-label", "Remove snippet");
-    remove.addEventListener("click", () => {
-      pendingSnippets.splice(i, 1);
+    },
+    onRemoveSnippet: (index, snippet) => {
+      pendingSnippets.splice(index, 1);
       removePendingMarker(snippet.marker);
       renderImagePreviews();
-    });
-    chip.append(remove);
-    imagePreviews.append(chip);
-  }
+    },
+  });
 }
 
 // --- Model picker ---
