@@ -1043,6 +1043,7 @@ mod tests {
                 name,
                 args,
                 worktree,
+                ..
             } => {
                 assert_eq!(cwd.as_deref(), Some("/tmp"));
                 assert_eq!(name, None);
@@ -1063,6 +1064,7 @@ mod tests {
                 name,
                 args,
                 worktree,
+                ..
             } => {
                 assert_eq!(cwd.as_deref(), Some("/tmp"));
                 assert_eq!(name.as_deref(), Some("my-project"));
@@ -1139,6 +1141,56 @@ mod tests {
         );
         repo.find_branch("feature/worktree-test", BranchType::Local)
             .expect("branch should be created");
+        drop(repo);
+        fs::remove_dir_all(root).expect("temp worktree repo should be removed");
+    }
+
+    #[test]
+    fn deletes_linked_worktree() {
+        let root = env::temp_dir().join(format!(
+            "fura-worktree-delete-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let repo_dir = root.join("repo");
+        let worktree_dir = root.join("repo-feature");
+        fs::create_dir_all(&repo_dir).expect("repo dir should be created");
+        fs::write(repo_dir.join("README.md"), "base\n").expect("file should be written");
+
+        let repo = Repository::init(&repo_dir).expect("repo should init");
+        let mut index = repo.index().expect("index should open");
+        index
+            .add_path(Path::new("README.md"))
+            .expect("file should be added");
+        index.write().expect("index should write");
+        let tree_id = index.write_tree().expect("tree should write");
+        let tree = repo.find_tree(tree_id).expect("tree should exist");
+        let signature = git2::Signature::now("Fura Test", "fura@example.invalid")
+            .expect("signature should be valid");
+        repo.commit(Some("HEAD"), &signature, &signature, "initial", &tree, &[])
+            .expect("initial commit should succeed");
+        let base_branch = repo
+            .head()
+            .expect("head should exist")
+            .shorthand()
+            .expect("head should have shorthand")
+            .to_string();
+        drop(tree);
+        drop(index);
+
+        create_git_worktree_sync(&WorktreeCreateRequest {
+            source_repo: repo_dir.to_string_lossy().into_owned(),
+            directory: worktree_dir.to_string_lossy().into_owned(),
+            base_branch,
+            branch_name: Some("feature/delete-worktree-test".to_string()),
+        })
+        .expect("worktree should be created");
+
+        delete_git_worktree_sync(&worktree_dir).expect("linked worktree should be deleted");
+        assert!(
+            !worktree_dir.exists(),
+            "worktree directory should be removed from disk"
+        );
+
         drop(repo);
         fs::remove_dir_all(root).expect("temp worktree repo should be removed");
     }
@@ -1222,9 +1274,31 @@ mod tests {
         let msg: ClientMessage =
             serde_json::from_str(r#"{"type":"session.delete","sessionId":"abc-123"}"#)
                 .expect("parse failed");
-        assert!(
-            matches!(msg, ClientMessage::SessionDelete { ref session_id } if session_id == "abc-123")
-        );
+        match msg {
+            ClientMessage::SessionDelete {
+                session_id,
+                delete_worktree,
+            } => {
+                assert_eq!(session_id, "abc-123");
+                assert!(!delete_worktree);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let msg: ClientMessage = serde_json::from_str(
+            r#"{"type":"session.delete","sessionId":"abc-123","deleteWorktree":true}"#,
+        )
+        .expect("parse failed");
+        match msg {
+            ClientMessage::SessionDelete {
+                session_id,
+                delete_worktree,
+            } => {
+                assert_eq!(session_id, "abc-123");
+                assert!(delete_worktree);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
     }
 
     #[tokio::test]

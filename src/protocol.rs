@@ -52,7 +52,11 @@ pub(crate) enum ClientMessage {
     #[serde(rename = "session.stop")]
     SessionStop { session_id: String },
     #[serde(rename = "session.delete")]
-    SessionDelete { session_id: String },
+    SessionDelete {
+        session_id: String,
+        #[serde(default)]
+        delete_worktree: bool,
+    },
     #[serde(rename = "session.list")]
     SessionList,
     #[serde(rename = "state.refresh")]

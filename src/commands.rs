@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow};
-use git2::{Branch, BranchType, Repository, WorktreeAddOptions};
+use git2::{Branch, BranchType, Repository, Worktree, WorktreeAddOptions, WorktreePruneOptions};
 use serde_json::Value;
 use tracing::{error, info, warn};
 
@@ -52,7 +52,10 @@ pub(crate) async fn handle_client_message(
             }]
         }
         ClientMessage::SessionStop { session_id } => stop_session(state, session_id).await,
-        ClientMessage::SessionDelete { session_id } => delete_session(state, session_id).await,
+        ClientMessage::SessionDelete {
+            session_id,
+            delete_worktree,
+        } => delete_session(state, session_id, delete_worktree).await,
         ClientMessage::PromptSend {
             session_id,
             text,
@@ -173,6 +176,72 @@ pub(crate) fn ensure_worktree_directory_available(path: &Path) -> anyhow::Result
         }
     }
     Ok(())
+}
+
+pub(crate) fn prune_valid_worktree(worktree: &Worktree) -> anyhow::Result<()> {
+    let mut options = WorktreePruneOptions::new();
+    options.valid(true).working_tree(true);
+    worktree
+        .prune(Some(&mut options))
+        .with_context(|| format!("failed to prune worktree {}", worktree.path().display()))
+}
+
+pub(crate) fn delete_git_worktree_sync(path: &Path) -> anyhow::Result<()> {
+    let worktree_root = fs::canonicalize(path)
+        .with_context(|| format!("worktree path does not exist: {}", path.display()))?;
+    let metadata = fs::metadata(&worktree_root).with_context(|| {
+        format!(
+            "failed to inspect worktree path {}",
+            worktree_root.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        anyhow::bail!(
+            "worktree path is not a directory: {}",
+            worktree_root.display()
+        );
+    }
+
+    let git_entry = worktree_root.join(".git");
+    let git_metadata = fs::metadata(&git_entry).with_context(|| {
+        format!(
+            "session cwd is not a linked git worktree root; missing .git file at {}",
+            git_entry.display()
+        )
+    })?;
+    if !git_metadata.is_file() {
+        anyhow::bail!(
+            "session cwd is not a linked git worktree root; .git is not a file: {}",
+            git_entry.display()
+        );
+    }
+
+    let repo = Repository::open(&worktree_root)
+        .with_context(|| format!("failed to open git worktree at {}", worktree_root.display()))?;
+    let worktree = Worktree::open_from_repository(&repo).with_context(|| {
+        format!(
+            "failed to open linked worktree at {}",
+            worktree_root.display()
+        )
+    })?;
+    worktree
+        .validate()
+        .with_context(|| format!("failed to validate worktree {}", worktree_root.display()))?;
+    let reported_path = fs::canonicalize(worktree.path()).with_context(|| {
+        format!(
+            "failed to resolve linked worktree path {}",
+            worktree.path().display()
+        )
+    })?;
+    if reported_path != worktree_root {
+        anyhow::bail!(
+            "git reported a different worktree path: expected {}, got {}",
+            worktree_root.display(),
+            reported_path.display()
+        );
+    }
+
+    prune_valid_worktree(&worktree)
 }
 
 pub(crate) fn reference_for_worktree<'repo>(
@@ -418,7 +487,7 @@ pub(crate) async fn create_session(
         cwd = %session_cwd,
         has_name = name.is_some(),
         has_worktree,
-        arg_count = args.len()
+        arg_count = args.len(),
     );
 
     state.pending_created_sessions.write().await.insert(
@@ -622,8 +691,12 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
     }
 }
 
-pub(crate) async fn delete_session(state: &AppState, session_id: String) -> Vec<ServerMessage> {
-    info!(action = "session.delete", session_id = %session_id);
+pub(crate) async fn delete_session(
+    state: &AppState,
+    session_id: String,
+    delete_worktree: bool,
+) -> Vec<ServerMessage> {
+    info!(action = "session.delete", session_id = %session_id, delete_worktree);
 
     // Stop managed child if running.
     if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
@@ -642,12 +715,13 @@ pub(crate) async fn delete_session(state: &AppState, session_id: String) -> Vec<
         }
     }
 
-    // Grab session file path before dropping from catalog.
-    let session_file = {
+    // Grab paths before dropping from catalog.
+    let (session_file, session_cwd) = {
         let sessions = state.sessions.read().await;
-        sessions
-            .get(&session_id)
-            .and_then(|r| r.session_file.clone())
+        match sessions.get(&session_id) {
+            Some(record) => (record.session_file.clone(), record.cwd.clone()),
+            None => return vec![unknown_session_error(session_id)],
+        }
     };
 
     // Drop from catalog.
@@ -674,8 +748,42 @@ pub(crate) async fn delete_session(state: &AppState, session_id: String) -> Vec<
         }
     }
 
+    let mut responses = Vec::new();
+    if delete_worktree {
+        match session_cwd {
+            Some(cwd) => {
+                let cwd_for_log = cwd.clone();
+                match tokio::task::spawn_blocking(move || delete_git_worktree_sync(Path::new(&cwd)))
+                    .await
+                    .context("worktree deletion task failed")
+                    .and_then(|result| result)
+                {
+                    Ok(()) => {
+                        info!(session_id = %session_id, cwd = %cwd_for_log, "deleted session worktree")
+                    }
+                    Err(error) => {
+                        warn!(session_id = %session_id, cwd = %cwd_for_log, %error, "failed to delete session worktree");
+                        responses.push(ServerMessage::Error {
+                            request_id: None,
+                            message: format!(
+                                "session was deleted, but worktree deletion failed for {cwd_for_log}: {error}"
+                            ),
+                        });
+                    }
+                }
+            }
+            None => {
+                responses.push(ServerMessage::Error {
+                    request_id: None,
+                    message: "session was deleted, but it had no working directory to delete"
+                        .to_string(),
+                });
+            }
+        }
+    }
+
     broadcast_sessions_snapshot(state).await;
-    vec![]
+    responses
 }
 
 pub(crate) async fn handle_slash_command(

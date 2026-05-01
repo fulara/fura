@@ -214,7 +214,7 @@ type ClientMessage =
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }
   | { type: "session.stop"; sessionId: string }
-  | { type: "session.delete"; sessionId: string }
+  | { type: "session.delete"; sessionId: string; deleteWorktree?: boolean }
   | { type: "session.list" }
   | { type: "state.refresh"; sessionId: string }
   | {
@@ -284,6 +284,7 @@ app.innerHTML = `
           <button id="thinkingVisibilityToggle" class="thinking-visibility-toggle" type="button" data-state="auto">Thinking: auto</button>
           <button id="abortButton" type="button">Abort</button>
           <button id="stopButton" type="button">Stop</button>
+          <button id="deleteSessionButton" class="danger-action" type="button">Delete session</button>
         </div>
       </header>
 
@@ -388,6 +389,33 @@ app.innerHTML = `
     </section>
   </div>
 
+  <div id="deleteSessionOverlay" class="modal-overlay" hidden>
+    <section class="delete-session-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="deleteSessionTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="deleteSessionTitle">Delete session</h2>
+          <p id="deleteSessionSubtitle">Stop this session and delete its OMP session file.</p>
+        </div>
+        <button id="deleteSessionClose" class="modal-close" type="button" aria-label="Close delete session dialog">×</button>
+      </header>
+      <div class="delete-session-body">
+        <p id="deleteSessionMessage"></p>
+        <label class="checkbox-row" for="deleteSessionWorktree">
+          <input id="deleteSessionWorktree" type="checkbox" />
+          <span>Also delete the linked git worktree directory</span>
+        </label>
+        <p id="deleteSessionWorktreePath" class="field-help"></p>
+      </div>
+      <footer class="modal-footer">
+        <span></span>
+        <div class="modal-actions">
+          <button id="deleteSessionCancel" type="button">Cancel</button>
+          <button id="deleteSessionConfirm" class="danger-action" type="button">Delete session</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
   <div id="forkPickerOverlay" class="modal-overlay" hidden>
     <section class="fork-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="forkPickerTitle">
       <header class="modal-header">
@@ -472,6 +500,7 @@ const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityTo
 const thinkingVisibilityToggle = requireElement<HTMLButtonElement>("thinkingVisibilityToggle");
 const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
+const deleteSessionButton = requireElement<HTMLButtonElement>("deleteSessionButton");
 const commandPalette = requireElement<HTMLDivElement>("commandPalette");
 const imagePreviews = requireElement<HTMLDivElement>("imagePreviews");
 const busyPromptOverlay = requireElement<HTMLDivElement>("busyPromptOverlay");
@@ -503,6 +532,13 @@ const cwdPickerWorktreeFields = requireElement<HTMLDivElement>("cwdPickerWorktre
 const cwdPickerWorktreeSourceRepo = requireElement<HTMLInputElement>("cwdPickerWorktreeSourceRepo");
 const cwdPickerWorktreeBase = requireElement<HTMLInputElement>("cwdPickerWorktreeBase");
 const cwdPickerWorktreeBranch = requireElement<HTMLInputElement>("cwdPickerWorktreeBranch");
+const deleteSessionOverlay = requireElement<HTMLDivElement>("deleteSessionOverlay");
+const deleteSessionClose = requireElement<HTMLButtonElement>("deleteSessionClose");
+const deleteSessionMessage = requireElement<HTMLParagraphElement>("deleteSessionMessage");
+const deleteSessionWorktree = requireElement<HTMLInputElement>("deleteSessionWorktree");
+const deleteSessionWorktreePath = requireElement<HTMLParagraphElement>("deleteSessionWorktreePath");
+const deleteSessionCancel = requireElement<HTMLButtonElement>("deleteSessionCancel");
+const deleteSessionConfirm = requireElement<HTMLButtonElement>("deleteSessionConfirm");
 const forkPickerOverlay = requireElement<HTMLDivElement>("forkPickerOverlay");
 const forkPickerClose = requireElement<HTMLButtonElement>("forkPickerClose");
 const forkPickerNameInput = requireElement<HTMLInputElement>("forkPickerNameInput");
@@ -555,6 +591,11 @@ let socket: WebSocket | null = null;
 let activeSessionId: string | null = null;
 let serverConfig: ServerConfig | null = null;
 let pendingCreatedSessionBaseline: Set<string> | null = null;
+let deleteSessionTargetId: string | null = null;
+let cwdPickerDirectoryAutofill = true;
+let cwdPickerBranchAutofill = true;
+let lastAutofilledWorktreeDirectory = "";
+let lastAutofilledWorktreeBranch = "";
 const unreadSessions = new Set<string>();
 const sessionListItems = new Map<string, SessionListItemDom>();
 let sessionsEmptyEl: HTMLParagraphElement | null = null;
@@ -662,6 +703,9 @@ busyPromptOverlay.addEventListener("mousedown", event => {
 busyPromptOverlay.addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); restoreBusyPromptDraft(); }
 });
+deleteSessionButton.addEventListener("click", () => {
+  if (activeSessionId) openDeleteSessionPicker(activeSessionId);
+});
 modelPickerClose.addEventListener("click", closeModelPicker);
 modelPickerCancel.addEventListener("click", closeModelPicker);
 modelPickerSelect.addEventListener("click", selectCurrentModel);
@@ -678,8 +722,26 @@ cwdPickerClose.addEventListener("click", closeCwdPicker);
 cwdPickerCancel.addEventListener("click", closeCwdPicker);
 cwdPickerCreate.addEventListener("click", submitCwdPicker);
 cwdPickerWorktreeEnabled.addEventListener("change", syncCwdPickerWorktreeFields);
+cwdPickerNameInput.addEventListener("input", applyCwdPickerAutofill);
+cwdPickerInput.addEventListener("input", () => {
+  if (cwdPickerWorktreeEnabled.checked && cwdPickerInput.value !== lastAutofilledWorktreeDirectory) {
+    cwdPickerDirectoryAutofill = false;
+  }
+});
+cwdPickerWorktreeSourceRepo.addEventListener("input", applyCwdPickerAutofill);
+cwdPickerWorktreeBranch.addEventListener("input", () => {
+  if (cwdPickerWorktreeEnabled.checked && cwdPickerWorktreeBranch.value !== lastAutofilledWorktreeBranch) {
+    cwdPickerBranchAutofill = false;
+  }
+});
 cwdPickerOverlay.addEventListener("mousedown", event => {
   if (event.target === cwdPickerOverlay) closeCwdPicker();
+});
+deleteSessionClose.addEventListener("click", closeDeleteSessionPicker);
+deleteSessionCancel.addEventListener("click", closeDeleteSessionPicker);
+deleteSessionConfirm.addEventListener("click", submitDeleteSessionPicker);
+deleteSessionOverlay.addEventListener("mousedown", event => {
+  if (event.target === deleteSessionOverlay) closeDeleteSessionPicker();
 });
 cwdPickerNameInput.addEventListener("keydown", event => {
   if (event.key === "Enter") { event.preventDefault(); cwdPickerInput.focus(); cwdPickerInput.select(); }
@@ -1305,6 +1367,39 @@ function sendBusyPromptDraft(behavior: "steer" | "followUp"): void {
   render();
 }
 
+
+function openDeleteSessionPicker(sessionId: string): void {
+  const session = currentSessionSummary(sessionId);
+  if (!session) return;
+
+  deleteSessionTargetId = session.sessionId;
+  const label = session.title || shortId(session.sessionId);
+  deleteSessionMessage.textContent = `Delete session "${label}"? This will stop the session and permanently delete its file.`;
+  deleteSessionWorktree.checked = false;
+  deleteSessionWorktree.disabled = !session.cwd;
+  deleteSessionWorktreePath.textContent = session.cwd
+    ? `Worktree candidate: ${session.cwd}`
+    : "This session has no working directory recorded.";
+  deleteSessionOverlay.hidden = false;
+  window.setTimeout(() => deleteSessionCancel.focus(), 0);
+}
+
+function closeDeleteSessionPicker(): void {
+  deleteSessionOverlay.hidden = true;
+  deleteSessionTargetId = null;
+  promptInput.focus();
+}
+
+function submitDeleteSessionPicker(): void {
+  const sessionId = deleteSessionTargetId;
+  if (!sessionId) return;
+  send({
+    type: "session.delete",
+    sessionId,
+    deleteWorktree: deleteSessionWorktree.checked,
+  });
+  closeDeleteSessionPicker();
+}
 // --- Top-level render ---
 
 function render(): void {
@@ -1365,13 +1460,7 @@ function handleSessionButtonClick(sessionId: string): void {
 }
 
 function handleSessionDeleteClick(sessionId: string): void {
-  const session = currentSessionSummary(sessionId);
-  if (!session) return;
-
-  const label = session.title || shortId(session.sessionId);
-  if (window.confirm(`Delete session "${label}"?\n\nThis will stop the session and permanently delete its file.`)) {
-    send({ type: "session.delete", sessionId: session.sessionId });
-  }
+  openDeleteSessionPicker(sessionId);
 }
 
 function createSessionListItem(sessionId: string): SessionListItemDom {
@@ -1519,6 +1608,7 @@ function renderActiveSession(): void {
 
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
+  deleteSessionButton.disabled = !activeSessionId;
   promptInput.disabled = !activeSessionId || hasBusyDraft;
   sendButton.disabled = !activeSessionId || hasBusyDraft;
 
@@ -4103,6 +4193,50 @@ function setCwdPickerError(message: string | null): void {
   cwdPickerStatus.classList.toggle("error", Boolean(message));
 }
 
+function trimTrailingPathSeparators(value: string): string {
+  if (value.length <= 1) return value;
+  return value.replace(/[\\/]+$/, "");
+}
+
+function pathSeparatorFor(value: string): string {
+  return value.includes("\\") && !value.includes("/") ? "\\" : "/";
+}
+
+function worktreeDirectorySeed(sourceRepo: string): string {
+  const source = sourceRepo.trim();
+  if (!source) return "";
+  return `${trimTrailingPathSeparators(source)}${pathSeparatorFor(source)}`;
+}
+
+function worktreeDirectoryForSession(sourceRepo: string, sessionName: string): string {
+  const source = sourceRepo.trim();
+  const name = sessionName.trim();
+  if (!source || !name) return worktreeDirectorySeed(source);
+  return `${trimTrailingPathSeparators(source)}-${name}`;
+}
+
+function setAutofilledWorktreeDirectory(value: string): void {
+  lastAutofilledWorktreeDirectory = value;
+  cwdPickerInput.value = value;
+}
+
+function setAutofilledWorktreeBranch(value: string): void {
+  lastAutofilledWorktreeBranch = value;
+  cwdPickerWorktreeBranch.value = value;
+}
+
+function applyCwdPickerAutofill(): void {
+  if (!cwdPickerWorktreeEnabled.checked) return;
+  const sourceRepo = cwdPickerWorktreeSourceRepo.value.trim();
+  const sessionName = cwdPickerNameInput.value.trim();
+  if (cwdPickerDirectoryAutofill) {
+    setAutofilledWorktreeDirectory(worktreeDirectoryForSession(sourceRepo, sessionName));
+  }
+  if (cwdPickerBranchAutofill) {
+    setAutofilledWorktreeBranch(sessionName);
+  }
+}
+
 function syncCwdPickerWorktreeFields(): void {
   const enabled = cwdPickerWorktreeEnabled.checked;
   cwdPickerWorktreeFields.hidden = !enabled;
@@ -4113,18 +4247,20 @@ function syncCwdPickerWorktreeFields(): void {
     const currentWorkingDirectory = cwdPickerInput.value.trim();
     const currentSourceRepo = cwdPickerWorktreeSourceRepo.value.trim();
     if (!currentSourceRepo || currentSourceRepo === serverConfig?.defaultCwd) {
-      cwdPickerWorktreeSourceRepo.value = currentWorkingDirectory;
+      cwdPickerWorktreeSourceRepo.value = currentWorkingDirectory || serverConfig?.defaultCwd || "";
     }
-    if (cwdPickerInput.value.trim() === cwdPickerWorktreeSourceRepo.value.trim()) {
-      cwdPickerInput.value = "";
-    }
+    cwdPickerDirectoryAutofill = true;
+    cwdPickerBranchAutofill = true;
+    applyCwdPickerAutofill();
   } else {
     cwdPickerInputLabel.textContent = "Working directory";
     cwdPickerInput.placeholder = "/home/user/project";
     cwdPickerInputHelp.textContent = "For a normal session, this is the directory where OMP starts.";
-    if (!cwdPickerInput.value.trim()) {
+    if (!cwdPickerInput.value.trim() || cwdPickerInput.value === lastAutofilledWorktreeDirectory) {
       cwdPickerInput.value = cwdPickerWorktreeSourceRepo.value.trim() || serverConfig?.defaultCwd || "";
     }
+    lastAutofilledWorktreeDirectory = "";
+    lastAutofilledWorktreeBranch = "";
   }
 }
 
@@ -4137,6 +4273,10 @@ function openCwdPicker(): void {
   cwdPickerWorktreeSourceRepo.value = config.defaultCwd;
   cwdPickerWorktreeBase.value = "HEAD";
   cwdPickerWorktreeBranch.value = "";
+  cwdPickerDirectoryAutofill = true;
+  cwdPickerBranchAutofill = true;
+  lastAutofilledWorktreeDirectory = "";
+  lastAutofilledWorktreeBranch = "";
   setCwdPickerError(null);
   syncCwdPickerWorktreeFields();
   cwdPickerOverlay.hidden = false;
@@ -4180,7 +4320,12 @@ function buildWorktreeCreateOptions(workingDirectory: string): WorktreeCreateOpt
     cwdPickerWorktreeBranch.focus();
     return null;
   }
-  return { sourceRepo, directory, baseBranch, ...(branchName ? { branchName } : {}) };
+  return {
+    sourceRepo,
+    directory,
+    baseBranch,
+    ...(branchName ? { branchName } : {}),
+  };
 }
 
 function submitCwdPicker(): void {
