@@ -104,6 +104,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
               <input id="mobileCreateWorktreeBase" autocomplete="off" spellcheck="false" placeholder="HEAD" />
               <label for="mobileCreateWorktreeBranch">Branch name <span class="mobile-optional-label">optional</span></label>
               <input id="mobileCreateWorktreeBranch" autocomplete="off" spellcheck="false" placeholder="feature/mobile" />
+              <p class="mobile-create-worktree-help">Must be a valid Git branch name. Leave blank to use the selected base ref directly.</p>
               <p id="mobileCreateWorktreeSummary" class="mobile-create-worktree-summary"></p>
             </div>
             <p id="mobileCreateStatus" class="mobile-create-status" aria-live="polite"></p>

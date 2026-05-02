@@ -56,6 +56,30 @@ export function trimSessionCreateText(value: string | null | undefined): string 
   return (value ?? "").trim();
 }
 
+export function validateGitBranchName(value: string | null | undefined): string | null {
+  const branchName = trimSessionCreateText(value);
+  if (!branchName) return null;
+  if (branchName.startsWith("-")) return "Branch name must not start with '-'.";
+  if (branchName === "@") return "Branch name must not be '@'.";
+  if (branchName.startsWith("/") || branchName.endsWith("/") || branchName.includes("//")) {
+    return "Branch name must not start with '/', end with '/', or contain '//'.";
+  }
+  if (branchName.endsWith(".")) return "Branch name must not end with '.'.";
+  if (branchName.includes("..")) return "Branch name must not contain '..'.";
+  if (branchName.includes("@{")) return "Branch name must not contain '@{'.";
+  if (branchName.includes("\\")) return "Branch name must not contain '\\'.";
+  if (/[\x00-\x20\x7f~^:?*\[]/u.test(branchName)) {
+    return "Branch name must not contain spaces, control characters, or any of ~ ^ : ? * [.";
+  }
+  const invalidComponent = branchName
+    .split("/")
+    .find(component => component.startsWith(".") || component.endsWith(".lock"));
+  if (invalidComponent) {
+    return "Branch path components must not start with '.' or end with '.lock'.";
+  }
+  return null;
+}
+
 export function trimTrailingPathSeparators(value: string): string {
   if (value.length <= 1) return value;
   return value.replace(/[\\/]+$/, "");
@@ -156,8 +180,9 @@ export function resolveSessionCreateMessage(draft: SessionCreateDraft): SessionC
     if (worktree.baseBranch.startsWith("-")) {
       return { type: "invalid", message: "Base branch/ref must not start with '-'.", target: "worktreeBaseBranch" };
     }
-    if (worktree.branchName?.startsWith("-")) {
-      return { type: "invalid", message: "Branch name must not start with '-'.", target: "worktreeBranchName" };
+    const branchNameError = validateGitBranchName(worktree.branchName);
+    if (branchNameError) {
+      return { type: "invalid", message: branchNameError, target: "worktreeBranchName" };
     }
     return {
       type: "message",

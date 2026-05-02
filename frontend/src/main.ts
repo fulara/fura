@@ -254,8 +254,9 @@ app.innerHTML = `
           <p class="field-help">Must be the repo root containing .git. Fura runs git worktree add from this repo.</p>
           <label for="cwdPickerWorktreeBase">Base branch/ref</label>
           <input id="cwdPickerWorktreeBase" autocomplete="off" spellcheck="false" placeholder="main" />
-          <label for="cwdPickerWorktreeBranch">Branch name</label>
+          <label for="cwdPickerWorktreeBranch">Branch name <span class="optional-label">optional</span></label>
           <input id="cwdPickerWorktreeBranch" autocomplete="off" spellcheck="false" placeholder="feature/my-work" />
+          <p class="field-help">Must be a valid Git branch name. Leave blank to use the selected base ref directly.</p>
           <p id="cwdPickerWorktreeSummary" class="field-help worktree-summary"></p>
         </div>
       </div>

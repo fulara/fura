@@ -5,9 +5,28 @@ import {
   formatWorktreeCreateSummary,
   resolveSessionCreateMessage,
   trimSessionCreateText,
+  validateGitBranchName,
   worktreeDirectoryForSession,
   worktreeDirectorySeed,
 } from "./sessionCreate";
+
+describe("validateGitBranchName", () => {
+  it("accepts empty and valid branch names", () => {
+    expect(validateGitBranchName("")).toBeNull();
+    expect(validateGitBranchName("feature/mobile-work")).toBeNull();
+    expect(validateGitBranchName("release/2026.05.02")).toBeNull();
+  });
+
+  it("rejects invalid Git branch names before backend worktree creation", () => {
+    expect(validateGitBranchName("-bad")).toBe("Branch name must not start with '-'.");
+    expect(validateGitBranchName("feature with spaces")).toBe("Branch name must not contain spaces, control characters, or any of ~ ^ : ? * [.");
+    expect(validateGitBranchName("feature..bad")).toBe("Branch name must not contain '..'.");
+    expect(validateGitBranchName("feature.lock/name")).toBe("Branch path components must not start with '.' or end with '.lock'.");
+    expect(validateGitBranchName("feature/@{bad")).toBe("Branch name must not contain '@{'.");
+    expect(validateGitBranchName("feature\\bad")).toBe("Branch name must not contain '\\'.");
+    expect(validateGitBranchName("@")).toBe("Branch name must not be '@'.");
+  });
+});
 
 describe("worktree path helpers", () => {
   it("builds directory seeds with the source path separator", () => {
@@ -225,6 +244,15 @@ describe("resolveSessionCreateMessage", () => {
     })).toEqual({
       type: "invalid",
       message: "Branch name must not start with '-'.",
+      target: "worktreeBranchName",
+    });
+    expect(resolveSessionCreateMessage({
+      requestId: "r1",
+      name: "Feature",
+      worktree: { enabled: true, directory: "/repo-feature", sourceRepo: "/repo", baseBranch: "main", branchName: "feature with spaces" },
+    })).toEqual({
+      type: "invalid",
+      message: "Branch name must not contain spaces, control characters, or any of ~ ^ : ? * [.",
       target: "worktreeBranchName",
     });
   });
