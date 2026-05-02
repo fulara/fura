@@ -1,0 +1,120 @@
+body {
+  min-width: 0;
+  min-height: 100dvh;
+  overflow: hidden;
+}
+
+.mobile-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100dvh;
+  background:
+    radial-gradient(circle at top left, rgba(89, 117, 255, 0.14), transparent 22rem),
+    #111318;
+}
+
+.mobile-topbar {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem;
+  border-bottom: 1px solid #252a35;
+  background: rgba(16, 19, 26, 0.9);
+}
+
+.mobile-brand-row,
+.mobile-session-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.mobile-brand h1,
+.mobile-session-heading h2 {
+  margin: 0;
+}
+
+.mobile-brand p,
+.mobile-session-heading p,
+.mobile-log {
+  margin: 0.2rem 0 0;
+  color: #9ba4b5;
+  font-size: 0.82rem;
+}
+
+.mobile-sessions-toggle {
+  flex: 0 0 auto;
+}
+
+.mobile-session-drawer {
+  max-height: 38dvh;
+  overflow: auto;
+  border: 1px solid #252a35;
+  border-radius: 0.9rem;
+  background: rgba(16, 19, 26, 0.82);
+  padding: 0.5rem;
+}
+
+.mobile-session-drawer[hidden] {
+  display: none;
+}
+
+.mobile-session-drawer .sessions {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.mobile-session-drawer .session-item {
+  grid-template-columns: 1fr;
+}
+
+.mobile-session-drawer .session-delete {
+  display: none;
+}
+
+.mobile-main {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+}
+
+.mobile-transcript {
+  min-height: 0;
+  overflow: auto;
+  padding: 0.9rem;
+}
+
+.mobile-transcript .message {
+  max-width: none;
+}
+
+.mobile-composer {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.75rem 0.9rem max(0.75rem, env(safe-area-inset-bottom));
+  border-top: 1px solid #252a35;
+  background: rgba(16, 19, 26, 0.95);
+}
+
+.mobile-composer textarea {
+  min-height: 5.5rem;
+  resize: vertical;
+}
+
+.mobile-composer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.mobile-composer-status {
+  color: #9ba4b5;
+  font-size: 0.82rem;
+}
+
+.mobile-empty-state {
+  color: #9ba4b5;
+  padding: 1rem;
+  text-align: center;
+}
