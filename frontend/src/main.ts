@@ -24,6 +24,13 @@ import {
   type PendingSnippet,
 } from "./composerAttachments";
 import {
+  createPromptSendMessage,
+  promptDraftAttachmentCount,
+  promptDraftDisplayText,
+  restorePendingImagesFromPayload,
+  type PromptBehavior,
+} from "./composer";
+import {
   fuzzyMatchCategories as fuzzyMatchSessionCategories,
   normalizedCategory,
   sessionCategories as deriveSessionCategories,
@@ -32,6 +39,12 @@ import {
   visibleSessions as filterVisibleSessions,
 } from "./sessionList";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
+import {
+  createCategoryCombobox,
+  handleCategoryComboboxKeydown,
+  hideCategoryCombobox,
+  type CategoryCombobox,
+} from "./categoryCombobox";
 import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
 import type {
   ClientMessage,
@@ -119,6 +132,7 @@ app.innerHTML = `
           <p id="sessionMeta">Create or attach to a session to begin.</p>
         </div>
         <div class="workspace-actions">
+          <!-- Ask Fura is intentionally a desktop-only workspace affordance for now; future mobile UI should omit it unless the product direction changes. -->
           <button id="askFuraButton" class="ask-fura-toggle" type="button" aria-pressed="false">Ask Fura</button>
           <button id="toolVisibilityToggle" class="tool-visibility-toggle" type="button" aria-pressed="true">Tools: on</button>
           <button id="thinkingVisibilityToggle" class="thinking-visibility-toggle" type="button" data-state="auto">Thinking: auto</button>
@@ -442,14 +456,6 @@ type ControlChatMessage = {
   candidates?: ControlCandidate[];
   suggestedActions?: ControlSuggestedAction[];
 };
-type CategoryCombobox = {
-  input: HTMLInputElement;
-  list: HTMLDivElement;
-  selectedIndex: number;
-  options: string[];
-  accept: (value: string) => void;
-  fallbackEnter: () => void;
-};
 type VoiceSegmentDraft = {
   target: HTMLInputElement | HTMLTextAreaElement;
   start: number;
@@ -560,18 +566,20 @@ const sessionListView = createSessionListView(sessionsList, {
   onDeleteSession: handleSessionDeleteClick,
 });
 
-cwdCategoryCombobox = createCategoryCombobox(
-  cwdPickerCategoryInput,
-  cwdPickerCategorySuggestions,
-  value => { cwdPickerCategoryInput.value = value; },
-  () => { cwdPickerInput.focus(); cwdPickerInput.select(); },
-);
-activeCategoryCombobox = createCategoryCombobox(
-  activeCategoryInput,
-  activeCategorySuggestions,
-  value => { activeCategoryInput.value = value; markActiveCategoryDirty(); },
-  submitActiveCategory,
-);
+cwdCategoryCombobox = createCategoryCombobox({
+  input: cwdPickerCategoryInput,
+  list: cwdPickerCategorySuggestions,
+  matchOptions: query => fuzzyMatchCategories(query),
+  accept: value => { cwdPickerCategoryInput.value = value; },
+  fallbackEnter: () => { cwdPickerInput.focus(); cwdPickerInput.select(); },
+});
+activeCategoryCombobox = createCategoryCombobox({
+  input: activeCategoryInput,
+  list: activeCategorySuggestions,
+  matchOptions: query => fuzzyMatchCategories(query),
+  accept: value => { activeCategoryInput.value = value; markActiveCategoryDirty(); },
+  fallbackEnter: submitActiveCategory,
+});
 
 
 // --- Event wiring ---
@@ -1280,7 +1288,7 @@ function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" 
     sessionId: message.sessionId,
     text: message.text,
     editorText: message.text,
-    images: restorePromptBusyImages(message.images ?? []),
+    images: restorePendingImagesFromPayload(message.images ?? [], createPendingMarker),
     snippets: [],
   };
   if (message.sessionId === activeSessionId) {
@@ -1292,46 +1300,15 @@ function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" 
   }
 }
 
-function restorePromptBusyImages(images: unknown[]): PendingImage[] {
-  const restored: PendingImage[] = [];
-  for (const image of images) {
-    if (!isImagePayload(image)) continue;
-    restored.push({
-      type: "image",
-      marker: createPendingMarker("Image"),
-      data: image.data,
-      mimeType: image.mimeType,
-    });
-  }
-  return restored;
-}
-
-function isImagePayload(value: unknown): value is { type: "image"; data: string; mimeType: string } {
-  if (!value || typeof value !== "object") return false;
-  const image = value as Record<string, unknown>;
-  return image.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string";
-}
-
 function sendPromptMessage(
   sessionId: string,
   text: string,
   images: PendingImage[],
-  behavior?: "steer" | "followUp",
+  behavior?: PromptBehavior,
 ): void {
-  const msg: ClientMessage = {
-    type: "prompt.send",
-    sessionId,
-    text,
-  };
-  if (images.length > 0) {
-    msg.images = images.map(({ type, data, mimeType }) => ({ type, data, mimeType }));
-  }
-  if (behavior) {
-    msg.behavior = behavior;
-  }
   sessionNotices.delete(sessionId);
   addPromptToHistory(sessionId, text);
-  send(msg);
+  send(createPromptSendMessage(sessionId, text, images, behavior));
 }
 
 function addPromptToHistory(sessionId: string, text: string): void {
@@ -1655,8 +1632,8 @@ function renderBusyPromptChoice(): void {
     return;
   }
 
-  const attachmentCount = draft.images.length + draft.snippets.length;
-  busyPromptText.value = draft.editorText || draft.text || (draft.images.length > 0 ? "[Image prompt]" : "");
+  const attachmentCount = promptDraftAttachmentCount(draft);
+  busyPromptText.value = promptDraftDisplayText(draft);
   busyPromptAttachmentNote.textContent =
     attachmentCount > 0 ? `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"} will be sent with this prompt.` : "";
   busyPromptAttachmentNote.hidden = attachmentCount === 0;
@@ -1747,99 +1724,6 @@ function fuzzyMatchCategories(query: string): string[] {
   return fuzzyMatchSessionCategories(sessionCategories(), query);
 }
 
-function createCategoryCombobox(
-  input: HTMLInputElement,
-  list: HTMLDivElement,
-  accept: (value: string) => void,
-  fallbackEnter: () => void,
-): CategoryCombobox {
-  const combobox: CategoryCombobox = { input, list, selectedIndex: -1, options: [], accept, fallbackEnter };
-  input.addEventListener("input", () => updateCategoryCombobox(combobox));
-  input.addEventListener("focus", () => updateCategoryCombobox(combobox, true));
-  input.addEventListener("blur", () => window.setTimeout(() => hideCategoryCombobox(combobox), 120));
-  return combobox;
-}
-
-function updateCategoryCombobox(combobox: CategoryCombobox, showAll = false): void {
-  const query = combobox.input.value;
-  const options = fuzzyMatchCategories(showAll ? "" : query).slice(0, 8);
-  combobox.options = options;
-  combobox.selectedIndex = options.length > 0 ? 0 : -1;
-  renderCategoryCombobox(combobox);
-}
-
-function hideCategoryCombobox(combobox: CategoryCombobox): void {
-  combobox.list.hidden = true;
-  combobox.input.setAttribute("aria-expanded", "false");
-  combobox.input.removeAttribute("aria-activedescendant");
-}
-
-function renderCategoryCombobox(combobox: CategoryCombobox): void {
-  combobox.list.replaceChildren();
-  if (combobox.options.length === 0) {
-    hideCategoryCombobox(combobox);
-    return;
-  }
-
-  for (const [index, option] of combobox.options.entries()) {
-    const row = document.createElement("div");
-    const optionId = `${combobox.list.id}-option-${index}`;
-    row.id = optionId;
-    row.className = `category-suggestion${index === combobox.selectedIndex ? " selected" : ""}`;
-    row.role = "option";
-    row.setAttribute("aria-selected", String(index === combobox.selectedIndex));
-    row.textContent = option;
-    row.addEventListener("mousedown", event => {
-      event.preventDefault();
-      combobox.accept(option);
-      hideCategoryCombobox(combobox);
-    });
-    combobox.list.append(row);
-  }
-  combobox.list.hidden = false;
-  combobox.input.setAttribute("aria-expanded", "true");
-  const active = combobox.selectedIndex >= 0 ? `${combobox.list.id}-option-${combobox.selectedIndex}` : null;
-  if (active) combobox.input.setAttribute("aria-activedescendant", active);
-  else combobox.input.removeAttribute("aria-activedescendant");
-}
-
-function handleCategoryComboboxKeydown(combobox: CategoryCombobox, event: KeyboardEvent): boolean {
-  if (event.key === "ArrowDown") {
-    event.preventDefault();
-    if (combobox.list.hidden) updateCategoryCombobox(combobox, true);
-    else if (combobox.options.length > 0) {
-      combobox.selectedIndex = (combobox.selectedIndex + 1) % combobox.options.length;
-      renderCategoryCombobox(combobox);
-    }
-    return true;
-  }
-  if (event.key === "ArrowUp") {
-    event.preventDefault();
-    if (combobox.list.hidden) updateCategoryCombobox(combobox, true);
-    else if (combobox.options.length > 0) {
-      combobox.selectedIndex = (combobox.selectedIndex - 1 + combobox.options.length) % combobox.options.length;
-      renderCategoryCombobox(combobox);
-    }
-    return true;
-  }
-  if (event.key === "Enter" && !combobox.list.hidden && combobox.selectedIndex >= 0) {
-    event.preventDefault();
-    combobox.accept(combobox.options[combobox.selectedIndex]);
-    hideCategoryCombobox(combobox);
-    return true;
-  }
-  if (event.key === "Enter") {
-    event.preventDefault();
-    combobox.fallbackEnter();
-    return true;
-  }
-  if (event.key === "Escape" && !combobox.list.hidden) {
-    event.preventDefault();
-    hideCategoryCombobox(combobox);
-    return true;
-  }
-  return false;
-}
 
 function renderCategoryFilter(): void {
   selectedCategoryFilter = renderSessionCategoryFilter(
