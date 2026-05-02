@@ -1,6 +1,5 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
-import "dockview-core/dist/styles/dockview.css";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
@@ -46,6 +45,7 @@ import {
   hideCategoryCombobox,
   type CategoryCombobox,
 } from "./categoryCombobox";
+import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
 import type {
   ClientMessage,
@@ -70,7 +70,6 @@ import type {
   TranscriptMessage,
   WorktreeCreateOptions,
 } from "./protocol";
-import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
 
 type WorkspaceMode = "session" | "controller";
 
@@ -85,14 +84,6 @@ type CachedPanelRenderState = {
   revision: number;
 };
 
-
-type PersistedDockviewLayout = {
-  version: 1;
-  layout: SerializedDockview;
-};
-
-
-const DOCKVIEW_LAYOUT_STORAGE_KEY = "fura.dockview.layout";
 
 const app = document.querySelector<HTMLDivElement>("#app");
 if (!app) {
@@ -549,18 +540,9 @@ let skipThinkingOpenRestoreOnce = false;
 syncToolVisibilityToggle();
 syncThinkingVisibilityToggle();
 
-// --- Dockview state ---
+// --- Desktop workspace state ---
 
-let dockviewApi: DockviewComponent | null = null;
-// References to the scrollable containers inside each Dockview panel.
-// Set when the panel's init() callback runs; null before Dockview is initialized
-// or while a panel has not yet been created (e.g. during fromJSON before init fires).
-let transcriptPanelEl: HTMLElement | null = null;
-let toolsPanelEl: HTMLElement | null = null;
-let diffsPanelEl: HTMLElement | null = null;
-
-// Current document owner for panel render functions is set in dom.ts before panel rendering.
-// This keeps Dockview popout panels creating nodes in their own window document.
+let desktopDockview: DesktopDockview | null = null;
 
 const sessionListView = createSessionListView(sessionsList, {
   onSelectSession: handleSessionButtonClick,
@@ -884,7 +866,7 @@ render();
 if (initialToken) {
   connect(initialToken);
 }
-initDockview();
+initDesktopWorkspace();
 
 // --- Core session logic ---
 
@@ -1040,8 +1022,8 @@ function handleServerMessage(message: ServerMessage): void {
         break;
       }
       markDiffsViewDirty();
-      if (message.sessionId === activeSessionId && diffsPanelEl && isDiffsPanelActive()) {
-        renderDiffsView(diffsPanelEl, projections.get(message.sessionId));
+      if (message.sessionId === activeSessionId && desktopDockview?.isPanelActive("diffs")) {
+        desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(message.sessionId)));
       }
       break;
     }
@@ -1230,8 +1212,8 @@ function captureFrontendUiSnapshot(): FrontendUiSnapshot {
       textLength: promptInput.value.length,
     },
     panels: {
-      transcriptVisible: Boolean(transcriptPanelEl),
-      toolsVisible: Boolean(toolsPanelEl),
+      transcriptVisible: desktopDockview?.panelMounted("transcript") ?? false,
+      toolsVisible: desktopDockview?.panelMounted("tools") ?? false,
     },
     blockingUi: {
       modalOpen: Boolean(document.querySelector(".modal-overlay:not([hidden])")),
@@ -1245,8 +1227,8 @@ function focusedArea(): FrontendUiSnapshot["focusedArea"] {
   if (workspaceMode === "controller" && element === promptInput) return "controller";
   if (element === promptInput) return "prompt";
   if (element && sessionsList.contains(element)) return "sessionList";
-  if (element && transcriptPanelEl?.contains(element)) return "transcript";
-  if (element && toolsPanelEl?.contains(element)) return "tools";
+  if (element && desktopDockview?.panelContains("transcript", element)) return "transcript";
+  if (element && desktopDockview?.panelContains("tools", element)) return "tools";
   return "unknown";
 }
 
@@ -1902,32 +1884,37 @@ function markToolsViewDirty(): void {
 function renderActiveDockviewPanel(projection: SessionProjection | undefined): void {
   renderTranscriptPanelIfNeeded(projection);
   renderToolsPanelIfNeeded(projection);
-  if (diffsPanelEl && isDiffsPanelActive() && shouldRenderDiffsView(projection)) renderDiffsView(diffsPanelEl, projection);
+  if (desktopDockview?.isPanelActive("diffs") && shouldRenderDiffsView(projection)) {
+    desktopDockview.withPanel("diffs", container => renderDiffsView(container, projection));
+  }
 }
 
 function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
-  if (!transcriptPanelEl) return;
+  if (!desktopDockview?.panelMounted("transcript")) return;
   const workspaceKey = activeWorkspaceKey();
   const sessionChanged = workspaceKey !== lastTranscriptRenderedSessionId;
   if (!force && !transcriptPanelDirty && !sessionChanged) return;
 
-  if (workspaceMode === "controller") {
-    renderControllerTranscriptView(transcriptPanelEl, sessionChanged);
-  } else {
-    renderTranscriptView(transcriptPanelEl, projection, sessionChanged);
-  }
+  const rendered = desktopDockview.withPanel("transcript", container => {
+    if (workspaceMode === "controller") renderControllerTranscriptView(container, sessionChanged);
+    else renderTranscriptView(container, projection, sessionChanged);
+  });
+  if (!rendered) return;
   transcriptPanelDirty = false;
   lastTranscriptRenderedSessionId = workspaceKey;
 }
 
 function renderToolsPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
-  if (!toolsPanelEl) return;
+  if (!desktopDockview?.panelMounted("tools")) return;
   const workspaceKey = activeWorkspaceKey();
   const sessionChanged = workspaceKey !== lastToolsRenderedSessionId;
   if (!force && !toolsPanelDirty && !sessionChanged) return;
 
-  if (workspaceMode === "controller") renderControllerToolsView(toolsPanelEl);
-  else renderToolsView(toolsPanelEl, projection);
+  const rendered = desktopDockview.withPanel("tools", container => {
+    if (workspaceMode === "controller") renderControllerToolsView(container);
+    else renderToolsView(container, projection);
+  });
+  if (!rendered) return;
   toolsPanelDirty = false;
   lastToolsRenderedSessionId = workspaceKey;
 }
@@ -2428,7 +2415,9 @@ function requestDiffState(sessionId: string, selector?: string, headSelector?: s
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
   send({ type: "diff.refresh", sessionId, selector, headSelector: headSelector ?? undefined });
-  if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+  if (desktopDockview?.isPanelActive("diffs")) {
+    desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
+  }
 }
 
 function markDiffsViewDirty(): void {
@@ -2444,11 +2433,11 @@ function shouldRenderDiffsView(projection: SessionProjection | undefined): boole
 }
 
 function isDiffsPanelActive(): boolean {
-  return dockviewApi?.activePanel?.id === "diffs";
+  return desktopDockview?.isPanelActive("diffs") ?? false;
 }
 
 function requestActiveDiffState(): void {
-  if (!activeSessionId || !diffsPanelEl || !isDiffsPanelActive()) return;
+  if (!activeSessionId || !isDiffsPanelActive()) return;
   if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
 
   const projection = projections.get(activeSessionId);
@@ -2457,7 +2446,7 @@ function requestActiveDiffState(): void {
   const { selectedSnapshot, headSnapshot } = resolveDiffSelection(activeSessionId, state, repoRoot);
   if (!selectedSnapshot && state && diffRepoRoots(state).length > 0) {
     markDiffsViewDirty();
-    if (diffsPanelEl) renderDiffsView(diffsPanelEl, projection);
+    desktopDockview?.withPanel("diffs", container => renderDiffsView(container, projection));
     return;
   }
 
@@ -2475,22 +2464,26 @@ function createDiffSnapshot(sessionId: string): void {
   diffErrors.delete(sessionId);
   markDiffsViewDirty();
   send({ type: "diff.snapshot", sessionId, label: label.trim() || undefined });
-  if (diffsPanelEl && isDiffsPanelActive()) renderDiffsView(diffsPanelEl, projections.get(sessionId));
+  if (desktopDockview?.isPanelActive("diffs")) {
+    desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
+  }
 }
 
 function rerenderDiffsViewPreservingScroll(sessionId: string): void {
-  if (!diffsPanelEl || !isDiffsPanelActive()) return;
-  const mainBody = diffsPanelEl.querySelector<HTMLElement>(".diffs-main-body");
-  const sidebarScroll = diffsPanelEl.querySelector<HTMLElement>(".diffs-sidebar-scroll");
-  const mainScrollTop = mainBody?.scrollTop ?? 0;
-  const sidebarScrollTop = sidebarScroll?.scrollTop ?? 0;
+  if (!desktopDockview?.isPanelActive("diffs")) return;
+  desktopDockview.withPanel("diffs", container => {
+    const mainBody = container.querySelector<HTMLElement>(".diffs-main-body");
+    const sidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
+    const mainScrollTop = mainBody?.scrollTop ?? 0;
+    const sidebarScrollTop = sidebarScroll?.scrollTop ?? 0;
 
-  renderDiffsView(diffsPanelEl, projections.get(sessionId));
+    renderDiffsView(container, projections.get(sessionId));
 
-  const nextMainBody = diffsPanelEl.querySelector<HTMLElement>(".diffs-main-body");
-  const nextSidebarScroll = diffsPanelEl.querySelector<HTMLElement>(".diffs-sidebar-scroll");
-  if (nextMainBody) nextMainBody.scrollTop = mainScrollTop;
-  if (nextSidebarScroll) nextSidebarScroll.scrollTop = sidebarScrollTop;
+    const nextMainBody = container.querySelector<HTMLElement>(".diffs-main-body");
+    const nextSidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
+    if (nextMainBody) nextMainBody.scrollTop = mainScrollTop;
+    if (nextSidebarScroll) nextSidebarScroll.scrollTop = sidebarScrollTop;
+  });
 }
 
 function addDiffComment(
@@ -3080,190 +3073,43 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   container.append(root);
 }
 
-// --- Dockview initialization ---
+// --- Desktop workspace initialization ---
 
-function initDockview(): void {
-  const host = requireElement<HTMLDivElement>("workspacePanelHost");
-
-  const dv = new DockviewComponent(host, {
-    theme: themeDark,
-    createComponent(options) {
-      switch (options.name) {
-        case "transcript": {
-          const el = document.createElement("div");
-          el.className = "panel-content panel-content-transcript";
-          return {
-            element: el,
-            init(params) {
-              const toolbar = makePanelToolbar(params.api.group);
-              const scroll = document.createElement("div");
-              scroll.className = "panel-scroll";
-              el.append(toolbar, scroll);
-              transcriptPanelEl = scroll;
-              markTranscriptViewDirty();
-              renderTranscriptPanelIfNeeded(activeSessionId ? projections.get(activeSessionId) : undefined, true);
-            },
-          };
-        }
-        case "tools": {
-          const el = document.createElement("div");
-          el.className = "panel-content panel-content-tools";
-          return {
-            element: el,
-            init(params) {
-              const toolbar = makePanelToolbar(params.api.group);
-              const scroll = document.createElement("div");
-              scroll.className = "panel-scroll";
-              el.append(toolbar, scroll);
-              toolsPanelEl = scroll;
-              markToolsViewDirty();
-              renderToolsPanelIfNeeded(activeSessionId ? projections.get(activeSessionId) : undefined, true);
-            },
-          };
-        }
-        case "diffs": {
-          const el = document.createElement("div");
-          el.className = "panel-content panel-content-diffs";
-          return {
-            element: el,
-            init(params) {
-              const toolbar = makePanelToolbar(params.api.group);
-              const scroll = document.createElement("div");
-              scroll.className = "panel-scroll";
-              el.append(toolbar, scroll);
-              diffsPanelEl = scroll;
-            },
-          };
-        }
-        default: {
-          const el = document.createElement("div");
-          return { element: el, init() {} };
-        }
+function initDesktopWorkspace(): void {
+  desktopDockview = initDesktopDockview({
+    host: requireElement<HTMLDivElement>("workspacePanelHost"),
+    onPanelReady: id => {
+      if (id === "transcript") markTranscriptViewDirty();
+      if (id === "tools") markToolsViewDirty();
+      if (id === "diffs") markDiffsViewDirty();
+    },
+    onPanelActivated: id => {
+      const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
+      if (id === "transcript") {
+        renderTranscriptPanelIfNeeded(projection, true);
+        return;
+      }
+      if (id === "tools") {
+        renderToolsPanelIfNeeded(projection, true);
+        return;
+      }
+      if (id === "diffs") {
+        desktopDockview?.withPanel("diffs", container => renderDiffsView(container, projection));
+        requestActiveDiffState();
       }
     },
+    onPopoutBlocked: () => {
+      const sid = activeSessionId;
+      if (!sid) return;
+      appendSessionNotice(sid, {
+        level: "warning",
+        text: "Popup window was blocked. Allow popups for this site to use the pop-out feature.",
+      });
+      render();
+    },
   });
-
-  dockviewApi = dv;
-  dv.onDidActivePanelChange(panel => {
-    const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
-    if (panel?.id === "transcript") {
-      renderTranscriptPanelIfNeeded(projection, true);
-      return;
-    }
-    if (panel?.id === "tools") {
-      renderToolsPanelIfNeeded(projection, true);
-      return;
-    }
-    if (panel?.id === "diffs") {
-      if (diffsPanelEl) renderDiffsView(diffsPanelEl, projection);
-      requestActiveDiffState();
-    }
-  });
-
-  // Show a session notice when a popout window is blocked by the browser.
-  dv.onDidOpenPopoutWindowFail(() => {
-    const sid = activeSessionId;
-    if (!sid) return;
-    appendSessionNotice(sid, {
-      level: "warning",
-      text: "Popup window was blocked. Allow popups for this site to use the pop-out feature.",
-    });
-    render();
-  });
-
-  // Restore persisted layout or fall back to the two-panel default.
-  const stored = localStorage.getItem(DOCKVIEW_LAYOUT_STORAGE_KEY);
-  let layoutRestored = false;
-
-  if (stored) {
-    try {
-      const data = JSON.parse(stored) as PersistedDockviewLayout;
-      if (data.version === 1 && data.layout) {
-        dv.fromJSON(data.layout);
-        layoutRestored = true;
-      }
-    } catch {
-      // Corrupt or incompatible layout — fall through to default.
-    }
-  }
-
-  if (!layoutRestored) {
-    loadDefaultLayout();
-  }
-  const hasDiffsPanel = dockviewApi.panels.some(panel => panel.id === "diffs");
-  if (!hasDiffsPanel) {
-    dockviewApi.addPanel({
-      id: "diffs",
-      component: "diffs",
-      title: "Diffs",
-      position: { referencePanel: "tools", direction: "below" },
-      renderer: "always",
-    });
-  }
   renderActiveDockviewPanel(activeSessionId ? projections.get(activeSessionId) : undefined);
   if (isDiffsPanelActive()) requestActiveDiffState();
-
-  // Persist layout on change (debounced: avoid rapid writes during drag).
-  let layoutSaveTimer: number | undefined;
-  dv.onDidLayoutChange(() => {
-    clearTimeout(layoutSaveTimer);
-    layoutSaveTimer = setTimeout(() => {
-      if (!dockviewApi) return;
-      const data: PersistedDockviewLayout = { version: 1, layout: dockviewApi.toJSON() };
-      localStorage.setItem(DOCKVIEW_LAYOUT_STORAGE_KEY, JSON.stringify(data));
-    }, 300);
-  });
-}
-
-function loadDefaultLayout(): void {
-  if (!dockviewApi) return;
-  dockviewApi.addPanel({
-    id: "transcript",
-    component: "transcript",
-    title: "Transcript",
-    renderer: "always",
-  });
-  dockviewApi.addPanel({
-    id: "tools",
-    component: "tools",
-    title: "Tools",
-    position: { referencePanel: "transcript", direction: "right" },
-    renderer: "always",
-  });
-  dockviewApi.addPanel({
-    id: "diffs",
-    component: "diffs",
-    title: "Diffs",
-    position: { referencePanel: "tools", direction: "below" },
-    renderer: "always",
-  });
-}
-
-// Creates a minimal panel toolbar with a Pop-out button.
-// `group` is a DockviewGroupPanel used as the target for addPopoutGroup.
-function makePanelToolbar(group: import("dockview-core").DockviewGroupPanel): HTMLElement {
-  const toolbar = document.createElement("div");
-  toolbar.className = "panel-toolbar";
-
-  const popoutBtn = document.createElement("button");
-  popoutBtn.type = "button";
-  popoutBtn.className = "panel-popout-btn";
-  popoutBtn.title = "Open panel in a separate window";
-  popoutBtn.textContent = "Pop out";
-  popoutBtn.addEventListener("click", () => {
-    void dockviewApi?.addPopoutGroup(group, {
-      popoutUrl: "/popout.html",
-      onDidOpen: ({ window: popWin }) => {
-        // Transfer stylesheets from the main window to the popout window so
-        // Fura and dockview CSS is available there.
-        document.querySelectorAll('link[rel="stylesheet"], style').forEach(node => {
-          popWin.document.head.appendChild(popWin.document.importNode(node, true));
-        });
-      },
-    });
-  });
-  toolbar.append(popoutBtn);
-  return toolbar;
 }
 
 // --- Status bar ---
