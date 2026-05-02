@@ -90,11 +90,85 @@ function projection(sessionId: string, overrides: Partial<SessionProjection> = {
   };
 }
 
+function diffState(diff = "src/main.ts | 2 ++"): import("./protocol").RepoDiffState {
+  return {
+    snapshots: [
+      {
+        entryId: "base-1",
+        label: "session start",
+        kind: "session-start",
+        createdAt: "2026-05-02T00:00:00Z",
+        repoRoot: "/repo",
+      },
+    ],
+    selectedSnapshot: {
+      entryId: "base-1",
+      label: "session start",
+      kind: "session-start",
+      createdAt: "2026-05-02T00:00:00Z",
+      repoRoot: "/repo",
+    },
+    headSnapshot: null,
+    diff,
+    stat: true,
+  };
+}
+
 function clickSession(index = 0): void {
   const buttons = document.querySelectorAll<HTMLButtonElement>("#mobileSessionsList .session-item button");
   const button = buttons[index];
   if (!button) throw new Error(`session button ${index} missing`);
   button.click();
+}
+
+function openCreateDrawer(): void {
+  const button = document.querySelector<HTMLButtonElement>("#mobileCreateToggle");
+  if (!button) throw new Error("create toggle missing");
+  button.click();
+}
+
+function submitCreateForm(name: string, cwd: string): void {
+  const nameInput = document.querySelector<HTMLInputElement>("#mobileCreateName");
+  const cwdInput = document.querySelector<HTMLInputElement>("#mobileCreateCwd");
+  const form = document.querySelector<HTMLFormElement>("#mobileCreateForm");
+  if (!nameInput || !cwdInput || !form) throw new Error("create form missing");
+  nameInput.value = name;
+  nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+  cwdInput.value = cwd;
+  cwdInput.dispatchEvent(new Event("input", { bubbles: true }));
+  form.requestSubmit();
+}
+
+function enableWorktreeCreate(fields: {
+  sourceRepo?: string;
+  directory?: string;
+  baseBranch?: string;
+  branchName?: string;
+} = {}): void {
+  const enabled = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeEnabled");
+  const sourceRepo = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeSourceRepo");
+  const directory = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeDirectory");
+  const baseBranch = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeBase");
+  const branchName = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeBranch");
+  if (!enabled || !sourceRepo || !directory || !baseBranch || !branchName) throw new Error("worktree form missing");
+  enabled.checked = true;
+  enabled.dispatchEvent(new Event("change", { bubbles: true }));
+  if (fields.sourceRepo !== undefined) {
+    sourceRepo.value = fields.sourceRepo;
+    sourceRepo.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (fields.directory !== undefined) {
+    directory.value = fields.directory;
+    directory.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (fields.baseBranch !== undefined) {
+    baseBranch.value = fields.baseBranch;
+    baseBranch.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (fields.branchName !== undefined) {
+    branchName.value = fields.branchName;
+    branchName.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 }
 
 beforeEach(() => {
@@ -177,5 +251,128 @@ describe("mountMobileApp", () => {
 
     expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("No session selected");
     expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
+  });
+
+  it("prefills the mobile create form from bridge config", () => {
+    createHarness();
+
+    openCreateDrawer();
+
+    expect(document.querySelector<HTMLInputElement>("#mobileCreateCwd")?.value).toBe("/repo");
+    expect(document.querySelector("#mobileCreateDrawer")?.hasAttribute("hidden")).toBe(false);
+  });
+
+  it("sends a normal cwd-based session.create from the mobile create form", () => {
+    const { connection } = createHarness();
+
+    openCreateDrawer();
+    submitCreateForm("Mobile session", "/tmp/mobile");
+
+    const createMessage = connection.sent.find(message => message.type === "session.create");
+    expect(createMessage).toMatchObject({
+      type: "session.create",
+      cwd: "/tmp/mobile",
+      name: "Mobile session",
+    });
+    expect(createMessage).not.toHaveProperty("worktree");
+    expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Creating session…");
+  });
+
+  it("rejects mobile session creation without a working directory", () => {
+    const { connection } = createHarness();
+
+    openCreateDrawer();
+    submitCreateForm("Mobile session", "");
+
+    expect(connection.sent.some(message => message.type === "session.create")).toBe(false);
+    expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Working directory is required.");
+  });
+
+  it("sends a worktree session.create from the mobile create form", () => {
+    const { connection } = createHarness();
+
+    openCreateDrawer();
+    enableWorktreeCreate({
+      sourceRepo: "/repo",
+      directory: "/repo-feature",
+      baseBranch: "main",
+      branchName: "feature/mobile",
+    });
+    submitCreateForm("Feature mobile", "/ignored-cwd");
+
+    const createMessage = connection.sent.find(message => message.type === "session.create");
+    expect(createMessage).toMatchObject({
+      type: "session.create",
+      name: "Feature mobile",
+      worktree: {
+        sourceRepo: "/repo",
+        directory: "/repo-feature",
+        baseBranch: "main",
+        branchName: "feature/mobile",
+      },
+    });
+    expect(createMessage).not.toHaveProperty("cwd");
+  });
+
+  it("rejects incomplete mobile worktree create fields", () => {
+    const { connection } = createHarness();
+
+    openCreateDrawer();
+    enableWorktreeCreate({ sourceRepo: "/repo", directory: "", baseBranch: "main" });
+    submitCreateForm("Feature mobile", "/ignored-cwd");
+
+    expect(connection.sent.some(message => message.type === "session.create")).toBe(false);
+    expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Worktree working directory is required.");
+    expect(document.activeElement).toBe(document.querySelector("#mobileCreateWorktreeDirectory"));
+  });
+
+  it("activates and closes the create drawer when the created session snapshot arrives", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("existing")] });
+
+    openCreateDrawer();
+    submitCreateForm("Mobile session", "/tmp/mobile");
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "created",
+      state: projection("created", { summary: summary("created", { title: "Mobile session", cwd: "/tmp/mobile" }) }),
+    });
+
+    expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Mobile session");
+    expect(document.querySelector("#mobileCreateDrawer")?.hasAttribute("hidden")).toBe(true);
+    expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("");
+  });
+
+  it("requests and renders mobile diff state for the active session", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    expect(connection.sent).not.toContainEqual({ type: "diff.refresh", sessionId: "live", stat: true });
+
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    expect(connection.sent).toContainEqual({ type: "diff.refresh", sessionId: "live", stat: true });
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Loading diff");
+
+    connection.emit({ type: "diff.state", sessionId: "live", state: diffState() });
+
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("src/main.ts | 2 ++");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Base: session start");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
+  });
+
+  it("shows diff errors without leaving the diff tab", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+
+    connection.emit({ type: "session.notice", sessionId: "live", level: "error", text: "diff failed" });
+
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("diff failed");
+    expect(document.querySelector("#mobileDiff")?.hasAttribute("hidden")).toBe(false);
+    expect(document.querySelector("#mobileTranscript")?.hasAttribute("hidden")).toBe(true);
   });
 });

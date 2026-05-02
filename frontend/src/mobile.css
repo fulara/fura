@@ -42,7 +42,14 @@ body {
   font-size: 0.82rem;
 }
 
-.mobile-sessions-toggle {
+.mobile-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.45rem;
+}
+
+.mobile-sessions-toggle,
+.mobile-create-toggle {
   flex: 0 0 auto;
 }
 
@@ -72,10 +79,84 @@ body {
   display: none;
 }
 
+.mobile-create-drawer {
+  border: 1px solid #252a35;
+  border-radius: 0.9rem;
+  background: rgba(16, 19, 26, 0.82);
+  padding: 0.75rem;
+}
+
+.mobile-create-drawer[hidden] {
+  display: none;
+}
+
+.mobile-create-form {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.mobile-create-form label {
+  color: #c7cedc;
+  font-size: 0.82rem;
+}
+
+.mobile-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mobile-checkbox-row input {
+  width: auto;
+}
+
+.mobile-create-worktree-fields {
+  display: grid;
+  gap: 0.55rem;
+  border: 1px solid #252a35;
+  border-radius: 0.75rem;
+  padding: 0.7rem;
+  background: rgba(21, 25, 34, 0.72);
+}
+
+.mobile-create-worktree-fields[hidden] {
+  display: none;
+}
+
+.mobile-optional-label,
+.mobile-create-status {
+  color: #9ba4b5;
+  font-size: 0.78rem;
+}
+
+.mobile-create-status {
+  min-height: 1rem;
+  margin: 0;
+}
+
+.mobile-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 .mobile-main {
   min-height: 0;
   overflow: hidden;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.mobile-workspace-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  padding: 0.6rem 0.9rem 0;
+}
+
+.mobile-workspace-tab.active {
+  border-color: #7f8cff;
+  background: rgba(127, 140, 255, 0.18);
 }
 
 .mobile-transcript {
@@ -86,6 +167,42 @@ body {
 
 .mobile-transcript .message {
   max-width: none;
+}
+
+.mobile-diff {
+  min-height: 0;
+  overflow: auto;
+  padding: 0.9rem;
+}
+
+.mobile-diff-summary {
+  display: grid;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.mobile-diff-summary h3,
+.mobile-diff-summary p {
+  margin: 0;
+}
+
+.mobile-diff-summary p {
+  color: #9ba4b5;
+  font-size: 0.82rem;
+}
+
+.mobile-diff-pre {
+  margin: 0;
+  overflow: auto;
+  border: 1px solid #252a35;
+  border-radius: 0.75rem;
+  background: #0d1117;
+  color: #d7deea;
+  padding: 0.85rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .mobile-composer {

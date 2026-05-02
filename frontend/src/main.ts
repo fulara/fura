@@ -40,6 +40,8 @@ import {
   visibleSessions as filterVisibleSessions,
 } from "./sessionList";
 import { applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
+import { diffRepoRoots, diffSnapshotsForRepo, formatDiffRepoLabel, inferDiffRepoRootFromCwd } from "./diffState";
+import { resolveSessionCreateMessage, type SessionCreateValidationTarget } from "./sessionCreate";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import {
   createCategoryCombobox,
@@ -2321,28 +2323,6 @@ function summarizeDiffFiles(
   return [...byPath.values()];
 }
 
-function diffRepoRoots(state: RepoDiffState | undefined): string[] {
-  if (!state) return [];
-  const roots: string[] = [];
-  for (const snapshot of state.snapshots) {
-    if (!roots.includes(snapshot.repoRoot)) roots.push(snapshot.repoRoot);
-  }
-  return roots;
-}
-
-function diffSnapshotsForRepo(state: RepoDiffState | undefined, repoRoot: string | null): DiffSnapshotSummary[] {
-  if (!state) return [];
-  if (!repoRoot) return state.snapshots;
-  return state.snapshots.filter(snapshot => snapshot.repoRoot === repoRoot);
-}
-
-function inferDiffRepoRootFromCwd(cwd: string | undefined, repoRoots: string[]): string | null {
-  if (!cwd) return null;
-  const matchingRoots = repoRoots
-    .filter(repoRoot => cwd === repoRoot || cwd.startsWith(`${repoRoot}/`) || cwd.startsWith(`${repoRoot}\\`))
-    .sort((left, right) => right.length - left.length);
-  return matchingRoots[0] ?? null;
-}
 
 function resolveSelectedDiffRepoRoot(
   sessionId: string,
@@ -2387,11 +2367,6 @@ function resolveDiffSelection(
   return { selectedSnapshot, headSnapshot, snapshots };
 }
 
-function formatDiffRepoLabel(repoRoot: string): string {
-  const parts = repoRoot.split(/[/\\]/).filter(Boolean);
-  const name = parts[parts.length - 1] ?? repoRoot;
-  return name === repoRoot ? repoRoot : `${name} — ${shortPath(repoRoot)}`;
-}
 
 function requestDiffState(sessionId: string, selector?: string, headSelector?: string | null): void {
   if (diffLoadingSessions.has(sessionId)) return;
@@ -3389,68 +3364,43 @@ function closeCwdPicker(): void {
   promptInput.focus();
 }
 
-function buildWorktreeCreateOptions(workingDirectory: string): WorktreeCreateOptions | null {
-  if (!cwdPickerWorktreeEnabled.checked) return null;
-  const sourceRepo = cwdPickerWorktreeSourceRepo.value.trim();
-  const directory = workingDirectory;
-  const baseBranch = cwdPickerWorktreeBase.value.trim();
-  const branchName = cwdPickerWorktreeBranch.value.trim();
-  if (!directory) {
-    setCwdPickerError("Worktree working directory is required.");
-    cwdPickerInput.focus();
-    return null;
-  }
-  if (!sourceRepo) {
-    setCwdPickerError("Source repo root is required.");
-    cwdPickerWorktreeSourceRepo.focus();
-    return null;
-  }
-  if (!baseBranch) {
-    setCwdPickerError("Base branch/ref is required.");
-    cwdPickerWorktreeBase.focus();
-    return null;
-  }
-  if (baseBranch.startsWith("-")) {
-    setCwdPickerError("Base branch/ref must not start with '-'.");
-    cwdPickerWorktreeBase.focus();
-    return null;
-  }
-  if (branchName.startsWith("-")) {
-    setCwdPickerError("Branch name must not start with '-'.");
-    cwdPickerWorktreeBranch.focus();
-    return null;
-  }
-  return {
-    sourceRepo,
-    directory,
-    baseBranch,
-    ...(branchName ? { branchName } : {}),
+function focusCwdPickerCreateTarget(target: SessionCreateValidationTarget): void {
+  const focusTargets: Partial<Record<SessionCreateValidationTarget, HTMLElement>> = {
+    name: cwdPickerNameInput,
+    cwd: cwdPickerInput,
+    worktreeDirectory: cwdPickerInput,
+    worktreeSourceRepo: cwdPickerWorktreeSourceRepo,
+    worktreeBaseBranch: cwdPickerWorktreeBase,
+    worktreeBranchName: cwdPickerWorktreeBranch,
   };
+  focusTargets[target]?.focus();
 }
 
 function submitCwdPicker(): void {
   if (cwdPickerCreatePending) return;
   if (!requireServerConfig()) return;
-  const name = cwdPickerNameInput.value.trim();
-  const cwd = cwdPickerInput.value.trim();
-  const category = normalizedCategory(cwdPickerCategoryInput.value);
-  if (!name || !cwd) {
-    setCwdPickerError(
-      cwdPickerWorktreeEnabled.checked
-        ? "Session name and worktree working directory are required."
-        : "Session name and working directory are required.",
-    );
+  const requestId = nextClientRequestId("session-create");
+  const result = resolveSessionCreateMessage({
+    requestId,
+    name: cwdPickerNameInput.value,
+    cwd: cwdPickerInput.value,
+    category: normalizedCategory(cwdPickerCategoryInput.value),
+    worktree: {
+      enabled: cwdPickerWorktreeEnabled.checked,
+      sourceRepo: cwdPickerWorktreeSourceRepo.value,
+      directory: cwdPickerInput.value,
+      baseBranch: cwdPickerWorktreeBase.value,
+      branchName: cwdPickerWorktreeBranch.value,
+    },
+  });
+  if (result.type === "invalid") {
+    setCwdPickerError(result.message);
+    focusCwdPickerCreateTarget(result.target);
     return;
   }
-  const worktree = buildWorktreeCreateOptions(cwd);
-  if (cwdPickerWorktreeEnabled.checked && !worktree) return;
-  const requestId = nextClientRequestId("session-create");
   pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
   setCwdPickerCreatePending(true, requestId);
-  const categoryPayload = category ? { category } : {};
-  const message: ClientMessage = worktree
-    ? { type: "session.create", requestId, name, ...categoryPayload, worktree }
-    : { type: "session.create", requestId, name, ...categoryPayload, cwd };
+  const message = result.message;
   if (!send(message)) {
     pendingCreatedSessionBaseline = null;
     setCwdPickerCreatePending(false);
