@@ -168,8 +168,33 @@ function enableWorktreeCreate(fields: {
   }
 }
 
+function stubFileReader(base64 = "aW1hZ2U="): void {
+  class MockFileReader {
+    result: string | ArrayBuffer | null = null;
+    error: DOMException | null = null;
+    onload: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+    onerror: ((this: FileReader, ev: ProgressEvent<FileReader>) => unknown) | null = null;
+
+    readAsDataURL(blob: Blob): void {
+      this.result = `data:${blob.type};base64,${base64}`;
+      queueMicrotask(() => this.onload?.call(this as unknown as FileReader, {} as ProgressEvent<FileReader>));
+    }
+  }
+
+  vi.stubGlobal("FileReader", MockFileReader);
+}
+
+async function selectMobileImage(file = new File(["image"], "image.png", { type: "image/png" })): Promise<void> {
+  const input = document.querySelector<HTMLInputElement>("#mobileImageInput");
+  if (!input) throw new Error("mobile image input missing");
+  Object.defineProperty(input, "files", { value: [file], configurable: true });
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  await new Promise(resolve => setTimeout(resolve, 0));
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("mountMobileApp", () => {
@@ -221,6 +246,70 @@ describe("mountMobileApp", () => {
     expect(input.value).toBe("");
   });
 
+  it("attaches and removes mobile image previews", async () => {
+    stubFileReader();
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    await selectMobileImage();
+
+    const previews = document.querySelector<HTMLElement>("#mobileImagePreviews");
+    expect(previews?.hidden).toBe(false);
+    expect(previews?.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,aW1hZ2U=");
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Ready · 1 image");
+
+    previews?.querySelector<HTMLButtonElement>('button[aria-label="Remove image"]')?.click();
+
+    expect(previews?.hidden).toBe(true);
+    expect(previews?.querySelector("img")).toBeNull();
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Ready");
+  });
+
+  it("sends mobile prompts with attached images and clears accepted drafts", async () => {
+    stubFileReader("c21va2U=");
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    await selectMobileImage(new File(["smoke"], "smoke.png", { type: "image/png" }));
+
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
+    const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
+    if (!input || !form) throw new Error("prompt form missing");
+    input.value = "describe this";
+    form.requestSubmit();
+
+    expect(connection.sent).toContainEqual({
+      type: "prompt.send",
+      sessionId: "live",
+      text: "describe this",
+      images: [{ type: "image", data: "c21va2U=", mimeType: "image/png" }],
+    });
+    expect(input.value).toBe("");
+    expect(document.querySelector<HTMLElement>("#mobileImagePreviews")?.hidden).toBe(true);
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Ready");
+  });
+
+  it("sends image-only mobile prompts", async () => {
+    stubFileReader("b25seS1pbWFnZQ==");
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    await selectMobileImage();
+
+    document.querySelector<HTMLFormElement>("#mobilePromptForm")?.requestSubmit();
+
+    expect(connection.sent).toContainEqual({
+      type: "prompt.send",
+      sessionId: "live",
+      text: "",
+      images: [{ type: "image", data: "b25seS1pbWFnZQ==", mimeType: "image/png" }],
+    });
+  });
+
   it("disables the composer while the active session is busy", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
@@ -233,6 +322,7 @@ describe("mountMobileApp", () => {
 
     expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
     expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLInputElement>("#mobileImageInput")?.disabled).toBe(true);
     expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Agent busy");
   });
 

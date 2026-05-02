@@ -1,3 +1,11 @@
+import {
+  blobToBase64,
+  createPendingMarker as createAttachmentMarker,
+  removePendingMarkerFromText,
+  renderAttachmentPreviews,
+  type PendingImage,
+} from "./composerAttachments";
+import { createPromptSendMessage } from "./composer";
 import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
@@ -126,10 +134,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       </section>
 
       <form id="mobilePromptForm" class="mobile-composer">
+        <div id="mobileImagePreviews" class="mobile-image-previews" hidden></div>
         <textarea id="mobilePromptInput" rows="3" placeholder="Select a session first"></textarea>
         <div class="mobile-composer-actions">
           <span id="mobileComposerStatus" class="mobile-composer-status">No active session</span>
-          <button id="mobileSendButton" type="submit">Send</button>
+          <div class="mobile-composer-buttons">
+            <label class="mobile-attach-button" for="mobileImageInput">Attach
+              <input id="mobileImageInput" type="file" accept="image/*" capture="environment" multiple />
+            </label>
+            <button id="mobileSendButton" type="submit">Send</button>
+          </div>
         </div>
       </form>
     </main>
@@ -163,6 +177,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const promptForm = requireElement<HTMLFormElement>(document, "mobilePromptForm");
   const promptInput = requireElement<HTMLTextAreaElement>(document, "mobilePromptInput");
   const sendButton = requireElement<HTMLButtonElement>(document, "mobileSendButton");
+  const imagePreviews = requireElement<HTMLDivElement>(document, "mobileImagePreviews");
+  const imageInput = requireElement<HTMLInputElement>(document, "mobileImageInput");
   const composerStatus = requireElement<HTMLSpanElement>(document, "mobileComposerStatus");
   const mobileLog = requireElement<HTMLParagraphElement>(document, "mobileLog");
 
@@ -179,6 +195,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let createWorktreeBranchDirty = false;
   let lastAutofilledWorktreeDirectory = "";
   let lastAutofilledWorktreeBranch = "";
+  let pendingImages: PendingImage[] = [];
+  let nextPendingImageId = 1;
   let createPendingRequestId: string | null = null;
   let pendingCreatedSessionBaseline: Set<string> | null = null;
   let activeMobileView: "transcript" | "diff" = "transcript";
@@ -259,12 +277,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     submitCreateSession();
   });
 
+  imageInput.addEventListener("change", () => {
+    void addSelectedImages(imageInput.files);
+  });
+
   promptForm.addEventListener("submit", event => {
     event.preventDefault();
     const text = promptInput.value.trim();
-    if (!text || !activeSessionId) return;
-    const accepted = send({ type: "prompt.send", sessionId: activeSessionId, text });
-    if (accepted) promptInput.value = "";
+    if ((!text && pendingImages.length === 0) || !activeSessionId) return;
+    const accepted = send(createPromptSendMessage(activeSessionId, text, pendingImages));
+    if (accepted) clearPromptComposer();
   });
 
   const initialToken = consumeBootstrapToken(
@@ -307,6 +329,67 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return false;
     }
     return connection.send(message);
+  }
+
+  function createPendingImageMarker(): string {
+    return createAttachmentMarker("Image", nextPendingImageId++);
+  }
+
+  async function addSelectedImages(fileList: FileList | null): Promise<void> {
+    const files = Array.from(fileList ?? []).filter(file => file.type.startsWith("image/"));
+    for (const file of files) {
+      try {
+        pendingImages.push({
+          type: "image",
+          marker: createPendingImageMarker(),
+          data: await blobToBase64(file),
+          mimeType: file.type,
+        });
+      } catch {
+        appendLog("Failed to read selected image.");
+      }
+    }
+    renderMobileImagePreviews();
+    imageInput.value = "";
+  }
+
+  function clearPromptComposer(): void {
+    promptInput.value = "";
+    pendingImages = [];
+    imageInput.value = "";
+    renderMobileImagePreviews();
+  }
+
+  function removePendingImageMarker(marker: string): void {
+    const nextValue = removePendingMarkerFromText(promptInput.value, marker);
+    if (nextValue !== promptInput.value) promptInput.value = nextValue;
+  }
+
+  function renderMobileImagePreviews(): void {
+    renderAttachmentPreviews(imagePreviews, pendingImages, [], {
+      onRemoveImage: (index, image) => {
+        pendingImages.splice(index, 1);
+        removePendingImageMarker(image.marker);
+        renderMobileImagePreviews();
+      },
+      onRemoveSnippet: () => undefined,
+    });
+    updateComposerStatus();
+  }
+
+  function updateComposerStatus(): void {
+    if (!activeSessionId) {
+      composerStatus.textContent = "No active session";
+      return;
+    }
+    const projection = projections.get(activeSessionId);
+    const summary = sessions.find(session => session.sessionId === activeSessionId);
+    const isBusy = projection?.isBusy ?? summary?.status === "busy";
+    composerStatus.textContent = isBusy
+      ? "Agent busy"
+      : pendingImages.length > 0
+        ? `Ready · ${pendingImages.length} image${pendingImages.length === 1 ? "" : "s"}`
+        : "Ready";
   }
 
   function setCreateDrawerOpen(open: boolean): void {
@@ -657,6 +740,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       sessionMeta.textContent = serverConfig ? "Choose a session to view its transcript." : "Waiting for bridge connection.";
       promptInput.disabled = true;
       sendButton.disabled = true;
+      imageInput.disabled = true;
       promptInput.placeholder = "Select a session first";
       composerStatus.textContent = "No active session";
       renderTranscript(undefined);
@@ -669,8 +753,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     sessionMeta.textContent = `${sessionKindLabel(summary.kind)} · ${sessionStatusLabel(summary)} · ${summary.cwd ?? "no dir"}`;
     promptInput.disabled = !projection || isBusy;
     sendButton.disabled = !projection || isBusy;
+    imageInput.disabled = !projection || isBusy;
     promptInput.placeholder = isBusy ? "Agent is busy…" : "Send a prompt…";
-    composerStatus.textContent = isBusy ? "Agent busy" : "Ready";
+    updateComposerStatus();
     renderTranscript(projection);
     renderDiffView(projection);
   }
