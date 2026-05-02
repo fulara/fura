@@ -139,6 +139,38 @@ function submitCreateForm(name: string, cwd: string): void {
   form.requestSubmit();
 }
 
+function enableWorktreeCreate(fields: {
+  sourceRepo?: string;
+  directory?: string;
+  baseBranch?: string;
+  branchName?: string;
+} = {}): void {
+  const enabled = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeEnabled");
+  const sourceRepo = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeSourceRepo");
+  const directory = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeDirectory");
+  const baseBranch = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeBase");
+  const branchName = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeBranch");
+  if (!enabled || !sourceRepo || !directory || !baseBranch || !branchName) throw new Error("worktree form missing");
+  enabled.checked = true;
+  enabled.dispatchEvent(new Event("change", { bubbles: true }));
+  if (fields.sourceRepo !== undefined) {
+    sourceRepo.value = fields.sourceRepo;
+    sourceRepo.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (fields.directory !== undefined) {
+    directory.value = fields.directory;
+    directory.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (fields.baseBranch !== undefined) {
+    baseBranch.value = fields.baseBranch;
+    baseBranch.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (fields.branchName !== undefined) {
+    branchName.value = fields.branchName;
+    branchName.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
 });
@@ -254,6 +286,44 @@ describe("mountMobileApp", () => {
 
     expect(connection.sent.some(message => message.type === "session.create")).toBe(false);
     expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Working directory is required.");
+  });
+
+  it("sends a worktree session.create from the mobile create form", () => {
+    const { connection } = createHarness();
+
+    openCreateDrawer();
+    enableWorktreeCreate({
+      sourceRepo: "/repo",
+      directory: "/repo-feature",
+      baseBranch: "main",
+      branchName: "feature/mobile",
+    });
+    submitCreateForm("Feature mobile", "/ignored-cwd");
+
+    const createMessage = connection.sent.find(message => message.type === "session.create");
+    expect(createMessage).toMatchObject({
+      type: "session.create",
+      name: "Feature mobile",
+      worktree: {
+        sourceRepo: "/repo",
+        directory: "/repo-feature",
+        baseBranch: "main",
+        branchName: "feature/mobile",
+      },
+    });
+    expect(createMessage).not.toHaveProperty("cwd");
+  });
+
+  it("rejects incomplete mobile worktree create fields", () => {
+    const { connection } = createHarness();
+
+    openCreateDrawer();
+    enableWorktreeCreate({ sourceRepo: "/repo", directory: "", baseBranch: "main" });
+    submitCreateForm("Feature mobile", "/ignored-cwd");
+
+    expect(connection.sent.some(message => message.type === "session.create")).toBe(false);
+    expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Worktree working directory is required.");
+    expect(document.activeElement).toBe(document.querySelector("#mobileCreateWorktreeDirectory"));
   });
 
   it("activates and closes the create drawer when the created session snapshot arrives", () => {

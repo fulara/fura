@@ -6,7 +6,7 @@ import { shortId } from "./format";
 import type { ClientMessage, RepoDiffState, ServerConfig, ServerMessage, SessionProjection, SessionSummary, TodoPhase } from "./protocol";
 import { sessionKindLabel, sessionStatusLabel } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
-import { resolveSessionCreateMessage } from "./sessionCreate";
+import { resolveSessionCreateMessage, type SessionCreateValidationTarget } from "./sessionCreate";
 import { createSessionListView } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
@@ -70,6 +70,20 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
             <input id="mobileCreateName" autocomplete="off" spellcheck="false" placeholder="my-session" />
             <label for="mobileCreateCwd">Working directory</label>
             <input id="mobileCreateCwd" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+            <label class="mobile-checkbox-row" for="mobileCreateWorktreeEnabled">
+              <input id="mobileCreateWorktreeEnabled" type="checkbox" />
+              <span>Create git worktree</span>
+            </label>
+            <div id="mobileCreateWorktreeFields" class="mobile-create-worktree-fields" hidden>
+              <label for="mobileCreateWorktreeSourceRepo">Source repo root</label>
+              <input id="mobileCreateWorktreeSourceRepo" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+              <label for="mobileCreateWorktreeDirectory">Worktree directory</label>
+              <input id="mobileCreateWorktreeDirectory" autocomplete="off" spellcheck="false" placeholder="/home/user/project-feature" />
+              <label for="mobileCreateWorktreeBase">Base branch/ref</label>
+              <input id="mobileCreateWorktreeBase" autocomplete="off" spellcheck="false" placeholder="HEAD" />
+              <label for="mobileCreateWorktreeBranch">Branch name <span class="mobile-optional-label">optional</span></label>
+              <input id="mobileCreateWorktreeBranch" autocomplete="off" spellcheck="false" placeholder="feature/mobile" />
+            </div>
             <p id="mobileCreateStatus" class="mobile-create-status" aria-live="polite"></p>
             <div class="mobile-create-actions">
               <button id="mobileCreateClose" type="button">Close</button>
@@ -109,6 +123,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const createForm = requireElement<HTMLFormElement>(document, "mobileCreateForm");
   const createNameInput = requireElement<HTMLInputElement>(document, "mobileCreateName");
   const createCwdInput = requireElement<HTMLInputElement>(document, "mobileCreateCwd");
+  const createWorktreeEnabled = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeEnabled");
+  const createWorktreeFields = requireElement<HTMLDivElement>(document, "mobileCreateWorktreeFields");
+  const createWorktreeSourceRepo = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeSourceRepo");
+  const createWorktreeDirectory = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeDirectory");
+  const createWorktreeBase = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeBase");
+  const createWorktreeBranch = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeBranch");
   const createStatus = requireElement<HTMLParagraphElement>(document, "mobileCreateStatus");
   const createClose = requireElement<HTMLButtonElement>(document, "mobileCreateClose");
   const createSubmit = requireElement<HTMLButtonElement>(document, "mobileCreateSubmit");
@@ -129,6 +149,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let projections = new Map<string, SessionProjection>();
   const unreadSessions = new Set<string>();
   let createCwdDirty = false;
+  let createWorktreeSourceDirty = false;
+  let createWorktreeBaseDirty = false;
   let createPendingRequestId: string | null = null;
   let pendingCreatedSessionBaseline: Set<string> | null = null;
   let activeMobileView: "transcript" | "diff" = "transcript";
@@ -169,6 +191,25 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   createNameInput.addEventListener("input", () => {
     if (!createPendingRequestId) createStatus.textContent = "";
   });
+  createWorktreeEnabled.addEventListener("change", () => {
+    syncCreateWorktreeFields();
+    if (!createPendingRequestId) createStatus.textContent = "";
+  });
+  createWorktreeSourceRepo.addEventListener("input", () => {
+    createWorktreeSourceDirty = true;
+    if (!createPendingRequestId) createStatus.textContent = "";
+  });
+  createWorktreeDirectory.addEventListener("input", () => {
+    if (!createPendingRequestId) createStatus.textContent = "";
+  });
+  createWorktreeBase.addEventListener("input", () => {
+    createWorktreeBaseDirty = true;
+    if (!createPendingRequestId) createStatus.textContent = "";
+  });
+  createWorktreeBranch.addEventListener("input", () => {
+    if (!createPendingRequestId) createStatus.textContent = "";
+  });
+
   createForm.addEventListener("submit", event => {
     event.preventDefault();
     submitCreateSession();
@@ -227,20 +268,47 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function setCreateDrawerOpen(open: boolean): void {
     createDrawer.hidden = !open;
     createToggle.setAttribute("aria-expanded", String(open));
-    if (open) syncCreateCwdDefault();
+    if (open) {
+      syncCreateCwdDefault();
+      syncCreateWorktreeFields();
+    }
   }
 
   function syncCreateCwdDefault(): void {
     if (!createCwdDirty) createCwdInput.value = serverConfig?.defaultCwd ?? "";
   }
 
+  function syncCreateWorktreeFields(): void {
+    const enabled = createWorktreeEnabled.checked;
+    createWorktreeFields.hidden = !enabled;
+    if (!createWorktreeSourceDirty) createWorktreeSourceRepo.value = serverConfig?.defaultCwd ?? createCwdInput.value.trim();
+    if (!createWorktreeBaseDirty) createWorktreeBase.value = "HEAD";
+  }
+
   function setCreatePending(pending: boolean, requestId: string | null = null): void {
     createPendingRequestId = pending ? requestId : null;
     createNameInput.disabled = pending;
     createCwdInput.disabled = pending;
+    createWorktreeEnabled.disabled = pending;
+    createWorktreeSourceRepo.disabled = pending;
+    createWorktreeDirectory.disabled = pending;
+    createWorktreeBase.disabled = pending;
+    createWorktreeBranch.disabled = pending;
     createSubmit.disabled = pending;
     createClose.disabled = pending;
     createStatus.textContent = pending ? "Creating session…" : "";
+  }
+
+  function focusCreateTarget(target: SessionCreateValidationTarget): void {
+    const focusTargets: Partial<Record<SessionCreateValidationTarget, HTMLElement>> = {
+      name: createNameInput,
+      cwd: createCwdInput,
+      worktreeSourceRepo: createWorktreeSourceRepo,
+      worktreeDirectory: createWorktreeDirectory,
+      worktreeBaseBranch: createWorktreeBase,
+      worktreeBranchName: createWorktreeBranch,
+    };
+    focusTargets[target]?.focus();
   }
 
   function submitCreateSession(): void {
@@ -249,18 +317,22 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       requestId,
       cwd: createCwdInput.value,
       name: createNameInput.value,
+      worktree: {
+        enabled: createWorktreeEnabled.checked,
+        sourceRepo: createWorktreeSourceRepo.value,
+        directory: createWorktreeDirectory.value,
+        baseBranch: createWorktreeBase.value,
+        branchName: createWorktreeBranch.value,
+      },
     });
     if (result.type === "invalid") {
       createStatus.textContent = result.message;
-      if (result.target === "cwd") createCwdInput.focus();
-      if (result.target === "name") createNameInput.focus();
+      focusCreateTarget(result.target);
       return;
     }
 
     pendingCreatedSessionBaseline = new Set(sessions.map(session => session.sessionId));
     setCreatePending(true, requestId);
-    // Mobile intentionally starts with normal cwd-based session creation.
-    // Worktree creation, model picker, desktop panel workspace, and Ask Fura are outside the mobile shell scope.
     const accepted = send(result.message);
     if (!accepted) {
       pendingCreatedSessionBaseline = null;
@@ -278,6 +350,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     setCreatePending(false);
     createNameInput.value = "";
     createCwdDirty = false;
+    createWorktreeSourceDirty = false;
+    createWorktreeBaseDirty = false;
+    createWorktreeEnabled.checked = false;
+    createWorktreeDirectory.value = "";
+    createWorktreeBranch.value = "";
+    syncCreateWorktreeFields();
     syncCreateCwdDefault();
     setCreateDrawerOpen(false);
   }

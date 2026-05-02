@@ -100,6 +100,29 @@ body {
   font-size: 0.82rem;
 }
 
+.mobile-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.mobile-checkbox-row input {
+  width: auto;
+}
+
+.mobile-create-worktree-fields {
+  display: grid;
+  gap: 0.55rem;
+  border: 1px solid #252a35;
+  border-radius: 0.75rem;
+  padding: 0.7rem;
+  background: rgba(21, 25, 34, 0.72);
+}
+
+.mobile-create-worktree-fields[hidden] {
+  display: none;
+}
+
 .mobile-optional-label,
 .mobile-create-status {
   color: #9ba4b5;
