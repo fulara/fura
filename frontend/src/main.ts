@@ -24,15 +24,14 @@ import {
   type PendingSnippet,
 } from "./composerAttachments";
 import {
-  formatSessionMeta,
   fuzzyMatchCategories as fuzzyMatchSessionCategories,
   normalizedCategory,
   sessionCategories as deriveSessionCategories,
   sessionKindLabel,
-  sessionStatusClass,
   sessionStatusLabel,
   visibleSessions as filterVisibleSessions,
 } from "./sessionList";
+import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
 import type {
   ClientMessage,
@@ -443,14 +442,6 @@ type ControlChatMessage = {
   candidates?: ControlCandidate[];
   suggestedActions?: ControlSuggestedAction[];
 };
-type SessionListItemDom = {
-  item: HTMLDivElement;
-  button: HTMLButtonElement;
-  title: HTMLSpanElement;
-  status: HTMLSpanElement;
-  meta: HTMLSpanElement;
-  deleteBtn: HTMLButtonElement;
-};
 type CategoryCombobox = {
   input: HTMLInputElement;
   list: HTMLDivElement;
@@ -481,8 +472,6 @@ let cwdPickerBranchAutofill = true;
 let lastAutofilledWorktreeDirectory = "";
 let lastAutofilledWorktreeBranch = "";
 const unreadSessions = new Set<string>();
-const sessionListItems = new Map<string, SessionListItemDom>();
-let sessionsEmptyEl: HTMLParagraphElement | null = null;
 let sessions: SessionSummary[] = [];
 let workspaceMode: WorkspaceMode = "session";
 let sessionPromptDraft = "";
@@ -565,6 +554,11 @@ let diffsPanelEl: HTMLElement | null = null;
 
 // Current document owner for panel render functions is set in dom.ts before panel rendering.
 // This keeps Dockview popout panels creating nodes in their own window document.
+
+const sessionListView = createSessionListView(sessionsList, {
+  onSelectSession: handleSessionButtonClick,
+  onDeleteSession: handleSessionDeleteClick,
+});
 
 cwdCategoryCombobox = createCategoryCombobox(
   cwdPickerCategoryInput,
@@ -1848,27 +1842,11 @@ function handleCategoryComboboxKeydown(combobox: CategoryCombobox, event: Keyboa
 }
 
 function renderCategoryFilter(): void {
-  const categories = sessionCategories();
-  if (selectedCategoryFilter && !categories.includes(selectedCategoryFilter)) {
-    selectedCategoryFilter = "";
-  }
-
-  const currentOptions = Array.from(sessionCategoryFilter.options).map(option => option.value);
-  const nextOptions = ["", ...categories];
-  if (currentOptions.length !== nextOptions.length || currentOptions.some((value, index) => value !== nextOptions[index])) {
-    sessionCategoryFilter.replaceChildren();
-    const all = document.createElement("option");
-    all.value = "";
-    all.textContent = "All sessions";
-    sessionCategoryFilter.append(all);
-    for (const category of categories) {
-      const option = document.createElement("option");
-      option.value = category;
-      option.textContent = category;
-      sessionCategoryFilter.append(option);
-    }
-  }
-  sessionCategoryFilter.value = selectedCategoryFilter;
+  selectedCategoryFilter = renderSessionCategoryFilter(
+    sessionCategoryFilter,
+    sessionCategories(),
+    selectedCategoryFilter,
+  );
 }
 
 function visibleSessions(): SessionSummary[] {
@@ -1896,112 +1874,15 @@ function handleSessionDeleteClick(sessionId: string): void {
   openDeleteSessionPicker(sessionId);
 }
 
-function createSessionListItem(sessionId: string): SessionListItemDom {
-  const item = document.createElement("div");
-  item.className = "session-item";
-
-  const button = document.createElement("button");
-  button.type = "button";
-  button.addEventListener("click", () => handleSessionButtonClick(sessionId));
-
-  const titleRow = document.createElement("span");
-  titleRow.className = "session-title-row";
-
-  const title = document.createElement("span");
-  title.className = "session-id";
-
-  const status = document.createElement("span");
-
-  const meta = document.createElement("span");
-  meta.className = "session-meta";
-
-  titleRow.append(title, status);
-  button.append(titleRow, meta);
-
-  const deleteBtn = document.createElement("button");
-  deleteBtn.type = "button";
-  deleteBtn.className = "session-delete";
-  deleteBtn.textContent = "\u00d7";
-  deleteBtn.addEventListener("click", e => {
-    e.stopPropagation();
-    handleSessionDeleteClick(sessionId);
-  });
-
-  item.append(button, deleteBtn);
-  return { item, button, title, status, meta, deleteBtn };
-}
-
-function updateSessionListItem(dom: SessionListItemDom, session: SessionSummary): void {
-  const isActive = workspaceMode === "session" && session.sessionId === activeSessionId;
-  const hasUpdates = !isActive && unreadSessions.has(session.sessionId);
-  const classes = ["session", isActive ? "active" : "", hasUpdates ? "has-updates" : ""].filter(Boolean);
-  const label = session.title || shortId(session.sessionId);
-
-  dom.button.className = classes.join(" ");
-  dom.button.setAttribute("aria-current", isActive ? "page" : "false");
-  dom.title.textContent = label;
-  dom.status.className = `session-status session-status-${sessionStatusClass(session)}`;
-  dom.status.textContent = sessionStatusLabel(session);
-  dom.meta.textContent = formatSessionMeta(session);
-  dom.deleteBtn.setAttribute("aria-label", `Delete session ${label}`);
-}
-
 function renderSessions(): void {
   renderCategoryFilter();
-  const visibleSessionList = visibleSessions();
-  if (sessions.length === 0) {
-    for (const dom of sessionListItems.values()) dom.item.remove();
-    sessionListItems.clear();
-
-    if (!sessionsEmptyEl) {
-      sessionsEmptyEl = document.createElement("p");
-      sessionsEmptyEl.className = "empty";
-      sessionsEmptyEl.textContent = "No sessions yet.";
-    }
-    if (sessionsEmptyEl.parentNode !== sessionsList) sessionsList.replaceChildren(sessionsEmptyEl);
-    return;
-  }
-
-  if (visibleSessionList.length === 0) {
-    for (const dom of sessionListItems.values()) dom.item.remove();
-    sessionListItems.clear();
-    if (!sessionsEmptyEl) {
-      sessionsEmptyEl = document.createElement("p");
-      sessionsEmptyEl.className = "empty";
-    }
-    sessionsEmptyEl.textContent = selectedCategoryFilter ? `No sessions in category ${selectedCategoryFilter}.` : "No sessions match the current filters.";
-    if (sessionsEmptyEl.parentNode !== sessionsList) sessionsList.replaceChildren(sessionsEmptyEl);
-    return;
-  }
-
-  sessionsEmptyEl?.remove();
-
-  const nextSessionIds = new Set(visibleSessionList.map(session => session.sessionId));
-  for (const [sessionId, dom] of sessionListItems) {
-    if (!nextSessionIds.has(sessionId)) {
-      dom.item.remove();
-      sessionListItems.delete(sessionId);
-    }
-  }
-
-  let anchor = sessionsList.firstChild;
-  for (const session of visibleSessionList) {
-    let dom = sessionListItems.get(session.sessionId);
-    if (!dom) {
-      dom = createSessionListItem(session.sessionId);
-      sessionListItems.set(session.sessionId, dom);
-    }
-
-    updateSessionListItem(dom, session);
-    if (dom.item !== anchor) sessionsList.insertBefore(dom.item, anchor);
-    anchor = dom.item.nextSibling;
-  }
-
-  while (anchor) {
-    const next = anchor.nextSibling;
-    anchor.remove();
-    anchor = next;
-  }
+  sessionListView.render({
+    sessions,
+    visibleSessions: visibleSessions(),
+    selectedCategoryFilter,
+    activeSessionId: workspaceMode === "session" ? activeSessionId : null,
+    unreadSessionIds: unreadSessions,
+  });
 }
 
 function syncToolVisibilityToggle(): void {
