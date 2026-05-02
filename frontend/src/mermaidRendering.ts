@@ -70,7 +70,18 @@ function downloadBlob(blob: Blob, fileName: string, owner: Document): void {
 export async function renderMermaidSvg(source: string, owner: Document = document): Promise<string> {
   const mermaid = await loadMermaidClient();
   const container = owner.createElement("div");
-  container.hidden = true;
+  container.className = "mermaid-render-sandbox";
+  container.setAttribute("aria-hidden", "true");
+  Object.assign(container.style, {
+    position: "absolute",
+    left: "-10000px",
+    top: "0",
+    width: "1200px",
+    maxWidth: "1200px",
+    overflow: "hidden",
+    pointerEvents: "none",
+    visibility: "hidden",
+  });
   owner.body.append(container);
   try {
     const result = await mermaid.render(nextMermaidId(), source, container);

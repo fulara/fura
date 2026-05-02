@@ -58,6 +58,29 @@ describe("renderMermaidBlock", () => {
     expect(Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action")).slice(1).every(button => !button.disabled)).toBe(true);
   });
 
+  it("renders in a measurable offscreen sandbox and removes it after success", async () => {
+    let sandbox: HTMLElement | null = null;
+    mermaidMock.render.mockImplementationOnce((_id: string, _source: string, container: HTMLElement) => {
+      sandbox = container;
+      expect(container.isConnected).toBe(true);
+      expect(container.hidden).toBe(false);
+      expect(container.getAttribute("aria-hidden")).toBe("true");
+      expect(container.style.visibility).toBe("hidden");
+      expect(container.style.display).not.toBe("none");
+      expect(container.style.width).toBe("1200px");
+      return Promise.resolve({ svg: '<svg viewBox="0 0 120 60"></svg>' });
+    });
+
+    const node = renderMermaidBlock("flowchart TD\n  A --> B");
+    document.body.append(node);
+    await flushMermaidRender();
+
+    const capturedSandbox = sandbox as HTMLElement | null;
+    expect(capturedSandbox).not.toBeNull();
+    expect(capturedSandbox?.isConnected).toBe(false);
+    expect(node.querySelector(".mermaid-preview svg")?.getAttribute("viewBox")).toBe("0 0 120 60");
+  });
+
   it("surfaces Mermaid render errors without hiding canonical source", async () => {
     mermaidMock.render.mockRejectedValueOnce(new Error("Parse error on line 2"));
 
