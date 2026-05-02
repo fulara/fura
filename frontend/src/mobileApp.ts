@@ -1,9 +1,26 @@
 import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
-import { diffRepoRoots, formatDiffRepoLabel } from "./diffState";
+import {
+  diffRepoRoots,
+  diffSnapshotsForRepo,
+  formatDiffRepoLabel,
+  inferDiffRepoRootFromCwd,
+  parseDiffRows,
+  summarizeDiffFiles,
+  type ParsedDiffRow,
+} from "./diffState";
 import { shortId } from "./format";
-import type { ClientMessage, RepoDiffState, ServerConfig, ServerMessage, SessionProjection, SessionSummary, TodoPhase } from "./protocol";
+import type {
+  ClientMessage,
+  DiffSnapshotSummary,
+  RepoDiffState,
+  ServerConfig,
+  ServerMessage,
+  SessionProjection,
+  SessionSummary,
+  TodoPhase,
+} from "./protocol";
 import { sessionKindLabel, sessionStatusLabel } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
 import { resolveSessionCreateMessage, type SessionCreateValidationTarget } from "./sessionCreate";
@@ -157,6 +174,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const diffStates = new Map<string, RepoDiffState>();
   const diffErrors = new Map<string, string>();
   const diffLoadingSessions = new Set<string>();
+  const diffSelectedRepos = new Map<string, string>();
+  const diffSelectedSnapshots = new Map<string, string>();
+  const diffSelectedHeads = new Map<string, string | null>();
+  const diffStatModes = new Map<string, boolean>();
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
@@ -394,12 +415,84 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     renderActiveSession();
   }
 
-  function requestMobileDiffState(sessionId: string): void {
-    if (!projections.has(sessionId) || diffLoadingSessions.has(sessionId)) return;
+  type MobileDiffSelection = {
+    repoRoot: string | null;
+    selectedSnapshot: DiffSnapshotSummary | null;
+    headSnapshot: DiffSnapshotSummary | null;
+    snapshots: DiffSnapshotSummary[];
+    stat: boolean;
+  };
+
+  function resolveMobileDiffRepoRoot(
+    sessionId: string,
+    projection: SessionProjection | undefined,
+    state: RepoDiffState | undefined,
+  ): string | null {
+    const repoRoots = diffRepoRoots(state);
+    const explicit = diffSelectedRepos.get(sessionId);
+    if (explicit && repoRoots.includes(explicit)) return explicit;
+
+    const selectedRepoRoot = state?.selectedSnapshot?.repoRoot;
+    if (selectedRepoRoot && repoRoots.includes(selectedRepoRoot)) {
+      diffSelectedRepos.set(sessionId, selectedRepoRoot);
+      return selectedRepoRoot;
+    }
+
+    const inferred = inferDiffRepoRootFromCwd(projection?.summary.cwd ?? undefined, repoRoots);
+    const fallback = inferred ?? repoRoots[0] ?? null;
+    if (fallback) diffSelectedRepos.set(sessionId, fallback);
+    else diffSelectedRepos.delete(sessionId);
+    return fallback;
+  }
+
+  function resolveMobileDiffSelection(
+    sessionId: string,
+    projection: SessionProjection | undefined,
+    state: RepoDiffState | undefined,
+  ): MobileDiffSelection {
+    const repoRoot = resolveMobileDiffRepoRoot(sessionId, projection, state);
+    const snapshots = diffSnapshotsForRepo(state, repoRoot);
+    const selectedSnapshot = snapshots.find(snapshot => snapshot.entryId === diffSelectedSnapshots.get(sessionId))
+      ?? (state?.selectedSnapshot?.repoRoot === repoRoot ? state.selectedSnapshot : null)
+      ?? snapshots[snapshots.length - 1]
+      ?? null;
+    const explicitHead = diffSelectedHeads.get(sessionId);
+    const headSnapshot = explicitHead === null && diffSelectedHeads.has(sessionId)
+      ? null
+      : snapshots.find(snapshot => snapshot.entryId === explicitHead)
+        ?? (state?.headSnapshot?.repoRoot === repoRoot ? state.headSnapshot : null)
+        ?? null;
+    return {
+      repoRoot,
+      selectedSnapshot,
+      headSnapshot,
+      snapshots,
+      stat: diffStatModes.get(sessionId) ?? state?.stat ?? true,
+    };
+  }
+
+  function requestMobileDiffState(
+    sessionId: string,
+    overrides: { selector?: string; headSelector?: string | null; stat?: boolean } = {},
+  ): void {
+    const projection = projections.get(sessionId);
+    if (!projection || diffLoadingSessions.has(sessionId)) return;
+    const state = diffStates.get(sessionId);
+    const selection = resolveMobileDiffSelection(sessionId, projection, state);
+    const selector = overrides.selector !== undefined ? overrides.selector : selection.selectedSnapshot?.entryId;
+    const headSelector = overrides.headSelector !== undefined ? overrides.headSelector : selection.headSnapshot?.entryId ?? null;
+    const stat = overrides.stat ?? selection.stat;
+
+    if (selector) diffSelectedSnapshots.set(sessionId, selector);
+    diffSelectedHeads.set(sessionId, headSelector);
+    diffStatModes.set(sessionId, stat);
     diffErrors.delete(sessionId);
     diffLoadingSessions.add(sessionId);
-    send({ type: "diff.refresh", sessionId, stat: true });
-    renderDiffView(projections.get(sessionId));
+    const message: ClientMessage = { type: "diff.refresh", sessionId, stat };
+    if (selector) message.selector = selector;
+    if (headSelector) message.headSelector = headSelector;
+    send(message);
+    renderDiffView(projection);
   }
 
   function handleServerMessage(message: ServerMessage): void {
@@ -462,6 +555,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         diffLoadingSessions.delete(message.sessionId);
         diffErrors.delete(message.sessionId);
         diffStates.set(message.sessionId, message.state);
+        diffStatModes.set(message.sessionId, message.state.stat);
         if (message.sessionId === activeSessionId) renderActiveSession();
         break;
       case "control.reply":
@@ -582,6 +676,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const sessionId = activeSessionId;
     const state = diffStates.get(sessionId);
     const error = diffErrors.get(sessionId);
+    if (state) renderDiffControls(sessionId, projection, state);
+
     if (error) {
       const message = diffView.ownerDocument.createElement("p");
       message.className = "mobile-empty-state";
@@ -606,20 +702,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
 
-    const summary = diffView.ownerDocument.createElement("section");
-    summary.className = "mobile-diff-summary";
-    const roots = diffRepoRoots(state);
-    const title = diffView.ownerDocument.createElement("h3");
-    title.textContent = roots.length === 1 ? formatDiffRepoLabel(roots[0] ?? "") : "Diff";
-    const meta = diffView.ownerDocument.createElement("p");
-    meta.textContent = [
-      state.selectedSnapshot ? `Base: ${state.selectedSnapshot.label}` : "Base: current state",
-      state.headSnapshot ? `Compare: ${state.headSnapshot.label}` : "Compare: working tree",
-      state.stat ? "Stat" : "Full diff",
-    ].join(" · ");
-    summary.append(title, meta);
-    diffView.append(summary);
-
     if (!state.diff.trim()) {
       const empty = diffView.ownerDocument.createElement("p");
       empty.className = "mobile-empty-state";
@@ -628,10 +710,186 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
 
-    const pre = diffView.ownerDocument.createElement("pre");
-    pre.className = "mobile-diff-pre";
-    pre.textContent = state.diff;
-    diffView.append(pre);
+    renderMobileDiffBody(state);
+  }
+
+  function renderDiffControls(sessionId: string, projection: SessionProjection, state: RepoDiffState): void {
+    const selection = resolveMobileDiffSelection(sessionId, projection, state);
+    const roots = diffRepoRoots(state);
+    const controls = diffView.ownerDocument.createElement("section");
+    controls.className = "mobile-diff-controls";
+
+    const title = diffView.ownerDocument.createElement("h3");
+    title.textContent = selection.repoRoot ? formatDiffRepoLabel(selection.repoRoot) : "Diff";
+    const meta = diffView.ownerDocument.createElement("p");
+    meta.className = "mobile-diff-meta";
+    meta.textContent = [
+      selection.selectedSnapshot ? `Base: ${selection.selectedSnapshot.label}` : "Base: current state",
+      selection.headSnapshot ? `Compare: ${selection.headSnapshot.label}` : "Compare: working tree",
+      selection.stat ? "Stat" : "Full diff",
+    ].join(" · ");
+    controls.append(title, meta);
+
+    const fields = diffView.ownerDocument.createElement("div");
+    fields.className = "mobile-diff-fields";
+    if (roots.length > 1) {
+      fields.append(renderDiffSelect(
+        "Repository",
+        roots.map(root => ({ value: root, label: formatDiffRepoLabel(root), title: root })),
+        selection.repoRoot ?? "",
+        diffLoadingSessions.has(sessionId),
+        value => {
+          diffSelectedRepos.set(sessionId, value);
+          diffSelectedSnapshots.delete(sessionId);
+          diffSelectedHeads.set(sessionId, null);
+          const nextSnapshots = diffSnapshotsForRepo(state, value);
+          requestMobileDiffState(sessionId, { selector: nextSnapshots[nextSnapshots.length - 1]?.entryId, headSelector: null });
+        },
+      ));
+    }
+
+    if (selection.snapshots.length > 0) {
+      fields.append(renderDiffSelect(
+        "Base",
+        selection.snapshots.map(snapshot => ({
+          value: snapshot.entryId,
+          label: snapshot.label,
+          title: `${snapshot.kind} · ${new Date(snapshot.createdAt).toLocaleString()}`,
+        })),
+        selection.selectedSnapshot?.entryId ?? "",
+        diffLoadingSessions.has(sessionId),
+        value => requestMobileDiffState(sessionId, { selector: value }),
+      ));
+      fields.append(renderDiffSelect(
+        "Compare",
+        [
+          { value: "", label: "Working tree", title: "Current working tree" },
+          ...selection.snapshots.map(snapshot => ({
+            value: snapshot.entryId,
+            label: snapshot.label,
+            title: `${snapshot.kind} · ${new Date(snapshot.createdAt).toLocaleString()}`,
+          })),
+        ],
+        selection.headSnapshot?.entryId ?? "",
+        diffLoadingSessions.has(sessionId),
+        value => requestMobileDiffState(sessionId, { headSelector: value || null }),
+      ));
+    }
+
+    const actions = diffView.ownerDocument.createElement("div");
+    actions.className = "mobile-diff-actions";
+    const statButton = renderDiffAction("Stat", selection.stat, diffLoadingSessions.has(sessionId), () => {
+      requestMobileDiffState(sessionId, { stat: true });
+    });
+    const fullButton = renderDiffAction("Full", !selection.stat, diffLoadingSessions.has(sessionId), () => {
+      requestMobileDiffState(sessionId, { stat: false });
+    });
+    const refreshButton = renderDiffAction(
+      diffLoadingSessions.has(sessionId) ? "Refreshing…" : "Refresh",
+      false,
+      diffLoadingSessions.has(sessionId),
+      () => requestMobileDiffState(sessionId),
+    );
+    actions.append(statButton, fullButton, refreshButton);
+
+    controls.append(fields, actions);
+    diffView.append(controls);
+  }
+
+  function renderDiffSelect(
+    labelText: string,
+    options: { value: string; label: string; title?: string }[],
+    selectedValue: string,
+    disabled: boolean,
+    onChange: (value: string) => void,
+  ): HTMLElement {
+    const label = diffView.ownerDocument.createElement("label");
+    label.className = "mobile-diff-field";
+    const labelSpan = diffView.ownerDocument.createElement("span");
+    labelSpan.textContent = labelText;
+    const select = diffView.ownerDocument.createElement("select");
+    select.disabled = disabled;
+    for (const optionValue of options) {
+      const option = diffView.ownerDocument.createElement("option");
+      option.value = optionValue.value;
+      option.textContent = optionValue.label;
+      if (optionValue.title) option.title = optionValue.title;
+      if (optionValue.value === selectedValue) option.selected = true;
+      select.append(option);
+    }
+    select.addEventListener("change", () => onChange(select.value));
+    label.append(labelSpan, select);
+    return label;
+  }
+
+  function renderDiffAction(label: string, active: boolean, disabled: boolean, onClick: () => void): HTMLButtonElement {
+    const button = diffView.ownerDocument.createElement("button");
+    button.type = "button";
+    button.className = active ? "active" : "";
+    button.textContent = label;
+    button.disabled = disabled;
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  function renderMobileDiffBody(state: RepoDiffState): void {
+    const rows = parseDiffRows(state.diff);
+    const fileSummaries = summarizeDiffFiles(rows);
+    if (fileSummaries.length > 0) renderMobileDiffFiles(fileSummaries);
+    if (!rows.some(row => row.type === "file" || row.type === "hunk" || (row.type === "line" && row.location.filePath))) {
+      const pre = diffView.ownerDocument.createElement("pre");
+      pre.className = "mobile-diff-pre";
+      pre.textContent = state.diff;
+      diffView.append(pre);
+      return;
+    }
+
+    const diff = diffView.ownerDocument.createElement("div");
+    diff.className = "mobile-diff-lines";
+    for (const row of rows) {
+      const line = renderMobileDiffRow(row);
+      if (line) diff.append(line);
+    }
+    diffView.append(diff);
+  }
+
+  function renderMobileDiffFiles(files: ReturnType<typeof summarizeDiffFiles>): void {
+    const section = diffView.ownerDocument.createElement("section");
+    section.className = "mobile-diff-files";
+    const title = diffView.ownerDocument.createElement("strong");
+    title.textContent = `Modified files (${files.length})`;
+    section.append(title);
+    const list = diffView.ownerDocument.createElement("div");
+    list.className = "mobile-diff-file-list";
+    for (const file of files) {
+      const item = diffView.ownerDocument.createElement("div");
+      item.className = "mobile-diff-file-item";
+      const path = diffView.ownerDocument.createElement("code");
+      path.textContent = file.filePath;
+      const meta = diffView.ownerDocument.createElement("span");
+      meta.textContent = `+${file.added} -${file.removed}`;
+      item.append(path, meta);
+      list.append(item);
+    }
+    section.append(list);
+    diffView.append(section);
+  }
+
+  function renderMobileDiffRow(row: ParsedDiffRow): HTMLElement | null {
+    if (row.type === "meta" && !row.text.trim()) return null;
+    const line = diffView.ownerDocument.createElement("div");
+    line.className = row.type === "line" ? `mobile-diff-line mobile-diff-line-${row.location.kind}` : `mobile-diff-line mobile-diff-${row.type}`;
+    if (row.type === "file") line.dataset.diffFilePath = row.filePath;
+
+    const gutter = diffView.ownerDocument.createElement("span");
+    gutter.className = "mobile-diff-gutter";
+    gutter.textContent = row.type === "line"
+      ? String(row.location.newLine ?? row.location.oldLine ?? "")
+      : "";
+    const text = diffView.ownerDocument.createElement("code");
+    text.textContent = row.type === "line" ? row.location.text : row.text;
+    line.append(gutter, text);
+    return line;
   }
 
   return { connect, send };

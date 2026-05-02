@@ -175,22 +175,78 @@ body {
   padding: 0.9rem;
 }
 
-.mobile-diff-summary {
+.mobile-diff-controls,
+.mobile-diff-files {
   display: grid;
-  gap: 0.25rem;
+  gap: 0.55rem;
   margin-bottom: 0.75rem;
+  border: 1px solid #252a35;
+  border-radius: 0.75rem;
+  background: rgba(16, 19, 26, 0.72);
+  padding: 0.75rem;
 }
 
-.mobile-diff-summary h3,
-.mobile-diff-summary p {
+.mobile-diff-controls h3,
+.mobile-diff-controls p {
   margin: 0;
 }
 
-.mobile-diff-summary p {
+.mobile-diff-meta {
   color: #9ba4b5;
   font-size: 0.82rem;
 }
 
+.mobile-diff-fields {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.mobile-diff-field {
+  display: grid;
+  gap: 0.25rem;
+  color: #c7cedc;
+  font-size: 0.78rem;
+}
+
+.mobile-diff-field select {
+  min-width: 0;
+}
+
+.mobile-diff-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.mobile-diff-actions button.active {
+  border-color: #7f8cff;
+  background: rgba(127, 140, 255, 0.18);
+}
+
+.mobile-diff-file-list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.mobile-diff-file-item {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  color: #d7deea;
+  font-size: 0.78rem;
+}
+
+.mobile-diff-file-item code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mobile-diff-file-item span {
+  color: #9ba4b5;
+  flex: 0 0 auto;
+}
+
+.mobile-diff-lines,
 .mobile-diff-pre {
   margin: 0;
   overflow: auto;
@@ -198,11 +254,65 @@ body {
   border-radius: 0.75rem;
   background: #0d1117;
   color: #d7deea;
-  padding: 0.85rem;
+  padding: 0.5rem 0;
   font-size: 0.78rem;
   line-height: 1.45;
+}
+
+.mobile-diff-pre {
+  padding: 0.85rem;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.mobile-diff-line {
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 1fr);
+  gap: 0.5rem;
+  padding: 0.08rem 0.65rem;
+}
+
+.mobile-diff-line code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.mobile-diff-gutter {
+  color: #6f7a8d;
+  text-align: right;
+  user-select: none;
+}
+
+.mobile-diff-file,
+.mobile-diff-hunk,
+.mobile-diff-meta {
+  color: #9ba4b5;
+}
+
+.mobile-diff-file {
+  background: rgba(127, 140, 255, 0.12);
+  color: #d7deea;
+  font-weight: 600;
+}
+
+.mobile-diff-line-add {
+  background: rgba(63, 185, 80, 0.12);
+}
+
+.mobile-diff-line-add code {
+  color: #9be9a8;
+}
+
+.mobile-diff-line-remove {
+  background: rgba(248, 81, 73, 0.12);
+}
+
+.mobile-diff-line-remove code {
+  color: #ffb3ad;
+}
+
+.mobile-diff-line-context code {
+  color: #c9d1d9;
 }
 
 .mobile-composer {

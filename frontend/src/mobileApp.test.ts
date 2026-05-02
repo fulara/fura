@@ -90,27 +90,24 @@ function projection(sessionId: string, overrides: Partial<SessionProjection> = {
   };
 }
 
-function diffState(diff = "src/main.ts | 2 ++"): import("./protocol").RepoDiffState {
+function diffState(
+  diff = "src/main.ts | 2 ++",
+  overrides: Partial<import("./protocol").RepoDiffState> = {},
+): import("./protocol").RepoDiffState {
+  const base = {
+    entryId: "base-1",
+    label: "session start",
+    kind: "session-start" as const,
+    createdAt: "2026-05-02T00:00:00Z",
+    repoRoot: "/repo",
+  };
   return {
-    snapshots: [
-      {
-        entryId: "base-1",
-        label: "session start",
-        kind: "session-start",
-        createdAt: "2026-05-02T00:00:00Z",
-        repoRoot: "/repo",
-      },
-    ],
-    selectedSnapshot: {
-      entryId: "base-1",
-      label: "session start",
-      kind: "session-start",
-      createdAt: "2026-05-02T00:00:00Z",
-      repoRoot: "/repo",
-    },
+    snapshots: [base],
+    selectedSnapshot: base,
     headSnapshot: null,
     diff,
     stat: true,
+    ...overrides,
   };
 }
 
@@ -360,6 +357,54 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("src/main.ts | 2 ++");
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Base: session start");
     expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
+  });
+
+  it("renders structured mobile diff rows and requests selected comparisons", () => {
+    const { connection } = createHarness();
+    const base = { entryId: "base-1", label: "session start", kind: "session-start" as const, createdAt: "2026-05-02T00:00:00Z", repoRoot: "/repo" };
+    const manual = { entryId: "manual-1", label: "manual", kind: "manual" as const, createdAt: "2026-05-02T01:00:00Z", repoRoot: "/repo" };
+    const patch = [
+      "diff --git a/src/main.ts b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-console.log('old')",
+      "+console.log('new')",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    connection.emit({
+      type: "diff.state",
+      sessionId: "live",
+      state: diffState(patch, { snapshots: [base, manual], selectedSnapshot: base, stat: false }),
+    });
+
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Modified files (1)");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("+1 -1");
+    expect(document.querySelector(".mobile-diff-file")?.textContent).toContain("diff --git");
+    expect(document.querySelector(".mobile-diff-line-remove")?.textContent).toContain("old");
+    expect(document.querySelector(".mobile-diff-line-add")?.textContent).toContain("new");
+
+    const selects = document.querySelectorAll<HTMLSelectElement>(".mobile-diff-field select");
+    selects[0]!.value = "manual-1";
+    selects[0]!.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(connection.sent).toContainEqual({ type: "diff.refresh", sessionId: "live", selector: "manual-1", stat: false });
+  });
+
+  it("switches mobile diff between stat and full diff", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    connection.emit({ type: "diff.state", sessionId: "live", state: diffState() });
+
+    const fullButton = [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
+      .find(button => button.textContent === "Full");
+    fullButton?.click();
+
+    expect(connection.sent).toContainEqual({ type: "diff.refresh", sessionId: "live", selector: "base-1", stat: false });
   });
 
   it("shows diff errors without leaving the diff tab", () => {
