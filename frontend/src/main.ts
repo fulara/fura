@@ -1,5 +1,6 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
+import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
@@ -38,6 +39,7 @@ import {
   sessionStatusLabel,
   visibleSessions as filterVisibleSessions,
 } from "./sessionList";
+import { applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import {
   createCategoryCombobox,
@@ -489,7 +491,7 @@ let paletteCommands: SlashCommandSpec[] = [];
 let paletteSelectedIndex = -1;
 let cwdCategoryCombobox: CategoryCombobox;
 let activeCategoryCombobox: CategoryCombobox;
-const projections = new Map<string, SessionProjection>();
+let projections = new Map<string, SessionProjection>();
 const diffStates = new Map<string, RepoDiffState>();
 const diffSelectedRepos = new Map<string, string>();
 const diffSelectedSnapshots = new Map<string, string>();
@@ -529,15 +531,11 @@ const controlClientId = getOrCreateControlClientId();
 let controlConversationId: string | null = null;
 let controlMessages: ControlChatMessage[] = [];
 let controlStatusState: ControlStatusProjection = { status: "idle" };
-const url = new URL(window.location.href);
-const urlToken = url.searchParams.get("token")?.trim() ?? "";
-const storedToken = window.localStorage.getItem("fura.token")?.trim() ?? "";
-const initialToken = urlToken || storedToken;
-if (urlToken) {
-  window.localStorage.setItem("fura.token", urlToken);
-  url.searchParams.delete("token");
-  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-}
+const initialToken = consumeBootstrapToken(
+  window.location.href,
+  window.localStorage,
+  url => window.history.replaceState(null, "", url),
+);
 let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
 let thinkingVisibilityMode = parseThinkingVisibilityMode(window.localStorage.getItem(THINKING_VISIBILITY_STORAGE_KEY));
 let skipThinkingOpenRestoreOnce = false;
@@ -875,13 +873,12 @@ initDesktopWorkspace();
 // --- Core session logic ---
 
 function connect(token: string): void {
-  const bridgeToken = token.trim();
+  const bridgeToken = storeBootstrapToken(token, window.localStorage);
   if (!bridgeToken) {
     appendLog("No bridge token found. Load Fura with ?token=<token> from the Rust server URL.");
     return;
   }
 
-  window.localStorage.setItem("fura.token", bridgeToken);
   connection?.disconnect();
   connection = createFuraConnection({
     auth: { type: "sessionCookie", token: bridgeToken },
@@ -935,8 +932,7 @@ function activateSession(sessionId: string): void {
     markToolsViewDirty();
     updatePalette();
   }
-  activeSessionId = sessionId;
-  unreadSessions.delete(sessionId);
+  activeSessionId = activateSessionState(unreadSessions, sessionId);
 }
 
 function appendSessionNotice(sessionId: string, notice: SessionNotice): void {
@@ -950,17 +946,6 @@ function isPendingCreatedSession(sessionId: string): boolean {
   return Boolean(pendingCreatedSessionBaseline && !pendingCreatedSessionBaseline.has(sessionId));
 }
 
-function mergeSessionSummary(summary: SessionSummary): void {
-  const index = sessions.findIndex(session => session.sessionId === summary.sessionId);
-  if (index === -1) {
-    sessions = [summary, ...sessions];
-    return;
-  }
-
-  const nextSessions = sessions.slice();
-  nextSessions[index] = summary;
-  sessions = nextSessions;
-}
 
 function shouldActivateSnapshot(sessionId: string): boolean {
   if (isPendingCreatedSession(sessionId)) {
@@ -980,16 +965,15 @@ function handleServerMessage(message: ServerMessage): void {
       serverConfig = message.config;
       break;
     case "sessions.snapshot":
-      sessions = message.sessions;
-      if (activeSessionId && !sessions.some(session => session.sessionId === activeSessionId)) {
-        activeSessionId = null;
-        resetPromptHistoryNavigation();
+      {
+        const previousActiveSessionId = activeSessionId;
+        ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
+        if (previousActiveSessionId && !activeSessionId) resetPromptHistoryNavigation();
       }
       render();
       break;
     case "session.snapshot": {
-      projections.set(message.sessionId, message.state);
-      mergeSessionSummary(message.state.summary);
+      ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
       syncPromptHistoryFromProjection(message.sessionId, message.state);
       const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
       if (shouldActivateSnapshot(message.sessionId)) {
@@ -1740,11 +1724,7 @@ function handleSessionButtonClick(sessionId: string): void {
   if (!session) return;
 
   activateSession(session.sessionId);
-  if (session.kind === "available" && session.sessionFile) {
-    send({ type: "session.open", sessionFile: session.sessionFile });
-  } else {
-    send({ type: "session.attach", sessionId: session.sessionId });
-  }
+  send(sessionOpenOrAttachMessage(session));
   render();
 }
 

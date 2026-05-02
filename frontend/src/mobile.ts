@@ -1,11 +1,13 @@
 import "./style.css";
 import "./mobile.css";
 import "highlight.js/styles/github-dark.css";
+import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import { createFuraConnection, type FuraConnection } from "./connection";
 import { setRenderDocument } from "./dom";
 import { shortId } from "./format";
 import type { ClientMessage, ServerConfig, ServerMessage, SessionProjection, SessionSummary, TodoPhase } from "./protocol";
 import { sessionKindLabel, sessionStatusLabel } from "./sessionList";
+import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
 import { createSessionListView } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
@@ -67,7 +69,7 @@ let connection: FuraConnection | null = null;
 let serverConfig: ServerConfig | null = null;
 let sessions: SessionSummary[] = [];
 let activeSessionId: string | null = null;
-const projections = new Map<string, SessionProjection>();
+let projections = new Map<string, SessionProjection>();
 const unreadSessions = new Set<string>();
 
 const sessionListView = createSessionListView(sessionsList, {
@@ -89,7 +91,11 @@ promptForm.addEventListener("submit", event => {
   if (accepted) promptInput.value = "";
 });
 
-const initialToken = consumeBootstrapToken();
+const initialToken = consumeBootstrapToken(
+  window.location.href,
+  window.localStorage,
+  url => window.history.replaceState(null, "", url),
+);
 render();
 if (initialToken) connect(initialToken);
 else appendLog("No bridge token found. Open mobile.html with ?token=<token> from the Rust server URL.");
@@ -100,22 +106,10 @@ function requireElement<T extends HTMLElement>(id: string): T {
   return element as T;
 }
 
-function consumeBootstrapToken(): string {
-  const url = new URL(window.location.href);
-  const urlToken = url.searchParams.get("token")?.trim() ?? "";
-  const storedToken = window.localStorage.getItem("fura.token")?.trim() ?? "";
-  if (urlToken) {
-    window.localStorage.setItem("fura.token", urlToken);
-    url.searchParams.delete("token");
-    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-  }
-  return urlToken || storedToken;
-}
 
 function connect(token: string): void {
-  const bridgeToken = token.trim();
+  const bridgeToken = storeBootstrapToken(token, window.localStorage);
   if (!bridgeToken) return;
-  window.localStorage.setItem("fura.token", bridgeToken);
   connection?.disconnect();
   connection = createFuraConnection({
     auth: { type: "sessionCookie", token: bridgeToken },
@@ -155,15 +149,11 @@ function handleServerMessage(message: ServerMessage): void {
       serverConfig = message.config;
       break;
     case "sessions.snapshot":
-      sessions = message.sessions;
-      if (activeSessionId && !sessions.some(session => session.sessionId === activeSessionId)) {
-        activeSessionId = null;
-      }
+      ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
       render();
       break;
     case "session.snapshot":
-      projections.set(message.sessionId, message.state);
-      mergeSessionSummary(message.state.summary);
+      ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
       if (!activeSessionId || activeSessionId === message.sessionId) {
         activateSession(message.sessionId);
         render();
@@ -205,14 +195,6 @@ function handleServerMessage(message: ServerMessage): void {
   }
 }
 
-function mergeSessionSummary(summary: SessionSummary): void {
-  const index = sessions.findIndex(session => session.sessionId === summary.sessionId);
-  if (index === -1) {
-    sessions = [summary, ...sessions];
-    return;
-  }
-  sessions = sessions.map(session => session.sessionId === summary.sessionId ? summary : session);
-}
 
 function selectSession(sessionId: string): void {
   const session = sessions.find(candidate => candidate.sessionId === sessionId);
@@ -220,17 +202,12 @@ function selectSession(sessionId: string): void {
   activateSession(sessionId);
   sessionsDrawer.hidden = true;
   sessionsToggle.setAttribute("aria-expanded", "false");
-  if (session.kind === "available" && session.sessionFile) {
-    send({ type: "session.open", sessionFile: session.sessionFile });
-  } else {
-    send({ type: "session.attach", sessionId });
-  }
+  send(sessionOpenOrAttachMessage(session));
   render();
 }
 
 function activateSession(sessionId: string): void {
-  activeSessionId = sessionId;
-  unreadSessions.delete(sessionId);
+  activeSessionId = activateSessionState(unreadSessions, sessionId);
 }
 
 function render(): void {
