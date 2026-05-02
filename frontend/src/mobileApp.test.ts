@@ -97,6 +97,24 @@ function clickSession(index = 0): void {
   button.click();
 }
 
+function openCreateDrawer(): void {
+  const button = document.querySelector<HTMLButtonElement>("#mobileCreateToggle");
+  if (!button) throw new Error("create toggle missing");
+  button.click();
+}
+
+function submitCreateForm(name: string, cwd: string): void {
+  const nameInput = document.querySelector<HTMLInputElement>("#mobileCreateName");
+  const cwdInput = document.querySelector<HTMLInputElement>("#mobileCreateCwd");
+  const form = document.querySelector<HTMLFormElement>("#mobileCreateForm");
+  if (!nameInput || !cwdInput || !form) throw new Error("create form missing");
+  nameInput.value = name;
+  nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+  cwdInput.value = cwd;
+  cwdInput.dispatchEvent(new Event("input", { bubbles: true }));
+  form.requestSubmit();
+}
+
 beforeEach(() => {
   vi.restoreAllMocks();
 });
@@ -177,5 +195,57 @@ describe("mountMobileApp", () => {
 
     expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("No session selected");
     expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
+  });
+
+  it("prefills the mobile create form from bridge config", () => {
+    createHarness();
+
+    openCreateDrawer();
+
+    expect(document.querySelector<HTMLInputElement>("#mobileCreateCwd")?.value).toBe("/repo");
+    expect(document.querySelector("#mobileCreateDrawer")?.hasAttribute("hidden")).toBe(false);
+  });
+
+  it("sends a normal cwd-based session.create from the mobile create form", () => {
+    const { connection } = createHarness();
+
+    openCreateDrawer();
+    submitCreateForm("Mobile session", "/tmp/mobile");
+
+    const createMessage = connection.sent.find(message => message.type === "session.create");
+    expect(createMessage).toMatchObject({
+      type: "session.create",
+      cwd: "/tmp/mobile",
+      name: "Mobile session",
+    });
+    expect(createMessage).not.toHaveProperty("worktree");
+    expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Creating session…");
+  });
+
+  it("rejects mobile session creation without a working directory", () => {
+    const { connection } = createHarness();
+
+    openCreateDrawer();
+    submitCreateForm("Mobile session", "");
+
+    expect(connection.sent.some(message => message.type === "session.create")).toBe(false);
+    expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Working directory is required.");
+  });
+
+  it("activates and closes the create drawer when the created session snapshot arrives", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("existing")] });
+
+    openCreateDrawer();
+    submitCreateForm("Mobile session", "/tmp/mobile");
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "created",
+      state: projection("created", { summary: summary("created", { title: "Mobile session", cwd: "/tmp/mobile" }) }),
+    });
+
+    expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Mobile session");
+    expect(document.querySelector("#mobileCreateDrawer")?.hasAttribute("hidden")).toBe(true);
+    expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("");
   });
 });

@@ -9,7 +9,7 @@ import { createSessionListView } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
 
-type MobileWindow = Pick<Window, "history" | "localStorage" | "location">;
+type MobileWindow = Pick<Window, "history" | "localStorage" | "location" | "setTimeout">;
 
 export type MobileConnectionOptions = {
   auth: WebSocketAuth;
@@ -53,11 +53,27 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
             <h2 id="mobileSessionTitle">No session selected</h2>
             <p id="mobileSessionMeta">Choose a session to view its transcript.</p>
           </div>
-          <button id="mobileSessionsToggle" class="mobile-sessions-toggle" type="button" aria-expanded="false" aria-controls="mobileSessionsDrawer">Sessions</button>
+          <div class="mobile-header-actions">
+            <button id="mobileCreateToggle" class="mobile-create-toggle" type="button" aria-expanded="false" aria-controls="mobileCreateDrawer">New</button>
+            <button id="mobileSessionsToggle" class="mobile-sessions-toggle" type="button" aria-expanded="false" aria-controls="mobileSessionsDrawer">Sessions</button>
+          </div>
         </div>
         <p id="mobileLog" class="mobile-log" aria-live="polite"></p>
         <section id="mobileSessionsDrawer" class="mobile-session-drawer" hidden>
           <nav id="mobileSessionsList" class="sessions" aria-label="Sessions"></nav>
+        </section>
+        <section id="mobileCreateDrawer" class="mobile-create-drawer" hidden>
+          <form id="mobileCreateForm" class="mobile-create-form">
+            <label for="mobileCreateName">Session name <span class="mobile-optional-label">optional</span></label>
+            <input id="mobileCreateName" autocomplete="off" spellcheck="false" placeholder="my-session" />
+            <label for="mobileCreateCwd">Working directory</label>
+            <input id="mobileCreateCwd" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+            <p id="mobileCreateStatus" class="mobile-create-status" aria-live="polite"></p>
+            <div class="mobile-create-actions">
+              <button id="mobileCreateClose" type="button">Close</button>
+              <button id="mobileCreateSubmit" type="submit">Create</button>
+            </div>
+          </form>
         </section>
       </header>
 
@@ -78,9 +94,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const connectionStatus = requireElement<HTMLSpanElement>(document, "mobileConnectionStatus");
   const sessionTitle = requireElement<HTMLHeadingElement>(document, "mobileSessionTitle");
   const sessionMeta = requireElement<HTMLParagraphElement>(document, "mobileSessionMeta");
+  const createToggle = requireElement<HTMLButtonElement>(document, "mobileCreateToggle");
   const sessionsToggle = requireElement<HTMLButtonElement>(document, "mobileSessionsToggle");
   const sessionsDrawer = requireElement<HTMLElement>(document, "mobileSessionsDrawer");
   const sessionsList = requireElement<HTMLElement>(document, "mobileSessionsList");
+  const createDrawer = requireElement<HTMLElement>(document, "mobileCreateDrawer");
+  const createForm = requireElement<HTMLFormElement>(document, "mobileCreateForm");
+  const createNameInput = requireElement<HTMLInputElement>(document, "mobileCreateName");
+  const createCwdInput = requireElement<HTMLInputElement>(document, "mobileCreateCwd");
+  const createStatus = requireElement<HTMLParagraphElement>(document, "mobileCreateStatus");
+  const createClose = requireElement<HTMLButtonElement>(document, "mobileCreateClose");
+  const createSubmit = requireElement<HTMLButtonElement>(document, "mobileCreateSubmit");
   const transcript = requireElement<HTMLDivElement>(document, "mobileTranscript");
   const promptForm = requireElement<HTMLFormElement>(document, "mobilePromptForm");
   const promptInput = requireElement<HTMLTextAreaElement>(document, "mobilePromptInput");
@@ -94,16 +118,43 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let activeSessionId: string | null = null;
   let projections = new Map<string, SessionProjection>();
   const unreadSessions = new Set<string>();
+  let createCwdDirty = false;
+  let createPendingRequestId: string | null = null;
+  let pendingCreatedSessionBaseline: Set<string> | null = null;
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
     onDeleteSession: () => undefined,
   });
 
+  createToggle.addEventListener("click", () => {
+    const open = createDrawer.hidden;
+    setCreateDrawerOpen(open);
+    if (open) {
+      sessionsDrawer.hidden = true;
+      sessionsToggle.setAttribute("aria-expanded", "false");
+      window.setTimeout(() => createNameInput.focus(), 0);
+    }
+  });
+
   sessionsToggle.addEventListener("click", () => {
     const open = sessionsDrawer.hidden;
     sessionsDrawer.hidden = !open;
     sessionsToggle.setAttribute("aria-expanded", String(open));
+    if (open) setCreateDrawerOpen(false);
+  });
+
+  createClose.addEventListener("click", () => setCreateDrawerOpen(false));
+  createCwdInput.addEventListener("input", () => {
+    createCwdDirty = true;
+    if (!createPendingRequestId) createStatus.textContent = "";
+  });
+  createNameInput.addEventListener("input", () => {
+    if (!createPendingRequestId) createStatus.textContent = "";
+  });
+  createForm.addEventListener("submit", event => {
+    event.preventDefault();
+    submitCreateSession();
   });
 
   promptForm.addEventListener("submit", event => {
@@ -131,6 +182,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       auth: { type: "sessionCookie", token: bridgeToken },
       onStatus: setStatus,
       onOpen: () => send({ type: "session.list" }),
+      onClose: () => handleConnectionClosed(),
       onMessage: handleServerMessage,
       onLog: appendLog,
     });
@@ -155,29 +207,114 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return connection.send(message);
   }
 
+  function setCreateDrawerOpen(open: boolean): void {
+    createDrawer.hidden = !open;
+    createToggle.setAttribute("aria-expanded", String(open));
+    if (open) syncCreateCwdDefault();
+  }
+
+  function syncCreateCwdDefault(): void {
+    if (!createCwdDirty) createCwdInput.value = serverConfig?.defaultCwd ?? "";
+  }
+
+  function setCreatePending(pending: boolean, requestId: string | null = null): void {
+    createPendingRequestId = pending ? requestId : null;
+    createNameInput.disabled = pending;
+    createCwdInput.disabled = pending;
+    createSubmit.disabled = pending;
+    createClose.disabled = pending;
+    createStatus.textContent = pending ? "Creating session…" : "";
+  }
+
+  function submitCreateSession(): void {
+    const cwd = createCwdInput.value.trim();
+    const name = createNameInput.value.trim();
+    if (!cwd) {
+      createStatus.textContent = "Working directory is required.";
+      return;
+    }
+
+    const requestId = nextClientRequestId("mobile-session-create");
+    pendingCreatedSessionBaseline = new Set(sessions.map(session => session.sessionId));
+    setCreatePending(true, requestId);
+    // Mobile intentionally starts with normal cwd-based session creation.
+    // Worktree creation, model picker, desktop panel workspace, and Ask Fura are outside the mobile shell scope.
+    const accepted = send({
+      type: "session.create",
+      requestId,
+      cwd,
+      ...(name ? { name } : {}),
+    });
+    if (!accepted) {
+      pendingCreatedSessionBaseline = null;
+      setCreatePending(false);
+      createStatus.textContent = "Not connected to the Fura bridge.";
+    }
+  }
+
+  function isPendingCreatedSession(sessionId: string): boolean {
+    return Boolean(pendingCreatedSessionBaseline && !pendingCreatedSessionBaseline.has(sessionId));
+  }
+
+  function finishCreateSession(): void {
+    pendingCreatedSessionBaseline = null;
+    setCreatePending(false);
+    createNameInput.value = "";
+    createCwdDirty = false;
+    syncCreateCwdDefault();
+    setCreateDrawerOpen(false);
+  }
+
+  function handleCreateError(requestId: string | null, message: string): boolean {
+    if (!createPendingRequestId || requestId !== createPendingRequestId) return false;
+    pendingCreatedSessionBaseline = null;
+    setCreatePending(false);
+    setCreateDrawerOpen(true);
+    createStatus.textContent = message;
+    return true;
+  }
+
+  function handleConnectionClosed(): void {
+    if (!createPendingRequestId) return;
+    const requestId = createPendingRequestId;
+    handleCreateError(requestId, "Connection closed before session creation completed.");
+  }
+
+  function nextClientRequestId(prefix: string): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return `${prefix}-${crypto.randomUUID()}`;
+    }
+    return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+
   function handleServerMessage(message: ServerMessage): void {
     switch (message.type) {
       case "hello":
         serverConfig = message.config;
+        syncCreateCwdDefault();
         appendLog(`Connected to fura ${message.serverVersion}.`);
         break;
       case "config.updated":
         serverConfig = message.config;
+        syncCreateCwdDefault();
         break;
       case "sessions.snapshot":
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
         render();
         break;
-      case "session.snapshot":
+      case "session.snapshot": {
+        const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
         ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
-        if (!activeSessionId || activeSessionId === message.sessionId) {
+        if (createdByPendingRequest || !activeSessionId || activeSessionId === message.sessionId) {
           activateSession(message.sessionId);
+          if (createdByPendingRequest) finishCreateSession();
           render();
         } else {
           unreadSessions.add(message.sessionId);
           renderSessions();
         }
         break;
+      }
       case "session.exited":
         appendLog(`Session ${message.sessionId} exited with code ${message.code ?? "unknown"}.`);
         render();
@@ -193,6 +330,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       case "error":
         appendLog(`Error: ${message.message}`);
+        if (handleCreateError(message.requestId ?? null, message.message)) break;
         break;
       case "dialog.request":
       case "model.list":

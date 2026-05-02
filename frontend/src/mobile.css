@@ -42,7 +42,14 @@ body {
   font-size: 0.82rem;
 }
 
-.mobile-sessions-toggle {
+.mobile-header-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.45rem;
+}
+
+.mobile-sessions-toggle,
+.mobile-create-toggle {
   flex: 0 0 auto;
 }
 
@@ -70,6 +77,44 @@ body {
 
 .mobile-session-drawer .session-delete {
   display: none;
+}
+
+.mobile-create-drawer {
+  border: 1px solid #252a35;
+  border-radius: 0.9rem;
+  background: rgba(16, 19, 26, 0.82);
+  padding: 0.75rem;
+}
+
+.mobile-create-drawer[hidden] {
+  display: none;
+}
+
+.mobile-create-form {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.mobile-create-form label {
+  color: #c7cedc;
+  font-size: 0.82rem;
+}
+
+.mobile-optional-label,
+.mobile-create-status {
+  color: #9ba4b5;
+  font-size: 0.78rem;
+}
+
+.mobile-create-status {
+  min-height: 1rem;
+  margin: 0;
+}
+
+.mobile-create-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
 }
 
 .mobile-main {
