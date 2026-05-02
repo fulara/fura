@@ -6,6 +6,7 @@ import { shortId } from "./format";
 import type { ClientMessage, RepoDiffState, ServerConfig, ServerMessage, SessionProjection, SessionSummary, TodoPhase } from "./protocol";
 import { sessionKindLabel, sessionStatusLabel } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
+import { resolveSessionCreateMessage } from "./sessionCreate";
 import { createSessionListView } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
@@ -243,24 +244,24 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   function submitCreateSession(): void {
-    const cwd = createCwdInput.value.trim();
-    const name = createNameInput.value.trim();
-    if (!cwd) {
-      createStatus.textContent = "Working directory is required.";
+    const requestId = nextClientRequestId("mobile-session-create");
+    const result = resolveSessionCreateMessage({
+      requestId,
+      cwd: createCwdInput.value,
+      name: createNameInput.value,
+    });
+    if (result.type === "invalid") {
+      createStatus.textContent = result.message;
+      if (result.target === "cwd") createCwdInput.focus();
+      if (result.target === "name") createNameInput.focus();
       return;
     }
 
-    const requestId = nextClientRequestId("mobile-session-create");
     pendingCreatedSessionBaseline = new Set(sessions.map(session => session.sessionId));
     setCreatePending(true, requestId);
     // Mobile intentionally starts with normal cwd-based session creation.
     // Worktree creation, model picker, desktop panel workspace, and Ask Fura are outside the mobile shell scope.
-    const accepted = send({
-      type: "session.create",
-      requestId,
-      cwd,
-      ...(name ? { name } : {}),
-    });
+    const accepted = send(result.message);
     if (!accepted) {
       pendingCreatedSessionBaseline = null;
       setCreatePending(false);
