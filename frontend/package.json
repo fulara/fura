@@ -19,6 +19,7 @@
   "dependencies": {
     "dockview-core": "^5.2.0",
     "highlight.js": "^11.11.1",
-    "marked": "^18.0.2"
+    "marked": "^18.0.2",
+    "mermaid": "^11.14.0"
   }
 }

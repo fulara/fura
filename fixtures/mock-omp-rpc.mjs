@@ -271,6 +271,36 @@ for await (const line of rl) {
         break;
       }
 
+      if (promptText.toLowerCase().includes("mock broken mermaid")) {
+        const assistant = {
+          id: `assistant-${now + 1}`,
+          role: "assistant",
+          content: [{ type: "text", text: "Here is a broken Mermaid diagram for local renderer testing.\n\n```mermaid\ngraph TD\n  A -->\n```" }],
+          timestamp: now + 1,
+        };
+        messages.push(user, assistant);
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({ type: "message_end", timestamp: now + 1, message: assistant });
+        write({ type: "agent_end", timestamp: now + 2 });
+        break;
+      }
+
+      if (promptText.toLowerCase().includes("mock mermaid")) {
+        const assistant = {
+          id: `assistant-${now + 1}`,
+          role: "assistant",
+          content: [{ type: "text", text: "Here is a local Mermaid diagram.\n\n```mermaid\nflowchart TD\n  Agent[OMP agent] -->|fenced source| Fura[Fura browser]\n  Fura -->|local render| Preview[SVG preview]\n  Preview --> Export[SVG/PNG export]\n```" }],
+          timestamp: now + 1,
+        };
+        messages.push(user, assistant);
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({ type: "message_end", timestamp: now + 1, message: assistant });
+        write({ type: "agent_end", timestamp: now + 2 });
+        break;
+      }
+
       const assistant = {
         id: `assistant-${now + 1}`,
         role: "assistant",

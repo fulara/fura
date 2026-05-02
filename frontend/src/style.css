@@ -1159,6 +1159,82 @@ h2 {
   white-space: nowrap;
 }
 
+.mermaid-block {
+  margin: 0.7rem 0;
+  border-top: 1px solid #252a35;
+  border-bottom: 1px solid #252a35;
+  background: rgba(12, 15, 22, 0.55);
+}
+
+.mermaid-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  background: #161b24;
+  padding: 0.35rem 0.85rem;
+  border-bottom: 1px solid #252a35;
+}
+
+.mermaid-label {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  color: #7f8cff;
+  text-transform: lowercase;
+}
+
+.mermaid-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.4rem;
+}
+
+.mermaid-action {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.72rem;
+}
+
+.mermaid-preview {
+  min-height: 5rem;
+  padding: 1rem;
+  overflow: auto;
+  color: #c9d3e6;
+  text-align: center;
+}
+
+.mermaid-preview svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+.mermaid-error {
+  color: #ffaaa6;
+  text-align: left;
+  white-space: pre-wrap;
+}
+
+.mermaid-source {
+  border-top: 1px solid #252a35;
+}
+
+.mermaid-source summary {
+  color: #8d98ad;
+  cursor: pointer;
+  font-size: 0.78rem;
+  padding: 0.45rem 0.85rem;
+  user-select: none;
+}
+
+.mermaid-source pre {
+  margin: 0;
+  overflow-x: auto;
+  padding: 0.85rem;
+  background: #10141c;
+}
+
 .markdown-body {
   padding: 0.5rem 0.85rem;
   line-height: 1.6;
@@ -1243,6 +1319,16 @@ h2 {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.88em;
   padding: 0.05rem 0.25rem;
+}
+
+.markdown-body .mermaid-source code {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #dbe7ff;
+  font-size: 0.875rem;
+  padding: 0;
+  white-space: pre;
 }
 
 .markdown-body hr {

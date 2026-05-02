@@ -3,6 +3,7 @@ import { marked, type Token, type Tokens } from "marked";
 import { mkEl, mkFrag, mkText } from "./dom";
 import { appendEventTimestamp } from "./eventTime";
 import { imagePlaceholderText, renderImageAttachment } from "./imageRendering";
+import { renderMermaidBlock } from "./mermaidRendering";
 import type { ContentBlock, TranscriptMessage } from "./protocol";
 import type { ThinkingVisibilityMode } from "./uiPreferences";
 
@@ -295,6 +296,10 @@ function tokenText(token: Token): string {
 }
 
 export function renderCodeBlock(lang: string, code: string): HTMLElement {
+  if (lang.trim().toLowerCase() === "mermaid") {
+    return renderMermaidBlock(code);
+  }
+
   const wrapper = mkEl("div");
   wrapper.className = "code-block";
 
