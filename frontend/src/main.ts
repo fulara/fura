@@ -880,7 +880,7 @@ function connect(token: string): void {
   window.localStorage.setItem("fura.token", bridgeToken);
   connection?.disconnect();
   connection = createFuraConnection({
-    token: bridgeToken,
+    auth: { type: "legacyQueryToken", token: bridgeToken },
     onStatus: setStatus,
     onOpen: () => {
       send({ type: "session.list" });

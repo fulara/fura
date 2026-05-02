@@ -44,14 +44,40 @@ function resetFakeWebSockets(): void {
 }
 
 describe("buildWebSocketUrl", () => {
-  it("builds ws URLs from http page URLs", () => {
-    expect(buildWebSocketUrl("http://127.0.0.1:3737/?token=old", "dev token")).toBe(
+  it("builds legacy query-token ws URLs from http page URLs", () => {
+    expect(buildWebSocketUrl(
+      "http://127.0.0.1:3737/?token=old",
+      { type: "legacyQueryToken", token: "dev token" },
+    )).toBe(
       "ws://127.0.0.1:3737/ws?token=dev+token",
     );
   });
 
-  it("builds wss URLs from https page URLs", () => {
-    expect(buildWebSocketUrl("https://fura.example/app", "secret")).toBe("wss://fura.example/ws?token=secret");
+  it("builds legacy query-token wss URLs from https page URLs", () => {
+    expect(buildWebSocketUrl(
+      "https://fura.example/app",
+      { type: "legacyQueryToken", token: "secret" },
+    )).toBe(
+      "wss://fura.example/ws?token=secret",
+    );
+  });
+
+  it("preserves empty legacy query tokens so callers own empty-token validation", () => {
+    expect(buildWebSocketUrl(
+      "http://localhost:3737/",
+      { type: "legacyQueryToken", token: "" },
+    )).toBe(
+      "ws://localhost:3737/ws?token=",
+    );
+  });
+
+  it("drops page path and replaces any page token with the explicit legacy query token", () => {
+    expect(buildWebSocketUrl(
+      "http://localhost:3737/app/path?token=old&other=ignored",
+      { type: "legacyQueryToken", token: "new" },
+    )).toBe(
+      "ws://localhost:3737/ws?token=new",
+    );
   });
 });
 
@@ -61,7 +87,7 @@ describe("createFuraConnection", () => {
     const statuses: string[] = [];
     const logs: string[] = [];
     const connection = createFuraConnection({
-      token: "dev",
+      auth: { type: "legacyQueryToken", token: "dev" },
       locationHref: "http://localhost:3737/",
       WebSocketCtor: FakeWebSocket,
       onStatus: status => statuses.push(status),
@@ -87,7 +113,7 @@ describe("createFuraConnection", () => {
     const logs: string[] = [];
     const received: string[] = [];
     const connection = createFuraConnection({
-      token: "dev",
+      auth: { type: "legacyQueryToken", token: "dev" },
       locationHref: "http://localhost:3737/",
       WebSocketCtor: FakeWebSocket,
       onStatus: () => {},
@@ -108,7 +134,7 @@ describe("createFuraConnection", () => {
     resetFakeWebSockets();
     const logs: string[] = [];
     const connection = createFuraConnection({
-      token: "dev",
+      auth: { type: "legacyQueryToken", token: "dev" },
       locationHref: "http://localhost:3737/",
       WebSocketCtor: FakeWebSocket,
       onStatus: () => {},

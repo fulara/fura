@@ -18,8 +18,14 @@ export type FuraConnection = {
   send(message: ClientMessage): boolean;
 };
 
+export type WebSocketAuth =
+  // Current bridge behavior: authenticate the WebSocket upgrade with a token query parameter.
+  // Query tokens can appear in HTTP access logs; add a new auth variant for safer future flows
+  // instead of hiding that behavior behind a plain string.
+  | { type: "legacyQueryToken"; token: string };
+
 type FuraConnectionOptions = {
-  token: string;
+  auth: WebSocketAuth;
   locationHref?: string;
   WebSocketCtor?: WebSocketConstructor;
   onStatus(status: ConnectionStatus, label: string): void;
@@ -31,10 +37,14 @@ type FuraConnectionOptions = {
 
 const OPEN_READY_STATE = 1;
 
-export function buildWebSocketUrl(locationHref: string, token: string): string {
+export function buildWebSocketUrl(locationHref: string, auth: WebSocketAuth): string {
   const wsUrl = new URL("/ws", locationHref);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-  wsUrl.searchParams.set("token", token);
+  switch (auth.type) {
+    case "legacyQueryToken":
+      wsUrl.searchParams.set("token", auth.token);
+      break;
+  }
   return wsUrl.toString();
 }
 
@@ -47,7 +57,7 @@ export function createFuraConnection(options: FuraConnectionOptions): FuraConnec
     connect() {
       socket?.close();
       options.onStatus("connecting", "connecting");
-      socket = new WebSocketCtor(buildWebSocketUrl(locationHref, options.token));
+      socket = new WebSocketCtor(buildWebSocketUrl(locationHref, options.auth));
       socket.addEventListener("open", () => {
         options.onStatus("connected", "connected");
         options.onOpen?.();
