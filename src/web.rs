@@ -50,13 +50,7 @@ pub(crate) async fn auth_session_handler(
     }
 
     let mut auth_sessions = state.auth_sessions.write().await;
-    let session_id = issue_auth_session(&mut auth_sessions, Instant::now());
-
-    (
-        StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, auth_session_cookie_header(&session_id))],
-    )
-        .into_response()
+    build_auth_session_response(issue_auth_session(&mut auth_sessions, Instant::now()))
 }
 
 pub(crate) async fn authenticate_websocket_headers(
@@ -84,6 +78,14 @@ pub(crate) fn issue_auth_session(
         },
     );
     session_id
+}
+
+pub(crate) fn build_auth_session_response(session_id: String) -> Response {
+    (
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, auth_session_cookie_header(&session_id))],
+    )
+        .into_response()
 }
 
 pub(crate) fn authenticate_session_id(
@@ -451,6 +453,23 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_auth_session_response_sets_http_only_cookie() {
+        let response = build_auth_session_response("session-1".to_string());
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("set-cookie header");
+        assert!(cookie.contains("fura_session=session-1"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Path=/"));
+        assert!(cookie.contains("Max-Age=43200"));
+    }
 
     #[test]
     fn issue_auth_session_removes_expired_sessions() {

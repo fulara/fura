@@ -1,7 +1,7 @@
 // fura-gui: native desktop window for a running Fura server.
 //
-// Connects to the server via WebSocket (same protocol as the browser frontend).
-// The server does not know or care whether its client is this binary or a browser.
+// Opens the browser frontend in a native window. The initial URL includes the bootstrap
+// token; the frontend exchanges it for an HttpOnly browser auth session before opening WebSocket.
 //
 // Usage:
 //   fura-gui --token dev
@@ -20,7 +20,7 @@ struct Args {
     #[arg(long, default_value_t = 3737)]
     port: u16,
 
-    /// Token must match FURA_TOKEN used when starting the server.
+    /// Bootstrap token used to create the browser auth session.
     #[arg(long, env = "FURA_TOKEN")]
     token: String,
 }

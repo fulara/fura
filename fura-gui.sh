@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # Open the Fura native desktop window.
-# Connects to an already-running fura server; does not start one.
+# Connects to an already-running fura server; does not start one. The token is
+# a bootstrap token used by the frontend to create an HttpOnly browser auth session.
 #
 # Environment overrides:
-#   FURA_TOKEN=dev          must match the token the server was started with
+#   FURA_TOKEN=dev          bootstrap token for the browser auth session
 #   FURA_HOST=127.0.0.1
 #   FURA_PORT=3737
 #   FURA_SKIP_BUILD=1       skip cargo rebuild
