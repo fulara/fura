@@ -11,7 +11,7 @@ import { canvasDimensionsForSvg, renderMermaidBlock, svgToPngBlob } from "./merm
 import { renderCodeBlock, renderMarkdown } from "./transcriptView";
 
 async function flushMermaidRender(): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 350));
   for (let i = 0; i < 5; i += 1) {
     await Promise.resolve();
   }
@@ -47,7 +47,7 @@ describe("renderMermaidBlock", () => {
       securityLevel: "strict",
       theme: "dark",
     });
-    expect(mermaidMock.render).toHaveBeenCalledWith(expect.stringMatching(/^fura-mermaid-/), "flowchart TD\n  A --> B");
+    expect(mermaidMock.render).toHaveBeenCalledWith(expect.stringMatching(/^fura-mermaid-/), "flowchart TD\n  A --> B", expect.any(HTMLDivElement));
     expect(node.dataset.mermaidState).toBe("rendered");
     expect(node.querySelector(".mermaid-preview svg")?.getAttribute("viewBox")).toBe("0 0 100 50");
     expect(Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action")).map(button => button.textContent)).toEqual([
@@ -69,6 +69,20 @@ describe("renderMermaidBlock", () => {
     expect(node.querySelector(".mermaid-error")?.textContent).toContain("Parse error on line 2");
     expect(node.querySelector(".mermaid-source")?.textContent).toContain("A -->");
     expect(Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action")).slice(1).every(button => button.disabled)).toBe(true);
+  });
+
+  it("cleans up Mermaid temporary render containers after errors", async () => {
+    mermaidMock.render.mockImplementationOnce((_id: string, _source: string, container: HTMLElement) => {
+      container.innerHTML = '<svg class="mermaid-parser-artifact"></svg>';
+      return Promise.reject(new Error("Parse error while streaming"));
+    });
+
+    const node = renderMermaidBlock("flowchart TD\n  A -->");
+    document.body.append(node);
+    await flushMermaidRender();
+
+    expect(node.dataset.mermaidState).toBe("error");
+    expect(document.querySelector(".mermaid-parser-artifact")).toBeNull();
   });
 
   it("copies canonical Mermaid source", async () => {

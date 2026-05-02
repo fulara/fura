@@ -11,6 +11,7 @@ const MAX_PNG_DIMENSION = 4096;
 const MAX_PNG_PIXELS = 16_777_216;
 const DEFAULT_PNG_WIDTH = 1200;
 const DEFAULT_PNG_HEIGHT = 800;
+const MERMAID_RENDER_DELAY_MS = 300;
 
 let initialized = false;
 let nextRenderId = 0;
@@ -66,10 +67,17 @@ function downloadBlob(blob: Blob, fileName: string, owner: Document): void {
   owner.defaultView?.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-export async function renderMermaidSvg(source: string): Promise<string> {
+export async function renderMermaidSvg(source: string, owner: Document = document): Promise<string> {
   const mermaid = await loadMermaidClient();
-  const result = await mermaid.render(nextMermaidId(), source);
-  return result.svg;
+  const container = owner.createElement("div");
+  container.hidden = true;
+  owner.body.append(container);
+  try {
+    const result = await mermaid.render(nextMermaidId(), source, container);
+    return result.svg;
+  } finally {
+    container.remove();
+  }
 }
 
 export function renderMermaidBlock(source: string): HTMLElement {
@@ -157,9 +165,12 @@ export function renderMermaidBlock(source: string): HTMLElement {
 
   wrapper.append(header, preview, details);
 
-  queueMicrotask(() => {
-    void renderMermaidSvg(source)
+  const win = wrapper.ownerDocument.defaultView ?? window;
+  win.setTimeout(() => {
+    if (!wrapper.isConnected) return;
+    void renderMermaidSvg(source, wrapper.ownerDocument)
       .then(svg => {
+        if (!wrapper.isConnected) return;
         state.svg = svg;
         wrapper.dataset.mermaidState = "rendered";
         preview.classList.remove("mermaid-error");
@@ -169,12 +180,13 @@ export function renderMermaidBlock(source: string): HTMLElement {
         savePng.disabled = false;
       })
       .catch(error => {
+        if (!wrapper.isConnected) return;
         state.error = errorMessage(error);
         wrapper.dataset.mermaidState = "error";
         preview.classList.add("mermaid-error");
         preview.textContent = `Unable to render Mermaid diagram: ${state.error}`;
       });
-  });
+  }, MERMAID_RENDER_DELAY_MS);
 
   return wrapper;
 }
