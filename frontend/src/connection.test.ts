@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { buildWebSocketUrl, createFuraConnection, type WebSocketLike } from "./connection";
+import {
+  buildAuthSessionUrl,
+  buildWebSocketUrl,
+  createFuraConnection,
+  establishAuthSession,
+  type FetchLike,
+  type WebSocketLike,
+} from "./connection";
 
 class FakeWebSocket implements WebSocketLike {
   static instances: FakeWebSocket[] = [];
@@ -43,53 +50,60 @@ function resetFakeWebSockets(): void {
   FakeWebSocket.instances = [];
 }
 
-describe("buildWebSocketUrl", () => {
-  it("builds legacy query-token ws URLs from http page URLs", () => {
-    expect(buildWebSocketUrl(
-      "http://127.0.0.1:3737/?token=old",
-      { type: "legacyQueryToken", token: "dev token" },
-    )).toBe(
-      "ws://127.0.0.1:3737/ws?token=dev+token",
-    );
+function okFetch(calls: Array<{ input: string | URL; init?: Parameters<FetchLike>[1] }> = []): FetchLike {
+  return async (input, init) => {
+    calls.push({ input, init });
+    return { ok: true, status: 204 };
+  };
+}
+
+async function flushPromises(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+describe("auth and WebSocket URLs", () => {
+  it("builds auth session URLs from the current page origin", () => {
+    expect(buildAuthSessionUrl("http://127.0.0.1:3737/app?token=dev")).toBe("http://127.0.0.1:3737/auth/session");
   });
 
-  it("builds legacy query-token wss URLs from https page URLs", () => {
-    expect(buildWebSocketUrl(
-      "https://fura.example/app",
-      { type: "legacyQueryToken", token: "secret" },
-    )).toBe(
-      "wss://fura.example/ws?token=secret",
-    );
+  it("builds WebSocket URLs without putting tokens in the URL", () => {
+    expect(buildWebSocketUrl("http://127.0.0.1:3737/?token=dev")).toBe("ws://127.0.0.1:3737/ws");
+    expect(buildWebSocketUrl("https://fura.example/app?token=secret")).toBe("wss://fura.example/ws");
   });
 
-  it("preserves empty legacy query tokens so callers own empty-token validation", () => {
-    expect(buildWebSocketUrl(
-      "http://localhost:3737/",
-      { type: "legacyQueryToken", token: "" },
-    )).toBe(
-      "ws://localhost:3737/ws?token=",
-    );
-  });
+  it("establishes an HttpOnly cookie session before WebSocket connection", async () => {
+    const calls: Array<{ input: string | URL; init?: Parameters<FetchLike>[1] }> = [];
 
-  it("drops page path and replaces any page token with the explicit legacy query token", () => {
-    expect(buildWebSocketUrl(
-      "http://localhost:3737/app/path?token=old&other=ignored",
-      { type: "legacyQueryToken", token: "new" },
-    )).toBe(
-      "ws://localhost:3737/ws?token=new",
-    );
+    await expect(establishAuthSession(
+      "http://localhost:3737/?token=dev",
+      { type: "sessionCookie", token: "dev" },
+      okFetch(calls),
+    )).resolves.toBe(true);
+
+    expect(calls).toEqual([{
+      input: "http://localhost:3737/auth/session",
+      init: {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ token: "dev" }),
+      },
+    }]);
   });
 });
 
 describe("createFuraConnection", () => {
-  it("reports status changes and requests the session list on open", () => {
+  it("authenticates, reports status changes, and requests the session list on open", async () => {
     resetFakeWebSockets();
     const statuses: string[] = [];
     const logs: string[] = [];
+    const fetchCalls: Array<{ input: string | URL; init?: Parameters<FetchLike>[1] }> = [];
     const connection = createFuraConnection({
-      auth: { type: "legacyQueryToken", token: "dev" },
-      locationHref: "http://localhost:3737/",
+      auth: { type: "sessionCookie", token: "dev" },
+      locationHref: "http://localhost:3737/?token=dev",
       WebSocketCtor: FakeWebSocket,
+      fetchImpl: okFetch(fetchCalls),
       onStatus: status => statuses.push(status),
       onOpen: () => connection.send({ type: "session.list" }),
       onClose: () => logs.push("closed"),
@@ -98,30 +112,56 @@ describe("createFuraConnection", () => {
     });
 
     connection.connect();
+    await flushPromises();
     const socket = FakeWebSocket.instances[0];
     socket.emit("open");
     socket.emit("close");
 
-    expect(socket.url).toBe("ws://localhost:3737/ws?token=dev");
+    expect(fetchCalls.map(call => call.input)).toEqual(["http://localhost:3737/auth/session"]);
+    expect(socket.url).toBe("ws://localhost:3737/ws");
     expect(statuses).toEqual(["connecting", "connected", "disconnected"]);
     expect(socket.sent).toEqual([JSON.stringify({ type: "session.list" })]);
     expect(logs).toEqual(["closed"]);
   });
 
-  it("routes text messages and ignores non-text frames", () => {
+  it("does not open a WebSocket when authentication fails", async () => {
+    resetFakeWebSockets();
+    const statuses: string[] = [];
+    const logs: string[] = [];
+    const connection = createFuraConnection({
+      auth: { type: "sessionCookie", token: "bad" },
+      locationHref: "http://localhost:3737/",
+      WebSocketCtor: FakeWebSocket,
+      fetchImpl: async () => ({ ok: false, status: 401 }),
+      onStatus: status => statuses.push(status),
+      onMessage: () => {},
+      onLog: message => logs.push(message),
+    });
+
+    connection.connect();
+    await flushPromises();
+
+    expect(FakeWebSocket.instances).toEqual([]);
+    expect(statuses).toEqual(["connecting", "disconnected"]);
+    expect(logs).toEqual(["Authentication failed. Check the token and bridge server."]);
+  });
+
+  it("routes text messages and ignores non-text frames", async () => {
     resetFakeWebSockets();
     const logs: string[] = [];
     const received: string[] = [];
     const connection = createFuraConnection({
-      auth: { type: "legacyQueryToken", token: "dev" },
+      auth: { type: "sessionCookie", token: "dev" },
       locationHref: "http://localhost:3737/",
       WebSocketCtor: FakeWebSocket,
+      fetchImpl: okFetch(),
       onStatus: () => {},
       onMessage: message => received.push(message.type),
       onLog: message => logs.push(message),
     });
 
     connection.connect();
+    await flushPromises();
     const socket = FakeWebSocket.instances[0];
     socket.emitMessage(JSON.stringify({ type: "sessions.snapshot", sessions: [] }));
     socket.emitMessage(new Uint8Array());
@@ -130,19 +170,21 @@ describe("createFuraConnection", () => {
     expect(logs).toEqual(["Ignored non-text WebSocket frame."]);
   });
 
-  it("does not send before the socket is open", () => {
+  it("does not send before the socket is open", async () => {
     resetFakeWebSockets();
     const logs: string[] = [];
     const connection = createFuraConnection({
-      auth: { type: "legacyQueryToken", token: "dev" },
+      auth: { type: "sessionCookie", token: "dev" },
       locationHref: "http://localhost:3737/",
       WebSocketCtor: FakeWebSocket,
+      fetchImpl: okFetch(),
       onStatus: () => {},
       onMessage: () => {},
       onLog: message => logs.push(message),
     });
 
     connection.connect();
+    await flushPromises();
 
     expect(connection.send({ type: "session.list" })).toBe(false);
     expect(FakeWebSocket.instances[0].sent).toEqual([]);

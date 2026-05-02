@@ -1,7 +1,10 @@
 use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use anyhow::Context;
-use axum::{Router, routing::get};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use clap::Parser;
 use tokio::{
     net::TcpListener,
@@ -89,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
     let (events, _) = broadcast::channel(512);
     let state = AppState {
         token: Arc::new(token),
+        auth_sessions: Arc::new(RwLock::new(HashMap::new())),
         sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
@@ -116,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .route("/healthz", get(healthz))
+        .route("/auth/session", post(auth_session_handler))
         .route("/ws", get(ws_handler))
         .fallback_service(ServeDir::new(&args.static_dir).append_index_html_on_directories(true))
         .layer(TraceLayer::new_for_http())
@@ -283,6 +288,7 @@ mod tests {
         let (events, _) = broadcast::channel(channel_capacity);
         AppState {
             token: Arc::new("test".into()),
+            auth_sessions: Arc::new(RwLock::new(HashMap::new())),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),

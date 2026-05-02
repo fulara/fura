@@ -1,45 +1,119 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use anyhow::anyhow;
 use axum::{
     Json,
     extract::{
-        Query, State,
+        Json as JsonBody, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::StatusCode,
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::{
-    AppState, ClientMessage, ServerMessage, client_config, handle_client_message,
+    AppState, AuthSession, ClientMessage, ServerMessage, client_config, handle_client_message,
     refresh_session_catalog, sessions_snapshot_from_map,
 };
 
+const AUTH_SESSION_COOKIE: &str = "fura_session";
+const AUTH_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct AuthSessionRequest {
+    token: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebSocketAuth {
-    // Current bridge behavior: authenticate the WebSocket upgrade with the `token`
-    // query parameter. Query tokens can appear in access logs; add a new variant
-    // here for safer future flows instead of hiding the strategy in `ws_handler`.
-    LegacyQueryToken,
+    SessionCookie,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WebSocketAuthError {
-    MissingOrInvalidToken,
+pub(crate) enum AuthError {
+    MissingOrInvalidSession,
 }
 
-pub(crate) fn authenticate_websocket_query(
-    query: &HashMap<String, String>,
-    expected_token: &str,
-) -> Result<WebSocketAuth, WebSocketAuthError> {
-    match query.get("token") {
-        Some(token) if token == expected_token => Ok(WebSocketAuth::LegacyQueryToken),
-        _ => Err(WebSocketAuthError::MissingOrInvalidToken),
+pub(crate) async fn auth_session_handler(
+    State(state): State<AppState>,
+    JsonBody(payload): JsonBody<AuthSessionRequest>,
+) -> Response {
+    if payload.token != *state.token.as_ref() {
+        return (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response();
     }
+
+    let mut auth_sessions = state.auth_sessions.write().await;
+    let session_id = issue_auth_session(&mut auth_sessions, Instant::now());
+
+    (
+        StatusCode::NO_CONTENT,
+        [(header::SET_COOKIE, auth_session_cookie_header(&session_id))],
+    )
+        .into_response()
+}
+
+pub(crate) async fn authenticate_websocket_headers(
+    headers: &HeaderMap,
+    state: &AppState,
+    now: Instant,
+) -> Result<WebSocketAuth, AuthError> {
+    let Some(session_id) = auth_session_cookie(headers) else {
+        return Err(AuthError::MissingOrInvalidSession);
+    };
+    let mut auth_sessions = state.auth_sessions.write().await;
+    authenticate_session_id(&mut auth_sessions, &session_id, now)
+}
+
+pub(crate) fn issue_auth_session(
+    auth_sessions: &mut HashMap<String, AuthSession>,
+    now: Instant,
+) -> String {
+    auth_sessions.retain(|_, session| session.expires_at > now);
+    let session_id = uuid::Uuid::new_v4().simple().to_string();
+    auth_sessions.insert(
+        session_id.clone(),
+        AuthSession {
+            expires_at: now + AUTH_SESSION_TTL,
+        },
+    );
+    session_id
+}
+
+pub(crate) fn authenticate_session_id(
+    auth_sessions: &mut HashMap<String, AuthSession>,
+    session_id: &str,
+    now: Instant,
+) -> Result<WebSocketAuth, AuthError> {
+    match auth_sessions.get(session_id) {
+        Some(session) if session.expires_at > now => Ok(WebSocketAuth::SessionCookie),
+        Some(_) => {
+            auth_sessions.remove(session_id);
+            Err(AuthError::MissingOrInvalidSession)
+        }
+        None => Err(AuthError::MissingOrInvalidSession),
+    }
+}
+
+fn auth_session_cookie(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == AUTH_SESSION_COOKIE && !value.is_empty()).then(|| value.to_string())
+    })
+}
+
+fn auth_session_cookie_header(session_id: &str) -> String {
+    format!(
+        "{AUTH_SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        AUTH_SESSION_TTL.as_secs(),
+    )
 }
 
 pub(crate) async fn healthz() -> Json<Value> {
@@ -48,15 +122,15 @@ pub(crate) async fn healthz() -> Json<Value> {
 
 pub(crate) async fn ws_handler(
     State(state): State<AppState>,
-    Query(query): Query<HashMap<String, String>>,
+    headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    match authenticate_websocket_query(&query, state.token.as_ref()) {
-        Ok(WebSocketAuth::LegacyQueryToken) => {
+    match authenticate_websocket_headers(&headers, &state, Instant::now()).await {
+        Ok(WebSocketAuth::SessionCookie) => {
             ws.on_upgrade(move |socket| handle_socket(socket, state))
         }
-        Err(WebSocketAuthError::MissingOrInvalidToken) => {
-            (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response()
+        Err(AuthError::MissingOrInvalidSession) => {
+            (StatusCode::UNAUTHORIZED, "missing or invalid session").into_response()
         }
     }
 }
@@ -379,34 +453,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn authenticate_websocket_query_accepts_matching_legacy_query_token() {
-        let query = HashMap::from([("token".to_string(), "dev".to_string())]);
+    fn issue_auth_session_removes_expired_sessions() {
+        let now = Instant::now();
+        let mut sessions = HashMap::from([(
+            "expired".to_string(),
+            AuthSession {
+                expires_at: now - Duration::from_secs(1),
+            },
+        )]);
+
+        let issued = issue_auth_session(&mut sessions, now);
+
+        assert!(!sessions.contains_key("expired"));
+        assert!(sessions.contains_key(&issued));
+    }
+
+    #[test]
+    fn authenticate_session_id_accepts_unexpired_session() {
+        let now = Instant::now();
+        let mut sessions = HashMap::from([(
+            "session-1".to_string(),
+            AuthSession {
+                expires_at: now + Duration::from_secs(60),
+            },
+        )]);
 
         assert_eq!(
-            authenticate_websocket_query(&query, "dev"),
-            Ok(WebSocketAuth::LegacyQueryToken),
+            authenticate_session_id(&mut sessions, "session-1", now),
+            Ok(WebSocketAuth::SessionCookie),
         );
     }
 
     #[test]
-    fn authenticate_websocket_query_rejects_missing_token() {
-        let query = HashMap::new();
+    fn authenticate_session_id_rejects_missing_session() {
+        let mut sessions = HashMap::new();
 
         assert_eq!(
-            authenticate_websocket_query(&query, "dev"),
-            Err(WebSocketAuthError::MissingOrInvalidToken),
+            authenticate_session_id(&mut sessions, "missing", Instant::now()),
+            Err(AuthError::MissingOrInvalidSession),
         );
     }
 
     #[test]
-    fn authenticate_websocket_query_rejects_wrong_or_empty_token() {
-        for token in ["", "old"] {
-            let query = HashMap::from([("token".to_string(), token.to_string())]);
+    fn authenticate_session_id_rejects_and_removes_expired_session() {
+        let now = Instant::now();
+        let mut sessions = HashMap::from([(
+            "expired".to_string(),
+            AuthSession {
+                expires_at: now - Duration::from_secs(1),
+            },
+        )]);
 
-            assert_eq!(
-                authenticate_websocket_query(&query, "dev"),
-                Err(WebSocketAuthError::MissingOrInvalidToken),
-            );
-        }
+        assert_eq!(
+            authenticate_session_id(&mut sessions, "expired", now),
+            Err(AuthError::MissingOrInvalidSession),
+        );
+        assert!(!sessions.contains_key("expired"));
     }
 }

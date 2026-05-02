@@ -95,7 +95,7 @@ Environment overrides for `run-local-omp.sh`:
 |---|---|---|
 | `OMP_REPO` | `~/repos/oh-my-pi` | Path to the OMP monorepo checkout |
 | `BUN_BIN` | `~/.bun/bin/bun` | Path to the `bun` executable |
-| `FURA_TOKEN` | `dev` | Auth token for the WebSocket endpoint |
+| `FURA_TOKEN` | `dev` | Bootstrap token for creating the browser auth session |
 | `FURA_BRIDGE_DEBUG_FILE` | `./bridge-debug.jsonl` | Raw RPC frame log (contains prompts — do not commit) |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
@@ -111,7 +111,7 @@ Environment overrides for `run-mock-rpc.sh`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `FURA_TOKEN` | `dev` | Auth token for the WebSocket endpoint |
+| `FURA_TOKEN` | `dev` | Bootstrap token for creating the browser auth session |
 | `FURA_PORT` | `3737` | Listen port |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
@@ -123,7 +123,7 @@ All flags can also be set via environment variables:
 |---|---|---|---|
 | `--host` | — | `127.0.0.1` | Bind address |
 | `--port` | — | `3737` | Listen port |
-| `--token` | `FURA_TOKEN` | random UUID (logged) | Auth token |
+| `--token` | `FURA_TOKEN` | random UUID (logged) | Bootstrap token for browser auth session creation |
 | `--static-dir` | — | `frontend/dist` | Frontend static files |
 | `--rpc-program` | `FURA_RPC_PROGRAM` | `omp` | RPC child executable |
 | `--rpc-arg` | `FURA_RPC_ARGS` | — | Extra args for RPC child (repeatable) |

@@ -533,7 +533,11 @@ const url = new URL(window.location.href);
 const urlToken = url.searchParams.get("token")?.trim() ?? "";
 const storedToken = window.localStorage.getItem("fura.token")?.trim() ?? "";
 const initialToken = urlToken || storedToken;
-if (urlToken) window.localStorage.setItem("fura.token", urlToken);
+if (urlToken) {
+  window.localStorage.setItem("fura.token", urlToken);
+  url.searchParams.delete("token");
+  window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+}
 let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
 let thinkingVisibilityMode = parseThinkingVisibilityMode(window.localStorage.getItem(THINKING_VISIBILITY_STORAGE_KEY));
 let skipThinkingOpenRestoreOnce = false;
@@ -880,7 +884,7 @@ function connect(token: string): void {
   window.localStorage.setItem("fura.token", bridgeToken);
   connection?.disconnect();
   connection = createFuraConnection({
-    auth: { type: "legacyQueryToken", token: bridgeToken },
+    auth: { type: "sessionCookie", token: bridgeToken },
     onStatus: setStatus,
     onOpen: () => {
       send({ type: "session.list" });
@@ -3753,6 +3757,3 @@ function setStatus(label: string, className: string): void {
 function appendLog(line: string): void {
   console.debug(`[fura] ${line}`);
 }
-
-
-

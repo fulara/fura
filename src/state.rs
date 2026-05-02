@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
 use serde_json::Value;
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
@@ -10,6 +10,7 @@ use crate::{
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) token: Arc<String>,
+    pub(crate) auth_sessions: Arc<RwLock<HashMap<String, AuthSession>>>,
     pub(crate) sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
     pub(crate) rpc_sessions: Arc<RwLock<HashMap<String, RpcSessionHandle>>>,
     pub(crate) rpc_session_targets: Arc<RwLock<HashMap<String, String>>>,
@@ -32,6 +33,11 @@ pub(crate) struct AppState {
     pub(crate) default_cwd: Arc<RwLock<String>>,
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) voice_language: Arc<RwLock<String>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AuthSession {
+    pub(crate) expires_at: Instant,
 }
 
 pub(crate) struct RpcSessionHandle {

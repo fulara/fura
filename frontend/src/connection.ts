@@ -10,6 +10,14 @@ export type WebSocketLike = {
 };
 
 export type WebSocketConstructor = new (url: string | URL) => WebSocketLike;
+export type FetchLike = (input: string | URL, init?: AuthSessionRequestInit) => Promise<{ ok: boolean; status: number }>;
+
+type AuthSessionRequestInit = {
+  method: "POST";
+  headers: Record<string, string>;
+  credentials: RequestCredentials;
+  body: string;
+};
 
 export type FuraConnection = {
   connect(): void;
@@ -19,15 +27,13 @@ export type FuraConnection = {
 };
 
 export type WebSocketAuth =
-  // Current bridge behavior: authenticate the WebSocket upgrade with a token query parameter.
-  // Query tokens can appear in HTTP access logs; add a new auth variant for safer future flows
-  // instead of hiding that behavior behind a plain string.
-  | { type: "legacyQueryToken"; token: string };
+  | { type: "sessionCookie"; token: string };
 
 type FuraConnectionOptions = {
   auth: WebSocketAuth;
   locationHref?: string;
   WebSocketCtor?: WebSocketConstructor;
+  fetchImpl?: FetchLike;
   onStatus(status: ConnectionStatus, label: string): void;
   onOpen?(): void;
   onClose?(): void;
@@ -37,27 +43,48 @@ type FuraConnectionOptions = {
 
 const OPEN_READY_STATE = 1;
 
-export function buildWebSocketUrl(locationHref: string, auth: WebSocketAuth): string {
+export function buildWebSocketUrl(locationHref: string): string {
   const wsUrl = new URL("/ws", locationHref);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
-  switch (auth.type) {
-    case "legacyQueryToken":
-      wsUrl.searchParams.set("token", auth.token);
-      break;
-  }
   return wsUrl.toString();
+}
+
+export function buildAuthSessionUrl(locationHref: string): string {
+  return new URL("/auth/session", locationHref).toString();
+}
+
+export async function establishAuthSession(locationHref: string, auth: WebSocketAuth, fetchImpl: FetchLike): Promise<boolean> {
+  switch (auth.type) {
+    case "sessionCookie": {
+      const response = await fetchImpl(buildAuthSessionUrl(locationHref), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ token: auth.token }),
+      });
+      return response.ok;
+    }
+  }
 }
 
 export function createFuraConnection(options: FuraConnectionOptions): FuraConnection {
   const WebSocketCtor = options.WebSocketCtor ?? WebSocket;
+  const fetchImpl = options.fetchImpl ?? fetch;
   const locationHref = options.locationHref ?? window.location.href;
   let socket: WebSocketLike | null = null;
+  let connectionGeneration = 0;
 
-  return {
-    connect() {
-      socket?.close();
-      options.onStatus("connecting", "connecting");
-      socket = new WebSocketCtor(buildWebSocketUrl(locationHref, options.auth));
+  async function connectWithAuth(generation: number): Promise<void> {
+    try {
+      const authenticated = await establishAuthSession(locationHref, options.auth, fetchImpl);
+      if (generation !== connectionGeneration) return;
+      if (!authenticated) {
+        options.onStatus("disconnected", "disconnected");
+        options.onLog("Authentication failed. Check the token and bridge server.");
+        return;
+      }
+
+      socket = new WebSocketCtor(buildWebSocketUrl(locationHref));
       socket.addEventListener("open", () => {
         options.onStatus("connected", "connected");
         options.onOpen?.();
@@ -77,8 +104,24 @@ export function createFuraConnection(options: FuraConnectionOptions): FuraConnec
         const message = JSON.parse(event.data) as ServerMessage;
         options.onMessage(message);
       });
+    } catch (error) {
+      if (generation !== connectionGeneration) return;
+      options.onStatus("disconnected", "disconnected");
+      options.onLog(error instanceof Error ? `Authentication failed: ${error.message}` : "Authentication failed.");
+    }
+  }
+
+  return {
+    connect() {
+      connectionGeneration += 1;
+      const generation = connectionGeneration;
+      socket?.close();
+      socket = null;
+      options.onStatus("connecting", "connecting");
+      void connectWithAuth(generation);
     },
     disconnect() {
+      connectionGeneration += 1;
       socket?.close();
       socket = null;
     },
