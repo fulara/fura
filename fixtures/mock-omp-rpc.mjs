@@ -42,8 +42,10 @@ const models = [
   },
 ];
 let currentModel = models[0];
-let currentSessionId = "mock-session";
-let currentSessionFile = "mock-session.jsonl";
+const processSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+let currentSessionId = `mock-session-${processSeed}`;
+let currentSessionFile = `${currentSessionId}.jsonl`;
+let currentSessionName = "Mock RPC Session";
 let forkCount = 0;
 let planMode = null;
 let hostTools = [];
@@ -101,7 +103,7 @@ for await (const line of rl) {
         thinkingLevel: undefined,
         sessionId: currentSessionId,
         sessionFile: currentSessionFile,
-        sessionName: "Mock RPC Session",
+        sessionName: currentSessionName,
         planMode,
         todoPhases,
       });
@@ -149,13 +151,15 @@ for await (const line of rl) {
     }
     case "fork": {
       forkCount += 1;
-      currentSessionId = `mock-session-fork-${forkCount}`;
+      currentSessionId = `mock-session-fork-${forkCount}-${processSeed}`;
       currentSessionFile = `${currentSessionId}.jsonl`;
+      currentSessionName = `Mock RPC Fork ${forkCount}`;
       success(command, { cancelled: false });
       break;
     }
     case "set_session_name": {
-      success(command, { name: command.name });
+      currentSessionName = String(command.name ?? "").trim() || currentSessionName;
+      success(command, { name: currentSessionName });
       break;
     }
     case "set_host_tools": {
@@ -200,7 +204,7 @@ for await (const line of rl) {
                   type: "session",
                   candidateId: "session-1",
                   sessionId: currentSessionId,
-                  title: "Mock RPC Session",
+                  title: currentSessionName,
                   cwd: "/mock/repo",
                   timestamp: "2026-04-29T00:00:00.000Z",
                   status: "idle",
