@@ -1029,6 +1029,20 @@ h2 {
   margin: 0.5rem 0.85rem;
 }
 
+.image-preview-button {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: 0.75rem;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.image-preview-button:focus-visible {
+  outline: 2px solid #15b7ff;
+  outline-offset: 3px;
+}
+
 .image-block img,
 .tool-image-thumb img {
   display: block;
@@ -1040,12 +1054,109 @@ h2 {
   object-fit: contain;
 }
 
+.image-preview-button:hover img {
+  border-color: rgba(21, 183, 255, 0.7);
+}
+
 .image-block figcaption,
 .tool-image-thumb figcaption,
 .image-fallback {
   margin-top: 0.35rem;
   color: #8d98ad;
   font-size: 0.82rem;
+}
+
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  background: rgba(2, 5, 12, 0.86);
+  backdrop-filter: blur(3px);
+}
+
+.image-lightbox-panel {
+  position: relative;
+  display: grid;
+  gap: 0.75rem;
+  max-width: min(94vw, 1200px);
+  max-height: 92vh;
+}
+
+.image-lightbox-panel img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(92vh - 4rem);
+  border: 1px solid #354057;
+  border-radius: 0.9rem;
+  background: #05070d;
+  object-fit: contain;
+  box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.45);
+}
+
+.image-lightbox-close {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  width: 2.2rem;
+  height: 2.2rem;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(5, 7, 13, 0.8);
+  color: #f5f7ff;
+  cursor: pointer;
+  font-size: 1.4rem;
+  line-height: 1;
+}
+
+.image-lightbox-close:focus-visible,
+.image-lightbox-close:hover {
+  border-color: #15b7ff;
+}
+
+.image-lightbox-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.5rem;
+}
+
+.image-lightbox-action {
+  border: 1px solid #2f3a50;
+  border-radius: 999px;
+  background: rgba(12, 15, 22, 0.92);
+  color: #dbe7ff;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.45rem 0.8rem;
+  text-decoration: none;
+}
+
+.image-lightbox-action:hover,
+.image-lightbox-action:focus-visible {
+  border-color: #15b7ff;
+  color: #ffffff;
+  outline: none;
+}
+
+.image-lightbox-action:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.image-lightbox-meta {
+  justify-self: center;
+  max-width: 100%;
+  padding: 0.35rem 0.65rem;
+  border-radius: 999px;
+  background: rgba(12, 15, 22, 0.86);
+  color: #c9d3e6;
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .markdown-body {

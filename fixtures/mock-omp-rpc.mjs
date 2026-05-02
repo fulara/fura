@@ -59,6 +59,8 @@ const todoPhases = [
     ],
   },
 ];
+const mockImageData =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
 const diffSnapshots = [
   {
@@ -227,10 +229,52 @@ for await (const line of rl) {
         content: [{ type: "text", text: command.message ?? "" }],
         timestamp: now,
       };
+      const promptText = String(command.message ?? "");
+      if (promptText.toLowerCase().includes("generate_image") || promptText.toLowerCase().includes("mock image")) {
+        const toolCallId = `mock-generate-image-${now}`;
+        const assistant = {
+          id: `assistant-${now + 1}`,
+          role: "assistant",
+          content: [{ type: "text", text: "Mock generated one image." }],
+          timestamp: now + 2,
+        };
+        messages.push(user, assistant);
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({
+          type: "tool_execution_start",
+          timestamp: now + 1,
+          toolCallId,
+          toolName: "generate_image",
+          args: { subject: "mock image fixture" },
+          intent: "generating mock image",
+        });
+        write({
+          type: "tool_execution_end",
+          timestamp: now + 2,
+          toolCallId,
+          toolName: "generate_image",
+          result: {
+            content: [{ type: "text", text: "Provider: mock\nModel: mock-image\nGenerated 1 image(s):\n  mock://generated-image.png" }],
+            details: {
+              provider: "mock",
+              model: "mock-image",
+              imageCount: 1,
+              imagePaths: ["mock://generated-image.png"],
+              images: [{ data: mockImageData, mimeType: "image/png", alt: "Mock generated image" }],
+            },
+          },
+          isError: false,
+        });
+        write({ type: "message_end", timestamp: now + 3, message: assistant });
+        write({ type: "agent_end", timestamp: now + 4 });
+        break;
+      }
+
       const assistant = {
         id: `assistant-${now + 1}`,
         role: "assistant",
-        content: [{ type: "text", text: `Mock assistant received ${String(command.message ?? "").length} bytes.` }],
+        content: [{ type: "text", text: `Mock assistant received ${promptText.length} bytes.` }],
         timestamp: now + 1,
       };
       messages.push(user, assistant);
