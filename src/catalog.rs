@@ -53,8 +53,12 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                 record.created_at = session.created_at;
                 record.updated_at = session.updated_at;
                 record.session_file = Some(session.session_file);
-                record.title = session.title;
-                record.timestamp = session.timestamp;
+                if session.title.is_some() {
+                    record.title = session.title;
+                }
+                if session.timestamp.is_some() {
+                    record.timestamp = session.timestamp;
+                }
                 record.category = category;
                 if should_reload_messages {
                     record.messages = session.messages.clone();
@@ -199,10 +203,17 @@ fn collect_direct_session_files(path: &Path) -> Vec<DiscoveredSession> {
         .collect()
 }
 
-fn first_entry_type_after_header<I>(lines: &mut I) -> Option<String>
+#[derive(Default)]
+struct HeaderProbe {
+    first_entry_type: Option<String>,
+    first_user_prompt: Option<String>,
+}
+
+fn probe_entries_after_header<I>(lines: &mut I) -> HeaderProbe
 where
     I: Iterator<Item = std::io::Result<String>>,
 {
+    let mut probe = HeaderProbe::default();
     for line in lines.take(8).flatten() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -211,12 +222,50 @@ where
         let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
             continue;
         };
-        return value
-            .get("type")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        if probe.first_entry_type.is_none() {
+            probe.first_entry_type = value
+                .get("type")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if probe.first_user_prompt.is_none() {
+            probe.first_user_prompt = extract_first_user_prompt(&value);
+        }
+        if probe.first_entry_type.is_some() && probe.first_user_prompt.is_some() {
+            break;
+        }
     }
-    None
+    probe
+}
+
+fn extract_first_user_prompt(entry: &Value) -> Option<String> {
+    if entry.get("type").and_then(Value::as_str) != Some("message") {
+        return None;
+    }
+    let message = entry.get("message")?;
+    if message.get("role").and_then(Value::as_str) != Some("user") {
+        return None;
+    }
+    match message.get("content")? {
+        Value::String(text) => Some(text.clone()),
+        Value::Array(blocks) => blocks.iter().find_map(|block| {
+            block
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }),
+        _ => None,
+    }
+}
+
+fn sanitize_session_title(value: &str) -> Option<String> {
+    let first_line = value.lines().next().unwrap_or_default();
+    let stripped = first_line
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>();
+    let trimmed = stripped.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
@@ -227,7 +276,8 @@ pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
     if header.entry_type != "session" {
         return None;
     }
-    if first_entry_type_after_header(&mut lines).as_deref() == Some("session_init") {
+    let probe = probe_entries_after_header(&mut lines);
+    if probe.first_entry_type.as_deref() == Some("session_init") {
         return None;
     }
     let metadata = fs::metadata(path).ok();
@@ -248,11 +298,22 @@ pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
         })
         .unwrap_or_else(Timestamp::now);
 
+    let title = header
+        .title
+        .as_deref()
+        .and_then(sanitize_session_title)
+        .or_else(|| {
+            probe
+                .first_user_prompt
+                .as_deref()
+                .and_then(sanitize_session_title)
+        });
+
     Some(DiscoveredSession {
         preload_index: usize::MAX,
         id: header.id,
         cwd: header.cwd,
-        title: header.title,
+        title,
         timestamp: header.timestamp,
         created_at,
         updated_at,

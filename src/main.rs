@@ -264,6 +264,52 @@ mod tests {
         }
     }
 
+    fn discovered_session(id: &str, title: Option<&str>, session_file: &Path) -> DiscoveredSession {
+        DiscoveredSession {
+            id: id.into(),
+            preload_index: 0,
+            cwd: Some("/workspace/project".into()),
+            title: title.map(str::to_string),
+            timestamp: Some("2026-04-29T00:00:00.000Z".into()),
+            created_at: Timestamp::from_rpc(&serde_json::json!(0)).expect("valid test timestamp"),
+            updated_at: Timestamp::from_rpc(&serde_json::json!(1)).expect("valid test timestamp"),
+            session_file: session_file.to_string_lossy().into_owned(),
+            messages: Vec::new(),
+            tool_cards: Vec::new(),
+            messages_loaded: false,
+        }
+    }
+
+    #[test]
+    fn opened_session_record_preserves_cached_available_transcript() {
+        let session_path = Path::new("/tmp/s1.jsonl");
+        let mut existing = test_record();
+        existing.kind = SessionKind::Available;
+        existing.status = SessionStatus::Available;
+        existing.messages = vec![text_message("m1", "cached history")];
+        existing.title = Some("Cached title".into());
+        existing.tokens_total = 42;
+
+        let discovered = discovered_session("s1", None, session_path);
+        let opened = opened_session_record(
+            &discovered,
+            session_path.to_string_lossy().into_owned(),
+            Some("infra".into()),
+            Some(&existing),
+        );
+
+        assert_eq!(opened.kind, SessionKind::Managed);
+        assert_eq!(opened.status, SessionStatus::Starting);
+        assert_eq!(opened.messages.len(), 1);
+        assert_eq!(opened.messages[0].id, "m1");
+        assert_eq!(opened.title.as_deref(), Some("Cached title"));
+        assert_eq!(opened.category.as_deref(), Some("infra"));
+        assert_eq!(opened.tokens_total, 42);
+        assert!(opened.live_message_ids.is_empty());
+        assert!(opened.streaming_message.is_none());
+        assert!(opened.active_tool_calls.is_empty());
+    }
+
     #[test]
     fn session_summaries_omit_controller_session() {
         let mut normal = test_record();
@@ -557,6 +603,72 @@ mod tests {
         );
 
         assert!(!refresh_session_catalog(&state).await);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn refresh_session_catalog_does_not_erase_known_title_when_header_lacks_one() {
+        let root = env::temp_dir().join(format!(
+            "fura-sessions-title-preserve-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let session_path = root.join("project").join("s1.jsonl");
+        fs::create_dir_all(session_path.parent().expect("session parent")).expect("session dir");
+        let header = serde_json::json!({
+            "type": "session",
+            "id": "s1",
+            "timestamp": "2026-04-29T00:00:00.000Z",
+            "cwd": "/workspace/project",
+        });
+        fs::write(&session_path, format!("{header}\n")).expect("session file should be written");
+
+        let mut state = test_state(8, None);
+        state.session_root = root.clone();
+        let mut record = test_record();
+        record.id = "s1".into();
+        record.kind = SessionKind::Available;
+        record.status = SessionStatus::Available;
+        record.title = Some("Known live title".into());
+        record.session_file = Some(session_path.to_string_lossy().into_owned());
+        state.sessions.write().await.insert("s1".into(), record);
+
+        assert!(refresh_session_catalog(&state).await);
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session should remain");
+        assert_eq!(record.title.as_deref(), Some("Known live title"));
+        drop(sessions);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_session_header_falls_back_to_first_user_prompt_title() {
+        let root = env::temp_dir().join(format!(
+            "fura-sessions-title-fallback-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let session_path = root.join("project").join("s1.jsonl");
+        fs::create_dir_all(session_path.parent().expect("session parent")).expect("session dir");
+        let header = serde_json::json!({
+            "type": "session",
+            "id": "s1",
+            "timestamp": "2026-04-29T00:00:00.000Z",
+            "cwd": "/workspace/project",
+        });
+        let message = serde_json::json!({
+            "type": "message",
+            "message": {
+                "id": "m1",
+                "role": "user",
+                "content": [{ "type": "text", "text": "  First request\nwith details" }]
+            }
+        });
+        fs::write(&session_path, format!("{header}\n{message}\n"))
+            .expect("session file should be written");
+
+        let discovered = read_session_header(&session_path).expect("session should be discovered");
+        assert_eq!(discovered.title.as_deref(), Some("First request"));
+
         let _ = fs::remove_dir_all(root);
     }
 

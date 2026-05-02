@@ -640,6 +640,51 @@ pub(crate) async fn set_session_category(
     vec![snapshot, sessions_snapshot]
 }
 
+pub(crate) fn opened_session_record(
+    discovered: &DiscoveredSession,
+    session_file: String,
+    category: Option<String>,
+    existing: Option<&SessionRecord>,
+) -> SessionRecord {
+    SessionRecord {
+        id: discovered.id.clone(),
+        cwd: discovered.cwd.clone(),
+        args: Vec::new(),
+        status: SessionStatus::Starting,
+        created_at: discovered.created_at,
+        updated_at: discovered.updated_at,
+        messages: existing
+            .map(|record| record.messages.clone())
+            .unwrap_or_default(),
+        live_message_ids: HashSet::new(),
+        streaming_message: None,
+        tool_cards: existing
+            .map(|record| record.tool_cards.clone())
+            .unwrap_or_default(),
+        active_tool_calls: Vec::new(),
+        todo_phases: existing.and_then(|record| record.todo_phases.clone()),
+        session_file: Some(session_file),
+        title: discovered
+            .title
+            .clone()
+            .or_else(|| existing.and_then(|record| record.title.clone())),
+        timestamp: discovered
+            .timestamp
+            .clone()
+            .or_else(|| existing.and_then(|record| record.timestamp.clone())),
+        category: category.or_else(|| existing.and_then(|record| record.category.clone())),
+        kind: SessionKind::Managed,
+        model: existing.and_then(|record| record.model.clone()),
+        thinking_level: existing.and_then(|record| record.thinking_level.clone()),
+        tokens_total: existing.map(|record| record.tokens_total).unwrap_or(0),
+        cost_usd: existing.map(|record| record.cost_usd).unwrap_or(0.0),
+        context_tokens: existing.and_then(|record| record.context_tokens),
+        context_window: existing.and_then(|record| record.context_window),
+        context_percent: existing.and_then(|record| record.context_percent),
+        plan_mode: existing.and_then(|record| record.plan_mode.clone()),
+    }
+}
+
 pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<ServerMessage> {
     info!(action = "session.open", session_file = %session_file);
     let session_path = PathBuf::from(&session_file);
@@ -676,38 +721,17 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
         .await
         .get(&session_id)
         .cloned();
-    let record = SessionRecord {
-        id: session_id.clone(),
-        cwd: discovered.cwd.clone(),
-        args: Vec::new(),
-        status: SessionStatus::Starting,
-        created_at: discovered.created_at,
-        updated_at: discovered.updated_at,
-        messages: Vec::new(),
-        live_message_ids: HashSet::new(),
-        streaming_message: None,
-        tool_cards: Vec::new(),
-        active_tool_calls: Vec::new(),
-        todo_phases: None,
-        session_file: Some(session_file.clone()),
-        title: discovered.title.clone(),
-        timestamp: discovered.timestamp.clone(),
-        category,
-        kind: SessionKind::Managed,
-        model: None,
-        thinking_level: None,
-        tokens_total: 0,
-        cost_usd: 0.0,
-        context_tokens: None,
-        context_window: None,
-        context_percent: None,
-        plan_mode: None,
-    };
-    let projection = record.projection();
-    let sessions_snapshot = {
+    let (projection, sessions_snapshot) = {
         let mut sessions = state.sessions.write().await;
+        let record = opened_session_record(
+            &discovered,
+            session_file.clone(),
+            category,
+            sessions.get(&session_id),
+        );
+        let projection = record.projection();
         sessions.insert(session_id.clone(), record);
-        sessions_snapshot_from_map(&sessions)
+        (projection, sessions_snapshot_from_map(&sessions))
     };
 
     let transport_session_id = {

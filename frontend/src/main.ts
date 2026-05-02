@@ -481,6 +481,7 @@ let connection: FuraConnection | null = null;
 let activeSessionId: string | null = null;
 let serverConfig: ServerConfig | null = null;
 let pendingCreatedSessionBaseline: Set<string> | null = null;
+let pendingSessionSelectionId: string | null = null;
 let cwdPickerCreatePending = false;
 let cwdPickerPendingRequestId: string | null = null;
 let deleteSessionTargetId: string | null = null;
@@ -997,6 +998,14 @@ function handleServerMessage(message: ServerMessage): void {
         const previousActiveSessionId = activeSessionId;
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
         if (previousActiveSessionId && !activeSessionId) resetPromptHistoryNavigation();
+        if (pendingSessionSelectionId) {
+          const pendingSession = currentSessionSummary(pendingSessionSelectionId);
+          if (pendingSession) {
+            requestSessionActivation(pendingSession);
+          } else {
+            pendingSessionSelectionId = null;
+          }
+        }
       }
       render();
       break;
@@ -1747,12 +1756,22 @@ function currentSessionSummary(sessionId: string): SessionSummary | undefined {
   return sessions.find(session => session.sessionId === sessionId);
 }
 
+function requestSessionActivation(session: SessionSummary): boolean {
+  const sent = send(sessionOpenOrAttachMessage(session));
+  if (!sent) {
+    pendingSessionSelectionId = session.sessionId;
+    return false;
+  }
+  pendingSessionSelectionId = null;
+  activateSession(session.sessionId);
+  return true;
+}
+
 function handleSessionButtonClick(sessionId: string): void {
   const session = currentSessionSummary(sessionId);
   if (!session) return;
 
-  activateSession(session.sessionId);
-  send(sessionOpenOrAttachMessage(session));
+  requestSessionActivation(session);
   render();
 }
 
