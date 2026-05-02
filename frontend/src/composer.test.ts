@@ -6,11 +6,71 @@ import {
   promptDraftDisplayText,
   promptImagePayloads,
   restorePendingImagesFromPayload,
+  resolvePromptSubmitAction,
 } from "./composer";
 import type { PendingImage, PendingSnippet } from "./composerAttachments";
 
 const image: PendingImage = { type: "image", marker: "[Image 1]", data: "abc", mimeType: "image/png" };
 const snippet: PendingSnippet = { type: "snippet", marker: "[Snippet 1]", text: "long pasted text" };
+
+describe("resolvePromptSubmitAction", () => {
+  const base = {
+    workspaceMode: "session" as const,
+    text: "hello",
+    imageCount: 0,
+    activeSessionId: "session-1",
+    isModelPickerCommand: false,
+    slashCommandName: null,
+  };
+
+  it("ignores empty controller submits before checking images", () => {
+    expect(resolvePromptSubmitAction({
+      ...base,
+      workspaceMode: "controller",
+      text: "",
+      imageCount: 1,
+    })).toEqual({ type: "ignore" });
+  });
+
+  it("rejects Ask Fura image attachments and accepts text-only controller prompts", () => {
+    expect(resolvePromptSubmitAction({
+      ...base,
+      workspaceMode: "controller",
+      imageCount: 1,
+    })).toEqual({ type: "controller.rejectImages" });
+    expect(resolvePromptSubmitAction({
+      ...base,
+      workspaceMode: "controller",
+    })).toEqual({ type: "controller.submit" });
+  });
+
+  it("ignores empty session submits and missing active sessions", () => {
+    expect(resolvePromptSubmitAction({ ...base, text: "", imageCount: 0 })).toEqual({ type: "ignore" });
+    expect(resolvePromptSubmitAction({ ...base, activeSessionId: null })).toEqual({ type: "ignore" });
+  });
+
+  it("opens the model picker only for image-free model picker commands", () => {
+    expect(resolvePromptSubmitAction({ ...base, isModelPickerCommand: true })).toEqual({
+      type: "openModelPicker",
+      sessionId: "session-1",
+    });
+    expect(resolvePromptSubmitAction({ ...base, isModelPickerCommand: true, imageCount: 1 })).toEqual({
+      type: "sendPrompt",
+      sessionId: "session-1",
+    });
+  });
+
+  it("routes known slash commands to their modal actions", () => {
+    expect(resolvePromptSubmitAction({ ...base, slashCommandName: "new" })).toEqual({ type: "openCwdPicker" });
+    expect(resolvePromptSubmitAction({ ...base, slashCommandName: "fork" })).toEqual({ type: "openForkPicker" });
+    expect(resolvePromptSubmitAction({ ...base, slashCommandName: "handoff" })).toEqual({ type: "openHandoffPicker" });
+  });
+
+  it("sends normal prompts and unknown slash commands", () => {
+    expect(resolvePromptSubmitAction(base)).toEqual({ type: "sendPrompt", sessionId: "session-1" });
+    expect(resolvePromptSubmitAction({ ...base, slashCommandName: "future" })).toEqual({ type: "sendPrompt", sessionId: "session-1" });
+  });
+});
 
 describe("prompt image payloads", () => {
   it("recognizes only complete image payloads", () => {

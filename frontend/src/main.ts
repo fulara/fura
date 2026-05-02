@@ -28,6 +28,7 @@ import {
   promptDraftAttachmentCount,
   promptDraftDisplayText,
   restorePendingImagesFromPayload,
+  resolvePromptSubmitAction,
   type PromptBehavior,
 } from "./composer";
 import {
@@ -757,50 +758,57 @@ promptForm.addEventListener("submit", event => {
   event.preventDefault();
   const editorText = promptInput.value.trim();
   const text = expandSnippetTokens(editorText);
-  if (workspaceMode === "controller") {
-    if (!text) return;
-    hidePalette();
-    if (pendingImages.length > 0) {
+  const knownSlashCommand = findSlashCommand(editorText);
+  const action = resolvePromptSubmitAction({
+    workspaceMode,
+    text,
+    imageCount: pendingImages.length,
+    activeSessionId,
+    isModelPickerCommand: isModelPickerCommand(editorText),
+    slashCommandName: knownSlashCommand?.name ?? null,
+  });
+
+  if (action.type === "ignore") return;
+  hidePalette();
+
+  switch (action.type) {
+    case "controller.rejectImages":
       controlMessages.push({ role: "system", text: "Ask Fura does not accept image attachments yet. Remove the image preview before asking Fura." });
       renderControlConversation();
       return;
+    case "controller.submit": {
+      const accepted = submitControlPromptText(text);
+      if (accepted) clearPromptEditor();
+      return;
     }
-    const accepted = submitControlPromptText(text);
-    if (accepted) clearPromptEditor();
-    return;
+    case "openModelPicker":
+      openModelPicker(action.sessionId);
+      clearPromptEditor();
+      return;
+    case "openCwdPicker":
+      clearPromptEditor();
+      openCwdPicker();
+      return;
+    case "openForkPicker":
+      clearPromptEditor();
+      openForkPicker();
+      return;
+    case "openHandoffPicker":
+      clearPromptEditor();
+      openHandoffPicker();
+      return;
+    case "sendPrompt": {
+      const accepted = sendPromptWithBusyHandling({
+        sessionId: action.sessionId,
+        text,
+        editorText,
+        images: pendingImages,
+        snippets: pendingSnippets,
+      });
+      if (accepted) clearPromptEditor();
+      return;
+    }
   }
-  if ((!text && pendingImages.length === 0) || !activeSessionId) return;
-  hidePalette();
-  if (pendingImages.length === 0 && isModelPickerCommand(editorText)) {
-    openModelPicker(activeSessionId);
-    clearPromptEditor();
-    return;
-  }
-  const knownSlashCommand = findSlashCommand(editorText);
-  if (knownSlashCommand?.name === "new") {
-    clearPromptEditor();
-    openCwdPicker();
-    return;
-  }
-  if (knownSlashCommand?.name === "fork") {
-    clearPromptEditor();
-    openForkPicker();
-    return;
-  }
-  if (knownSlashCommand?.name === "handoff") {
-    clearPromptEditor();
-    openHandoffPicker();
-    return;
-  }
-
-  const accepted = sendPromptWithBusyHandling({
-    sessionId: activeSessionId,
-    text,
-    editorText,
-    images: pendingImages,
-    snippets: pendingSnippets,
-  });
-  if (accepted) clearPromptEditor();
 });
 promptInput.addEventListener("paste", async event => {
   const items = Array.from(event.clipboardData?.items ?? []);

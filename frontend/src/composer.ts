@@ -9,6 +9,43 @@ export type ComposerPromptDraft = {
   images: PendingImage[];
   snippets: PendingSnippet[];
 };
+export type PromptSubmitWorkspaceMode = "session" | "controller";
+export type PromptSubmitAction =
+  | { type: "ignore" }
+  | { type: "controller.rejectImages" }
+  | { type: "controller.submit" }
+  | { type: "openModelPicker"; sessionId: string }
+  | { type: "openCwdPicker" }
+  | { type: "openForkPicker" }
+  | { type: "openHandoffPicker" }
+  | { type: "sendPrompt"; sessionId: string };
+
+export type PromptSubmitDecisionInput = {
+  workspaceMode: PromptSubmitWorkspaceMode;
+  text: string;
+  imageCount: number;
+  activeSessionId: string | null;
+  isModelPickerCommand: boolean;
+  slashCommandName?: string | null;
+};
+
+export function resolvePromptSubmitAction(input: PromptSubmitDecisionInput): PromptSubmitAction {
+  if (input.workspaceMode === "controller") {
+    if (!input.text) return { type: "ignore" };
+    if (input.imageCount > 0) return { type: "controller.rejectImages" };
+    return { type: "controller.submit" };
+  }
+
+  if ((!input.text && input.imageCount === 0) || !input.activeSessionId) return { type: "ignore" };
+  if (input.imageCount === 0 && input.isModelPickerCommand) {
+    return { type: "openModelPicker", sessionId: input.activeSessionId };
+  }
+  if (input.slashCommandName === "new") return { type: "openCwdPicker" };
+  if (input.slashCommandName === "fork") return { type: "openForkPicker" };
+  if (input.slashCommandName === "handoff") return { type: "openHandoffPicker" };
+  return { type: "sendPrompt", sessionId: input.activeSessionId };
+}
+
 
 export function isPromptImagePayload(value: unknown): value is PromptImagePayload {
   if (!value || typeof value !== "object") return false;
