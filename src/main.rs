@@ -1006,6 +1006,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn agent_end_refresh_uses_remapped_session_id_after_get_state() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("transport-1".to_string(), test_record());
+        let (stdin, mut commands) = mpsc::channel(8);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("transport-1".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("transport-1".to_string(), "transport-1".to_string());
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "real-s1",
+                    "sessionName": "Real Session",
+                    "messageCount": 0
+                }
+            }),
+        )
+        .await;
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({ "type": "agent_end" }),
+        )
+        .await;
+
+        let first = commands.recv().await.expect("first refresh command");
+        let second = commands.recv().await.expect("second refresh command");
+        assert_eq!(first.get("type").and_then(|value| value.as_str()), Some("get_messages"));
+        assert_eq!(second.get("type").and_then(|value| value.as_str()), Some("get_session_stats"));
+        assert_eq!(
+            state.rpc_session_targets.read().await.get("transport-1").map(String::as_str),
+            Some("real-s1")
+        );
+    }
+
+    #[tokio::test]
     async fn rpc_prompt_error_targets_real_session_and_clears_busy_state() {
         let state = test_state(8, None);
         let mut record = test_record();
@@ -2123,6 +2177,52 @@ mod tests {
     }
 
     #[test]
+    fn maps_user_image_content_for_transcript_roundtrip() {
+        let message = map_omp_message(&serde_json::json!({
+            "id": "user-img",
+            "role": "user",
+            "content": [
+                { "type": "text", "text": "Please inspect this." },
+                { "type": "image", "data": "c2NyZWVuc2hvdA==", "mimeType": "image/jpeg" }
+            ],
+            "timestamp": 1234
+        }))
+        .expect("user image message should map");
+
+        assert!(matches!(message.role, MessageRole::User));
+        assert_eq!(message.blocks.len(), 2);
+        match &message.blocks[1] {
+            ContentBlock::Image {
+                data,
+                mime_type,
+                alt,
+            } => {
+                assert_eq!(data, "c2NyZWVuc2hvdA==");
+                assert_eq!(mime_type, "image/jpeg");
+                assert!(alt.is_none());
+            }
+            other => panic!("expected image block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn project_omp_transcript_preserves_user_image_blocks() {
+        let raw_messages = vec![serde_json::json!({
+            "id": "user-img",
+            "role": "user",
+            "content": [{ "type": "image", "data": "abc123", "mimeType": "image/png" }]
+        })];
+
+        let (messages, tool_cards) = project_omp_transcript(&raw_messages);
+
+        assert!(tool_cards.is_empty());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, "user-img");
+        assert!(matches!(messages[0].role, MessageRole::User));
+        assert!(matches!(messages[0].blocks[0], ContentBlock::Image { .. }));
+    }
+
+    #[test]
     fn ignores_incomplete_image_content_blocks() {
         let result = map_omp_message(&serde_json::json!({
             "id": "img2",
@@ -2602,6 +2702,36 @@ mod tests {
             }
             other => panic!("unexpected second event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn rpc_transport_session_id_accepts_live_transport_id() {
+        let state = test_state(8, None);
+        let (stdin, _commands) = mpsc::channel(1);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("transport-live".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("transport-live".to_string(), "real-session".to_string());
+
+        assert_eq!(
+            rpc_transport_session_id(&state, "transport-live")
+                .await
+                .as_deref(),
+            Some("transport-live")
+        );
+        assert_eq!(
+            rpc_transport_session_id(&state, "real-session")
+                .await
+                .as_deref(),
+            Some("transport-live")
+        );
     }
 
     #[tokio::test]

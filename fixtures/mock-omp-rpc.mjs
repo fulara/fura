@@ -223,13 +223,23 @@ for await (const line of rl) {
         break;
       }
       const now = Date.now();
+      const promptText = String(command.message ?? "");
+      const userContent = [];
+      if (promptText) userContent.push({ type: "text", text: promptText });
+      for (const image of Array.isArray(command.images) ? command.images : []) {
+        if (!image || typeof image !== "object") continue;
+        if (image.type !== "image" || typeof image.data !== "string" || typeof image.mimeType !== "string") continue;
+        const content = { type: "image", data: image.data, mimeType: image.mimeType };
+        if (typeof image.alt === "string" && image.alt.trim()) content.alt = image.alt.trim();
+        userContent.push(content);
+      }
+      if (userContent.length === 0) userContent.push({ type: "text", text: promptText });
       const user = {
         id: `user-${now}`,
         role: "user",
-        content: [{ type: "text", text: command.message ?? "" }],
+        content: userContent,
         timestamp: now,
       };
-      const promptText = String(command.message ?? "");
       if (promptText.toLowerCase().includes("generate_image") || promptText.toLowerCase().includes("mock image")) {
         const toolCallId = `mock-generate-image-${now}`;
         const assistant = {

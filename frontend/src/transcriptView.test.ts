@@ -61,6 +61,23 @@ describe("renderMessage", () => {
     expect(node.querySelector(".image-block img")?.getAttribute("alt")).toBe("Generated chart");
   });
 
+  it("renders user image attachments after transcript roundtrip", () => {
+    const node = renderMessage({
+      id: "m-user-image",
+      role: "user",
+      isNew: false,
+      blocks: [
+        { kind: "text", text: "See attached" },
+        { kind: "image", data: "abc123", mimeType: "image/jpeg" },
+      ],
+    }, { thinkingVisibilityMode: "auto" });
+
+    expect(node.querySelector("strong")?.textContent).toBe("You");
+    expect(node.querySelector(".text-block")?.textContent).toContain("See attached");
+    expect(node.querySelector(".image-block img")?.getAttribute("src")).toBe("data:image/jpeg;base64,abc123");
+    expect(node.querySelector(".image-block img")?.getAttribute("alt")).toBe("[Image: image/jpeg]");
+  });
+
   it("copies complete message text", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.assign(navigator, { clipboard: { writeText } });

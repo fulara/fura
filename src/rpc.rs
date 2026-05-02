@@ -29,6 +29,10 @@ pub(crate) async fn rpc_session_target_id(state: &AppState, transport_session_id
 }
 
 pub(crate) async fn rpc_transport_session_id(state: &AppState, session_id: &str) -> Option<String> {
+    if state.rpc_sessions.read().await.contains_key(session_id) {
+        return Some(session_id.to_string());
+    }
+
     let targets = state.rpc_session_targets.read().await;
     if let Some((transport_id, _)) = targets
         .iter()
@@ -353,14 +357,14 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         OmpRpcFrame::AgentEnd { .. } => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
             if let Err(message) =
-                send_rpc_command(state, session_id, get_messages_command(next_rpc_id())).await
+                send_rpc_command(state, &target_session_id, get_messages_command(next_rpc_id())).await
             {
-                warn!(session_id = %session_id, %message, "post-agent transcript refresh failed");
+                warn!(session_id = %target_session_id, %message, "post-agent transcript refresh failed");
             }
             if let Err(message) =
-                send_rpc_command(state, session_id, get_session_stats_command(next_rpc_id())).await
+                send_rpc_command(state, &target_session_id, get_session_stats_command(next_rpc_id())).await
             {
-                warn!(session_id = %session_id, %message, "post-agent stats refresh failed");
+                warn!(session_id = %target_session_id, %message, "post-agent stats refresh failed");
             }
         }
         OmpRpcFrame::PlanReview {
