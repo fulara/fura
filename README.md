@@ -102,13 +102,18 @@ Environment overrides for `run-local-omp.sh`:
 ### Mock RPC (no OMP required)
 
 ```bash
-npm --prefix frontend run build
-FURA_TOKEN=dev cargo run -- \
-  --static-dir frontend/dist \
-  --rpc-program node \
-  --no-default-rpc-args \
-  --rpc-arg fixtures/mock-omp-rpc.mjs
+./run-mock-rpc.sh
 ```
+
+Open: `http://127.0.0.1:3737/?token=dev`
+
+Environment overrides for `run-mock-rpc.sh`:
+
+| Variable | Default | Description |
+|---|---|---|
+| `FURA_TOKEN` | `dev` | Auth token for the WebSocket endpoint |
+| `FURA_PORT` | `3737` | Listen port |
+| `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
 ## Configuration
 
