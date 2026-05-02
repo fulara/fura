@@ -1,5 +1,6 @@
 import { appendEventTimestamp, renderEventTimestamp } from "./eventTime";
 import { formatTokens, shortPath } from "./format";
+import { renderImageAttachment, type RenderableImage } from "./imageRendering";
 import { mkEl } from "./dom";
 import type {
   AgentProgress,
@@ -31,13 +32,17 @@ export function renderToolCard(card: ToolCard): HTMLElement {
   wrapper.append(header);
 
   appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
+  appendToolImageGrid(wrapper, toolResultImages(card.partialResult ?? card.result));
 
   return wrapper;
 }
 
 export function renderReadToolCard(card: ToolCard): HTMLElement {
+  const result = card.partialResult ?? card.result;
+  const images = toolResultImages(result);
+  const isCompact = !card.isError && images.length === 0;
   const wrapper = mkEl("section");
-  wrapper.className = `tool-card read-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${card.isError ? "" : "tool-compact"}`;
+  wrapper.className = `tool-card read-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${isCompact ? "tool-compact" : ""}`;
   wrapper.dataset.toolName = "read";
 
   const header = mkEl("div");
@@ -51,8 +56,9 @@ export function renderReadToolCard(card: ToolCard): HTMLElement {
   wrapper.append(header);
 
   if (card.isError) {
-    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
+    appendToolResultBody(wrapper, toolResultText(result));
   }
+  appendToolImageGrid(wrapper, images);
 
   return wrapper;
 }
@@ -621,7 +627,7 @@ function taskResultTotals(results: TaskResult[], source: unknown): string {
 function toolArgSummary(args: Record<string, unknown>): string {
   const path = typeof args.path === "string" ? args.path : undefined;
   if (path) return shortPath(path);
-  for (const key of ["command", "message", "input", "pattern"]) {
+  for (const key of ["subject", "command", "message", "input", "pattern"]) {
     const value = args[key];
     if (typeof value === "string" && value.trim()) return truncate(value.trim(), 70);
   }
@@ -638,6 +644,37 @@ export function toolResultText(value: unknown): string {
     if (text) return text;
   }
   return "";
+}
+
+export function toolResultImages(value: unknown): RenderableImage[] {
+  if (!isRecord(value)) return [];
+  const images: RenderableImage[] = [];
+  collectContentImages(value.content, images);
+  if (isRecord(value.details)) collectContentImages(value.details.images, images);
+  return images;
+}
+
+function collectContentImages(value: unknown, images: RenderableImage[]): void {
+  if (!Array.isArray(value)) return;
+  for (const item of value) {
+    if (!isRecord(item)) continue;
+    if (typeof item.type === "string" && item.type !== "image") continue;
+    const data = typeof item.data === "string" ? item.data : undefined;
+    const mimeType = typeof item.mimeType === "string" ? item.mimeType : undefined;
+    if (!data || !mimeType) continue;
+    const alt = typeof item.alt === "string" ? item.alt : undefined;
+    images.push({ data, mimeType, alt });
+  }
+}
+
+function appendToolImageGrid(wrapper: HTMLElement, images: RenderableImage[]): void {
+  if (images.length === 0) return;
+  const grid = mkEl("div");
+  grid.className = "tool-image-grid";
+  for (const image of images) {
+    grid.append(renderImageAttachment(image, "tool-image-thumb"));
+  }
+  wrapper.append(grid);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

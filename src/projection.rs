@@ -362,6 +362,33 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
                             blocks.push(ContentBlock::Text { text });
                         }
                     }
+                    Some("image") => {
+                        let data = item
+                            .get("data")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        let mime_type = item
+                            .get("mimeType")
+                            .and_then(|value| value.as_str())
+                            .unwrap_or("")
+                            .trim()
+                            .to_string();
+                        if !data.is_empty() && !mime_type.is_empty() {
+                            let alt = item
+                                .get("alt")
+                                .and_then(|value| value.as_str())
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .map(str::to_string);
+                            blocks.push(ContentBlock::Image {
+                                data,
+                                mime_type,
+                                alt,
+                            });
+                        }
+                    }
                     // toolCall blocks are separate messages/events in the RPC event stream
                     _ => {}
                 }
@@ -378,6 +405,7 @@ pub(crate) fn content_to_text(value: &Value) -> String {
         .into_iter()
         .filter_map(|block| match block {
             ContentBlock::Text { text } => Some(text),
+            ContentBlock::Image { mime_type, .. } => Some(format!("[Image: {mime_type}]")),
             ContentBlock::Thinking { thinking } => Some(thinking),
             ContentBlock::RedactedThinking => None,
         })

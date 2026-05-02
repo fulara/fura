@@ -1025,6 +1025,29 @@ h2 {
   padding: 0.1rem 0;
 }
 
+.image-block {
+  margin: 0.5rem 0.85rem;
+}
+
+.image-block img,
+.tool-image-thumb img {
+  display: block;
+  max-width: min(100%, 520px);
+  max-height: 320px;
+  border: 1px solid #2a3040;
+  border-radius: 0.75rem;
+  background: #080b11;
+  object-fit: contain;
+}
+
+.image-block figcaption,
+.tool-image-thumb figcaption,
+.image-fallback {
+  margin-top: 0.35rem;
+  color: #8d98ad;
+  font-size: 0.82rem;
+}
+
 .markdown-body {
   padding: 0.5rem 0.85rem;
   line-height: 1.6;
@@ -1780,6 +1803,23 @@ h2 {
 
 .tool-result-body {
   border-top: 1px solid #191e29;
+}
+
+.tool-image-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, max-content));
+  gap: 0.75rem;
+  padding: 0.75rem 0.85rem;
+  border-top: 1px solid #191e29;
+}
+
+.tool-image-thumb {
+  margin: 0;
+}
+
+.tool-image-thumb img {
+  max-width: 260px;
+  max-height: 220px;
 }
 
 .tool-result-text {

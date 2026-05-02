@@ -2,6 +2,7 @@ import hljs from "highlight.js/lib/common";
 import { marked, type Token, type Tokens } from "marked";
 import { mkEl, mkFrag, mkText } from "./dom";
 import { appendEventTimestamp } from "./eventTime";
+import { imagePlaceholderText, renderImageAttachment } from "./imageRendering";
 import type { ContentBlock, TranscriptMessage } from "./protocol";
 import type { ThinkingVisibilityMode } from "./uiPreferences";
 
@@ -9,6 +10,7 @@ export function messageText(message: TranscriptMessage): string {
   return message.blocks
     .map(block => {
       if (block.kind === "text") return block.text;
+      if (block.kind === "image") return imagePlaceholderText(block);
       if (block.kind === "thinking") return `<thinking>\n${block.thinking}\n</thinking>`;
       return "";
     })
@@ -26,7 +28,7 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
   article.dataset.messageId = message.id;
   const visibleBlocks = message.blocks
     .map((block, index) => ({ block, index }))
-    .filter(({ block }) => options.thinkingVisibilityMode !== "hidden" || block.kind === "text");
+    .filter(({ block }) => options.thinkingVisibilityMode !== "hidden" || block.kind === "text" || block.kind === "image");
   if (visibleBlocks.length === 0) {
     article.hidden = true;
     return article;
@@ -348,6 +350,14 @@ export function renderBlock(
     wrapper.dataset.blockIndex = String(blockIndex);
     wrapper.dataset.blockKind = "text";
     wrapper.append(renderMarkdown(block.text));
+    return wrapper;
+  }
+
+  if (block.kind === "image") {
+    const wrapper = renderImageAttachment(block, "image-block");
+    wrapper.dataset.messageId = messageId;
+    wrapper.dataset.blockIndex = String(blockIndex);
+    wrapper.dataset.blockKind = "image";
     return wrapper;
   }
 

@@ -271,6 +271,13 @@ pub(crate) enum ContentBlock {
     Text {
         text: String,
     },
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        alt: Option<String>,
+    },
     /// Extended thinking content. Signature is intentionally excluded.
     Thinking {
         thinking: String,

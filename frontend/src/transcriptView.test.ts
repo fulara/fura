@@ -3,19 +3,20 @@ import { messageText, renderBlock, renderCodeBlock, renderMarkdown, renderMessag
 import type { TranscriptMessage } from "./protocol";
 
 describe("messageText", () => {
-  it("preserves text and thinking blocks while omitting redacted thinking", () => {
+  it("preserves text, image placeholders, and thinking while omitting redacted thinking", () => {
     const message = {
       id: "m1",
       role: "assistant",
       isNew: false,
       blocks: [
         { kind: "text", text: "Answer" },
+        { kind: "image", data: "abc", mimeType: "image/png", alt: "Chart" },
         { kind: "thinking", thinking: "private chain" },
         { kind: "redactedthinking" },
       ],
     } satisfies TranscriptMessage;
 
-    expect(messageText(message)).toBe("Answer\n\n<thinking>\nprivate chain\n</thinking>");
+    expect(messageText(message)).toBe("Answer\n\n[Image: image/png]\n\n<thinking>\nprivate chain\n</thinking>");
   });
 });
 
@@ -45,6 +46,19 @@ describe("renderMessage", () => {
     }, { thinkingVisibilityMode: "hidden" });
 
     expect(node.hidden).toBe(true);
+  });
+
+  it("keeps image-only messages visible when thinking is hidden", () => {
+    const node = renderMessage({
+      id: "m-image",
+      role: "assistant",
+      isNew: false,
+      blocks: [{ kind: "image", data: "abc", mimeType: "image/png", alt: "Generated chart" }],
+    }, { thinkingVisibilityMode: "hidden" });
+
+    expect(node.hidden).toBe(false);
+    expect(node.querySelector(".image-block img")?.getAttribute("src")).toBe("data:image/png;base64,abc");
+    expect(node.querySelector(".image-block img")?.getAttribute("alt")).toBe("Generated chart");
   });
 
   it("copies complete message text", async () => {
@@ -124,6 +138,22 @@ describe("renderBlock", () => {
     expect(node.dataset.messageId).toBe("m1");
     expect(node.dataset.blockIndex).toBe("2");
     expect(node.dataset.blockKind).toBe("text");
+  });
+
+  it("renders image blocks with stable selection data attributes", () => {
+    const node = renderBlock(
+      { kind: "image", data: "abc", mimeType: "image/webp", alt: "Preview" },
+      false,
+      "m1",
+      4,
+      { thinkingVisibilityMode: "auto" },
+    );
+
+    expect(node.className).toBe("image-block");
+    expect(node.dataset.messageId).toBe("m1");
+    expect(node.dataset.blockIndex).toBe("4");
+    expect(node.dataset.blockKind).toBe("image");
+    expect(node.querySelector("img")?.getAttribute("src")).toBe("data:image/webp;base64,abc");
   });
 
   it("opens thinking blocks when visibility is shown or message is new", () => {

@@ -7,6 +7,7 @@ import {
   renderReadToolGroup,
   renderToolCard,
   toolResultText,
+  toolResultImages,
   truncate,
 } from "./toolCards";
 import type { TodoPhase, ToolCard, TranscriptEntry } from "./protocol";
@@ -48,6 +49,25 @@ describe("renderToolCard", () => {
     expect(node.className).toContain("tool-error");
     expect(node.querySelector(".tool-status-icon")?.textContent).toBe("⠋");
   });
+
+  it("renders generate_image details images", () => {
+    const node = renderToolCard(tool({
+      toolName: "generate_image",
+      args: { subject: "a chart" },
+      result: {
+        content: [{ type: "text", text: "Generated 1 image" }],
+        details: {
+          images: [{ data: "abc", mimeType: "image/webp", alt: "Generated chart" }],
+        },
+      },
+    }));
+
+    expect(node.dataset.toolName).toBe("generate_image");
+    expect(node.querySelector(".tool-args-summary")?.textContent).toBe("a chart");
+    expect(node.querySelector(".tool-result-text")?.textContent).toBe("Generated 1 image");
+    expect(node.querySelector(".tool-image-grid img")?.getAttribute("src")).toBe("data:image/webp;base64,abc");
+    expect(node.querySelector(".tool-image-grid img")?.getAttribute("alt")).toBe("Generated chart");
+  });
 });
 
 describe("read tool cards", () => {
@@ -75,6 +95,18 @@ describe("read tool cards", () => {
     expect(node.className).toContain("tool-error");
     expect(node.className).not.toContain("tool-compact");
     expect(node.querySelector(".tool-result-text")?.textContent).toBe("not found");
+  });
+
+  it("renders successful read image results instead of compacting them away", () => {
+    const node = renderReadToolCard(tool({
+      toolName: "read",
+      args: { path: "/tmp/omp-image.png" },
+      result: { content: [{ type: "image", data: "abc", mimeType: "image/png" }] },
+    }));
+
+    expect(node.className).not.toContain("tool-compact");
+    expect(node.querySelector(".tool-result-body")).toBeNull();
+    expect(node.querySelector(".tool-image-grid img")?.getAttribute("src")).toBe("data:image/png;base64,abc");
   });
 
   it("renders read groups and detects compact read cards", () => {
@@ -130,6 +162,21 @@ describe("tool helpers", () => {
     expect(toolResultText({ content: [{ text: "a" }, { text: "b" }, { other: true }] })).toBe("a\nb");
     expect(toolResultText({ text: "direct" })).toBe("direct");
     expect(toolResultText(null)).toBe("");
+  });
+
+  it("extracts image blocks from content and details", () => {
+    expect(toolResultImages({
+      content: [{ type: "image", data: "content-image", mimeType: "image/png", alt: "Content" }],
+      details: {
+        images: [
+          { data: "detail-image", mimeType: "image/webp", alt: "Detail" },
+          { data: "missing-mime" },
+        ],
+      },
+    })).toEqual([
+      { data: "content-image", mimeType: "image/png", alt: "Content" },
+      { data: "detail-image", mimeType: "image/webp", alt: "Detail" },
+    ]);
   });
 
   it("truncates long strings", () => {

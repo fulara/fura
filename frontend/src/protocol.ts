@@ -3,6 +3,7 @@ export type MessageRole = "user" | "assistant" | "system" | "tool";
 
 export type ContentBlock =
   | { kind: "text"; text: string }
+  | { kind: "image"; data: string; mimeType: string; alt?: string }
   | { kind: "thinking"; thinking: string }
   | { kind: "redactedthinking" };
 

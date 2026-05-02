@@ -1977,6 +1977,55 @@ mod tests {
             other => panic!("unexpected block: {other:?}"),
         }
     }
+
+    #[test]
+    fn maps_image_content_block_without_exposing_base64_as_text() {
+        let message = map_omp_message(&serde_json::json!({
+            "id": "img1",
+            "role": "assistant",
+            "content": [
+                { "type": "text", "text": "Generated image:" },
+                { "type": "image", "data": "aW1hZ2UtYnl0ZXM=", "mimeType": "image/png", "alt": "Generated chart" }
+            ]
+        }))
+        .expect("message should map");
+
+        assert_eq!(message.blocks.len(), 2);
+        match &message.blocks[1] {
+            ContentBlock::Image {
+                data,
+                mime_type,
+                alt,
+            } => {
+                assert_eq!(data, "aW1hZ2UtYnl0ZXM=");
+                assert_eq!(mime_type, "image/png");
+                assert_eq!(alt.as_deref(), Some("Generated chart"));
+            }
+            other => panic!("expected image block, got {other:?}"),
+        }
+
+        let text = content_to_text(&serde_json::json!([
+            { "type": "image", "data": "aW1hZ2UtYnl0ZXM=", "mimeType": "image/png" }
+        ]));
+        assert_eq!(text, "[Image: image/png]");
+    }
+
+    #[test]
+    fn ignores_incomplete_image_content_blocks() {
+        let result = map_omp_message(&serde_json::json!({
+            "id": "img2",
+            "role": "assistant",
+            "content": [
+                { "type": "image", "data": "aW1hZ2UtYnl0ZXM=" },
+                { "type": "image", "mimeType": "image/png" }
+            ]
+        }));
+
+        assert!(
+            result.is_none(),
+            "incomplete image-only content should be suppressed"
+        );
+    }
     #[test]
     fn maps_omp_message_timestamp() {
         let message = map_omp_message(&serde_json::json!({
