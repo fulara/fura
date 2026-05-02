@@ -19,6 +19,29 @@ use crate::{
     refresh_session_catalog, sessions_snapshot_from_map,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebSocketAuth {
+    // Current bridge behavior: authenticate the WebSocket upgrade with the `token`
+    // query parameter. Query tokens can appear in access logs; add a new variant
+    // here for safer future flows instead of hiding the strategy in `ws_handler`.
+    LegacyQueryToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebSocketAuthError {
+    MissingOrInvalidToken,
+}
+
+pub(crate) fn authenticate_websocket_query(
+    query: &HashMap<String, String>,
+    expected_token: &str,
+) -> Result<WebSocketAuth, WebSocketAuthError> {
+    match query.get("token") {
+        Some(token) if token == expected_token => Ok(WebSocketAuth::LegacyQueryToken),
+        _ => Err(WebSocketAuthError::MissingOrInvalidToken),
+    }
+}
+
 pub(crate) async fn healthz() -> Json<Value> {
     Json(serde_json::json!({ "ok": true }))
 }
@@ -28,11 +51,13 @@ pub(crate) async fn ws_handler(
     Query(query): Query<HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Response {
-    match query.get("token") {
-        Some(token) if token == state.token.as_ref() => {
+    match authenticate_websocket_query(&query, state.token.as_ref()) {
+        Ok(WebSocketAuth::LegacyQueryToken) => {
             ws.on_upgrade(move |socket| handle_socket(socket, state))
         }
-        _ => (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response(),
+        Err(WebSocketAuthError::MissingOrInvalidToken) => {
+            (StatusCode::UNAUTHORIZED, "missing or invalid token").into_response()
+        }
     }
 }
 
@@ -346,5 +371,42 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "error",
             bytes = message.len()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authenticate_websocket_query_accepts_matching_legacy_query_token() {
+        let query = HashMap::from([("token".to_string(), "dev".to_string())]);
+
+        assert_eq!(
+            authenticate_websocket_query(&query, "dev"),
+            Ok(WebSocketAuth::LegacyQueryToken),
+        );
+    }
+
+    #[test]
+    fn authenticate_websocket_query_rejects_missing_token() {
+        let query = HashMap::new();
+
+        assert_eq!(
+            authenticate_websocket_query(&query, "dev"),
+            Err(WebSocketAuthError::MissingOrInvalidToken),
+        );
+    }
+
+    #[test]
+    fn authenticate_websocket_query_rejects_wrong_or_empty_token() {
+        for token in ["", "old"] {
+            let query = HashMap::from([("token".to_string(), token.to_string())]);
+
+            assert_eq!(
+                authenticate_websocket_query(&query, "dev"),
+                Err(WebSocketAuthError::MissingOrInvalidToken),
+            );
+        }
     }
 }
