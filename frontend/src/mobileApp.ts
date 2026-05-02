@@ -1,8 +1,9 @@
 import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
+import { diffRepoRoots, formatDiffRepoLabel } from "./diffState";
 import { shortId } from "./format";
-import type { ClientMessage, ServerConfig, ServerMessage, SessionProjection, SessionSummary, TodoPhase } from "./protocol";
+import type { ClientMessage, RepoDiffState, ServerConfig, ServerMessage, SessionProjection, SessionSummary, TodoPhase } from "./protocol";
 import { sessionKindLabel, sessionStatusLabel } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
 import { createSessionListView } from "./sessionListView";
@@ -77,8 +78,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         </section>
       </header>
 
-      <section class="mobile-main" aria-label="Active session transcript">
+      <section class="mobile-main" aria-label="Active session workspace">
+        <nav class="mobile-workspace-tabs" aria-label="Mobile workspace views">
+          <button id="mobileTranscriptTab" type="button" class="mobile-workspace-tab active" aria-pressed="true">Transcript</button>
+          <button id="mobileDiffTab" type="button" class="mobile-workspace-tab" aria-pressed="false">Diff</button>
+        </nav>
         <div id="mobileTranscript" class="mobile-transcript"></div>
+        <div id="mobileDiff" class="mobile-diff" hidden></div>
       </section>
 
       <form id="mobilePromptForm" class="mobile-composer">
@@ -105,7 +111,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const createStatus = requireElement<HTMLParagraphElement>(document, "mobileCreateStatus");
   const createClose = requireElement<HTMLButtonElement>(document, "mobileCreateClose");
   const createSubmit = requireElement<HTMLButtonElement>(document, "mobileCreateSubmit");
+  const transcriptTab = requireElement<HTMLButtonElement>(document, "mobileTranscriptTab");
+  const diffTab = requireElement<HTMLButtonElement>(document, "mobileDiffTab");
   const transcript = requireElement<HTMLDivElement>(document, "mobileTranscript");
+  const diffView = requireElement<HTMLDivElement>(document, "mobileDiff");
   const promptForm = requireElement<HTMLFormElement>(document, "mobilePromptForm");
   const promptInput = requireElement<HTMLTextAreaElement>(document, "mobilePromptInput");
   const sendButton = requireElement<HTMLButtonElement>(document, "mobileSendButton");
@@ -121,11 +130,18 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let createCwdDirty = false;
   let createPendingRequestId: string | null = null;
   let pendingCreatedSessionBaseline: Set<string> | null = null;
+  let activeMobileView: "transcript" | "diff" = "transcript";
+  const diffStates = new Map<string, RepoDiffState>();
+  const diffErrors = new Map<string, string>();
+  const diffLoadingSessions = new Set<string>();
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
     onDeleteSession: () => undefined,
   });
+
+  transcriptTab.addEventListener("click", () => setActiveMobileView("transcript"));
+  diffTab.addEventListener("click", () => setActiveMobileView("diff"));
 
   createToggle.addEventListener("click", () => {
     const open = createDrawer.hidden;
@@ -287,6 +303,26 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   }
 
+  function setActiveMobileView(view: "transcript" | "diff"): void {
+    activeMobileView = view;
+    transcript.hidden = view !== "transcript";
+    diffView.hidden = view !== "diff";
+    transcriptTab.classList.toggle("active", view === "transcript");
+    diffTab.classList.toggle("active", view === "diff");
+    transcriptTab.setAttribute("aria-pressed", String(view === "transcript"));
+    diffTab.setAttribute("aria-pressed", String(view === "diff"));
+    if (view === "diff" && activeSessionId) requestMobileDiffState(activeSessionId);
+    renderActiveSession();
+  }
+
+  function requestMobileDiffState(sessionId: string): void {
+    if (!projections.has(sessionId) || diffLoadingSessions.has(sessionId)) return;
+    diffErrors.delete(sessionId);
+    diffLoadingSessions.add(sessionId);
+    send({ type: "diff.refresh", sessionId, stat: true });
+    renderDiffView(projections.get(sessionId));
+  }
+
   function handleServerMessage(message: ServerMessage): void {
     switch (message.type) {
       case "hello":
@@ -321,6 +357,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       case "session.notice":
         appendLog(`[${message.sessionId}] ${message.level}: ${message.text}`);
+        if (message.level === "error" && diffLoadingSessions.has(message.sessionId)) {
+          diffLoadingSessions.delete(message.sessionId);
+          diffErrors.set(message.sessionId, message.text);
+          if (message.sessionId === activeSessionId) renderActiveSession();
+        }
         break;
       case "prompt.busy":
         appendLog("Session is busy. Mobile shell does not support steer/follow-up yet.");
@@ -337,7 +378,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "model.changed":
       case "plan.review":
       case "raw.omp":
+        break;
       case "diff.state":
+        diffLoadingSessions.delete(message.sessionId);
+        diffErrors.delete(message.sessionId);
+        diffStates.set(message.sessionId, message.state);
+        if (message.sessionId === activeSessionId) renderActiveSession();
+        break;
       case "control.reply":
       case "control.status":
       case "frontend.control":
@@ -361,6 +408,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function activateSession(sessionId: string): void {
     activeSessionId = activateSessionState(unreadSessions, sessionId);
+    if (activeMobileView === "diff" && projections.has(sessionId)) requestMobileDiffState(sessionId);
   }
 
   function render(): void {
@@ -389,6 +437,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       promptInput.placeholder = "Select a session first";
       composerStatus.textContent = "No active session";
       renderTranscript(undefined);
+      renderDiffView(undefined);
       return;
     }
 
@@ -400,6 +449,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     promptInput.placeholder = isBusy ? "Agent is busy…" : "Send a prompt…";
     composerStatus.textContent = isBusy ? "Agent busy" : "Ready";
     renderTranscript(projection);
+    renderDiffView(projection);
   }
 
   function renderTranscript(projection: SessionProjection | undefined): void {
@@ -436,6 +486,73 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
     transcript.replaceChildren(fragment);
     if (wasNearBottom) transcript.scrollTop = transcript.scrollHeight;
+  }
+
+  function renderDiffView(projection: SessionProjection | undefined): void {
+    setRenderDocument(diffView.ownerDocument);
+    diffView.replaceChildren();
+
+    if (!activeSessionId || !projection) {
+      const empty = diffView.ownerDocument.createElement("p");
+      empty.className = "mobile-empty-state";
+      empty.textContent = "Select a session to load its diff.";
+      diffView.append(empty);
+      return;
+    }
+
+    const sessionId = activeSessionId;
+    const state = diffStates.get(sessionId);
+    const error = diffErrors.get(sessionId);
+    if (error) {
+      const message = diffView.ownerDocument.createElement("p");
+      message.className = "mobile-empty-state";
+      message.textContent = error;
+      diffView.append(message);
+      return;
+    }
+
+    if (diffLoadingSessions.has(sessionId) && !state) {
+      const loading = diffView.ownerDocument.createElement("p");
+      loading.className = "mobile-empty-state";
+      loading.textContent = "Loading diff…";
+      diffView.append(loading);
+      return;
+    }
+
+    if (!state) {
+      const empty = diffView.ownerDocument.createElement("p");
+      empty.className = "mobile-empty-state";
+      empty.textContent = "No diff loaded yet.";
+      diffView.append(empty);
+      return;
+    }
+
+    const summary = diffView.ownerDocument.createElement("section");
+    summary.className = "mobile-diff-summary";
+    const roots = diffRepoRoots(state);
+    const title = diffView.ownerDocument.createElement("h3");
+    title.textContent = roots.length === 1 ? formatDiffRepoLabel(roots[0] ?? "") : "Diff";
+    const meta = diffView.ownerDocument.createElement("p");
+    meta.textContent = [
+      state.selectedSnapshot ? `Base: ${state.selectedSnapshot.label}` : "Base: current state",
+      state.headSnapshot ? `Compare: ${state.headSnapshot.label}` : "Compare: working tree",
+      state.stat ? "Stat" : "Full diff",
+    ].join(" · ");
+    summary.append(title, meta);
+    diffView.append(summary);
+
+    if (!state.diff.trim()) {
+      const empty = diffView.ownerDocument.createElement("p");
+      empty.className = "mobile-empty-state";
+      empty.textContent = diffLoadingSessions.has(sessionId) ? "Loading diff…" : "No diff changes.";
+      diffView.append(empty);
+      return;
+    }
+
+    const pre = diffView.ownerDocument.createElement("pre");
+    pre.className = "mobile-diff-pre";
+    pre.textContent = state.diff;
+    diffView.append(pre);
   }
 
   return { connect, send };

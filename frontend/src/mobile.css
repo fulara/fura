@@ -121,6 +121,19 @@ body {
   min-height: 0;
   overflow: hidden;
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.mobile-workspace-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.4rem;
+  padding: 0.6rem 0.9rem 0;
+}
+
+.mobile-workspace-tab.active {
+  border-color: #7f8cff;
+  background: rgba(127, 140, 255, 0.18);
 }
 
 .mobile-transcript {
@@ -131,6 +144,42 @@ body {
 
 .mobile-transcript .message {
   max-width: none;
+}
+
+.mobile-diff {
+  min-height: 0;
+  overflow: auto;
+  padding: 0.9rem;
+}
+
+.mobile-diff-summary {
+  display: grid;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.mobile-diff-summary h3,
+.mobile-diff-summary p {
+  margin: 0;
+}
+
+.mobile-diff-summary p {
+  color: #9ba4b5;
+  font-size: 0.82rem;
+}
+
+.mobile-diff-pre {
+  margin: 0;
+  overflow: auto;
+  border: 1px solid #252a35;
+  border-radius: 0.75rem;
+  background: #0d1117;
+  color: #d7deea;
+  padding: 0.85rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .mobile-composer {

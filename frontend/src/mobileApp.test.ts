@@ -90,6 +90,30 @@ function projection(sessionId: string, overrides: Partial<SessionProjection> = {
   };
 }
 
+function diffState(diff = "src/main.ts | 2 ++"): import("./protocol").RepoDiffState {
+  return {
+    snapshots: [
+      {
+        entryId: "base-1",
+        label: "session start",
+        kind: "session-start",
+        createdAt: "2026-05-02T00:00:00Z",
+        repoRoot: "/repo",
+      },
+    ],
+    selectedSnapshot: {
+      entryId: "base-1",
+      label: "session start",
+      kind: "session-start",
+      createdAt: "2026-05-02T00:00:00Z",
+      repoRoot: "/repo",
+    },
+    headSnapshot: null,
+    diff,
+    stat: true,
+  };
+}
+
 function clickSession(index = 0): void {
   const buttons = document.querySelectorAll<HTMLButtonElement>("#mobileSessionsList .session-item button");
   const button = buttons[index];
@@ -247,5 +271,38 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Mobile session");
     expect(document.querySelector("#mobileCreateDrawer")?.hasAttribute("hidden")).toBe(true);
     expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("");
+  });
+
+  it("requests and renders mobile diff state for the active session", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    expect(connection.sent).not.toContainEqual({ type: "diff.refresh", sessionId: "live", stat: true });
+
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    expect(connection.sent).toContainEqual({ type: "diff.refresh", sessionId: "live", stat: true });
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Loading diff");
+
+    connection.emit({ type: "diff.state", sessionId: "live", state: diffState() });
+
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("src/main.ts | 2 ++");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Base: session start");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
+  });
+
+  it("shows diff errors without leaving the diff tab", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+
+    connection.emit({ type: "session.notice", sessionId: "live", level: "error", text: "diff failed" });
+
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("diff failed");
+    expect(document.querySelector("#mobileDiff")?.hasAttribute("hidden")).toBe(false);
+    expect(document.querySelector("#mobileTranscript")?.hasAttribute("hidden")).toBe(true);
   });
 });
