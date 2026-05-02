@@ -1,5 +1,80 @@
 import { describe, expect, it } from "vitest";
-import { buildWorktreeCreateOptions, resolveSessionCreateMessage, trimSessionCreateText } from "./sessionCreate";
+import {
+  buildWorktreeCreateOptions,
+  deriveWorktreeCreateView,
+  formatWorktreeCreateSummary,
+  resolveSessionCreateMessage,
+  trimSessionCreateText,
+  worktreeDirectoryForSession,
+  worktreeDirectorySeed,
+} from "./sessionCreate";
+
+describe("worktree path helpers", () => {
+  it("builds directory seeds with the source path separator", () => {
+    expect(worktreeDirectorySeed("/repo/project")).toBe("/repo/project/");
+    expect(worktreeDirectoryForSession("/repo/project/", "feature")).toBe("/repo/project-feature");
+    expect(worktreeDirectoryForSession("C:\\repo\\project", "feature")).toBe("C:\\repo\\project-feature");
+  });
+});
+
+describe("deriveWorktreeCreateView", () => {
+  it("derives shared source, directory, branch, base, and summary defaults", () => {
+    expect(deriveWorktreeCreateView({
+      enabled: true,
+      defaultCwd: "/default",
+      normalCwd: "/repo/project",
+      sessionName: "feature mobile",
+      sourceRepo: "",
+      directory: "",
+      baseBranch: "",
+      branchName: "",
+      sourceRepoAutofill: true,
+      directoryAutofill: true,
+      baseBranchAutofill: true,
+      branchAutofill: true,
+    })).toEqual({
+      enabled: true,
+      sourceRepo: "/repo/project",
+      directory: "/repo/project-feature mobile",
+      baseBranch: "HEAD",
+      branchName: "feature mobile",
+      lastAutofilledDirectory: "/repo/project-feature mobile",
+      lastAutofilledBranch: "feature mobile",
+      summary: "Create branch feature mobile from HEAD at /repo/project-feature mobile, using /repo/project.",
+    });
+  });
+
+  it("preserves manually edited worktree fields", () => {
+    expect(deriveWorktreeCreateView({
+      enabled: true,
+      defaultCwd: "/default",
+      normalCwd: "/repo/project",
+      sessionName: "feature mobile",
+      sourceRepo: "/custom/source",
+      directory: "/custom/worktree",
+      baseBranch: "main",
+      branchName: "feature/custom",
+      sourceRepoAutofill: false,
+      directoryAutofill: false,
+      baseBranchAutofill: false,
+      branchAutofill: false,
+    })).toMatchObject({
+      sourceRepo: "/custom/source",
+      directory: "/custom/worktree",
+      baseBranch: "main",
+      branchName: "feature/custom",
+      summary: "Create branch feature/custom from main at /custom/worktree, using /custom/source.",
+    });
+  });
+});
+
+describe("formatWorktreeCreateSummary", () => {
+  it("describes normal and worktree session creates", () => {
+    expect(formatWorktreeCreateSummary({ enabled: false })).toBe("Create a normal session in the selected working directory.");
+    expect(formatWorktreeCreateSummary({ enabled: true, sourceRepo: "/repo", directory: "/repo-feature", baseBranch: "HEAD" }))
+      .toBe("Create a worktree from HEAD at /repo-feature, using /repo.");
+  });
+});
 
 describe("trimSessionCreateText", () => {
   it("trims missing and present values", () => {

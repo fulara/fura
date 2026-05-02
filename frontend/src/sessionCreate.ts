@@ -26,8 +26,97 @@ export type SessionCreateResult =
   | { type: "invalid"; message: string; target: SessionCreateValidationTarget }
   | { type: "message"; message: ClientMessage };
 
+export type WorktreeCreateViewInput = {
+  enabled: boolean;
+  defaultCwd?: string | null;
+  normalCwd?: string | null;
+  sessionName?: string | null;
+  sourceRepo?: string | null;
+  directory?: string | null;
+  baseBranch?: string | null;
+  branchName?: string | null;
+  sourceRepoAutofill: boolean;
+  directoryAutofill: boolean;
+  baseBranchAutofill: boolean;
+  branchAutofill: boolean;
+};
+
+export type WorktreeCreateViewModel = {
+  enabled: boolean;
+  sourceRepo: string;
+  directory: string;
+  baseBranch: string;
+  branchName: string;
+  lastAutofilledDirectory: string;
+  lastAutofilledBranch: string;
+  summary: string;
+};
+
 export function trimSessionCreateText(value: string | null | undefined): string {
   return (value ?? "").trim();
+}
+
+export function trimTrailingPathSeparators(value: string): string {
+  if (value.length <= 1) return value;
+  return value.replace(/[\\/]+$/, "");
+}
+
+export function pathSeparatorFor(value: string): string {
+  return value.includes("\\") && !value.includes("/") ? "\\" : "/";
+}
+
+export function worktreeDirectorySeed(sourceRepo: string): string {
+  const source = trimSessionCreateText(sourceRepo);
+  if (!source) return "";
+  return `${trimTrailingPathSeparators(source)}${pathSeparatorFor(source)}`;
+}
+
+export function worktreeDirectoryForSession(sourceRepo: string, sessionName: string): string {
+  const source = trimSessionCreateText(sourceRepo);
+  const name = trimSessionCreateText(sessionName);
+  if (!source || !name) return worktreeDirectorySeed(source);
+  return `${trimTrailingPathSeparators(source)}-${name}`;
+}
+
+export function deriveWorktreeCreateView(input: WorktreeCreateViewInput): WorktreeCreateViewModel {
+  const normalCwd = trimSessionCreateText(input.normalCwd);
+  const defaultCwd = trimSessionCreateText(input.defaultCwd);
+  const sourceRepo = input.sourceRepoAutofill
+    ? normalCwd || defaultCwd || trimSessionCreateText(input.sourceRepo)
+    : trimSessionCreateText(input.sourceRepo);
+  const sessionName = trimSessionCreateText(input.sessionName);
+  const lastAutofilledDirectory = worktreeDirectoryForSession(sourceRepo, sessionName);
+  const directory = input.directoryAutofill ? lastAutofilledDirectory : trimSessionCreateText(input.directory);
+  const baseBranch = input.baseBranchAutofill ? "HEAD" : trimSessionCreateText(input.baseBranch);
+  const lastAutofilledBranch = sessionName;
+  const branchName = input.branchAutofill ? lastAutofilledBranch : trimSessionCreateText(input.branchName);
+  return {
+    enabled: input.enabled,
+    sourceRepo,
+    directory,
+    baseBranch,
+    branchName,
+    lastAutofilledDirectory,
+    lastAutofilledBranch,
+    summary: formatWorktreeCreateSummary({ enabled: input.enabled, sourceRepo, directory, baseBranch, branchName }),
+  };
+}
+
+export function formatWorktreeCreateSummary(worktree: {
+  enabled: boolean;
+  sourceRepo?: string | null;
+  directory?: string | null;
+  baseBranch?: string | null;
+  branchName?: string | null;
+}): string {
+  if (!worktree.enabled) return "Create a normal session in the selected working directory.";
+  const sourceRepo = trimSessionCreateText(worktree.sourceRepo) || "source repo";
+  const directory = trimSessionCreateText(worktree.directory) || "new worktree directory";
+  const baseBranch = trimSessionCreateText(worktree.baseBranch) || "base ref";
+  const branchName = trimSessionCreateText(worktree.branchName);
+  return branchName
+    ? `Create branch ${branchName} from ${baseBranch} at ${directory}, using ${sourceRepo}.`
+    : `Create a worktree from ${baseBranch} at ${directory}, using ${sourceRepo}.`;
 }
 
 export function buildWorktreeCreateOptions(draft: SessionCreateDraft): WorktreeCreateOptions | null {

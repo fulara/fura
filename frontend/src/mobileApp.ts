@@ -23,7 +23,11 @@ import type {
 } from "./protocol";
 import { sessionKindLabel, sessionStatusLabel } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
-import { resolveSessionCreateMessage, type SessionCreateValidationTarget } from "./sessionCreate";
+import {
+  deriveWorktreeCreateView,
+  resolveSessionCreateMessage,
+  type SessionCreateValidationTarget,
+} from "./sessionCreate";
 import { createSessionListView } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
@@ -100,6 +104,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
               <input id="mobileCreateWorktreeBase" autocomplete="off" spellcheck="false" placeholder="HEAD" />
               <label for="mobileCreateWorktreeBranch">Branch name <span class="mobile-optional-label">optional</span></label>
               <input id="mobileCreateWorktreeBranch" autocomplete="off" spellcheck="false" placeholder="feature/mobile" />
+              <p id="mobileCreateWorktreeSummary" class="mobile-create-worktree-summary"></p>
             </div>
             <p id="mobileCreateStatus" class="mobile-create-status" aria-live="polite"></p>
             <div class="mobile-create-actions">
@@ -146,6 +151,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const createWorktreeDirectory = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeDirectory");
   const createWorktreeBase = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeBase");
   const createWorktreeBranch = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeBranch");
+  const createWorktreeSummary = requireElement<HTMLParagraphElement>(document, "mobileCreateWorktreeSummary");
   const createStatus = requireElement<HTMLParagraphElement>(document, "mobileCreateStatus");
   const createClose = requireElement<HTMLButtonElement>(document, "mobileCreateClose");
   const createSubmit = requireElement<HTMLButtonElement>(document, "mobileCreateSubmit");
@@ -168,6 +174,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let createCwdDirty = false;
   let createWorktreeSourceDirty = false;
   let createWorktreeBaseDirty = false;
+  let createWorktreeDirectoryDirty = false;
+  let createWorktreeBranchDirty = false;
+  let lastAutofilledWorktreeDirectory = "";
+  let lastAutofilledWorktreeBranch = "";
   let createPendingRequestId: string | null = null;
   let pendingCreatedSessionBaseline: Set<string> | null = null;
   let activeMobileView: "transcript" | "diff" = "transcript";
@@ -207,27 +217,39 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   createClose.addEventListener("click", () => setCreateDrawerOpen(false));
   createCwdInput.addEventListener("input", () => {
     createCwdDirty = true;
+    syncCreateWorktreeFields();
     if (!createPendingRequestId) createStatus.textContent = "";
   });
   createNameInput.addEventListener("input", () => {
+    syncCreateWorktreeFields();
     if (!createPendingRequestId) createStatus.textContent = "";
   });
   createWorktreeEnabled.addEventListener("change", () => {
+    if (createWorktreeEnabled.checked) {
+      createWorktreeDirectoryDirty = false;
+      createWorktreeBranchDirty = false;
+    }
     syncCreateWorktreeFields();
     if (!createPendingRequestId) createStatus.textContent = "";
   });
   createWorktreeSourceRepo.addEventListener("input", () => {
     createWorktreeSourceDirty = true;
+    syncCreateWorktreeFields();
     if (!createPendingRequestId) createStatus.textContent = "";
   });
   createWorktreeDirectory.addEventListener("input", () => {
+    if (createWorktreeDirectory.value !== lastAutofilledWorktreeDirectory) createWorktreeDirectoryDirty = true;
+    syncCreateWorktreeFields();
     if (!createPendingRequestId) createStatus.textContent = "";
   });
   createWorktreeBase.addEventListener("input", () => {
     createWorktreeBaseDirty = true;
+    syncCreateWorktreeFields();
     if (!createPendingRequestId) createStatus.textContent = "";
   });
   createWorktreeBranch.addEventListener("input", () => {
+    if (createWorktreeBranch.value !== lastAutofilledWorktreeBranch) createWorktreeBranchDirty = true;
+    syncCreateWorktreeFields();
     if (!createPendingRequestId) createStatus.textContent = "";
   });
 
@@ -302,8 +324,31 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function syncCreateWorktreeFields(): void {
     const enabled = createWorktreeEnabled.checked;
     createWorktreeFields.hidden = !enabled;
-    if (!createWorktreeSourceDirty) createWorktreeSourceRepo.value = serverConfig?.defaultCwd ?? createCwdInput.value.trim();
-    if (!createWorktreeBaseDirty) createWorktreeBase.value = "HEAD";
+    if (!enabled) {
+      createWorktreeSummary.textContent = "";
+      return;
+    }
+    const view = deriveWorktreeCreateView({
+      enabled,
+      defaultCwd: serverConfig?.defaultCwd,
+      normalCwd: createCwdInput.value,
+      sessionName: createNameInput.value,
+      sourceRepo: createWorktreeSourceRepo.value,
+      directory: createWorktreeDirectory.value,
+      baseBranch: createWorktreeBase.value,
+      branchName: createWorktreeBranch.value,
+      sourceRepoAutofill: !createWorktreeSourceDirty,
+      directoryAutofill: !createWorktreeDirectoryDirty,
+      baseBranchAutofill: !createWorktreeBaseDirty,
+      branchAutofill: !createWorktreeBranchDirty,
+    });
+    createWorktreeSourceRepo.value = view.sourceRepo;
+    lastAutofilledWorktreeDirectory = view.lastAutofilledDirectory;
+    if (!createWorktreeDirectoryDirty) createWorktreeDirectory.value = view.directory;
+    if (!createWorktreeBaseDirty) createWorktreeBase.value = view.baseBranch;
+    lastAutofilledWorktreeBranch = view.lastAutofilledBranch;
+    if (!createWorktreeBranchDirty) createWorktreeBranch.value = view.branchName;
+    createWorktreeSummary.textContent = view.summary;
   }
 
   function setCreatePending(pending: boolean, requestId: string | null = null): void {
@@ -373,6 +418,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     createCwdDirty = false;
     createWorktreeSourceDirty = false;
     createWorktreeBaseDirty = false;
+    createWorktreeDirectoryDirty = false;
+    createWorktreeBranchDirty = false;
+    lastAutofilledWorktreeDirectory = "";
+    lastAutofilledWorktreeBranch = "";
     createWorktreeEnabled.checked = false;
     createWorktreeDirectory.value = "";
     createWorktreeBranch.value = "";

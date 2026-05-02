@@ -50,7 +50,11 @@ import {
   summarizeDiffFiles,
   type ParsedDiffRow,
 } from "./diffState";
-import { resolveSessionCreateMessage, type SessionCreateValidationTarget } from "./sessionCreate";
+import {
+  deriveWorktreeCreateView,
+  resolveSessionCreateMessage,
+  type SessionCreateValidationTarget,
+} from "./sessionCreate";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import {
   createCategoryCombobox,
@@ -81,7 +85,6 @@ import type {
   ToolCard,
   TranscriptEntry,
   TranscriptMessage,
-  WorktreeCreateOptions,
 } from "./protocol";
 
 type WorkspaceMode = "session" | "controller";
@@ -253,6 +256,7 @@ app.innerHTML = `
           <input id="cwdPickerWorktreeBase" autocomplete="off" spellcheck="false" placeholder="main" />
           <label for="cwdPickerWorktreeBranch">Branch name</label>
           <input id="cwdPickerWorktreeBranch" autocomplete="off" spellcheck="false" placeholder="feature/my-work" />
+          <p id="cwdPickerWorktreeSummary" class="field-help worktree-summary"></p>
         </div>
       </div>
       <footer class="modal-footer">
@@ -414,6 +418,7 @@ const cwdPickerWorktreeFields = requireElement<HTMLDivElement>("cwdPickerWorktre
 const cwdPickerWorktreeSourceRepo = requireElement<HTMLInputElement>("cwdPickerWorktreeSourceRepo");
 const cwdPickerWorktreeBase = requireElement<HTMLInputElement>("cwdPickerWorktreeBase");
 const cwdPickerWorktreeBranch = requireElement<HTMLInputElement>("cwdPickerWorktreeBranch");
+const cwdPickerWorktreeSummary = requireElement<HTMLParagraphElement>("cwdPickerWorktreeSummary");
 const deleteSessionOverlay = requireElement<HTMLDivElement>("deleteSessionOverlay");
 const deleteSessionClose = requireElement<HTMLButtonElement>("deleteSessionClose");
 const deleteSessionMessage = requireElement<HTMLParagraphElement>("deleteSessionMessage");
@@ -478,8 +483,10 @@ let pendingCreatedSessionBaseline: Set<string> | null = null;
 let cwdPickerCreatePending = false;
 let cwdPickerPendingRequestId: string | null = null;
 let deleteSessionTargetId: string | null = null;
+let cwdPickerSourceRepoAutofill = true;
 let cwdPickerDirectoryAutofill = true;
 let cwdPickerBranchAutofill = true;
+let cwdPickerBaseBranchAutofill = true;
 let lastAutofilledWorktreeDirectory = "";
 let lastAutofilledWorktreeBranch = "";
 const unreadSessions = new Set<string>();
@@ -679,12 +686,21 @@ cwdPickerInput.addEventListener("input", () => {
   if (cwdPickerWorktreeEnabled.checked && cwdPickerInput.value !== lastAutofilledWorktreeDirectory) {
     cwdPickerDirectoryAutofill = false;
   }
+  applyCwdPickerAutofill();
 });
-cwdPickerWorktreeSourceRepo.addEventListener("input", applyCwdPickerAutofill);
+cwdPickerWorktreeSourceRepo.addEventListener("input", () => {
+  cwdPickerSourceRepoAutofill = false;
+  applyCwdPickerAutofill();
+});
+cwdPickerWorktreeBase.addEventListener("input", () => {
+  cwdPickerBaseBranchAutofill = false;
+  applyCwdPickerAutofill();
+});
 cwdPickerWorktreeBranch.addEventListener("input", () => {
   if (cwdPickerWorktreeEnabled.checked && cwdPickerWorktreeBranch.value !== lastAutofilledWorktreeBranch) {
     cwdPickerBranchAutofill = false;
   }
+  applyCwdPickerAutofill();
 });
 cwdPickerOverlay.addEventListener("mousedown", event => {
   if (event.target === cwdPickerOverlay) closeCwdPicker();
@@ -3158,48 +3174,32 @@ function handleCwdPickerCreateError(requestId: string | null, message: string): 
   return true;
 }
 
-function trimTrailingPathSeparators(value: string): string {
-  if (value.length <= 1) return value;
-  return value.replace(/[\\/]+$/, "");
-}
-
-function pathSeparatorFor(value: string): string {
-  return value.includes("\\") && !value.includes("/") ? "\\" : "/";
-}
-
-function worktreeDirectorySeed(sourceRepo: string): string {
-  const source = sourceRepo.trim();
-  if (!source) return "";
-  return `${trimTrailingPathSeparators(source)}${pathSeparatorFor(source)}`;
-}
-
-function worktreeDirectoryForSession(sourceRepo: string, sessionName: string): string {
-  const source = sourceRepo.trim();
-  const name = sessionName.trim();
-  if (!source || !name) return worktreeDirectorySeed(source);
-  return `${trimTrailingPathSeparators(source)}-${name}`;
-}
-
-function setAutofilledWorktreeDirectory(value: string): void {
-  lastAutofilledWorktreeDirectory = value;
-  cwdPickerInput.value = value;
-}
-
-function setAutofilledWorktreeBranch(value: string): void {
-  lastAutofilledWorktreeBranch = value;
-  cwdPickerWorktreeBranch.value = value;
-}
-
 function applyCwdPickerAutofill(): void {
-  if (!cwdPickerWorktreeEnabled.checked) return;
-  const sourceRepo = cwdPickerWorktreeSourceRepo.value.trim();
-  const sessionName = cwdPickerNameInput.value.trim();
-  if (cwdPickerDirectoryAutofill) {
-    setAutofilledWorktreeDirectory(worktreeDirectoryForSession(sourceRepo, sessionName));
+  if (!cwdPickerWorktreeEnabled.checked) {
+    cwdPickerWorktreeSummary.textContent = "";
+    return;
   }
-  if (cwdPickerBranchAutofill) {
-    setAutofilledWorktreeBranch(sessionName);
-  }
+  const view = deriveWorktreeCreateView({
+    enabled: true,
+    defaultCwd: serverConfig?.defaultCwd,
+    normalCwd: cwdPickerWorktreeSourceRepo.value || serverConfig?.defaultCwd,
+    sessionName: cwdPickerNameInput.value,
+    sourceRepo: cwdPickerWorktreeSourceRepo.value,
+    directory: cwdPickerInput.value,
+    baseBranch: cwdPickerWorktreeBase.value,
+    branchName: cwdPickerWorktreeBranch.value,
+    sourceRepoAutofill: cwdPickerSourceRepoAutofill,
+    directoryAutofill: cwdPickerDirectoryAutofill,
+    baseBranchAutofill: cwdPickerBaseBranchAutofill,
+    branchAutofill: cwdPickerBranchAutofill,
+  });
+  cwdPickerWorktreeSourceRepo.value = view.sourceRepo;
+  lastAutofilledWorktreeDirectory = view.lastAutofilledDirectory;
+  if (cwdPickerDirectoryAutofill) cwdPickerInput.value = view.directory;
+  if (cwdPickerBaseBranchAutofill) cwdPickerWorktreeBase.value = view.baseBranch;
+  lastAutofilledWorktreeBranch = view.lastAutofilledBranch;
+  if (cwdPickerBranchAutofill) cwdPickerWorktreeBranch.value = view.branchName;
+  cwdPickerWorktreeSummary.textContent = view.summary;
 }
 
 function syncCwdPickerWorktreeFields(): void {
@@ -3213,9 +3213,11 @@ function syncCwdPickerWorktreeFields(): void {
     const currentSourceRepo = cwdPickerWorktreeSourceRepo.value.trim();
     if (!currentSourceRepo || currentSourceRepo === serverConfig?.defaultCwd) {
       cwdPickerWorktreeSourceRepo.value = currentWorkingDirectory || serverConfig?.defaultCwd || "";
+      cwdPickerSourceRepoAutofill = true;
     }
     cwdPickerDirectoryAutofill = true;
     cwdPickerBranchAutofill = true;
+    cwdPickerBaseBranchAutofill = !cwdPickerWorktreeBase.value.trim();
     applyCwdPickerAutofill();
   } else {
     cwdPickerInputLabel.textContent = "Working directory";
@@ -3226,6 +3228,7 @@ function syncCwdPickerWorktreeFields(): void {
     }
     lastAutofilledWorktreeDirectory = "";
     lastAutofilledWorktreeBranch = "";
+    cwdPickerWorktreeSummary.textContent = "";
   }
 }
 
@@ -3240,8 +3243,10 @@ function openCwdPicker(): void {
   cwdPickerWorktreeSourceRepo.value = config.defaultCwd;
   cwdPickerWorktreeBase.value = "HEAD";
   cwdPickerWorktreeBranch.value = "";
+  cwdPickerSourceRepoAutofill = true;
   cwdPickerDirectoryAutofill = true;
   cwdPickerBranchAutofill = true;
+  cwdPickerBaseBranchAutofill = true;
   lastAutofilledWorktreeDirectory = "";
   lastAutofilledWorktreeBranch = "";
   setCwdPickerCreatePending(false);

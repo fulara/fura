@@ -134,6 +134,13 @@ body {
   margin: 0;
 }
 
+.mobile-create-worktree-summary {
+  margin: 0;
+  color: #9ba4b5;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .mobile-create-actions {
   display: flex;
   justify-content: flex-end;

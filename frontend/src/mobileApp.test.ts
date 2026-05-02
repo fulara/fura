@@ -285,6 +285,28 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Working directory is required.");
   });
 
+  it("derives mobile worktree defaults from the shared create view model", () => {
+    createHarness();
+    openCreateDrawer();
+    const nameInput = document.querySelector<HTMLInputElement>("#mobileCreateName");
+    const cwdInput = document.querySelector<HTMLInputElement>("#mobileCreateCwd");
+    const enabled = document.querySelector<HTMLInputElement>("#mobileCreateWorktreeEnabled");
+    if (!nameInput || !cwdInput || !enabled) throw new Error("create form missing");
+    nameInput.value = "Feature Mobile";
+    nameInput.dispatchEvent(new Event("input", { bubbles: true }));
+    cwdInput.value = "/repo/app";
+    cwdInput.dispatchEvent(new Event("input", { bubbles: true }));
+    enabled.checked = true;
+    enabled.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(document.querySelector<HTMLInputElement>("#mobileCreateWorktreeSourceRepo")?.value).toBe("/repo/app");
+    expect(document.querySelector<HTMLInputElement>("#mobileCreateWorktreeDirectory")?.value).toBe("/repo/app-Feature Mobile");
+    expect(document.querySelector<HTMLInputElement>("#mobileCreateWorktreeBase")?.value).toBe("HEAD");
+    expect(document.querySelector<HTMLInputElement>("#mobileCreateWorktreeBranch")?.value).toBe("Feature Mobile");
+    expect(document.querySelector("#mobileCreateWorktreeSummary")?.textContent)
+      .toBe("Create branch Feature Mobile from HEAD at /repo/app-Feature Mobile, using /repo/app.");
+  });
+
   it("sends a worktree session.create from the mobile create form", () => {
     const { connection } = createHarness();
 

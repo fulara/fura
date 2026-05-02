@@ -1429,6 +1429,10 @@ h2 {
   display: none;
 }
 
+.worktree-summary {
+  margin-top: 0;
+}
+
 .modal-status {
   min-height: 1.2em;
   color: #9ba4b5;
