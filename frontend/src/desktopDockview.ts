@@ -32,6 +32,7 @@ const DOCKVIEW_LAYOUT_STORAGE_KEY = "fura.dockview.layout";
 
 export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDockview {
   const panelEls: Partial<Record<DesktopDockviewPanelId, HTMLElement>> = {};
+  const panelActivators: Partial<Record<DesktopDockviewPanelId, () => void>> = {};
   const owner = options.host.ownerDocument;
   const win = owner.defaultView ?? window;
 
@@ -59,6 +60,10 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
               popoutUrl: "/popout.html",
               onDidOpen: ({ window: popWin }) => copyStylesToPopout(owner, popWin),
             });
+          };
+          panelActivators[panelId] = () => {
+            params.api.setActive();
+            params.api.getWindow().focus();
           };
           panelEls[panelId] = shell.scroll;
           options.onPanelReady(panelId, shell.scroll);
@@ -97,6 +102,12 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       return api.activePanel?.id === id;
     },
     activatePanel(id) {
+      const activate = panelActivators[id];
+      if (activate) {
+        activate();
+        return true;
+      }
+
       const panel = api.getGroupPanel(id);
       if (!panel) return false;
       api.setActivePanel(panel);
