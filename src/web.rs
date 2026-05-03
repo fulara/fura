@@ -58,7 +58,10 @@ pub(crate) async fn auth_session_handler(
     }
 
     let mut auth_sessions = state.auth_sessions.write().await;
-    build_auth_session_response(issue_auth_session(&mut auth_sessions, Instant::now()))
+    build_auth_session_response(
+        issue_auth_session(&mut auth_sessions, Instant::now()),
+        state.secure_auth_cookie,
+    )
 }
 
 pub(crate) fn authenticate_websocket_origin(
@@ -103,10 +106,10 @@ pub(crate) fn issue_auth_session(
     session_id
 }
 
-pub(crate) fn build_auth_session_response(session_id: String) -> Response {
+pub(crate) fn build_auth_session_response(session_id: String, secure: bool) -> Response {
     (
         StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, auth_session_cookie_header(&session_id))],
+        [(header::SET_COOKIE, auth_session_cookie_header(&session_id, secure))],
     )
         .into_response()
 }
@@ -134,9 +137,10 @@ fn auth_session_cookie(headers: &HeaderMap) -> Option<String> {
     })
 }
 
-fn auth_session_cookie_header(session_id: &str) -> String {
+fn auth_session_cookie_header(session_id: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
     format!(
-        "{AUTH_SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        "{AUTH_SESSION_COOKIE}={session_id}; HttpOnly{secure_attr}; SameSite=Lax; Path=/; Max-Age={}",
         AUTH_SESSION_TTL.as_secs(),
     )
 }
@@ -150,14 +154,16 @@ pub(crate) async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    match authenticate_websocket_origin(&headers, &state.allowed_origins) {
-        Ok(()) => {}
-        Err(error) => {
-            warn!(
-                ?error,
-                "rejected websocket connection with disallowed origin"
-            );
-            return (StatusCode::FORBIDDEN, "missing or disallowed origin").into_response();
+    if let Some(allowed_origins) = state.allowed_origins.as_deref() {
+        match authenticate_websocket_origin(&headers, allowed_origins) {
+            Ok(()) => {}
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "rejected websocket connection with disallowed origin"
+                );
+                return (StatusCode::FORBIDDEN, "missing or disallowed origin").into_response();
+            }
         }
     }
 
@@ -559,7 +565,7 @@ mod tests {
 
     #[test]
     fn build_auth_session_response_sets_http_only_cookie() {
-        let response = build_auth_session_response("session-1".to_string());
+        let response = build_auth_session_response("session-1".to_string(), false);
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let cookie = response
@@ -572,6 +578,19 @@ mod tests {
         assert!(cookie.contains("SameSite=Lax"));
         assert!(cookie.contains("Path=/"));
         assert!(cookie.contains("Max-Age=43200"));
+        assert!(!cookie.contains("Secure"));
+    }
+
+    #[test]
+    fn build_auth_session_response_adds_secure_cookie_when_requested() {
+        let response = build_auth_session_response("session-1".to_string(), true);
+
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("set-cookie header");
+        assert!(cookie.contains("Secure"));
     }
 
     #[test]

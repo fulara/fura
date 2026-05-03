@@ -5,3 +5,6 @@
 .DS_Store
 
 /bridge-debug*.jsonl
+
+/.cert
+

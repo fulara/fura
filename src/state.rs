@@ -34,7 +34,8 @@ pub(crate) struct AppState {
     pub(crate) default_cwd: Arc<RwLock<String>>,
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) voice_language: Arc<RwLock<String>>,
-    pub(crate) allowed_origins: Arc<Vec<String>>,
+    pub(crate) allowed_origins: Option<Arc<Vec<String>>>,
+    pub(crate) secure_auth_cookie: bool,
 }
 
 #[derive(Debug, Clone)]

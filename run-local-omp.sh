@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # Any arguments passed to this script are forwarded to Fura after the local OMP
 # RPC wiring arguments, e.g.:
-#   ./run-local-omp.sh --port 3738 --log-frames
+#   ./run-local-omp.sh --bind 127.0.0.1:3738 --log-frames
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 OMP_REPO=${OMP_REPO:-/home/aleksander/repos/oh-my-pi}

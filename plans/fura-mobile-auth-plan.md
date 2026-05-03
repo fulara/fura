@@ -176,44 +176,36 @@ cargo test
 ```
 
 
-## Phase 5: Tailscale Launch Path (implemented explicit helper)
+## Phase 5: Dual Local/Remote Listener Model (implemented)
 
-Do this after token cleanup and WebSocket origin hardening pass.
-
-Goal: make mobile access obvious without Fura owning Tailscale installation.
-
-Implemented first iteration:
+Implemented contract:
 
 ```bash
-fura --host <tailscale-ip-or-bind-ip> --mobile-host <tailscale-name-or-ip>
+fura \
+  --bind 127.0.0.1:3737 \
+  --remote-bind <tailscale-ip>:4450 \
+  --remote-host <machine>.<tailnet>.ts.net \
+  --tls-cert /path/to/<machine>.<tailnet>.ts.net.crt \
+  --tls-key /path/to/<machine>.<tailnet>.ts.net.key
 ```
 
-`--mobile-host` / `FURA_MOBILE_HOST` does not change the bind address. It adds `http://<mobile-host>:<port>` to the allowed Origin list and prints that URL as the configured Mobile URL.
+Behavior:
 
-Rules:
+- local listener stays plain HTTP for laptop development;
+- remote listener requires HTTPS and certificate-backed host naming;
+- remote listener requires exact allowed origins derived from `--remote-host`;
+- local listener does not enforce the remote browser Origin allowlist;
+- remote auth cookies are `Secure`; local auth cookies are not;
+- `--remote-bind`, `--remote-host`, `--tls-cert`, and `--tls-key` form one all-or-nothing remote TLS group.
 
-- exact Origin allowlist only;
-- no wildcards;
-- no substring matching;
-- keep loopback as the safe default;
-- do not silently fall back to `0.0.0.0`;
-- print Mobile URL only when explicitly configured.
-
-## Phase 6: Browser-Visible HTTPS over Tailscale
-
-Do this after token cleanup, Origin allowlist, and the explicit Tailscale launch path are stable.
-
-Goal: support mobile access over the internet through Tailscale with HTTPS at the browser layer, not only WireGuard encryption under an `http://` page.
-
-Recommended target URL shape:
+Recommended remote URL shape:
 
 ```text
-https://<machine>.<tailnet>.ts.net:3737/
-wss://<machine>.<tailnet>.ts.net:3737/ws
+https://<machine>.<tailnet>.ts.net:4450/mobile.html
+wss://<machine>.<tailnet>.ts.net:4450/ws
 ```
 
-Preferred certificate source: Tailscale HTTPS certificates for the machine's MagicDNS full domain name, or a simple reverse proxy such as Caddy if that proves operationally cleaner.
-
+Preferred certificate source remains Tailscale HTTPS certificates for the machine's MagicDNS full domain name.
 Fura implementation options to evaluate in this phase:
 
 - native TLS flags such as `--tls-cert <path>` and `--tls-key <path>`;

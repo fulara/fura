@@ -5,10 +5,11 @@ use axum::{
     Router,
     routing::{get, post},
 };
+use axum_server::{Handle as AxumServerHandle, tls_rustls::RustlsConfig};
 use clap::Parser;
 use tokio::{
     net::TcpListener,
-    sync::{RwLock, broadcast},
+    sync::{RwLock, broadcast, watch},
 };
 use tower_http::{services::ServeDir, trace::TraceLayer};
 use tracing::{info, warn};
@@ -72,11 +73,27 @@ async fn main() -> anyhow::Result<()> {
         None => (generate_token(), BridgeTokenSource::Generated),
     };
 
-    if !args.host.is_loopback() {
+    if !args.bind.ip().is_loopback() {
         warn!(
-            host = %args.host,
-            "binding outside loopback; use only on trusted networks"
+            bind = %args.bind,
+            "local bind outside loopback; local listener is intended for private development only"
         );
+    }
+
+    let remote_listener = remote_listener_from_args(
+        args.remote_bind,
+        args.remote_host.as_deref(),
+        args.tls_cert.as_deref(),
+        args.tls_key.as_deref(),
+        args.allowed_origins,
+    )?;
+    if let Some(remote) = remote_listener.as_ref() {
+        if remote.bind.ip().is_unspecified() {
+            warn!(
+                bind = %remote.bind,
+                "remote bind uses an unspecified address; this may expose Fura on more interfaces than intended"
+            );
+        }
     }
 
     let mut rpc_args = Vec::new();
@@ -91,13 +108,6 @@ async fn main() -> anyhow::Result<()> {
     let fura_config = load_fura_config(config_path.as_deref());
     let default_cwd = default_cwd_from_config(&fura_config, &startup_cwd);
     let voice_language = fura_config.voice_language.clone();
-    let mobile_url = mobile_url(args.mobile_host.as_deref(), args.port);
-    let allowed_origins = allowed_origins_from_args(
-        args.host,
-        args.port,
-        args.allowed_origins,
-        args.mobile_host.as_deref(),
-    );
     let session_categories = fura_config
         .session_categories
         .into_iter()
@@ -109,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .collect();
     let (events, _) = broadcast::channel(512);
-    let state = AppState {
+    let shared_state = AppState {
         token: Arc::new(token),
         auth_sessions: Arc::new(RwLock::new(HashMap::new())),
         sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -134,35 +144,92 @@ async fn main() -> anyhow::Result<()> {
         default_cwd: Arc::new(RwLock::new(default_cwd)),
         config_path,
         voice_language: Arc::new(RwLock::new(voice_language)),
-        allowed_origins: Arc::new(allowed_origins),
+        allowed_origins: None,
+        secure_auth_cookie: false,
     };
 
-    start_session_catalog_watcher(state.clone());
+    start_session_catalog_watcher(shared_state.clone());
 
-    let app = Router::new()
-        .route("/healthz", get(healthz))
-        .route("/auth/session", post(auth_session_handler))
-        .route("/ws", get(ws_handler))
-        .fallback_service(ServeDir::new(&args.static_dir).append_index_html_on_directories(true))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state.clone());
-
-    let listener = TcpListener::bind((args.host, args.port))
+    let local_state = shared_state.clone();
+    let local_app = build_app(local_state, args.static_dir.clone());
+    let local_listener = TcpListener::bind(args.bind)
         .await
-        .with_context(|| format!("failed to bind {}:{}", args.host, args.port))?;
+        .with_context(|| format!("failed to bind local listener {}", args.bind))?;
+
+    let remote_runtime = if let Some(remote) = remote_listener.as_ref() {
+        let mut remote_state = shared_state.clone();
+        remote_state.allowed_origins = Some(Arc::new(remote.allowed_origins.clone()));
+        remote_state.secure_auth_cookie = true;
+        let remote_app = build_app(remote_state, args.static_dir.clone());
+        let tls_config = RustlsConfig::from_pem_file(&remote.cert_path, &remote.key_path)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to load TLS certificate/key from {} and {}",
+                    remote.cert_path.display(),
+                    remote.key_path.display()
+                )
+            })?;
+        Some((remote.clone(), remote_app, tls_config))
+    } else {
+        None
+    };
 
     log_server_ready(
-        &state,
-        args.host,
-        args.port,
-        mobile_url.as_deref(),
+        &shared_state,
+        args.bind,
+        remote_runtime
+            .as_ref()
+            .map(|(remote, _, _)| remote_url(&remote.host, remote.bind.port())),
         token_source,
     );
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server failed")
+    if let Some((remote, remote_app, tls_config)) = remote_runtime {
+        let remote_handle = AxumServerHandle::new();
+        let remote_shutdown = remote_handle.clone();
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            let _ = shutdown_tx.send(true);
+            remote_shutdown.graceful_shutdown(Some(Duration::from_secs(5)));
+        });
+
+        let local_server = axum::serve(local_listener, local_app).with_graceful_shutdown(
+            wait_for_shutdown(shutdown_rx),
+        );
+        let remote_server = axum_server::bind_rustls(remote.bind, tls_config)
+            .handle(remote_handle)
+            .serve(remote_app.into_make_service());
+
+        tokio::try_join!(
+            async {
+                local_server.await.context("local server failed")
+            },
+            async {
+                remote_server.await.context("remote TLS server failed")
+            },
+        )
+        .map(|_| ())
+    } else {
+        axum::serve(local_listener, local_app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+            .context("local server failed")
+    }
+}
+
+fn build_app(state: AppState, static_dir: std::path::PathBuf) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/auth/session", post(auth_session_handler))
+        .route("/ws", get(ws_handler))
+        .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
+    let _ = shutdown_rx.changed().await;
 }
 
 fn start_session_catalog_watcher(state: AppState) {
@@ -178,20 +245,19 @@ fn start_session_catalog_watcher(state: AppState) {
 
 fn log_server_ready(
     state: &AppState,
-    host: std::net::IpAddr,
-    port: u16,
-    mobile_url: Option<&str>,
+    local_bind: std::net::SocketAddr,
+    remote_url: Option<String>,
     token_source: BridgeTokenSource,
 ) {
     info!(
-        url = %bridge_listen_url(host, port),
+        url = %local_bind_url(local_bind),
         auth = startup_auth_label(token_source),
         rpc_program = %state.rpc_config.program,
         rpc_arg_count = state.rpc_config.args.len(),
-        "fura bridge listening"
+        "fura local URL configured"
     );
-    if let Some(mobile_url) = mobile_url {
-        info!(url = %mobile_url, "fura mobile URL configured");
+    if let Some(remote_url) = remote_url {
+        info!(url = %remote_url, "fura remote URL configured");
     }
     if token_source == BridgeTokenSource::Generated {
         warn!(
@@ -221,9 +287,6 @@ fn next_rpc_id() -> String {
     Uuid::new_v4().to_string()
 }
 
-fn bridge_listen_url(host: std::net::IpAddr, port: u16) -> String {
-    format!("http://{host}:{port}/")
-}
 
 fn startup_auth_label(token_source: BridgeTokenSource) -> &'static str {
     match token_source {
@@ -403,18 +466,18 @@ mod tests {
     }
 
     #[test]
-    fn bridge_listen_url_never_contains_token() {
-        let url = bridge_listen_url("127.0.0.1".parse().expect("ip"), 3737);
+    fn local_bind_url_never_contains_token() {
+        let url = local_bind_url("127.0.0.1:3737".parse().expect("socket"));
 
         assert_eq!(url, "http://127.0.0.1:3737/");
         assert!(!url.contains("token"));
     }
 
     #[test]
-    fn mobile_url_formats_explicit_mobile_host() {
+    fn remote_url_formats_explicit_remote_host() {
         assert_eq!(
-            mobile_url(Some("desktop.tailnet.ts.net"), 3737).as_deref(),
-            Some("http://desktop.tailnet.ts.net:3737/")
+            remote_url("serwer-mini.caracal-porgy.ts.net", 4450),
+            "https://serwer-mini.caracal-porgy.ts.net:4450/"
         );
     }
 
@@ -457,10 +520,8 @@ mod tests {
             default_cwd: Arc::new(RwLock::new(env::temp_dir().to_string_lossy().into_owned())),
             config_path: None,
             voice_language: Arc::new(RwLock::new(default_voice_language())),
-            allowed_origins: Arc::new(default_allowed_origins(
-                "127.0.0.1".parse().expect("test ip"),
-                3737,
-            )),
+            allowed_origins: None,
+            secure_auth_cookie: false,
         }
     }
 

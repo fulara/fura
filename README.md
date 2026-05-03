@@ -99,18 +99,21 @@ Environment overrides for `run-local-omp.sh`:
 | `FURA_BRIDGE_DEBUG_FILE` | `./bridge-debug.jsonl` | Raw RPC frame log (contains prompts — do not commit) |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
-### Against a local OMP checkout over Tailscale
+### Against a local OMP checkout over Tailscale + HTTPS
 
 ```bash
 ./run-local-with-tailscale.sh
 ```
 
-Defaults: bind to this machine's `tailscale ip -4`, listen on port `4450`, and advertise the same Tailscale IPv4 as `FURA_MOBILE_HOST`. Open `http://<tailscale-ip>:4450/mobile.html` on a phone connected to the same tailnet and enter the bridge token (`dev` by default).
+Defaults: keep local development on `http://127.0.0.1:3737/`, add a remote HTTPS listener on `https://serwer-mini.caracal-porgy.ts.net:4450/mobile.html`, and bind that remote listener to this machine's `tailscale ip -4`. The script expects matching TLS files at `~/tmp/serwer-mini.caracal-porgy.ts.net.crt` and `.key` unless you override them.
 
-If you later want to use a Tailscale DNS name or service name instead of the raw IP, override it explicitly:
+Override the remote host or TLS file paths explicitly if needed:
 
 ```bash
-FURA_MOBILE_HOST=<machine>.<tailnet>.ts.net ./run-local-with-tailscale.sh
+FURA_REMOTE_HOST=<machine>.<tailnet>.ts.net \
+FURA_TLS_CERT=/path/to/<machine>.<tailnet>.ts.net.crt \
+FURA_TLS_KEY=/path/to/<machine>.<tailnet>.ts.net.key \
+./run-local-with-tailscale.sh
 ```
 
 
@@ -136,11 +139,13 @@ All flags can also be set via environment variables:
 
 | Flag | Env var | Default | Description |
 |---|---|---|---|
-| `--host` | — | `127.0.0.1` | Bind address |
-| `--port` | — | `3737` | Listen port |
+| `--bind` | `FURA_BIND` | `127.0.0.1:3737` | Local HTTP bind address used for laptop development |
+| `--remote-bind` | `FURA_REMOTE_BIND` | — | Optional remote HTTPS bind address, typically a Tailscale IP plus phone port |
+| `--remote-host` | `FURA_REMOTE_HOST` | — | Public HTTPS host name used by remote browsers; must match the TLS certificate host name |
+| `--allowed-origin` | `FURA_ALLOWED_ORIGINS` | — | Additional exact remote HTTPS origins allowed for the remote listener |
+| `--tls-cert` | `FURA_TLS_CERT` | — | PEM certificate file for the remote HTTPS listener |
+| `--tls-key` | `FURA_TLS_KEY` | — | PEM private key file for the remote HTTPS listener |
 | `--token` | `FURA_TOKEN` | random UUID (logged separately when generated) | Bridge token entered in the browser auth screen |
-| `--allowed-origin` | `FURA_ALLOWED_ORIGINS` | `http://127.0.0.1:<port>`, `http://localhost:<port>` | Allowed browser WebSocket origins; repeat flag or comma-separate env values for Tailscale/HTTPS origins |
-| `--mobile-host` | `FURA_MOBILE_HOST` | — | Hostname or Tailscale IP shown as Mobile URL and added as an allowed origin; does not change bind address |
 | `--static-dir` | — | `frontend/dist` | Frontend static files |
 | `--rpc-program` | `FURA_RPC_PROGRAM` | `omp` | RPC child executable |
 | `--rpc-arg` | `FURA_RPC_ARGS` | — | Extra args for RPC child (repeatable) |

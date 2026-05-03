@@ -10,8 +10,8 @@ set -euo pipefail
 #   FURA_PORT=38737
 #   FURA_SKIP_FRONTEND_BUILD=1
 #
-# Extra arguments are forwarded to Fura, e.g.:
-#   ./run-mock-rpc.sh --log-frames
+# Extra arguments are forwarded to Fura after the mock RPC wiring, e.g.:
+#   ./run-mock-rpc.sh --bind 127.0.0.1:38888 --log-frames
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 PORT=${FURA_PORT:-38737}
@@ -24,8 +24,8 @@ if [[ "${FURA_SKIP_FRONTEND_BUILD:-0}" != "1" ]]; then
 fi
 
 exec cargo run --bin fura -- \
+  --bind "127.0.0.1:${PORT}" \
   --static-dir "${SCRIPT_DIR}/frontend/dist" \
-  --port "${PORT}" \
   --rpc-program node \
   --no-default-rpc-args \
   --rpc-arg "${SCRIPT_DIR}/fixtures/mock-omp-rpc.mjs" \

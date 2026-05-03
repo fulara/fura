@@ -1,35 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run Fura against the local Oh My Pi checkout, bound to this machine's
-# Tailscale IPv4 address so a phone in the same tailnet can connect.
+# Run Fura against the local Oh My Pi checkout with two listeners:
+# - local HTTP for laptop development:  http://127.0.0.1:3737/
+# - remote HTTPS for phone development: https://<remote-host>:4450/mobile.html
 #
-# Defaults are intentionally explicit and safe:
-# - bind to `tailscale ip -4`, not 0.0.0.0
-# - use port 4450 for the phone workflow
-# - add --mobile-host as an allowed browser Origin helper
+# Defaults are explicit and split by purpose:
+# - local listener stays on 127.0.0.1:3737
+# - remote listener binds to `tailscale ip -4`:4450
+# - remote host defaults to the user's configured Tailscale DNS name
+# - TLS cert/key default to ~/tmp/<remote-host>.crt and .key
 #
 # Environment overrides:
 #   OMP_REPO=/path/to/oh-my-pi
 #   BUN_BIN=/path/to/bun
 #   FURA_TOKEN=dev
-#   FURA_PORT=4450
-#   FURA_MOBILE_HOST=<tailscale-ip-or-dns-name>  # defaults to tailscale ip -4
+#   FURA_LOCAL_BIND=127.0.0.1:3737
+#   FURA_REMOTE_PORT=4450
+#   FURA_REMOTE_HOST=serwer-mini.caracal-porgy.ts.net
+#   FURA_TLS_CERT=/path/to/<remote-host>.crt
+#   FURA_TLS_KEY=/path/to/<remote-host>.key
 #   FURA_BRIDGE_DEBUG_FILE=/path/to/bridge-debug.jsonl
 #   FURA_SKIP_FRONTEND_BUILD=1
 #
 # Any arguments passed to this script are forwarded to Fura after the local OMP
-# RPC wiring and Tailscale bind arguments.
+# RPC wiring and dual-listener arguments.
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 OMP_REPO=${OMP_REPO:-/home/aleksander/repos/oh-my-pi}
 BUN_BIN=${BUN_BIN:-${HOME}/.bun/bin/bun}
 FURA_TOKEN=${FURA_TOKEN:-dev}
-FURA_PORT=${FURA_PORT:-4450}
-MOBILE_HOST_OVERRIDDEN=0
-if [[ -n "${FURA_MOBILE_HOST+x}" ]]; then
-  MOBILE_HOST_OVERRIDDEN=1
-fi
+FURA_LOCAL_BIND=${FURA_LOCAL_BIND:-127.0.0.1:3737}
+FURA_REMOTE_PORT=${FURA_REMOTE_PORT:-4450}
+FURA_REMOTE_HOST=${FURA_REMOTE_HOST:-serwer-mini.caracal-porgy.ts.net}
+FURA_TLS_CERT=${FURA_TLS_CERT:-${HOME}/tmp/${FURA_REMOTE_HOST}.crt}
+FURA_TLS_KEY=${FURA_TLS_KEY:-${HOME}/tmp/${FURA_REMOTE_HOST}.key}
 FURA_BRIDGE_DEBUG_FILE=${FURA_BRIDGE_DEBUG_FILE:-${SCRIPT_DIR}/bridge-debug.jsonl}
 
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -42,8 +47,7 @@ if [[ -z "${TAILSCALE_IP}" ]]; then
   echo "No Tailscale IPv4 address found. Is Tailscale running and connected?" >&2
   exit 1
 fi
-
-FURA_MOBILE_HOST=${FURA_MOBILE_HOST:-${TAILSCALE_IP}}
+REMOTE_BIND="${TAILSCALE_IP}:${FURA_REMOTE_PORT}"
 
 if [[ ! -x "${BUN_BIN}" ]]; then
   echo "Bun not found or not executable at: ${BUN_BIN}" >&2
@@ -57,6 +61,18 @@ if [[ ! -d "${OMP_REPO}/packages/coding-agent" ]]; then
   exit 1
 fi
 
+if [[ ! -r "${FURA_TLS_CERT}" ]]; then
+  echo "TLS cert not readable at: ${FURA_TLS_CERT}" >&2
+  echo "Generate it first, e.g.: sudo tailscale cert ${FURA_REMOTE_HOST}" >&2
+  exit 1
+fi
+
+if [[ ! -r "${FURA_TLS_KEY}" ]]; then
+  echo "TLS key not readable at: ${FURA_TLS_KEY}" >&2
+  echo "If it was created with sudo, fix ownership/permissions or reissue it for the current user." >&2
+  exit 1
+fi
+
 shopt -s nullglob
 native_addons=("${OMP_REPO}"/packages/natives/native/pi_natives.linux-x64*.node)
 shopt -u nullglob
@@ -67,8 +83,9 @@ if (( ${#native_addons[@]} == 0 )); then
   exit 1
 fi
 
-if (( MOBILE_HOST_OVERRIDDEN )) && command -v python >/dev/null 2>&1; then
-  resolved_mobile_ip=$(python - "${FURA_MOBILE_HOST}" <<'PY' || true
+resolved_remote_ip=""
+if command -v python >/dev/null 2>&1; then
+  resolved_remote_ip=$(python - "${FURA_REMOTE_HOST}" <<'PY' || true
 import socket
 import sys
 try:
@@ -77,10 +94,11 @@ except Exception:
     pass
 PY
 )
+fi
 
-  if [[ -n "${resolved_mobile_ip}" && "${resolved_mobile_ip}" != "${TAILSCALE_IP}" ]]; then
-    echo "Warning: FURA_MOBILE_HOST=${FURA_MOBILE_HOST} resolves to ${resolved_mobile_ip}, but this machine's Tailscale IP is ${TAILSCALE_IP}." >&2
-  fi
+if [[ -n "${resolved_remote_ip}" && "${resolved_remote_ip}" != "${TAILSCALE_IP}" ]]; then
+  echo "Warning: FURA_REMOTE_HOST=${FURA_REMOTE_HOST} resolves to ${resolved_remote_ip}, but this machine's Tailscale IP is ${TAILSCALE_IP}." >&2
+  echo "HTTPS clients must open the exact remote host from the certificate, and that host should route back to this machine." >&2
 fi
 
 export FURA_TOKEN
@@ -94,17 +112,22 @@ if [[ "${FURA_SKIP_FRONTEND_BUILD:-0}" != "1" ]]; then
 fi
 
 cat >&2 <<EOF
-Starting Fura for Tailscale mobile access:
-  Bind address: ${TAILSCALE_IP}:${FURA_PORT}
-  Mobile URL:   http://${FURA_MOBILE_HOST}:${FURA_PORT}/mobile.html
-  Allowed Origin: http://${FURA_MOBILE_HOST}:${FURA_PORT}
-  Auth token:   enter FURA_TOKEN in the browser auth screen (default: dev)
+Starting Fura for local + Tailscale development:
+  Local URL:        http://${FURA_LOCAL_BIND}/
+  Remote bind:      ${REMOTE_BIND}
+  Remote URL:       https://${FURA_REMOTE_HOST}:${FURA_REMOTE_PORT}/mobile.html
+  Remote Origin:    https://${FURA_REMOTE_HOST}:${FURA_REMOTE_PORT}
+  TLS cert:         ${FURA_TLS_CERT}
+  TLS key:          ${FURA_TLS_KEY}
+  Auth token:       enter FURA_TOKEN in the browser auth screen (default: dev)
 EOF
 
 exec cargo run --bin fura -- \
-  --host "${TAILSCALE_IP}" \
-  --port "${FURA_PORT}" \
-  --mobile-host "${FURA_MOBILE_HOST}" \
+  --bind "${FURA_LOCAL_BIND}" \
+  --remote-bind "${REMOTE_BIND}" \
+  --remote-host "${FURA_REMOTE_HOST}" \
+  --tls-cert "${FURA_TLS_CERT}" \
+  --tls-key "${FURA_TLS_KEY}" \
   --static-dir "${SCRIPT_DIR}/frontend/dist" \
   --bridge-debug-file "${FURA_BRIDGE_DEBUG_FILE}" \
   --rpc-program "${BUN_BIN}" \

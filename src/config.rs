@@ -1,9 +1,10 @@
+use anyhow::ensure;
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     env, fs,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
 };
 use tokio::fs as async_fs;
@@ -18,13 +19,17 @@ use crate::{AppState, ServerMessage};
     about = "Local browser bridge for Oh My Pi RPC sessions"
 )]
 pub(crate) struct Args {
-    #[arg(long, default_value = "127.0.0.1")]
-    pub(crate) host: IpAddr,
+    #[arg(long, default_value = "127.0.0.1:3737")]
+    pub(crate) bind: SocketAddr,
 
-    #[arg(long, default_value_t = 3737)]
-    pub(crate) port: u16,
+    #[arg(long, env = "FURA_REMOTE_BIND")]
+    pub(crate) remote_bind: Option<SocketAddr>,
 
-    /// Allowed browser Origin values for WebSocket handshakes. Repeat or pass comma-separated values via FURA_ALLOWED_ORIGINS.
+    /// Public HTTPS host name used by remote browser clients. Must match the TLS certificate host name.
+    #[arg(long, env = "FURA_REMOTE_HOST")]
+    pub(crate) remote_host: Option<String>,
+
+    /// Additional exact browser Origin values allowed for the remote HTTPS listener.
     #[arg(
         long = "allowed-origin",
         env = "FURA_ALLOWED_ORIGINS",
@@ -32,9 +37,11 @@ pub(crate) struct Args {
     )]
     pub(crate) allowed_origins: Vec<String>,
 
-    /// Hostname or Tailscale IP shown as the mobile URL and added to allowed browser origins. Does not change the bind address.
-    #[arg(long, env = "FURA_MOBILE_HOST")]
-    pub(crate) mobile_host: Option<String>,
+    #[arg(long, env = "FURA_TLS_CERT")]
+    pub(crate) tls_cert: Option<PathBuf>,
+
+    #[arg(long, env = "FURA_TLS_KEY")]
+    pub(crate) tls_key: Option<PathBuf>,
 
     #[arg(long, env = "FURA_TOKEN")]
     pub(crate) token: Option<String>,
@@ -70,6 +77,15 @@ pub(crate) struct Args {
     pub(crate) session_root: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteListenerConfig {
+    pub(crate) bind: SocketAddr,
+    pub(crate) host: String,
+    pub(crate) cert_path: PathBuf,
+    pub(crate) key_path: PathBuf,
+    pub(crate) allowed_origins: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct FuraConfig {
@@ -101,40 +117,58 @@ pub(crate) fn default_voice_language() -> String {
     "pl-PL".to_string()
 }
 
-pub(crate) fn allowed_origins_from_args(
-    host: IpAddr,
-    port: u16,
-    configured: Vec<String>,
-    mobile_host: Option<&str>,
-) -> Vec<String> {
-    let mut origins = default_allowed_origins(host, port);
-    for origin in configured {
+pub(crate) fn local_bind_url(bind: SocketAddr) -> String {
+    format!("http://{bind}/")
+}
+
+pub(crate) fn remote_listener_from_args(
+    remote_bind: Option<SocketAddr>,
+    remote_host: Option<&str>,
+    tls_cert: Option<&Path>,
+    tls_key: Option<&Path>,
+    configured_allowed_origins: Vec<String>,
+) -> anyhow::Result<Option<RemoteListenerConfig>> {
+    let remote_parts_present = remote_bind.is_some()
+        || remote_host.is_some()
+        || tls_cert.is_some()
+        || tls_key.is_some()
+        || !configured_allowed_origins.is_empty();
+    if !remote_parts_present {
+        return Ok(None);
+    }
+
+    let bind = remote_bind.ok_or_else(|| anyhow::anyhow!("--remote-bind is required when remote TLS is enabled"))?;
+    let host = normalize_remote_host(
+        remote_host.ok_or_else(|| anyhow::anyhow!("--remote-host is required when remote TLS is enabled"))?,
+    )
+    .ok_or_else(|| anyhow::anyhow!("--remote-host must be a bare host name or IP without scheme/path"))?;
+    let cert_path = tls_cert
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("--tls-cert is required when remote TLS is enabled"))?;
+    let key_path = tls_key
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("--tls-key is required when remote TLS is enabled"))?;
+    ensure!(
+        cert_path != key_path,
+        "--tls-cert and --tls-key must point to different files"
+    );
+
+    let mut allowed_origins = vec![remote_origin(&host, bind.port())];
+    for origin in configured_allowed_origins {
         if let Some(origin) = normalize_allowed_origin(&origin) {
-            if !origins.contains(&origin) {
-                origins.push(origin);
+            if !allowed_origins.contains(&origin) {
+                allowed_origins.push(origin);
             }
         }
     }
-    if let Some(origin) = mobile_origin(mobile_host, port) {
-        if !origins.contains(&origin) {
-            origins.push(origin);
-        }
-    }
-    origins
-}
 
-pub(crate) fn default_allowed_origins(host: IpAddr, port: u16) -> Vec<String> {
-    let mut origins = vec![
-        format!("http://127.0.0.1:{port}"),
-        format!("http://localhost:{port}"),
-    ];
-    if host.is_loopback() {
-        let host_origin = format!("http://{}:{port}", origin_host(host));
-        if !origins.contains(&host_origin) {
-            origins.push(host_origin);
-        }
-    }
-    origins
+    Ok(Some(RemoteListenerConfig {
+        bind,
+        host,
+        cert_path,
+        key_path,
+        allowed_origins,
+    }))
 }
 
 pub(crate) fn normalize_allowed_origin(origin: &str) -> Option<String> {
@@ -142,21 +176,27 @@ pub(crate) fn normalize_allowed_origin(origin: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-pub(crate) fn mobile_origin(mobile_host: Option<&str>, port: u16) -> Option<String> {
-    let host = normalize_mobile_host(mobile_host?)?;
-    Some(format!("http://{host}:{port}"))
+pub(crate) fn remote_origin(host: &str, port: u16) -> String {
+    format!("https://{}:{port}", format_public_host(host))
 }
 
-pub(crate) fn mobile_url(mobile_host: Option<&str>, port: u16) -> Option<String> {
-    mobile_origin(mobile_host, port).map(|origin| format!("{origin}/"))
+pub(crate) fn remote_url(host: &str, port: u16) -> String {
+    format!("{}/", remote_origin(host, port))
 }
 
-pub(crate) fn normalize_mobile_host(host: &str) -> Option<String> {
-    let trimmed = host.trim().trim_end_matches('/');
+pub(crate) fn normalize_remote_host(host: &str) -> Option<String> {
+    let trimmed = host.trim().trim_end_matches('/').trim_end_matches('.');
     if trimmed.is_empty() || trimmed.contains("://") || trimmed.contains('/') {
         return None;
     }
     Some(trimmed.to_string())
+}
+
+fn format_public_host(host: &str) -> String {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return origin_host(ip);
+    }
+    host.to_string()
 }
 
 fn origin_host(host: IpAddr) -> String {
@@ -268,53 +308,67 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_allowed_origins_include_loopback_browser_origins() {
-        let origins = default_allowed_origins("127.0.0.1".parse().expect("ip"), 3737);
-
-        assert!(origins.contains(&"http://127.0.0.1:3737".to_string()));
-        assert!(origins.contains(&"http://localhost:3737".to_string()));
-        assert_eq!(origins.len(), 2);
+    fn local_bind_url_formats_socket_addr() {
+        assert_eq!(
+            local_bind_url("127.0.0.1:3737".parse().expect("socket")),
+            "http://127.0.0.1:3737/"
+        );
     }
 
     #[test]
-    fn configured_allowed_origins_are_trimmed_and_deduplicated() {
-        let origins = allowed_origins_from_args(
-            "127.0.0.1".parse().expect("ip"),
-            3737,
-            vec![
-                " http://phone.tailnet.ts.net:3737/ ".to_string(),
-                "http://phone.tailnet.ts.net:3737".to_string(),
-            ],
+    fn remote_listener_requires_all_tls_fields_when_enabled() {
+        let error = remote_listener_from_args(
+            Some("100.117.222.49:4450".parse().expect("socket")),
+            Some("serwer-mini.caracal-porgy.ts.net"),
             None,
-        );
-
-        assert_eq!(
-            origins
-                .iter()
-                .filter(|origin| origin.as_str() == "http://phone.tailnet.ts.net:3737")
-                .count(),
-            1,
-        );
-    }
-
-    #[test]
-    fn mobile_host_adds_allowed_origin() {
-        let origins = allowed_origins_from_args(
-            "127.0.0.1".parse().expect("ip"),
-            3737,
+            None,
             Vec::new(),
-            Some("desktop.tailnet.ts.net"),
-        );
+        )
+        .expect_err("missing tls fields should fail");
 
-        assert!(origins.contains(&"http://desktop.tailnet.ts.net:3737".to_string()));
+        assert!(
+            error
+                .to_string()
+                .contains("--tls-cert is required when remote TLS is enabled")
+        );
     }
 
     #[test]
-    fn mobile_host_rejects_full_urls() {
+    fn remote_listener_builds_https_origin_and_deduplicates_extras() {
+        let remote = remote_listener_from_args(
+            Some("100.117.222.49:4450".parse().expect("socket")),
+            Some("serwer-mini.caracal-porgy.ts.net."),
+            Some(Path::new("cert.pem")),
+            Some(Path::new("key.pem")),
+            vec![
+                " https://serwer-mini.caracal-porgy.ts.net:4450/ ".to_string(),
+                "https://alt.tailnet.ts.net:4450".to_string(),
+            ],
+        )
+        .expect("config should parse")
+        .expect("remote config should exist");
+
+        assert_eq!(remote.host, "serwer-mini.caracal-porgy.ts.net");
         assert_eq!(
-            mobile_origin(Some("http://desktop.tailnet.ts.net"), 3737),
-            None
+            remote.allowed_origins,
+            vec![
+                "https://serwer-mini.caracal-porgy.ts.net:4450".to_string(),
+                "https://alt.tailnet.ts.net:4450".to_string(),
+            ]
         );
-        assert_eq!(mobile_url(Some("desktop.tailnet.ts.net/path"), 3737), None);
+        assert_eq!(
+            remote_url(&remote.host, remote.bind.port()),
+            "https://serwer-mini.caracal-porgy.ts.net:4450/"
+        );
+    }
+
+    #[test]
+    fn normalize_remote_host_rejects_scheme_and_path() {
+        assert_eq!(normalize_remote_host("https://host.example"), None);
+        assert_eq!(normalize_remote_host("host.example/path"), None);
+        assert_eq!(
+            normalize_remote_host(" serwer-mini.caracal-porgy.ts.net. "),
+            Some("serwer-mini.caracal-porgy.ts.net".to_string())
+        );
     }
 }
