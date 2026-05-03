@@ -37,6 +37,7 @@ type FuraConnectionOptions = {
   onStatus(status: ConnectionStatus, label: string): void;
   onOpen?(): void;
   onClose?(): void;
+  onAuthFailure?(message: string): void;
   onMessage(message: ServerMessage): void;
   onLog(message: string): void;
 };
@@ -79,8 +80,10 @@ export function createFuraConnection(options: FuraConnectionOptions): FuraConnec
       const authenticated = await establishAuthSession(locationHref, options.auth, fetchImpl);
       if (generation !== connectionGeneration) return;
       if (!authenticated) {
+        const message = "Authentication failed. Check the token and bridge server.";
         options.onStatus("disconnected", "disconnected");
-        options.onLog("Authentication failed. Check the token and bridge server.");
+        options.onLog(message);
+        options.onAuthFailure?.(message);
         return;
       }
 
@@ -107,7 +110,9 @@ export function createFuraConnection(options: FuraConnectionOptions): FuraConnec
     } catch (error) {
       if (generation !== connectionGeneration) return;
       options.onStatus("disconnected", "disconnected");
-      options.onLog(error instanceof Error ? `Authentication failed: ${error.message}` : "Authentication failed.");
+      const message = error instanceof Error ? `Authentication failed: ${error.message}` : "Authentication failed.";
+      options.onLog(message);
+      options.onAuthFailure?.(message);
     }
   }
 

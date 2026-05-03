@@ -81,7 +81,7 @@ cargo build
 FURA_TOKEN=dev cargo run -- --static-dir frontend/dist
 ```
 
-Open: `http://127.0.0.1:3737/?token=dev`
+Open: `http://127.0.0.1:3737/`, then enter bridge token `dev` in the auth screen.
 
 ### Against a local OMP checkout
 
@@ -95,7 +95,7 @@ Environment overrides for `run-local-omp.sh`:
 |---|---|---|
 | `OMP_REPO` | `~/repos/oh-my-pi` | Path to the OMP monorepo checkout |
 | `BUN_BIN` | `~/.bun/bin/bun` | Path to the `bun` executable |
-| `FURA_TOKEN` | `dev` | Bootstrap token for creating the browser auth session |
+| `FURA_TOKEN` | `dev` | Bridge token entered in the browser auth screen |
 | `FURA_BRIDGE_DEBUG_FILE` | `./bridge-debug.jsonl` | Raw RPC frame log (contains prompts — do not commit) |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
@@ -105,13 +105,13 @@ Environment overrides for `run-local-omp.sh`:
 ./run-mock-rpc.sh
 ```
 
-Open: `http://127.0.0.1:3737/?token=dev`
+Open: `http://127.0.0.1:3737/`, then enter bridge token `dev` in the auth screen.
 
 Environment overrides for `run-mock-rpc.sh`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `FURA_TOKEN` | `dev` | Bootstrap token for creating the browser auth session |
+| `FURA_TOKEN` | `dev` | Bridge token entered in the browser auth screen |
 | `FURA_PORT` | `3737` | Listen port |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 

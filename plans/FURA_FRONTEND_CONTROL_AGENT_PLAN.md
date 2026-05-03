@@ -307,7 +307,7 @@ Run only relevant checks after implementation:
 - Manual/mock smoke:
   - build frontend;
   - run Fura against `fixtures/mock-omp-rpc.mjs` with `FURA_TOKEN=dev`;
-  - connect browser to `http://127.0.0.1:3737/?token=dev`;
+  - connect browser to `http://127.0.0.1:3737/` and enter bridge token `dev` in the auth screen;
   - send a controller prompt like "find me a session where I talked about mock";
   - verify the controller replies with candidates and does not open a session;
   - send "open the second one" or click an "Open" suggestion;

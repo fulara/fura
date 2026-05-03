@@ -6,7 +6,7 @@ import {
   type PendingImage,
 } from "./composerAttachments";
 import { createPromptSendMessage, type PromptBehavior } from "./composer";
-import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
+import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
 import {
@@ -60,13 +60,14 @@ import {
   type TranscriptReviewLine,
 } from "./transcriptReview";
 
-type MobileWindow = Pick<Window, "history" | "localStorage" | "location" | "prompt" | "setTimeout">;
+type MobileWindow = Pick<Window, "history" | "localStorage" | "sessionStorage" | "location" | "prompt" | "setTimeout">;
 
 export type MobileConnectionOptions = {
   auth: WebSocketAuth;
   onStatus(status: ConnectionStatus, label: string): void;
   onOpen?(): void;
   onClose?(): void;
+  onAuthFailure?(message: string): void;
   onMessage(message: ServerMessage): void;
   onLog(message: string): void;
 };
@@ -177,6 +178,27 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </form>
+      <section id="mobileAuthGate" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-auth-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileAuthTitle" aria-describedby="mobileAuthDescription">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Bridge auth</p>
+              <h2 id="mobileAuthTitle">Connect to Fura</h2>
+            </div>
+          </header>
+          <div id="mobileAuthDescription" class="mobile-dialog-body">
+            <p>Enter the bridge token from the Fura startup output. URL tokens are ignored and removed.</p>
+          </div>
+          <form id="mobileAuthForm" class="mobile-dialog-form">
+            <label for="mobileAuthToken">Bridge token</label>
+            <input id="mobileAuthToken" type="password" autocomplete="current-password" spellcheck="false" required />
+            <p id="mobileAuthStatus" class="mobile-dialog-status" aria-live="polite"></p>
+            <div class="mobile-dialog-actions">
+              <button id="mobileAuthSubmit" type="submit">Connect</button>
+            </div>
+          </form>
+        </div>
+      </section>
       <section id="mobileBusyPromptOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog mobile-busy-prompt" role="dialog" aria-modal="true" aria-labelledby="mobileBusyPromptTitle" aria-describedby="mobileBusyPromptDescription">
           <header class="mobile-dialog-header">
@@ -261,6 +283,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   `;
 
   const connectionStatus = requireElement<HTMLSpanElement>(document, "mobileConnectionStatus");
+  const authGate = requireElement<HTMLElement>(document, "mobileAuthGate");
+  const authForm = requireElement<HTMLFormElement>(document, "mobileAuthForm");
+  const authTokenInput = requireElement<HTMLInputElement>(document, "mobileAuthToken");
+  const authStatus = requireElement<HTMLParagraphElement>(document, "mobileAuthStatus");
+  const authSubmit = requireElement<HTMLButtonElement>(document, "mobileAuthSubmit");
   const sessionTitle = requireElement<HTMLHeadingElement>(document, "mobileSessionTitle");
   const sessionMeta = requireElement<HTMLParagraphElement>(document, "mobileSessionMeta");
   const createToggle = requireElement<HTMLButtonElement>(document, "mobileCreateToggle");
@@ -423,6 +450,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (!createPendingRequestId) createStatus.textContent = "";
   });
 
+  authForm.addEventListener("submit", event => {
+    event.preventDefault();
+    connect(authTokenInput.value);
+  });
+
   createForm.addEventListener("submit", event => {
     event.preventDefault();
     submitCreateSession();
@@ -464,26 +496,52 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   const initialToken = consumeBootstrapToken(
     window.location.href,
-    window.localStorage,
+    window.sessionStorage,
     url => window.history.replaceState(null, "", url),
   );
   render();
   if (initialToken) connect(initialToken);
-  else appendLog("No bridge token found. Open mobile.html with ?token=<token> from the Rust server URL.");
+  else showAuthGate("Enter the bridge token to connect.");
 
   function connect(token: string): void {
-    const bridgeToken = storeBootstrapToken(token, window.localStorage);
-    if (!bridgeToken) return;
+    const bridgeToken = storeBootstrapToken(token, window.sessionStorage);
+    if (!bridgeToken) {
+      showAuthGate("Enter the bridge token to connect.");
+      return;
+    }
+    authSubmit.disabled = true;
+    authStatus.textContent = "Connecting…";
     connection?.disconnect();
     connection = createConnection({
       auth: { type: "sessionCookie", token: bridgeToken },
       onStatus: setStatus,
-      onOpen: () => send({ type: "session.list" }),
+      onOpen: () => {
+        hideAuthGate();
+        send({ type: "session.list" });
+      },
       onClose: () => handleConnectionClosed(),
+      onAuthFailure: message => {
+        clearBootstrapToken(window.sessionStorage);
+        showAuthGate(message);
+        authTokenInput.select();
+      },
       onMessage: handleServerMessage,
       onLog: appendLog,
     });
     connection.connect();
+  }
+
+  function showAuthGate(message: string): void {
+    authGate.hidden = false;
+    authSubmit.disabled = false;
+    authStatus.textContent = message;
+  }
+
+  function hideAuthGate(): void {
+    authGate.hidden = true;
+    authSubmit.disabled = false;
+    authStatus.textContent = "";
+    authTokenInput.value = "";
   }
 
   function setStatus(label: string, className: string): void {

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { FuraConnection } from "./connection";
 import { mountMobileApp, type MobileConnectionOptions } from "./mobileApp";
+import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ClientMessage, ServerConfig, ServerMessage, SessionProjection, SessionSummary } from "./protocol";
 
 class FakeConnection implements FuraConnection {
@@ -36,9 +37,11 @@ class FakeConnection implements FuraConnection {
 
 const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en" };
 
-function createHarness(path = "/mobile.html?token=dev") {
+function createHarness(path = "/mobile.html", storedToken = "dev") {
   document.body.innerHTML = `<div id="app"></div>`;
   window.localStorage.clear();
+  window.sessionStorage.clear();
+  if (storedToken) window.sessionStorage.setItem(FURA_TOKEN_STORAGE_KEY, storedToken);
   window.history.replaceState(null, "", path);
   const connections: FakeConnection[] = [];
   const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
@@ -55,6 +58,25 @@ function createHarness(path = "/mobile.html?token=dev") {
   if (!connection) throw new Error("connection missing");
   connection.emit({ type: "hello", serverVersion: "test", protocolVersion: 1, config });
   return { app, connection, connections, debug };
+}
+
+function createUnauthenticatedHarness(path = "/mobile.html") {
+  document.body.innerHTML = `<div id="app"></div>`;
+  window.localStorage.clear();
+  window.sessionStorage.clear();
+  window.history.replaceState(null, "", path);
+  const connections: FakeConnection[] = [];
+  const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  const app = mountMobileApp({
+    document,
+    window,
+    createConnection: options => {
+      const connection = new FakeConnection(options);
+      connections.push(connection);
+      return connection;
+    },
+  });
+  return { app, connections, debug };
 }
 
 function summary(sessionId: string, overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -198,14 +220,38 @@ beforeEach(() => {
 });
 
 describe("mountMobileApp", () => {
-  it("bootstraps cookie auth from the URL token and requests sessions on open", () => {
-    const { connection, debug } = createHarness();
+  it("uses a sessionStorage token and strips URL tokens without storing them", () => {
+    const { connection, debug } = createHarness("/mobile.html?token=url-token", "stored-token");
 
     expect(window.location.href).toBe("http://localhost:3000/mobile.html");
-    expect(window.localStorage.getItem("fura.token")).toBe("dev");
-    expect(connection.options.auth).toEqual({ type: "sessionCookie", token: "dev" });
+    expect(window.localStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBe("stored-token");
+    expect(connection.options.auth).toEqual({ type: "sessionCookie", token: "stored-token" });
     expect(connection.sent).toContainEqual({ type: "session.list" });
     expect(document.querySelector("#mobileConnectionStatus")?.textContent).toBe("connected");
+    debug.mockRestore();
+  });
+
+  it("shows the auth gate instead of connecting without a stored token", () => {
+    const { connections, debug } = createUnauthenticatedHarness("/mobile.html?token=url-token");
+
+    expect(window.location.href).toBe("http://localhost:3000/mobile.html");
+    expect(connections).toEqual([]);
+    expect(document.querySelector<HTMLElement>("#mobileAuthGate")?.hidden).toBe(false);
+    expect(document.querySelector("#mobileAuthStatus")?.textContent).toBe("Enter the bridge token to connect.");
+    expect(window.localStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+    debug.mockRestore();
+  });
+
+  it("clears the attempted session token when auth fails", () => {
+    const { connection, debug } = createHarness();
+
+    connection.options.onAuthFailure?.("invalid token");
+
+    expect(window.sessionStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(document.querySelector<HTMLElement>("#mobileAuthGate")?.hidden).toBe(false);
+    expect(document.querySelector("#mobileAuthStatus")?.textContent).toBe("invalid token");
     debug.mockRestore();
   });
 
