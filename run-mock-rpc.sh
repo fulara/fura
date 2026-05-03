@@ -7,14 +7,14 @@ set -euo pipefail
 #
 # Environment overrides:
 #   FURA_TOKEN=dev
-#   FURA_PORT=3737
+#   FURA_PORT=38737
 #   FURA_SKIP_FRONTEND_BUILD=1
 #
 # Extra arguments are forwarded to Fura, e.g.:
 #   ./run-mock-rpc.sh --log-frames
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-PORT=${FURA_PORT:-3737}
+PORT=${FURA_PORT:-38737}
 export FURA_TOKEN=${FURA_TOKEN:-dev}
 
 cd "${SCRIPT_DIR}"

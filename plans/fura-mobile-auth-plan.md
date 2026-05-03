@@ -16,6 +16,8 @@ Observed in `fura-tailgate` after the auth hardening slice:
 - Opening an old URL containing `?token=...` strips the query parameter without using or storing it.
 - The frontend stores manually entered bridge tokens in `sessionStorage` by default, not `localStorage`.
 - Startup logging no longer emits configured tokens or URL query tokens; generated tokens are printed separately as a local terminal secret.
+- WebSocket handshakes now require an exact allowed `Origin` before cookie authentication.
+- Client text WebSocket frames are capped at 32 MiB and oversized frames close with WebSocket close code 1009.
 
 ## Decisions
 
@@ -154,23 +156,39 @@ npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
-## Phase 4: Tailscale Launch Path
+## Phase 4: WebSocket Origin and Size Hardening (implemented)
 
-Do this after token cleanup passes.
+Implemented behavior:
+
+- default allowed browser origins are `http://127.0.0.1:<port>` and `http://localhost:<port>`;
+- `--allowed-origin` / `FURA_ALLOWED_ORIGINS` adds exact allowed origins for Tailscale/HTTPS deployments;
+- missing, invalid, or unlisted `Origin` is rejected before cookie authentication;
+- no wildcard or substring origin matching;
+- text WebSocket frames larger than 32 MiB are rejected with close code 1009;
+- oversized payloads are not echoed in logs or error responses.
+
+Observed commands after implementation:
+
+```bash
+cargo fmt
+cargo check
+cargo test
+```
+
+
+## Phase 5: Tailscale Launch Path (implemented explicit helper)
+
+Do this after token cleanup and WebSocket origin hardening pass.
 
 Goal: make mobile access obvious without Fura owning Tailscale installation.
 
-Recommended first iteration:
+Implemented first iteration:
 
 ```bash
-fura --host <tailscale-ip-or-name> --allowed-origin http://<tailscale-ip-or-name>:3737
+fura --host <tailscale-ip-or-bind-ip> --mobile-host <tailscale-name-or-ip>
 ```
 
-or a simpler wrapper flag if it stays explicit:
-
-```bash
-fura --mobile-host <tailscale-ip-or-name>
-```
+`--mobile-host` / `FURA_MOBILE_HOST` does not change the bind address. It adds `http://<mobile-host>:<port>` to the allowed Origin list and prints that URL as the configured Mobile URL.
 
 Rules:
 
@@ -181,7 +199,7 @@ Rules:
 - do not silently fall back to `0.0.0.0`;
 - print Mobile URL only when explicitly configured.
 
-## Phase 5: Browser-Visible HTTPS over Tailscale
+## Phase 6: Browser-Visible HTTPS over Tailscale
 
 Do this after token cleanup, Origin allowlist, and the explicit Tailscale launch path are stable.
 

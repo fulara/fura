@@ -8,7 +8,7 @@ use axum::{
     Json,
     extract::{
         Json as JsonBody, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
@@ -25,6 +25,7 @@ use crate::{
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
 const AUTH_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const MAX_CLIENT_TEXT_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AuthSessionRequest {
@@ -34,6 +35,13 @@ pub(crate) struct AuthSessionRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebSocketAuth {
     SessionCookie,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OriginError {
+    Missing,
+    Invalid,
+    NotAllowed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +59,21 @@ pub(crate) async fn auth_session_handler(
 
     let mut auth_sessions = state.auth_sessions.write().await;
     build_auth_session_response(issue_auth_session(&mut auth_sessions, Instant::now()))
+}
+
+pub(crate) fn authenticate_websocket_origin(
+    headers: &HeaderMap,
+    allowed_origins: &[String],
+) -> Result<(), OriginError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Err(OriginError::Missing);
+    };
+    let origin = origin.to_str().map_err(|_| OriginError::Invalid)?;
+    if allowed_origins.iter().any(|allowed| allowed == origin) {
+        Ok(())
+    } else {
+        Err(OriginError::NotAllowed)
+    }
 }
 
 pub(crate) async fn authenticate_websocket_headers(
@@ -127,6 +150,17 @@ pub(crate) async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    match authenticate_websocket_origin(&headers, &state.allowed_origins) {
+        Ok(()) => {}
+        Err(error) => {
+            warn!(
+                ?error,
+                "rejected websocket connection with disallowed origin"
+            );
+            return (StatusCode::FORBIDDEN, "missing or disallowed origin").into_response();
+        }
+    }
+
     match authenticate_websocket_headers(&headers, &state, Instant::now()).await {
         Ok(WebSocketAuth::SessionCookie) => {
             ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -188,6 +222,28 @@ pub(crate) async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 }
 
+fn client_text_frame_too_large(text: &str) -> bool {
+    text.len() > MAX_CLIENT_TEXT_FRAME_BYTES
+}
+
+async fn close_for_text_frame_too_large(
+    socket: &mut WebSocket,
+    bytes: usize,
+) -> Result<(), axum::Error> {
+    warn!(
+        bytes,
+        limit = MAX_CLIENT_TEXT_FRAME_BYTES,
+        "websocket text frame too large"
+    );
+    socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::SIZE,
+            reason: "message too large".into(),
+        })))
+        .await?;
+    Err(axum::Error::new(anyhow!("websocket text frame too large")))
+}
+
 pub(crate) async fn handle_websocket_frame(
     socket: &mut WebSocket,
     state: &AppState,
@@ -203,6 +259,10 @@ pub(crate) async fn handle_websocket_frame(
 
     match frame {
         Message::Text(text) => {
+            if client_text_frame_too_large(&text) {
+                return close_for_text_frame_too_large(socket, text.len()).await;
+            }
+
             if state.log_frames {
                 info!(direction = "client_to_bridge", frame = %text, "websocket frame");
             }
@@ -528,6 +588,54 @@ mod tests {
 
         assert!(!sessions.contains_key("expired"));
         assert!(sessions.contains_key(&issued));
+    }
+
+    #[test]
+    fn authenticate_websocket_origin_accepts_exact_allowed_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://127.0.0.1:3737"),
+        );
+        let allowed = vec!["http://127.0.0.1:3737".to_string()];
+
+        assert_eq!(authenticate_websocket_origin(&headers, &allowed), Ok(()));
+    }
+
+    #[test]
+    fn authenticate_websocket_origin_rejects_disallowed_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://evil.example"),
+        );
+        let allowed = vec!["http://127.0.0.1:3737".to_string()];
+
+        assert_eq!(
+            authenticate_websocket_origin(&headers, &allowed),
+            Err(OriginError::NotAllowed),
+        );
+    }
+
+    #[test]
+    fn authenticate_websocket_origin_rejects_missing_origin() {
+        let headers = HeaderMap::new();
+        let allowed = vec!["http://127.0.0.1:3737".to_string()];
+
+        assert_eq!(
+            authenticate_websocket_origin(&headers, &allowed),
+            Err(OriginError::Missing),
+        );
+    }
+
+    #[test]
+    fn client_text_frame_size_limit_is_explicit() {
+        assert!(!client_text_frame_too_large(
+            &"a".repeat(MAX_CLIENT_TEXT_FRAME_BYTES)
+        ));
+        assert!(client_text_frame_too_large(
+            &"a".repeat(MAX_CLIENT_TEXT_FRAME_BYTES + 1)
+        ));
     }
 
     #[test]

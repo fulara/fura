@@ -91,6 +91,13 @@ async fn main() -> anyhow::Result<()> {
     let fura_config = load_fura_config(config_path.as_deref());
     let default_cwd = default_cwd_from_config(&fura_config, &startup_cwd);
     let voice_language = fura_config.voice_language.clone();
+    let mobile_url = mobile_url(args.mobile_host.as_deref(), args.port);
+    let allowed_origins = allowed_origins_from_args(
+        args.host,
+        args.port,
+        args.allowed_origins,
+        args.mobile_host.as_deref(),
+    );
     let session_categories = fura_config
         .session_categories
         .into_iter()
@@ -127,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
         default_cwd: Arc::new(RwLock::new(default_cwd)),
         config_path,
         voice_language: Arc::new(RwLock::new(voice_language)),
+        allowed_origins: Arc::new(allowed_origins),
     };
 
     start_session_catalog_watcher(state.clone());
@@ -143,7 +151,13 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {}:{}", args.host, args.port))?;
 
-    log_server_ready(&state, args.host, args.port, token_source);
+    log_server_ready(
+        &state,
+        args.host,
+        args.port,
+        mobile_url.as_deref(),
+        token_source,
+    );
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -166,6 +180,7 @@ fn log_server_ready(
     state: &AppState,
     host: std::net::IpAddr,
     port: u16,
+    mobile_url: Option<&str>,
     token_source: BridgeTokenSource,
 ) {
     info!(
@@ -175,6 +190,9 @@ fn log_server_ready(
         rpc_arg_count = state.rpc_config.args.len(),
         "fura bridge listening"
     );
+    if let Some(mobile_url) = mobile_url {
+        info!(url = %mobile_url, "fura mobile URL configured");
+    }
     if token_source == BridgeTokenSource::Generated {
         warn!(
             bridge_token = %state.token,
@@ -393,6 +411,14 @@ mod tests {
     }
 
     #[test]
+    fn mobile_url_formats_explicit_mobile_host() {
+        assert_eq!(
+            mobile_url(Some("desktop.tailnet.ts.net"), 3737).as_deref(),
+            Some("http://desktop.tailnet.ts.net:3737/")
+        );
+    }
+
+    #[test]
     fn startup_auth_label_names_token_source_without_secret() {
         assert_eq!(
             startup_auth_label(BridgeTokenSource::Configured),
@@ -431,6 +457,10 @@ mod tests {
             default_cwd: Arc::new(RwLock::new(env::temp_dir().to_string_lossy().into_owned())),
             config_path: None,
             voice_language: Arc::new(RwLock::new(default_voice_language())),
+            allowed_origins: Arc::new(default_allowed_origins(
+                "127.0.0.1".parse().expect("test ip"),
+                3737,
+            )),
         }
     }
 
