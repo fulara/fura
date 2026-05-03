@@ -193,6 +193,89 @@ body {
   max-width: none;
 }
 
+.mobile-transcript .plan-review-card {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px solid rgba(255, 196, 87, 0.42);
+  border-radius: 0.9rem;
+  background: linear-gradient(180deg, rgba(255, 196, 87, 0.10), rgba(23, 27, 36, 0.94));
+  padding: 0.85rem;
+}
+
+.mobile-transcript .plan-review-card header {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.mobile-transcript .plan-review-kicker,
+.mobile-transcript .plan-review-path {
+  margin: 0;
+  color: #aeb7c8;
+  font-size: 0.75rem;
+}
+
+.mobile-transcript .plan-review-card h3 {
+  margin: 0.12rem 0 0;
+  color: #f4f7fb;
+  font-size: 1rem;
+}
+
+.mobile-transcript .plan-review-path {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  word-break: break-all;
+}
+
+.mobile-transcript .plan-review-body {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.mobile-transcript .plan-review-body p {
+  margin: 0;
+  color: #d5dceb;
+}
+
+.mobile-transcript .plan-review-body details {
+  border: 1px solid #303646;
+  border-radius: 0.7rem;
+  background: rgba(10, 13, 20, 0.52);
+}
+
+.mobile-transcript .plan-review-body summary {
+  cursor: pointer;
+  padding: 0.6rem 0.7rem;
+  color: #f0d79a;
+  font-weight: 700;
+}
+
+.mobile-transcript .plan-review-body pre {
+  max-height: 42vh;
+  overflow: auto;
+  border-top: 1px solid #303646;
+  padding: 0.7rem;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.mobile-transcript .plan-review-actions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.mobile-transcript .plan-review-approve {
+  border-color: rgba(135, 226, 164, 0.55);
+  background: rgba(80, 180, 120, 0.16);
+}
+
+.mobile-transcript .plan-review-refine {
+  border-color: rgba(127, 140, 255, 0.45);
+  background: rgba(127, 140, 255, 0.12);
+}
+
 .mobile-diff {
   min-height: 0;
   overflow: auto;

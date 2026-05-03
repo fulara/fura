@@ -103,6 +103,13 @@ import {
   type TranscriptReviewLine,
 } from "./transcriptReview";
 import {
+  createApprovePlanReviewMessage,
+  pendingPlanReviewFromMessage,
+  planReviewRenderKey,
+  renderPlanReviewCard,
+  type PendingPlanReview,
+} from "./planReview";
+import {
   parentCodePath,
   renderCodeViewer,
   type CodeViewerState,
@@ -631,6 +638,7 @@ let codePreviewDraft: CodePreviewDraft | null = null;
 let transcriptPreviewDraft: TranscriptPreviewDraft | null = null;
 const transcriptReviewActiveMessages = new Map<string, string>();
 const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
+const pendingPlanReviews = new Map<string, PendingPlanReview>();
 const PROMPT_HISTORY_LIMIT = 100;
 let modelPickerSessionId: string | null = null;
 let modelPickerModels: ModelSummary[] = [];
@@ -1289,30 +1297,9 @@ function handleServerMessage(message: ServerMessage): void {
         renderCodePanelIfNeeded(true);
       }
       break;
-    case "plan.review": {
-      const preview = message.content.length > 6000 ? `${message.content.slice(0, 6000)}\n\n… truncated …` : message.content;
-      const approved = window.confirm(
-        `Plan ready${message.title ? `: ${message.title}` : ""}\n\n${preview}\n\nApprove and execute this plan? Press Cancel to stay in plan mode.`,
-      );
-      if (approved) {
-        send({
-          type: "raw.rpc",
-          sessionId: message.sessionId,
-          command: {
-            type: "approve_plan_mode",
-            planFilePath: message.planFilePath,
-            finalPlanFilePath: message.finalPlanFilePath,
-          },
-        });
-      } else {
-        appendSessionNotice(message.sessionId, {
-          level: "info",
-          text: "Stayed in plan mode. Type a refinement prompt to continue planning.",
-        });
-        render();
-      }
+    case "plan.review":
+      handlePlanReview(message);
       break;
-    }
     case "session.exited":
       appendLog(`Session ${message.sessionId} exited with code ${message.code ?? "unknown"}.`);
       render();
@@ -1543,6 +1530,39 @@ function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" 
   } else {
     unreadSessions.add(message.sessionId);
     renderSessions();
+  }
+}
+
+function hasPendingPlanReview(sessionId: string): boolean {
+  return pendingPlanReviews.has(sessionId);
+}
+
+function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
+  pendingPlanReviews.set(message.sessionId, pendingPlanReviewFromMessage(message));
+  appendLog(`[${message.sessionId}] plan ready for review`);
+  if (message.sessionId === activeSessionId && workspaceMode === "session") {
+    markTranscriptViewDirty();
+    render();
+  } else {
+    unreadSessions.add(message.sessionId);
+    renderSessions();
+  }
+}
+
+function approvePendingPlanReview(review: PendingPlanReview): void {
+  const accepted = send(createApprovePlanReviewMessage(review));
+  if (!accepted) return;
+  pendingPlanReviews.delete(review.sessionId);
+  markTranscriptViewDirty();
+  render();
+}
+
+function refinePendingPlanReview(review: PendingPlanReview): void {
+  pendingPlanReviews.delete(review.sessionId);
+  markTranscriptViewDirty();
+  render();
+  if (workspaceMode === "session" && activeSessionId === review.sessionId) {
+    promptInput.focus();
   }
 }
 
@@ -2052,6 +2072,15 @@ function sendPromptWithBusyHandling(options: {
   const knownSlashCommand = findSlashCommand(options.editorText);
   const isSlashCommandLike = /^\/[^\s:]+/.test(options.editorText);
 
+  if (hasPendingPlanReview(options.sessionId)) {
+    appendSessionNotice(options.sessionId, {
+      level: "warning",
+      text: "Plan review is waiting. Choose Approve and execute or Refine plan before sending another prompt in this session.",
+    });
+    render();
+    return false;
+  }
+
   if (projection?.isBusy) {
     if (knownSlashCommand && options.images.length === 0) {
       sendPromptMessage(options.sessionId, options.text, options.images);
@@ -2318,13 +2347,14 @@ function renderActiveSession(): void {
 
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
   const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
+  const hasPendingPlan = activeSessionId ? hasPendingPlanReview(activeSessionId) : false;
 
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
   deleteSessionButton.disabled = !activeSessionId;
   syncActiveCategoryEditor(projection);
-  promptInput.disabled = !activeSessionId || hasBusyDraft;
-  sendButton.disabled = !activeSessionId || hasBusyDraft;
+  promptInput.disabled = !activeSessionId || hasBusyDraft || hasPendingPlan;
+  sendButton.disabled = !activeSessionId || hasBusyDraft || hasPendingPlan;
 
   if (!activeSessionId || !projection) {
     sessionTitle.textContent = "No session selected";
@@ -2335,7 +2365,7 @@ function renderActiveSession(): void {
     const category = normalizedCategory(projection.summary.category);
     const categoryPart = category ? ` · ${category}` : "";
     sessionMeta.textContent = `${sessionKindLabel(projection.summary.kind)} · ${sessionStatusLabel(projection.summary)}${categoryPart} · ${projection.summary.cwd ?? "no dir"}`;
-    promptInput.placeholder = "Send a prompt… (type / for commands)";
+    promptInput.placeholder = hasPendingPlan ? "Choose Approve and execute or Refine plan first…" : "Send a prompt… (type / for commands)";
   }
 
   renderStatusBar(projection);
@@ -2875,6 +2905,16 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
     items.push({
       key: `current-todos:${todoPhasesRenderKey(currentTodos)}`,
       render: () => renderCurrentTodoCard(currentTodos),
+    });
+  }
+  const pendingPlanReview = pendingPlanReviews.get(projection.summary.sessionId);
+  if (pendingPlanReview) {
+    items.push({
+      key: `plan-review:${planReviewRenderKey(pendingPlanReview)}`,
+      render: () => renderPlanReviewCard(pendingPlanReview, {
+        onApprove: approvePendingPlanReview,
+        onRefine: refinePendingPlanReview,
+      }),
     });
   }
   return items;

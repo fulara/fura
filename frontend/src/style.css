@@ -1332,6 +1332,93 @@ h2 {
   padding: 0.85rem;
 }
 
+.plan-review-card {
+  display: grid;
+  gap: 0.85rem;
+  border: 1px solid rgba(255, 196, 87, 0.42);
+  border-radius: 1rem;
+  background: linear-gradient(180deg, rgba(255, 196, 87, 0.10), rgba(23, 27, 36, 0.94));
+  box-shadow: 0 1rem 2rem rgba(0, 0, 0, 0.18);
+  padding: 0.9rem;
+}
+
+.plan-review-card header {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.plan-review-kicker,
+.plan-review-path {
+  margin: 0;
+  color: #aeb7c8;
+  font-size: 0.78rem;
+}
+
+.plan-review-card h3 {
+  margin: 0.15rem 0 0;
+  color: #f4f7fb;
+}
+
+.plan-review-path {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  text-align: right;
+  word-break: break-all;
+}
+
+.plan-review-body {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.plan-review-body p {
+  margin: 0;
+  color: #d5dceb;
+}
+
+.plan-review-body details {
+  border: 1px solid #303646;
+  border-radius: 0.75rem;
+  background: rgba(10, 13, 20, 0.52);
+}
+
+.plan-review-body summary {
+  cursor: pointer;
+  padding: 0.65rem 0.75rem;
+  color: #f0d79a;
+  font-weight: 700;
+}
+
+.plan-review-body pre {
+  max-height: min(48vh, 32rem);
+  overflow: auto;
+  border-top: 1px solid #303646;
+  padding: 0.75rem;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.86rem;
+  line-height: 1.5;
+}
+
+.plan-review-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.plan-review-approve {
+  border-color: rgba(135, 226, 164, 0.55);
+  background: rgba(80, 180, 120, 0.16);
+}
+
+.plan-review-refine {
+  border-color: rgba(127, 140, 255, 0.45);
+  background: rgba(127, 140, 255, 0.12);
+}
+
 .prompt-form {
   display: grid;
   grid-template-columns: 1fr auto;

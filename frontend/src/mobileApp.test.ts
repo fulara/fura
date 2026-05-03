@@ -568,6 +568,58 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Agent busy");
   });
 
+  it("renders session-scoped plan review and blocks prompts until refine or approve", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    connection.emit({
+      type: "plan.review",
+      sessionId: "live",
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Review me",
+      content: "Plan body",
+    });
+
+    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Plan ready: Review me");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(true);
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Plan review waiting");
+
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
+    const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
+    if (!input || !form) throw new Error("prompt form missing");
+    input.value = "should not send";
+    form.requestSubmit();
+    expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "should not send")).toBe(false);
+
+    document.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
+    expect(document.querySelector(".plan-review-card")).toBeNull();
+    expect(input.disabled).toBe(false);
+
+    connection.emit({
+      type: "plan.review",
+      sessionId: "live",
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Review me",
+      content: "Plan body",
+    });
+    document.querySelector<HTMLButtonElement>(".plan-review-approve")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "raw.rpc",
+      sessionId: "live",
+      command: {
+        type: "approve_plan_mode",
+        planFilePath: "local://PLAN.md",
+        finalPlanFilePath: "local://FINAL.md",
+      },
+    });
+  });
+
   it("renders prompt busy choices and sends steer behavior", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });

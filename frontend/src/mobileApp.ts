@@ -75,6 +75,12 @@ import {
   type TranscriptReviewComment,
   type TranscriptReviewLine,
 } from "./transcriptReview";
+import {
+  createApprovePlanReviewMessage,
+  pendingPlanReviewFromMessage,
+  renderPlanReviewCard,
+  type PendingPlanReview,
+} from "./planReview";
 
 type MobileWindow = Pick<Window, "history" | "localStorage" | "sessionStorage" | "location" | "prompt" | "setTimeout">;
 type MobileSessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
@@ -454,6 +460,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let busyPromptDraft: BusyPromptDraft | null = null;
   let activeDialog: ExtensionDialogRequest | null = null;
   const dialogQueue: ExtensionDialogRequest[] = [];
+  const pendingPlanReviews = new Map<string, PendingPlanReview>();
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
@@ -543,6 +550,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     event.preventDefault();
     const text = promptInput.value.trim();
     if ((!text && pendingImages.length === 0) || !activeSessionId) return;
+    if (hasPendingPlanReview(activeSessionId)) return;
     const accepted = send(createPromptSendMessage(activeSessionId, text, pendingImages));
     if (accepted) clearPromptComposer();
   });
@@ -661,6 +669,34 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
     unreadSessions.add(message.sessionId);
     renderSessions();
+  }
+
+  function hasPendingPlanReview(sessionId: string): boolean {
+    return pendingPlanReviews.has(sessionId);
+  }
+
+  function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
+    pendingPlanReviews.set(message.sessionId, pendingPlanReviewFromMessage(message));
+    appendLog(`[${message.sessionId}] plan ready for review`);
+    if (message.sessionId === activeSessionId) {
+      renderActiveSession();
+      return;
+    }
+    unreadSessions.add(message.sessionId);
+    renderSessions();
+  }
+
+  function approvePendingPlanReview(review: PendingPlanReview): void {
+    const accepted = send(createApprovePlanReviewMessage(review));
+    if (!accepted) return;
+    pendingPlanReviews.delete(review.sessionId);
+    renderActiveSession();
+  }
+
+  function refinePendingPlanReview(review: PendingPlanReview): void {
+    pendingPlanReviews.delete(review.sessionId);
+    renderActiveSession();
+    if (activeSessionId === review.sessionId) promptInput.focus();
   }
 
   function renderBusyPromptChoice(): void {
@@ -1105,7 +1141,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const projection = projections.get(activeSessionId);
     const summary = sessions.find(session => session.sessionId === activeSessionId);
     const isBusy = projection?.isBusy ?? summary?.status === "busy";
-    if (isBusy) {
+    const hasPendingPlan = hasPendingPlanReview(activeSessionId);
+    if (hasPendingPlan) {
+      composerStatus.textContent = "Plan review waiting";
+    } else if (isBusy) {
       composerStatus.textContent = "Agent busy";
     } else if (pendingImages.length > 0) {
       composerStatus.textContent = `${pendingImages.length} image${pendingImages.length === 1 ? "" : "s"} attached`;
@@ -1423,9 +1462,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "dialog.request":
         handleDialogRequest(message);
         break;
+      case "plan.review":
+        handlePlanReview(message);
+        break;
       case "model.list":
       case "model.changed":
-      case "plan.review":
       case "raw.omp":
         break;
       case "diff.state":
@@ -1617,14 +1658,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     const isBusy = projection?.isBusy ?? summary.status === "busy";
+    const hasPendingPlan = hasPendingPlanReview(activeSessionId);
     sessionTitle.textContent = summary.title || `Session ${shortId(summary.sessionId)}`;
     sessionMeta.hidden = true;
     sessionMeta.textContent = "";
     updateMobileStatusBar(projection, summary);
-    promptInput.disabled = !projection || isBusy;
-    sendButton.disabled = !projection || isBusy;
-    imageInput.disabled = !projection || isBusy;
-    promptInput.placeholder = isBusy ? "Agent is busy…" : "Send a prompt…";
+    promptInput.disabled = !projection || isBusy || hasPendingPlan;
+    sendButton.disabled = !projection || isBusy || hasPendingPlan;
+    imageInput.disabled = !projection || isBusy || hasPendingPlan;
+    promptInput.placeholder = hasPendingPlan ? "Choose Approve and execute or Refine plan first…" : isBusy ? "Agent is busy…" : "Send a prompt…";
     updateComposerStatus();
     renderTranscript(projection);
     renderDiffView(projection);
@@ -1657,6 +1699,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
     for (const phaseCard of renderTodoCards(projection.todoPhases ?? [])) {
       fragment.append(phaseCard);
+    }
+
+    const pendingPlanReview = pendingPlanReviews.get(projection.summary.sessionId);
+    if (pendingPlanReview) {
+      fragment.append(renderPlanReviewCard(pendingPlanReview, {
+        onApprove: approvePendingPlanReview,
+        onRefine: refinePendingPlanReview,
+      }));
     }
 
     if (!fragment.hasChildNodes()) {
