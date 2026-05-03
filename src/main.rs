@@ -253,6 +253,7 @@ mod tests {
             title: None,
             timestamp: None,
             category: None,
+            worktree: None,
             model: None,
             thinking_level: None,
             tokens_total: 0,
@@ -328,6 +329,24 @@ mod tests {
 
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].session_id, "normal");
+    }
+
+    #[test]
+    fn session_summary_preserves_managed_worktree_path() {
+        let mut record = test_record();
+        record.worktree = Some(SessionWorktreeSummary {
+            path: "/repo-feature".to_string(),
+        });
+
+        let summary = record.summary();
+
+        assert_eq!(
+            summary
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.path.as_str()),
+            Some("/repo-feature")
+        );
     }
 
     fn test_state(channel_capacity: usize, bridge_debug_file: Option<PathBuf>) -> AppState {
@@ -1637,6 +1656,29 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn delete_session_rejects_unknown_worktree_deletion() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        let responses = delete_session(&state, "s1".to_string(), true).await;
+
+        match responses.as_slice() {
+            [ServerMessage::Error { message, .. }] => {
+                assert_eq!(
+                    message,
+                    "session delete requested worktree deletion, but this session has no Fura-managed worktree"
+                );
+            }
+            other => panic!("unexpected responses: {other:?}"),
+        }
+        assert!(state.sessions.read().await.contains_key("s1"));
+    }
+
     #[test]
     fn creates_git_worktree_from_base_branch() {
         let root = env::temp_dir().join(format!("fura-worktree-test-{}", Uuid::new_v4().simple()));
@@ -2714,6 +2756,7 @@ mod tests {
                 title: Some("diffs2".to_string()),
                 request_id: Some("create-1".to_string()),
                 category: Some("infra".to_string()),
+                worktree: None,
                 created_at: Timestamp::from_rpc(&serde_json::json!(123_000))
                     .expect("valid test timestamp"),
             },

@@ -893,6 +893,11 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                             record.kind = SessionKind::Managed;
                             record.streaming_message = None;
                             record.live_message_ids.clear();
+                            if record.worktree.is_none() {
+                                record.worktree = pending_create
+                                    .as_ref()
+                                    .and_then(|pending| pending.worktree.clone());
+                            }
                         })
                         .or_insert_with(|| {
                             let now = Timestamp::now();
@@ -943,6 +948,14 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                                         pending_create
                                             .as_ref()
                                             .and_then(|pending| pending.category.clone())
+                                    }),
+                                worktree: source
+                                    .as_ref()
+                                    .and_then(|record| record.worktree.clone())
+                                    .or_else(|| {
+                                        pending_create
+                                            .as_ref()
+                                            .and_then(|pending| pending.worktree.clone())
                                     }),
                                 model: None,
                                 thinking_level: None,

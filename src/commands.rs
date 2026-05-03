@@ -516,7 +516,7 @@ pub(crate) async fn create_session(
         Some(cwd) => cwd,
         None => state.default_cwd.read().await.clone(),
     };
-    let has_worktree = worktree.is_some();
+    let mut session_worktree = None;
     let mut session_cwd = requested_cwd.clone();
     let mut default_cwd_to_save = requested_cwd;
 
@@ -532,6 +532,9 @@ pub(crate) async fn create_session(
                     session_cwd = %created.session_cwd.display()
                 );
                 session_cwd = created.session_cwd.to_string_lossy().into_owned();
+                session_worktree = Some(SessionWorktreeSummary {
+                    path: created.worktree_root.to_string_lossy().into_owned(),
+                });
             }
             Err(error) => {
                 warn!(transport_session_id = %transport_id, %error, "worktree creation failed");
@@ -543,6 +546,7 @@ pub(crate) async fn create_session(
         }
     }
 
+    let has_worktree = session_worktree.is_some();
     info!(
         action = "session.create",
         transport_session_id = %transport_id,
@@ -561,6 +565,7 @@ pub(crate) async fn create_session(
             request_id: request_id.clone(),
             category: category.clone(),
             created_at,
+            worktree: session_worktree,
         },
     );
 
@@ -681,6 +686,7 @@ pub(crate) fn opened_session_record(
             .clone()
             .or_else(|| existing.and_then(|record| record.timestamp.clone())),
         category: category.or_else(|| existing.and_then(|record| record.category.clone())),
+        worktree: existing.and_then(|record| record.worktree.clone()),
         kind: SessionKind::Managed,
         model: existing.and_then(|record| record.model.clone()),
         thinking_level: existing.and_then(|record| record.thinking_level.clone()),
@@ -856,13 +862,21 @@ pub(crate) async fn delete_session(
     }
 
     // Grab paths before dropping from catalog.
-    let (session_file, session_cwd) = {
+    let (session_file, session_worktree) = {
         let sessions = state.sessions.read().await;
         match sessions.get(&session_id) {
-            Some(record) => (record.session_file.clone(), record.cwd.clone()),
+            Some(record) => (record.session_file.clone(), record.worktree.clone()),
             None => return vec![unknown_session_error(session_id)],
         }
     };
+
+    if delete_worktree && session_worktree.is_none() {
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: "session delete requested worktree deletion, but this session has no Fura-managed worktree"
+                .to_string(),
+        }];
+    }
 
     // Drop from catalog.
     state.sessions.write().await.remove(&session_id);
@@ -890,33 +904,25 @@ pub(crate) async fn delete_session(
 
     let mut responses = Vec::new();
     if delete_worktree {
-        match session_cwd {
-            Some(cwd) => {
-                let cwd_for_log = cwd.clone();
-                match tokio::task::spawn_blocking(move || delete_git_worktree_sync(Path::new(&cwd)))
-                    .await
-                    .context("worktree deletion task failed")
-                    .and_then(|result| result)
-                {
-                    Ok(()) => {
-                        info!(session_id = %session_id, cwd = %cwd_for_log, "deleted session worktree")
-                    }
-                    Err(error) => {
-                        warn!(session_id = %session_id, cwd = %cwd_for_log, %error, "failed to delete session worktree");
-                        responses.push(ServerMessage::Error {
-                            request_id: None,
-                            message: format!(
-                                "session was deleted, but worktree deletion failed for {cwd_for_log}: {error}"
-                            ),
-                        });
-                    }
-                }
+        let worktree_path = session_worktree.expect("checked before deletion").path;
+        let worktree_path_for_log = worktree_path.clone();
+        match tokio::task::spawn_blocking(move || {
+            delete_git_worktree_sync(Path::new(&worktree_path))
+        })
+        .await
+        .context("worktree deletion task failed")
+        .and_then(|result| result)
+        {
+            Ok(()) => {
+                info!(session_id = %session_id, cwd = %worktree_path_for_log, "deleted session worktree")
             }
-            None => {
+            Err(error) => {
+                warn!(session_id = %session_id, cwd = %worktree_path_for_log, %error, "failed to delete session worktree");
                 responses.push(ServerMessage::Error {
                     request_id: None,
-                    message: "session was deleted, but it had no working directory to delete"
-                        .to_string(),
+                    message: format!(
+                        "session was deleted, but worktree deletion failed for {worktree_path_for_log}: {error}"
+                    ),
                 });
             }
         }

@@ -84,6 +84,10 @@ export type TranscriptEntry =
   | ({ kind: "message" } & TranscriptMessage)
   | ({ kind: "tool" } & ToolCard);
 
+export type SessionWorktreeSummary = {
+  path: string;
+};
+
 export type SessionSummary = {
   kind: "managed" | "available";
   sessionId: string;
@@ -95,6 +99,7 @@ export type SessionSummary = {
   title?: string | null;
   timestamp?: string | null;
   category?: string | null;
+  worktree?: SessionWorktreeSummary | null;
 };
 
 export type PlanModeProjection = {

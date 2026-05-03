@@ -230,6 +230,64 @@ describe("mountMobileApp", () => {
     expect(connection.sent).toContainEqual({ type: "session.attach", sessionId: "live" });
   });
 
+  it("filters sessions by category and updates the active category", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "sessions.snapshot",
+      sessions: [summary("live", { category: "ops" }), summary("other", { category: "personal" })],
+    });
+
+    const filter = document.querySelector<HTMLSelectElement>("#mobileSessionCategoryFilter");
+    if (!filter) throw new Error("category filter missing");
+    expect([...filter.options].map(option => option.value)).toEqual(["", "ops", "personal"]);
+    filter.value = "ops";
+    filter.dispatchEvent(new Event("change", { bubbles: true }));
+
+    expect(document.querySelector("#mobileSessionsList")?.textContent).toContain("ops");
+    expect(document.querySelector("#mobileSessionsList")?.textContent).not.toContain("personal");
+
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { summary: summary("live", { title: "Ops session", category: "ops" }) }),
+    });
+    const input = document.querySelector<HTMLInputElement>("#mobileCategoryInput");
+    if (!input) throw new Error("category input missing");
+    input.value = "infra";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLButtonElement>("#mobileCategorySave")?.click();
+
+    expect(connection.sent).toContainEqual({ type: "session.setCategory", sessionId: "live", category: "infra" });
+  });
+
+  it("deletes sessions with a worktree option only for managed worktree sessions", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "sessions.snapshot",
+      sessions: [
+        summary("regular", { title: "Regular" }),
+        summary("worktree", { title: "Feature", worktree: { path: "/repo-feature" } }),
+      ],
+    });
+
+    const deleteButtons = document.querySelectorAll<HTMLButtonElement>("#mobileSessionsList .session-delete");
+    deleteButtons[0]?.click();
+    expect(document.querySelector<HTMLElement>("#mobileDeleteSessionOverlay")?.hidden).toBe(false);
+    expect(document.querySelector("#mobileDeleteSessionWorktreeRow")?.hasAttribute("hidden")).toBe(true);
+    document.querySelector<HTMLButtonElement>("#mobileDeleteSessionConfirm")?.click();
+    expect(connection.sent).toContainEqual({ type: "session.delete", sessionId: "regular" });
+
+    deleteButtons[1]?.click();
+    expect(document.querySelector("#mobileDeleteSessionWorktreeRow")?.hasAttribute("hidden")).toBe(false);
+    expect(document.querySelector("#mobileDeleteSessionWorktreePath")?.textContent).toBe("Linked worktree: /repo-feature");
+    const checkbox = document.querySelector<HTMLInputElement>("#mobileDeleteSessionWorktree");
+    if (!checkbox) throw new Error("delete worktree checkbox missing");
+    checkbox.checked = true;
+    document.querySelector<HTMLButtonElement>("#mobileDeleteSessionConfirm")?.click();
+    expect(connection.sent).toContainEqual({ type: "session.delete", sessionId: "worktree", deleteWorktree: true });
+  });
+
   it("sends prompts for the active ready session and clears the editor", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });

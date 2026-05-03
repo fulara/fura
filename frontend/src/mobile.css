@@ -76,7 +76,40 @@ body {
 }
 
 .mobile-session-drawer .session-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mobile-category-filter,
+.mobile-category-editor {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.mobile-category-filter {
+  margin-bottom: 0.5rem;
+  color: #c7cedc;
+  font-size: 0.82rem;
+}
+
+.mobile-category-editor {
+  margin-top: 0.45rem;
+}
+
+.mobile-category-editor[hidden] {
   display: none;
+}
+
+.mobile-category-editor label {
+  color: #9ba4b5;
+  font-size: 0.78rem;
+}
+
+.mobile-category-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
 }
 
 .mobile-create-drawer {

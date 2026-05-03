@@ -42,14 +42,15 @@ import type {
   SessionSummary,
   TodoPhase,
 } from "./protocol";
-import { sessionKindLabel, sessionStatusLabel } from "./sessionList";
+import { normalizedCategory, sessionCategories, sessionKindLabel, sessionStatusLabel, visibleSessions } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   deriveWorktreeCreateView,
   resolveSessionCreateMessage,
   type SessionCreateValidationTarget,
 } from "./sessionCreate";
-import { createSessionListView } from "./sessionListView";
+import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
+import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
 
@@ -96,6 +97,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           <div class="mobile-session-heading">
             <h2 id="mobileSessionTitle">No session selected</h2>
             <p id="mobileSessionMeta">Choose a session to view its transcript.</p>
+            <div id="mobileCategoryEditor" class="mobile-category-editor">
+              <label for="mobileCategoryInput">Category</label>
+              <div class="mobile-category-actions">
+                <input id="mobileCategoryInput" autocomplete="off" spellcheck="false" maxlength="80" placeholder="category" />
+                <button id="mobileCategorySave" type="button">Save</button>
+              </div>
+            </div>
           </div>
           <div class="mobile-header-actions">
             <button id="mobileCreateToggle" class="mobile-create-toggle" type="button" aria-expanded="false" aria-controls="mobileCreateDrawer">New</button>
@@ -104,6 +112,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         </div>
         <p id="mobileLog" class="mobile-log" aria-live="polite"></p>
         <section id="mobileSessionsDrawer" class="mobile-session-drawer" hidden>
+          <label class="mobile-category-filter" for="mobileSessionCategoryFilter">
+            <span>Category</span>
+            <select id="mobileSessionCategoryFilter"></select>
+          </label>
           <nav id="mobileSessionsList" class="sessions" aria-label="Sessions"></nav>
         </section>
         <section id="mobileCreateDrawer" class="mobile-create-drawer" hidden>
@@ -182,6 +194,28 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </section>
+      <section id="mobileDeleteSessionOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-delete-session" role="dialog" aria-modal="true" aria-labelledby="mobileDeleteSessionTitle" aria-describedby="mobileDeleteSessionMessage">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Delete session</p>
+              <h2 id="mobileDeleteSessionTitle">Delete session</h2>
+            </div>
+          </header>
+          <div class="mobile-dialog-body">
+            <p id="mobileDeleteSessionMessage"></p>
+            <label id="mobileDeleteSessionWorktreeRow" class="mobile-checkbox-row" for="mobileDeleteSessionWorktree">
+              <input id="mobileDeleteSessionWorktree" type="checkbox" />
+              <span>Also delete the linked git worktree directory</span>
+            </label>
+            <p id="mobileDeleteSessionWorktreePath" class="mobile-create-worktree-help"></p>
+          </div>
+          <div class="mobile-dialog-actions">
+            <button id="mobileDeleteSessionCancel" type="button">Cancel</button>
+            <button id="mobileDeleteSessionConfirm" class="danger-action" type="button">Delete session</button>
+          </div>
+        </div>
+      </section>
       <section id="mobileDialogOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileDialogTitle" aria-describedby="mobileDialogBody">
           <header class="mobile-dialog-header">
@@ -236,6 +270,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const imageInput = requireElement<HTMLInputElement>(document, "mobileImageInput");
   const composerStatus = requireElement<HTMLSpanElement>(document, "mobileComposerStatus");
   const mobileLog = requireElement<HTMLParagraphElement>(document, "mobileLog");
+  const categoryEditor = requireElement<HTMLDivElement>(document, "mobileCategoryEditor");
+  const categoryInput = requireElement<HTMLInputElement>(document, "mobileCategoryInput");
+  const categorySave = requireElement<HTMLButtonElement>(document, "mobileCategorySave");
+  const categoryFilter = requireElement<HTMLSelectElement>(document, "mobileSessionCategoryFilter");
+  const deleteSessionOverlay = requireElement<HTMLElement>(document, "mobileDeleteSessionOverlay");
+  const deleteSessionMessage = requireElement<HTMLParagraphElement>(document, "mobileDeleteSessionMessage");
+  const deleteSessionWorktreeRow = requireElement<HTMLLabelElement>(document, "mobileDeleteSessionWorktreeRow");
+  const deleteSessionWorktree = requireElement<HTMLInputElement>(document, "mobileDeleteSessionWorktree");
+  const deleteSessionWorktreePath = requireElement<HTMLParagraphElement>(document, "mobileDeleteSessionWorktreePath");
+  const deleteSessionCancel = requireElement<HTMLButtonElement>(document, "mobileDeleteSessionCancel");
+  const deleteSessionConfirm = requireElement<HTMLButtonElement>(document, "mobileDeleteSessionConfirm");
   const busyPromptOverlay = requireElement<HTMLElement>(document, "mobileBusyPromptOverlay");
   const busyPromptText = requireElement<HTMLTextAreaElement>(document, "mobileBusyPromptText");
   const busyPromptAttachmentNote = requireElement<HTMLParagraphElement>(document, "mobileBusyPromptAttachmentNote");
@@ -257,6 +302,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let activeSessionId: string | null = null;
   let projections = new Map<string, SessionProjection>();
   const unreadSessions = new Set<string>();
+  let selectedCategoryFilter = "";
+  let activeCategoryDirty = false;
+  let activeCategorySessionId: string | null = null;
+  let deleteSessionTarget: SessionDeleteView | null = null;
   let createCwdDirty = false;
   let createWorktreeSourceDirty = false;
   let createWorktreeBaseDirty = false;
@@ -282,7 +331,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
-    onDeleteSession: () => undefined,
+    onDeleteSession: openDeleteSessionPicker,
   });
 
   transcriptTab.addEventListener("click", () => setActiveMobileView("transcript"));
@@ -369,6 +418,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   busyPromptCancel.addEventListener("click", restoreBusyPromptDraft);
   busyPromptSteer.addEventListener("click", () => sendBusyPromptDraft("steer"));
   busyPromptFollowUp.addEventListener("click", () => sendBusyPromptDraft("followUp"));
+  categoryFilter.addEventListener("change", () => {
+    selectedCategoryFilter = categoryFilter.value;
+    renderSessions();
+  });
+  categoryInput.addEventListener("input", markActiveCategoryDirty);
+  categorySave.addEventListener("click", submitActiveCategory);
+  deleteSessionCancel.addEventListener("click", closeDeleteSessionPicker);
+  deleteSessionConfirm.addEventListener("click", submitDeleteSessionPicker);
 
   const initialToken = consumeBootstrapToken(
     window.location.href,
@@ -675,6 +732,64 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     textarea.value = request.prefill ?? "";
     label.append(textarea);
     dialogField.append(label);
+  }
+
+  function markActiveCategoryDirty(): void {
+    activeCategoryDirty = true;
+    activeCategorySessionId = activeSessionId;
+    categorySave.disabled = !activeSessionId;
+  }
+
+  function syncActiveCategoryEditor(summary: SessionSummary | undefined): void {
+    const canEdit = Boolean(activeSessionId && summary);
+    const category = normalizedCategory(summary?.category);
+    const shouldReset = activeCategorySessionId !== activeSessionId || !activeCategoryDirty;
+    categoryEditor.hidden = !canEdit;
+    categoryInput.disabled = !canEdit;
+    categorySave.disabled = !canEdit || (!activeCategoryDirty && categoryInput.value.trim() === category);
+    if (!canEdit || shouldReset) {
+      categoryInput.value = canEdit ? category : "";
+      activeCategorySessionId = activeSessionId;
+      activeCategoryDirty = false;
+      categorySave.disabled = true;
+    }
+  }
+
+  function submitActiveCategory(): void {
+    if (!activeSessionId) return;
+    const category = normalizedCategory(categoryInput.value);
+    send(category
+      ? { type: "session.setCategory", sessionId: activeSessionId, category }
+      : { type: "session.setCategory", sessionId: activeSessionId });
+    activeCategoryDirty = false;
+    activeCategorySessionId = activeSessionId;
+    categorySave.disabled = true;
+  }
+
+  function openDeleteSessionPicker(sessionId: string): void {
+    const session = sessions.find(candidate => candidate.sessionId === sessionId);
+    if (!session) return;
+    const view = deriveSessionDeleteView(session);
+    deleteSessionTarget = view;
+    deleteSessionMessage.textContent = view.message;
+    deleteSessionWorktree.checked = false;
+    deleteSessionWorktree.disabled = !view.canDeleteWorktree;
+    deleteSessionWorktreeRow.hidden = !view.canDeleteWorktree;
+    deleteSessionWorktreePath.textContent = view.worktreeHelp;
+    deleteSessionOverlay.hidden = false;
+    window.setTimeout(() => deleteSessionCancel.focus(), 0);
+  }
+
+  function closeDeleteSessionPicker(): void {
+    deleteSessionOverlay.hidden = true;
+    deleteSessionTarget = null;
+  }
+
+  function submitDeleteSessionPicker(): void {
+    const view = deleteSessionTarget;
+    if (!view) return;
+    send(sessionDeleteMessage(view, deleteSessionWorktree.checked));
+    closeDeleteSessionPicker();
   }
 
   function createPendingImageMarker(): string {
@@ -1071,10 +1186,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   function renderSessions(): void {
+    const categories = sessionCategories(sessions);
+    selectedCategoryFilter = renderSessionCategoryFilter(categoryFilter, categories, selectedCategoryFilter);
+    const filteredSessions = visibleSessions(sessions, selectedCategoryFilter);
     sessionListView.render({
       sessions,
-      visibleSessions: sessions,
-      selectedCategoryFilter: "",
+      visibleSessions: filteredSessions,
+      selectedCategoryFilter,
       activeSessionId,
       unreadSessionIds: unreadSessions,
     });
@@ -1093,6 +1211,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       composerStatus.textContent = "No active session";
       renderTranscript(undefined);
       renderDiffView(undefined);
+      syncActiveCategoryEditor(undefined);
       renderBusyPromptChoice();
       return;
     }
@@ -1100,6 +1219,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const isBusy = projection?.isBusy ?? summary.status === "busy";
     sessionTitle.textContent = summary.title || `Session ${shortId(summary.sessionId)}`;
     sessionMeta.textContent = `${sessionKindLabel(summary.kind)} · ${sessionStatusLabel(summary)} · ${summary.cwd ?? "no dir"}`;
+    syncActiveCategoryEditor(summary);
     promptInput.disabled = !projection || isBusy;
     sendButton.disabled = !projection || isBusy;
     imageInput.disabled = !projection || isBusy;

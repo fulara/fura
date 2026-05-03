@@ -98,6 +98,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                         title: session.title,
                         timestamp: session.timestamp,
                         category,
+                        worktree: None,
                         model: None,
                         thinking_level: None,
                         tokens_total: 0,

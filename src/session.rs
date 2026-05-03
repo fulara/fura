@@ -33,6 +33,7 @@ pub(crate) struct SessionRecord {
     pub(crate) title: Option<String>,
     pub(crate) timestamp: Option<String>,
     pub(crate) category: Option<String>,
+    pub(crate) worktree: Option<SessionWorktreeSummary>,
     pub(crate) model: Option<String>,
     pub(crate) thinking_level: Option<String>,
     pub(crate) tokens_total: u64,
@@ -57,6 +58,7 @@ impl SessionRecord {
             title: self.title.clone(),
             timestamp: self.timestamp.clone(),
             category: self.category.clone(),
+            worktree: self.worktree.clone(),
         }
     }
 
@@ -170,6 +172,13 @@ pub(crate) struct SessionSummary {
     pub(crate) title: Option<String>,
     pub(crate) timestamp: Option<String>,
     pub(crate) category: Option<String>,
+    pub(crate) worktree: Option<SessionWorktreeSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionWorktreeSummary {
+    pub(crate) path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

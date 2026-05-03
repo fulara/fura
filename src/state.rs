@@ -58,6 +58,7 @@ pub(crate) struct PendingCreatedSession {
     pub(crate) request_id: Option<String>,
     pub(crate) category: Option<String>,
     pub(crate) created_at: Timestamp,
+    pub(crate) worktree: Option<crate::SessionWorktreeSummary>,
 }
 
 #[derive(Debug, Clone)]

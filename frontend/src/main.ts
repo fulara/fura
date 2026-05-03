@@ -60,6 +60,7 @@ import {
   resolveSessionCreateMessage,
   type SessionCreateValidationTarget,
 } from "./sessionCreate";
+import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import {
   createCategoryCombobox,
@@ -522,7 +523,7 @@ let pendingCreatedSessionBaseline: Set<string> | null = null;
 let pendingSessionSelectionId: string | null = null;
 let cwdPickerCreatePending = false;
 let cwdPickerPendingRequestId: string | null = null;
-let deleteSessionTargetId: string | null = null;
+let deleteSessionTarget: SessionDeleteView | null = null;
 let cwdPickerSourceRepoAutofill = true;
 let cwdPickerDirectoryAutofill = true;
 let cwdPickerBranchAutofill = true;
@@ -1956,32 +1957,27 @@ function openDeleteSessionPicker(sessionId: string): void {
   const session = currentSessionSummary(sessionId);
   if (!session) return;
 
-  deleteSessionTargetId = session.sessionId;
-  const label = session.title || shortId(session.sessionId);
-  deleteSessionMessage.textContent = `Delete session "${label}"? This will stop the session and permanently delete its file.`;
+  const view = deriveSessionDeleteView(session);
+  deleteSessionTarget = view;
+  deleteSessionMessage.textContent = view.message;
   deleteSessionWorktree.checked = false;
-  deleteSessionWorktree.disabled = !session.cwd;
-  deleteSessionWorktreePath.textContent = session.cwd
-    ? `Worktree candidate: ${session.cwd}`
-    : "This session has no working directory recorded.";
+  deleteSessionWorktree.disabled = !view.canDeleteWorktree;
+  deleteSessionWorktree.parentElement?.toggleAttribute("hidden", !view.canDeleteWorktree);
+  deleteSessionWorktreePath.textContent = view.worktreeHelp;
   deleteSessionOverlay.hidden = false;
   window.setTimeout(() => deleteSessionCancel.focus(), 0);
 }
 
 function closeDeleteSessionPicker(): void {
   deleteSessionOverlay.hidden = true;
-  deleteSessionTargetId = null;
+  deleteSessionTarget = null;
   promptInput.focus();
 }
 
 function submitDeleteSessionPicker(): void {
-  const sessionId = deleteSessionTargetId;
-  if (!sessionId) return;
-  send({
-    type: "session.delete",
-    sessionId,
-    deleteWorktree: deleteSessionWorktree.checked,
-  });
+  const view = deleteSessionTarget;
+  if (!view) return;
+  send(sessionDeleteMessage(view, deleteSessionWorktree.checked));
   closeDeleteSessionPicker();
 }
 // --- Top-level render ---
