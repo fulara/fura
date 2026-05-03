@@ -76,6 +76,11 @@ import {
 } from "./extensionDialog";
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
+import {
+  buildTranscriptReviewPrompt,
+  type TranscriptReviewComment,
+  type TranscriptReviewLine,
+} from "./transcriptReview";
 import type {
   ClientMessage,
   ControlCandidate,
@@ -487,6 +492,8 @@ const handoffPickerCancel = requireElement<HTMLButtonElement>("handoffPickerCanc
 const handoffPickerCreate = requireElement<HTMLButtonElement>("handoffPickerCreate");
 const diffPreviewOverlay = requireElement<HTMLDivElement>("diffPreviewOverlay");
 const diffPreviewClose = requireElement<HTMLButtonElement>("diffPreviewClose");
+const diffPreviewTitle = requireElement<HTMLHeadingElement>("diffPreviewTitle");
+const diffPreviewSubtitle = requireElement<HTMLParagraphElement>("diffPreviewSubtitle");
 const diffPreviewText = requireElement<HTMLTextAreaElement>("diffPreviewText");
 const diffPreviewStatus = requireElement<HTMLSpanElement>("diffPreviewStatus");
 const diffPreviewCancel = requireElement<HTMLButtonElement>("diffPreviewCancel");
@@ -498,6 +505,11 @@ type DiffPreviewDraft = {
   baseSnapshot: DiffSnapshotSummary;
   headSnapshot: DiffSnapshotSummary | null;
   comments: DiffComment[];
+};
+type TranscriptPreviewDraft = {
+  sessionId: string;
+  message: TranscriptMessage;
+  comments: TranscriptReviewComment[];
 };
 type SessionNotice = { level: string; text: string };
 type ControlChatMessage = {
@@ -566,6 +578,9 @@ let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
+let transcriptPreviewDraft: TranscriptPreviewDraft | null = null;
+const transcriptReviewActiveMessages = new Map<string, string>();
+const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
 const DIFF_COMMENT_CONTEXT_RADIUS = 4;
 const PROMPT_HISTORY_LIMIT = 100;
 let modelPickerSessionId: string | null = null;
@@ -816,7 +831,7 @@ handoffPickerInstructions.addEventListener("keydown", event => {
 });
 diffPreviewClose.addEventListener("click", closeDiffPreview);
 diffPreviewCancel.addEventListener("click", closeDiffPreview);
-diffPreviewSend.addEventListener("click", sendDiffPreviewDraft);
+diffPreviewSend.addEventListener("click", sendPromptPreviewDraft);
 diffPreviewOverlay.addEventListener("mousedown", event => {
   if (event.target === diffPreviewOverlay) closeDiffPreview();
 });
@@ -2376,7 +2391,7 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
     if (entry.kind === "message") {
       items.push({
         key: `message:${entry.id}:${startIndex}`,
-        render: () => renderMessage(entry),
+        render: () => renderMessage(entry, projection.summary.sessionId),
       });
       continue;
     }
@@ -2644,6 +2659,101 @@ function rerenderDiffsViewPreservingScroll(sessionId: string): void {
   });
 }
 
+function transcriptReviewCommentsForMessage(sessionId: string, messageId: string): TranscriptReviewComment[] {
+  return (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId === messageId);
+}
+
+function isTranscriptMessageUnderReview(sessionId: string, messageId: string): boolean {
+  return transcriptReviewActiveMessages.get(sessionId) === messageId;
+}
+
+function startTranscriptReview(sessionId: string, message: TranscriptMessage): void {
+  transcriptReviewActiveMessages.set(sessionId, message.id);
+  markTranscriptViewDirty({ resetCache: true });
+  render();
+}
+
+function cancelTranscriptReview(sessionId: string, message: TranscriptMessage): void {
+  transcriptReviewActiveMessages.delete(sessionId);
+  transcriptReviewComments.set(
+    sessionId,
+    (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId !== message.id),
+  );
+  markTranscriptViewDirty({ resetCache: true });
+  render();
+}
+
+function addTranscriptReviewComment(
+  sessionId: string,
+  message: TranscriptMessage,
+  line: TranscriptReviewLine,
+): void {
+  const comment = window.prompt("Comment on this transcript line");
+  if (!comment?.trim()) return;
+  const comments = transcriptReviewComments.get(sessionId) ?? [];
+  comments.push({
+    id: `${Date.now()}-${comments.length}`,
+    messageId: message.id,
+    role: message.role,
+    lineNumber: line.lineNumber,
+    lineText: line.text,
+    text: comment.trim(),
+  });
+  transcriptReviewComments.set(sessionId, comments);
+  markTranscriptViewDirty({ resetCache: true });
+  render();
+}
+
+function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
+  const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
+  if (comments.length === 0) return;
+  transcriptPreviewDraft = { sessionId, message, comments };
+  diffPreviewDraft = null;
+  diffPreviewTitle.textContent = "Preview transcript comments";
+  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewText.value = buildTranscriptReviewPrompt(message, comments);
+  diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
+  diffPreviewSend.textContent = "Send comments";
+  diffPreviewOverlay.hidden = false;
+  diffPreviewText.scrollTop = 0;
+  diffPreviewSend.focus();
+}
+
+function sendTranscriptReviewComments(
+  sessionId: string,
+  message: TranscriptMessage,
+  comments: TranscriptReviewComment[],
+): void {
+  if (comments.length === 0) return;
+  const clearFlushedComments = () => {
+    transcriptReviewComments.set(
+      sessionId,
+      (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId !== message.id),
+    );
+    transcriptReviewActiveMessages.delete(sessionId);
+    markTranscriptViewDirty({ resetCache: true });
+    render();
+  };
+  sendPromptWithBusyHandling({
+    sessionId,
+    text: buildTranscriptReviewPrompt(message, comments),
+    editorText: `Flush ${comments.length} transcript comment${comments.length === 1 ? "" : "s"}`,
+    images: [],
+    onSend: clearFlushedComments,
+  });
+}
+
+function transcriptReviewOptions(sessionId: string, message: TranscriptMessage) {
+  return {
+    active: isTranscriptMessageUnderReview(sessionId, message.id),
+    comments: transcriptReviewCommentsForMessage(sessionId, message.id),
+    onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
+    onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
+    onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
+    onFlush: (target: TranscriptMessage) => flushTranscriptReviewComments(sessionId, target),
+  };
+}
+
 function addDiffComment(
   sessionId: string,
   baseSnapshot: DiffSnapshotSummary,
@@ -2850,6 +2960,10 @@ function previewDiffComments(
   const comments = selectedDiffComments(sessionId, baseSnapshot, headSnapshot);
   if (comments.length === 0) return;
   diffPreviewDraft = { sessionId, state, baseSnapshot, headSnapshot, comments };
+  transcriptPreviewDraft = null;
+  diffPreviewTitle.textContent = "Preview diff comments";
+  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewSend.textContent = "Send comments";
   diffPreviewText.value = buildDiffCommentPrompt(state, comments, baseSnapshot, headSnapshot);
   diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
   diffPreviewOverlay.hidden = false;
@@ -2861,14 +2975,24 @@ function closeDiffPreview(): void {
   diffPreviewOverlay.hidden = true;
   diffPreviewText.value = "";
   diffPreviewStatus.textContent = "";
+  diffPreviewTitle.textContent = "Preview diff comments";
+  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewSend.textContent = "Send comments";
   diffPreviewDraft = null;
+  transcriptPreviewDraft = null;
 }
 
-function sendDiffPreviewDraft(): void {
-  const draft = diffPreviewDraft;
-  if (!draft) return;
+function sendPromptPreviewDraft(): void {
+  const diffDraft = diffPreviewDraft;
+  const transcriptDraft = transcriptPreviewDraft;
   closeDiffPreview();
-  sendDiffComments(draft.sessionId, draft.state, draft.baseSnapshot, draft.headSnapshot, draft.comments);
+  if (diffDraft) {
+    sendDiffComments(diffDraft.sessionId, diffDraft.state, diffDraft.baseSnapshot, diffDraft.headSnapshot, diffDraft.comments);
+    return;
+  }
+  if (transcriptDraft) {
+    sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments);
+  }
 }
 
 function flushDiffComments(
@@ -3337,8 +3461,11 @@ function statusInterruptButton(): HTMLButtonElement {
 
 // --- Message rendering ---
 
-function renderMessage(message: TranscriptMessage): HTMLElement {
-  return renderTranscriptMessage(message, { thinkingVisibilityMode });
+function renderMessage(message: TranscriptMessage, sessionId = activeSessionId): HTMLElement {
+  return renderTranscriptMessage(message, {
+    thinkingVisibilityMode,
+    review: sessionId ? transcriptReviewOptions(sessionId, message) : undefined,
+  });
 }
 
 

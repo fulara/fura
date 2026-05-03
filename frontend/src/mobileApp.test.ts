@@ -304,6 +304,47 @@ describe("mountMobileApp", () => {
     expect(input.value).toBe("");
   });
 
+  it("reviews transcript lines on mobile and sends previewed comments", () => {
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("Please clarify line two");
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [{
+          kind: "message",
+          id: "message-live",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "line one\nline two" }],
+          timestamp: null,
+          isNew: false,
+        }],
+      }),
+    });
+
+    const reviewButton = [...document.querySelectorAll<HTMLButtonElement>(".message-actions button")]
+      .find(button => button.textContent === "Review");
+    reviewButton?.click();
+    document.querySelectorAll<HTMLButtonElement>(".transcript-review-comment-btn")[1]?.click();
+    expect(prompt).toHaveBeenCalledWith("Comment on this transcript line");
+    expect(document.querySelector(".transcript-review-inline-comment")?.textContent).toBe("Please clarify line two");
+
+    document.querySelector<HTMLButtonElement>(".transcript-review-actions button:last-child")?.click();
+    expect(document.querySelector<HTMLElement>("#mobileReviewPreviewOverlay")?.hidden).toBe(false);
+    expect(document.querySelector<HTMLTextAreaElement>("#mobileReviewPreviewText")?.value).toContain("Comment: Please clarify line two");
+
+    document.querySelector<HTMLButtonElement>("#mobileReviewPreviewSend")?.click();
+
+    const sentPrompt = connection.sent.find(
+      message => message.type === "prompt.send" && message.sessionId === "live" && message.text.includes("Please clarify line two"),
+    );
+    expect(sentPrompt).toBeTruthy();
+    expect(document.querySelector<HTMLElement>("#mobileReviewPreviewOverlay")?.hidden).toBe(true);
+    expect(document.querySelector(".transcript-review-body")).toBeNull();
+  });
+
   it("attaches and removes mobile image previews", async () => {
     stubFileReader();
     const { connection } = createHarness();

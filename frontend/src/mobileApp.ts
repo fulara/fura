@@ -41,6 +41,7 @@ import type {
   SessionProjection,
   SessionSummary,
   TodoPhase,
+  TranscriptMessage,
 } from "./protocol";
 import { normalizedCategory, sessionCategories, sessionKindLabel, sessionStatusLabel, visibleSessions } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
@@ -53,8 +54,13 @@ import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView }
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
+import {
+  buildTranscriptReviewPrompt,
+  type TranscriptReviewComment,
+  type TranscriptReviewLine,
+} from "./transcriptReview";
 
-type MobileWindow = Pick<Window, "history" | "localStorage" | "location" | "setTimeout">;
+type MobileWindow = Pick<Window, "history" | "localStorage" | "location" | "prompt" | "setTimeout">;
 
 export type MobileConnectionOptions = {
   auth: WebSocketAuth;
@@ -235,6 +241,22 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </form>
         </div>
       </section>
+      <section id="mobileReviewPreviewOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-review-preview" role="dialog" aria-modal="true" aria-labelledby="mobileReviewPreviewTitle">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Transcript review</p>
+              <h2 id="mobileReviewPreviewTitle">Preview transcript comments</h2>
+            </div>
+          </header>
+          <textarea id="mobileReviewPreviewText" class="mobile-review-preview-text" readonly spellcheck="false"></textarea>
+          <p id="mobileReviewPreviewStatus" class="mobile-dialog-status" aria-live="polite"></p>
+          <div class="mobile-dialog-actions mobile-review-preview-actions">
+            <button id="mobileReviewPreviewCancel" type="button">Cancel</button>
+            <button id="mobileReviewPreviewSend" type="button">Send comments</button>
+          </div>
+        </div>
+      </section>
     </main>
   `;
 
@@ -295,8 +317,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const dialogStatus = requireElement<HTMLParagraphElement>(document, "mobileDialogStatus");
   const dialogCancel = requireElement<HTMLButtonElement>(document, "mobileDialogCancel");
   const dialogSubmit = requireElement<HTMLButtonElement>(document, "mobileDialogSubmit");
+  const reviewPreviewOverlay = requireElement<HTMLElement>(document, "mobileReviewPreviewOverlay");
+  const reviewPreviewText = requireElement<HTMLTextAreaElement>(document, "mobileReviewPreviewText");
+  const reviewPreviewStatus = requireElement<HTMLParagraphElement>(document, "mobileReviewPreviewStatus");
+  const reviewPreviewCancel = requireElement<HTMLButtonElement>(document, "mobileReviewPreviewCancel");
+  const reviewPreviewSend = requireElement<HTMLButtonElement>(document, "mobileReviewPreviewSend");
 
   let connection: FuraConnection | null = null;
+  let reviewPreviewDraft: { sessionId: string; message: TranscriptMessage; comments: TranscriptReviewComment[] } | null = null;
+  const transcriptReviewActiveMessages = new Map<string, string>();
+  const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
   let serverConfig: ServerConfig | null = null;
   let sessions: SessionSummary[] = [];
   let activeSessionId: string | null = null;
@@ -426,6 +456,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   categorySave.addEventListener("click", submitActiveCategory);
   deleteSessionCancel.addEventListener("click", closeDeleteSessionPicker);
   deleteSessionConfirm.addEventListener("click", submitDeleteSessionPicker);
+  reviewPreviewCancel.addEventListener("click", closeReviewPreview);
+  reviewPreviewSend.addEventListener("click", sendReviewPreviewDraft);
+  reviewPreviewOverlay.addEventListener("mousedown", event => {
+    if (event.target === reviewPreviewOverlay) closeReviewPreview();
+  });
 
   const initialToken = consumeBootstrapToken(
     window.location.href,
@@ -1198,6 +1233,87 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     });
   }
 
+  function reviewCommentsForMessage(sessionId: string, messageId: string): TranscriptReviewComment[] {
+    return (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId === messageId);
+  }
+
+  function startTranscriptReview(sessionId: string, message: TranscriptMessage): void {
+    transcriptReviewActiveMessages.set(sessionId, message.id);
+    renderActiveSession();
+  }
+
+  function cancelTranscriptReview(sessionId: string, message: TranscriptMessage): void {
+    transcriptReviewActiveMessages.delete(sessionId);
+    transcriptReviewComments.set(
+      sessionId,
+      (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId !== message.id),
+    );
+    renderActiveSession();
+  }
+
+  function addTranscriptReviewComment(sessionId: string, message: TranscriptMessage, line: TranscriptReviewLine): void {
+    const comment = window.prompt("Comment on this transcript line");
+    if (!comment?.trim()) return;
+    const comments = transcriptReviewComments.get(sessionId) ?? [];
+    comments.push({
+      id: `${Date.now()}-${comments.length}`,
+      messageId: message.id,
+      role: message.role,
+      lineNumber: line.lineNumber,
+      lineText: line.text,
+      text: comment.trim(),
+    });
+    transcriptReviewComments.set(sessionId, comments);
+    renderActiveSession();
+  }
+
+  function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
+    const comments = reviewCommentsForMessage(sessionId, message.id);
+    if (comments.length === 0) return;
+    reviewPreviewDraft = { sessionId, message, comments };
+    reviewPreviewText.value = buildTranscriptReviewPrompt(message, comments);
+    reviewPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
+    reviewPreviewOverlay.hidden = false;
+    reviewPreviewText.scrollTop = 0;
+    reviewPreviewSend.focus();
+  }
+
+  function closeReviewPreview(): void {
+    reviewPreviewOverlay.hidden = true;
+    reviewPreviewText.value = "";
+    reviewPreviewStatus.textContent = "";
+    reviewPreviewDraft = null;
+  }
+
+  function sendReviewPreviewDraft(): void {
+    const draft = reviewPreviewDraft;
+    if (!draft) return;
+    closeReviewPreview();
+    const accepted = send(createPromptSendMessage(
+      draft.sessionId,
+      buildTranscriptReviewPrompt(draft.message, draft.comments),
+      [],
+    ));
+    if (!accepted) return;
+    transcriptReviewComments.set(
+      draft.sessionId,
+      (transcriptReviewComments.get(draft.sessionId) ?? []).filter(comment => comment.messageId !== draft.message.id),
+    );
+    transcriptReviewActiveMessages.delete(draft.sessionId);
+    renderActiveSession();
+  }
+
+  function transcriptReviewOptions(sessionId: string, message: TranscriptMessage) {
+    return {
+      active: transcriptReviewActiveMessages.get(sessionId) === message.id,
+      comments: reviewCommentsForMessage(sessionId, message.id),
+      onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
+      onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
+      onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
+      onFlush: (target: TranscriptMessage) => flushTranscriptReviewComments(sessionId, target),
+    };
+  }
+
   function renderActiveSession(): void {
     const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
     const summary = projection?.summary ?? sessions.find(session => session.sessionId === activeSessionId);
@@ -1209,6 +1325,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       imageInput.disabled = true;
       promptInput.placeholder = "Select a session first";
       composerStatus.textContent = "No active session";
+      closeReviewPreview();
       renderTranscript(undefined);
       renderDiffView(undefined);
       syncActiveCategoryEditor(undefined);
@@ -1245,7 +1362,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const fragment = transcript.ownerDocument.createDocumentFragment();
     for (const entry of projection.transcript) {
       if (entry.kind === "message") {
-        fragment.append(renderMessage(entry, { thinkingVisibilityMode: "auto" }));
+        fragment.append(renderMessage(entry, {
+          thinkingVisibilityMode: "auto",
+          review: activeSessionId ? transcriptReviewOptions(activeSessionId, entry) : undefined,
+        }));
       } else {
         fragment.append(renderToolCard(entry));
       }

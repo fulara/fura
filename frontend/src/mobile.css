@@ -539,3 +539,25 @@ body {
   padding: 1rem;
   text-align: center;
 }
+
+
+.mobile-review-preview {
+  gap: 0;
+}
+
+.mobile-review-preview-text {
+  min-height: min(46vh, 24rem);
+  margin: 0;
+  border: 0;
+  border-top: 1px solid #252a35;
+  border-bottom: 1px solid #252a35;
+  border-radius: 0;
+  resize: vertical;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.mobile-review-preview-actions {
+  padding: 0 1rem 1rem;
+}

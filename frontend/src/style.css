@@ -853,6 +853,112 @@ h2 {
   font-size: 0.78rem;
 }
 
+.message-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.message.message-reviewing {
+  border-color: rgba(109, 124, 255, 0.62);
+  box-shadow: 0 0 0 1px rgba(109, 124, 255, 0.12), 0 1rem 2rem rgba(0, 0, 0, 0.16);
+}
+
+.transcript-review-body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.65rem 0.8rem 0.8rem;
+}
+
+.transcript-review-lines {
+  display: grid;
+  align-content: start;
+  gap: 0.15rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.82rem;
+}
+
+.transcript-review-line-wrap {
+  display: grid;
+  gap: 0.2rem;
+}
+
+.transcript-review-line {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.5rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.35rem;
+  background: rgba(12, 15, 22, 0.45);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.transcript-review-comment-btn {
+  width: 1.5rem;
+  min-width: 1.5rem;
+  padding: 0;
+  line-height: 1.2;
+  border-radius: 999px;
+  border: 1px solid #343a46;
+  background: #171b24;
+  color: #c7cedc;
+}
+
+.transcript-review-comment-btn.has-comments {
+  border-color: #6d7cff;
+  background: rgba(109, 124, 255, 0.16);
+  color: #eef1f8;
+}
+
+.transcript-review-gutter {
+  min-width: 2.5rem;
+  color: #778195;
+  text-align: right;
+}
+
+.transcript-review-line-content {
+  min-width: 0;
+  color: #d7deea;
+}
+
+.transcript-review-inline-comments {
+  display: grid;
+  gap: 0.15rem;
+  margin-left: calc(1.5rem + 3rem + 0.35rem);
+}
+
+.transcript-review-inline-comment {
+  padding: 0.2rem 0.45rem;
+  border-radius: 0.35rem;
+  border: 1px solid rgba(109, 124, 255, 0.2);
+  background: rgba(109, 124, 255, 0.08);
+  color: #cfd7e6;
+  font-size: 0.76rem;
+  line-height: 1.3;
+}
+
+.transcript-review-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid #252a35;
+}
+
+.transcript-review-status {
+  color: #9ba4b5;
+  font-size: 0.82rem;
+}
+
+.transcript-review-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .message pre,
 #rawLog {
   margin: 0;
