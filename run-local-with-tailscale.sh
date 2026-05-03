@@ -14,7 +14,7 @@ set -euo pipefail
 # Environment overrides:
 #   OMP_REPO=/path/to/oh-my-pi
 #   BUN_BIN=/path/to/bun
-#   FURA_TOKEN=dev
+#   FURA_TOKEN=<optional explicit token>  # if unset, Fura generates a random token and logs it
 #   FURA_LOCAL_BIND=127.0.0.1:3737
 #   FURA_REMOTE_PORT=4450
 #   FURA_REMOTE_HOST=serwer-mini.caracal-porgy.ts.net
@@ -28,7 +28,7 @@ set -euo pipefail
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 OMP_REPO=${OMP_REPO:-/home/aleksander/repos/oh-my-pi}
 BUN_BIN=${BUN_BIN:-${HOME}/.bun/bin/bun}
-FURA_TOKEN=${FURA_TOKEN:-dev}
+FURA_TOKEN=${FURA_TOKEN:-}
 FURA_LOCAL_BIND=${FURA_LOCAL_BIND:-127.0.0.1:3737}
 FURA_REMOTE_PORT=${FURA_REMOTE_PORT:-4450}
 FURA_REMOTE_HOST=${FURA_REMOTE_HOST:-serwer-mini.caracal-porgy.ts.net}
@@ -100,7 +100,9 @@ if [[ -n "${resolved_remote_ip}" && "${resolved_remote_ip}" != "${TAILSCALE_IP}"
   echo "HTTPS clients must open the exact remote host from the certificate, and that host should route back to this machine." >&2
 fi
 
-export FURA_TOKEN
+if [[ -n "${FURA_TOKEN}" ]]; then
+  export FURA_TOKEN
+fi
 export FURA_BRIDGE_DEBUG_FILE
 export PATH="$(dirname -- "${BUN_BIN}"):${PATH}"
 
@@ -118,7 +120,7 @@ Starting Fura for local + Tailscale development:
   Remote Origin:    https://${FURA_REMOTE_HOST}:${FURA_REMOTE_PORT}
   TLS cert:         ${FURA_TLS_CERT}
   TLS key:          ${FURA_TLS_KEY}
-  Auth token:       enter FURA_TOKEN in the browser auth screen (default: dev)
+  Auth token:       use FURA_TOKEN if set; otherwise copy the random token that Fura logs at startup
 EOF
 
 exec cargo run --bin fura -- \
