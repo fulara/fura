@@ -25,12 +25,17 @@ import {
 } from "./composerAttachments";
 import {
   createPromptSendMessage,
-  promptDraftAttachmentCount,
-  promptDraftDisplayText,
-  restorePendingImagesFromPayload,
   resolvePromptSubmitAction,
   type PromptBehavior,
 } from "./composer";
+import {
+  busyPromptAttachmentNote as formatBusyPromptAttachmentNote,
+  busyPromptDisplayText,
+  createBusyPromptDraft,
+  createBusyPromptDraftFromServer,
+  restoreBusyPromptEditorText,
+  type BusyPromptDraft,
+} from "./promptBusy";
 import {
   fuzzyMatchCategories as fuzzyMatchSessionCategories,
   normalizedCategory,
@@ -492,14 +497,6 @@ type DiffPreviewDraft = {
   baseSnapshot: DiffSnapshotSummary;
   headSnapshot: DiffSnapshotSummary | null;
   comments: DiffComment[];
-};
-type BusyPromptDraft = {
-  sessionId: string;
-  text: string;
-  editorText: string;
-  images: PendingImage[];
-  snippets: PendingSnippet[];
-  onSend?: () => void;
 };
 type SessionNotice = { level: string; text: string };
 type ControlChatMessage = {
@@ -1354,13 +1351,7 @@ function getOrCreateControlClientId(): string {
 
 function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" }>): void {
   appendLog(`[${message.sessionId}] prompt needs steer or follow-up choice`);
-  busyPromptDraft = {
-    sessionId: message.sessionId,
-    text: message.text,
-    editorText: message.text,
-    images: restorePendingImagesFromPayload(message.images ?? [], createPendingMarker),
-    snippets: [],
-  };
+  busyPromptDraft = createBusyPromptDraftFromServer(message, createPendingMarker);
   if (message.sessionId === activeSessionId) {
     render();
     promptInput.focus();
@@ -1890,14 +1881,14 @@ function sendPromptWithBusyHandling(options: {
       render();
       return false;
     }
-    busyPromptDraft = {
+    busyPromptDraft = createBusyPromptDraft({
       sessionId: options.sessionId,
       text: options.text,
       editorText: options.editorText,
-      images: options.images.map(image => ({ ...image })),
-      snippets: (options.snippets ?? []).map(snippet => ({ ...snippet })),
+      images: options.images,
+      snippets: options.snippets,
       onSend: options.onSend,
-    };
+    });
     renderBusyPromptChoice();
     return true;
   }
@@ -1919,11 +1910,10 @@ function renderBusyPromptChoice(): void {
     return;
   }
 
-  const attachmentCount = promptDraftAttachmentCount(draft);
-  busyPromptText.value = promptDraftDisplayText(draft);
-  busyPromptAttachmentNote.textContent =
-    attachmentCount > 0 ? `${attachmentCount} attachment${attachmentCount === 1 ? "" : "s"} will be sent with this prompt.` : "";
-  busyPromptAttachmentNote.hidden = attachmentCount === 0;
+  const attachmentNote = formatBusyPromptAttachmentNote(draft);
+  busyPromptText.value = busyPromptDisplayText(draft);
+  busyPromptAttachmentNote.textContent = attachmentNote;
+  busyPromptAttachmentNote.hidden = attachmentNote.length === 0;
   busyPromptOverlay.hidden = false;
 
   if (wasHidden) {
@@ -1941,8 +1931,7 @@ function restoreBusyPromptDraft(): void {
   busyPromptDraft = null;
 
   resetPromptHistoryNavigation();
-  const currentText = promptInput.value.trim();
-  promptInput.value = [draft.editorText, currentText].filter(Boolean).join("\n\n");
+  promptInput.value = restoreBusyPromptEditorText(draft, promptInput.value);
   pendingImages = [...draft.images, ...pendingImages];
   pendingSnippets = [...draft.snippets, ...pendingSnippets];
   renderImagePreviews();

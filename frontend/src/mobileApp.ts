@@ -5,7 +5,7 @@ import {
   renderAttachmentPreviews,
   type PendingImage,
 } from "./composerAttachments";
-import { createPromptSendMessage } from "./composer";
+import { createPromptSendMessage, type PromptBehavior } from "./composer";
 import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
@@ -24,6 +24,13 @@ import {
   parseExtensionDialogRequest,
   type ExtensionDialogRequest,
 } from "./extensionDialog";
+import {
+  busyPromptAttachmentNote as formatBusyPromptAttachmentNote,
+  busyPromptDisplayText,
+  createBusyPromptDraftFromServer,
+  restoreBusyPromptEditorText,
+  type BusyPromptDraft,
+} from "./promptBusy";
 import { shortId } from "./format";
 import type {
   ClientMessage,
@@ -152,6 +159,29 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </form>
+      <section id="mobileBusyPromptOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-busy-prompt" role="dialog" aria-modal="true" aria-labelledby="mobileBusyPromptTitle" aria-describedby="mobileBusyPromptDescription">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Agent busy</p>
+              <h2 id="mobileBusyPromptTitle">Choose prompt behavior</h2>
+            </div>
+          </header>
+          <div id="mobileBusyPromptDescription" class="mobile-dialog-body">
+            <p>The agent is already processing. Steer interrupts the active turn; follow-up queues this prompt for after the current turn.</p>
+          </div>
+          <div class="mobile-dialog-form">
+            <label class="mobile-busy-prompt-field" for="mobileBusyPromptText">Prompt to send</label>
+            <textarea id="mobileBusyPromptText" class="mobile-busy-prompt-text" readonly spellcheck="false"></textarea>
+            <p id="mobileBusyPromptAttachmentNote" class="mobile-dialog-status"></p>
+            <div class="mobile-dialog-actions">
+              <button id="mobileBusyPromptCancel" type="button">Cancel</button>
+              <button id="mobileBusyPromptSteer" type="button">Steer</button>
+              <button id="mobileBusyPromptFollowUp" type="button">Follow-up</button>
+            </div>
+          </div>
+        </div>
+      </section>
       <section id="mobileDialogOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileDialogTitle" aria-describedby="mobileDialogBody">
           <header class="mobile-dialog-header">
@@ -206,6 +236,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const imageInput = requireElement<HTMLInputElement>(document, "mobileImageInput");
   const composerStatus = requireElement<HTMLSpanElement>(document, "mobileComposerStatus");
   const mobileLog = requireElement<HTMLParagraphElement>(document, "mobileLog");
+  const busyPromptOverlay = requireElement<HTMLElement>(document, "mobileBusyPromptOverlay");
+  const busyPromptText = requireElement<HTMLTextAreaElement>(document, "mobileBusyPromptText");
+  const busyPromptAttachmentNote = requireElement<HTMLParagraphElement>(document, "mobileBusyPromptAttachmentNote");
+  const busyPromptCancel = requireElement<HTMLButtonElement>(document, "mobileBusyPromptCancel");
+  const busyPromptSteer = requireElement<HTMLButtonElement>(document, "mobileBusyPromptSteer");
+  const busyPromptFollowUp = requireElement<HTMLButtonElement>(document, "mobileBusyPromptFollowUp");
   const dialogOverlay = requireElement<HTMLElement>(document, "mobileDialogOverlay");
   const dialogTitle = requireElement<HTMLHeadingElement>(document, "mobileDialogTitle");
   const dialogBody = requireElement<HTMLDivElement>(document, "mobileDialogBody");
@@ -240,6 +276,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const diffSelectedSnapshots = new Map<string, string>();
   const diffSelectedHeads = new Map<string, string | null>();
   const diffStatModes = new Map<string, boolean>();
+  let busyPromptDraft: BusyPromptDraft | null = null;
   let activeDialog: ExtensionDialogRequest | null = null;
   const dialogQueue: ExtensionDialogRequest[] = [];
 
@@ -329,6 +366,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     submitActiveDialog();
   });
   dialogCancel.addEventListener("click", () => respondToActiveDialog({ cancelled: true }));
+  busyPromptCancel.addEventListener("click", restoreBusyPromptDraft);
+  busyPromptSteer.addEventListener("click", () => sendBusyPromptDraft("steer"));
+  busyPromptFollowUp.addEventListener("click", () => sendBusyPromptDraft("followUp"));
 
   const initialToken = consumeBootstrapToken(
     window.location.href,
@@ -370,6 +410,71 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return false;
     }
     return connection.send(message);
+  }
+
+  function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" }>): void {
+    appendLog(`[${message.sessionId}] prompt needs steer or follow-up choice`);
+    busyPromptDraft = createBusyPromptDraftFromServer(message, createPendingImageMarker);
+    if (message.sessionId === activeSessionId) {
+      renderBusyPromptChoice();
+      return;
+    }
+    unreadSessions.add(message.sessionId);
+    renderSessions();
+  }
+
+  function renderBusyPromptChoice(): void {
+    const draft = busyPromptDraft;
+    const shouldShow = Boolean(draft && draft.sessionId === activeSessionId);
+    const wasHidden = busyPromptOverlay.hidden;
+
+    if (!draft || !shouldShow) {
+      busyPromptOverlay.hidden = true;
+      busyPromptText.value = "";
+      busyPromptAttachmentNote.textContent = "";
+      busyPromptAttachmentNote.hidden = true;
+      return;
+    }
+
+    const attachmentNote = formatBusyPromptAttachmentNote(draft);
+    busyPromptText.value = busyPromptDisplayText(draft);
+    busyPromptAttachmentNote.textContent = attachmentNote;
+    busyPromptAttachmentNote.hidden = attachmentNote.length === 0;
+    busyPromptOverlay.hidden = false;
+
+    if (wasHidden) {
+      window.setTimeout(() => {
+        if (busyPromptOverlay.hidden) return;
+        busyPromptText.focus();
+        busyPromptText.select();
+      }, 0);
+    }
+  }
+
+  function restoreBusyPromptDraft(): void {
+    const draft = busyPromptDraft;
+    if (!draft) return;
+    busyPromptDraft = null;
+    promptInput.value = restoreBusyPromptEditorText(draft, promptInput.value);
+    pendingImages = [...draft.images, ...pendingImages];
+    renderMobileImagePreviews();
+    renderBusyPromptChoice();
+    renderActiveSession();
+    promptInput.focus();
+  }
+
+  function sendBusyPromptDraft(behavior: PromptBehavior): void {
+    const draft = busyPromptDraft;
+    if (!draft) return;
+    const accepted = send(createPromptSendMessage(draft.sessionId, draft.text, draft.images, behavior));
+    if (!accepted) {
+      busyPromptAttachmentNote.textContent = "Not connected to the Fura bridge.";
+      busyPromptAttachmentNote.hidden = false;
+      return;
+    }
+    busyPromptDraft = null;
+    renderBusyPromptChoice();
+    renderActiveSession();
   }
 
   function handleDialogRequest(message: Extract<ServerMessage, { type: "dialog.request" }>): void {
@@ -910,7 +1015,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         }
         break;
       case "prompt.busy":
-        appendLog("Session is busy. Mobile shell does not support steer/follow-up yet.");
+        handlePromptBusy(message);
         break;
       case "log.stderr":
         appendLog(`[${message.sessionId}] ${message.text}`);
@@ -988,6 +1093,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       composerStatus.textContent = "No active session";
       renderTranscript(undefined);
       renderDiffView(undefined);
+      renderBusyPromptChoice();
       return;
     }
 
@@ -1001,6 +1107,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     updateComposerStatus();
     renderTranscript(projection);
     renderDiffView(projection);
+    renderBusyPromptChoice();
   }
 
   function renderTranscript(projection: SessionProjection | undefined): void {

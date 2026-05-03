@@ -392,6 +392,59 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Agent busy");
   });
 
+  it("renders prompt busy choices and sends steer behavior", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", { isBusy: true, summary: summary("busy", { status: "busy", title: "Busy session" }) }),
+    });
+
+    connection.emit({ type: "prompt.busy", sessionId: "busy", text: "interrupt now", images: null });
+
+    expect(document.querySelector<HTMLElement>("#mobileBusyPromptOverlay")?.hidden).toBe(false);
+    expect(document.querySelector<HTMLTextAreaElement>("#mobileBusyPromptText")?.value).toBe("interrupt now");
+
+    document.querySelector<HTMLButtonElement>("#mobileBusyPromptSteer")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "prompt.send",
+      sessionId: "busy",
+      text: "interrupt now",
+      behavior: "steer",
+    });
+    expect(document.querySelector<HTMLElement>("#mobileBusyPromptOverlay")?.hidden).toBe(true);
+  });
+
+  it("restores prompt busy drafts with image attachments on cancel", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", { isBusy: true, summary: summary("busy", { status: "busy", title: "Busy session" }) }),
+    });
+
+    connection.emit({
+      type: "prompt.busy",
+      sessionId: "busy",
+      text: "look at this",
+      images: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+    });
+
+    expect(document.querySelector("#mobileBusyPromptAttachmentNote")?.textContent).toBe("1 attachment will be sent with this prompt.");
+    document.querySelector<HTMLButtonElement>("#mobileBusyPromptCancel")?.click();
+
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.value).toBe("look at this");
+    const previews = document.querySelector<HTMLElement>("#mobileImagePreviews");
+    expect(previews?.hidden).toBe(false);
+    expect(previews?.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,aW1hZ2U=");
+    expect(document.querySelector<HTMLElement>("#mobileBusyPromptOverlay")?.hidden).toBe(true);
+  });
+
   it("clears the active session when a later snapshot no longer contains it", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });

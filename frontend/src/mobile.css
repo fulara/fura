@@ -413,6 +413,18 @@ body {
   display: none;
 }
 
+.mobile-busy-prompt-field {
+  display: grid;
+  gap: 0.35rem;
+  color: #c7cedc;
+  font-size: 0.82rem;
+}
+
+.mobile-busy-prompt-text {
+  min-height: 9rem;
+  resize: vertical;
+}
+
 .mobile-dialog-overlay {
   position: fixed;
   inset: 0;
