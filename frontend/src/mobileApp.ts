@@ -61,10 +61,15 @@ import {
 } from "./transcriptReview";
 
 type MobileWindow = Pick<Window, "history" | "localStorage" | "sessionStorage" | "location" | "prompt" | "setTimeout">;
+type MobileSessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+const MOBILE_ACTIVE_SESSION_STORAGE_KEY = "fura.mobile.activeSessionId";
+const MOBILE_ATTACHED_SESSIONS_STORAGE_KEY = "fura.mobile.attachedSessionIds";
+const MAX_TRACKED_MOBILE_SESSION_IDS = 20;
 
 export type MobileConnectionOptions = {
   auth: WebSocketAuth;
-  onStatus(status: ConnectionStatus, label: string): void;
+  onStatus(label: string, className: ConnectionStatus): void;
   onOpen?(): void;
   onClose?(): void;
   onAuthFailure?(message: string): void;
@@ -356,8 +361,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
   let serverConfig: ServerConfig | null = null;
   let sessions: SessionSummary[] = [];
-  let activeSessionId: string | null = null;
+  let activeSessionId: string | null = readStoredActiveSessionId(window.sessionStorage);
   let projections = new Map<string, SessionProjection>();
+  const trackedSessionIds = readStoredTrackedSessionIds(window.sessionStorage);
+  let pendingRestoreAfterSessionsSnapshot = false;
   const unreadSessions = new Set<string>();
   let selectedCategoryFilter = "";
   let activeCategoryDirty = false;
@@ -454,6 +461,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     event.preventDefault();
     connect(authTokenInput.value);
   });
+  connectionStatus.addEventListener("click", forceReconnectNow);
+  connectionStatus.addEventListener("keydown", event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    forceReconnectNow();
+  });
 
   createForm.addEventListener("submit", event => {
     event.preventDefault();
@@ -516,6 +529,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       auth: { type: "sessionCookie", token: bridgeToken },
       onStatus: setStatus,
       onOpen: () => {
+        pendingRestoreAfterSessionsSnapshot = true;
         hideAuthGate();
         send({ type: "session.list" });
       },
@@ -544,9 +558,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     authTokenInput.value = "";
   }
 
-  function setStatus(label: string, className: string): void {
+  function setStatus(label: string, className: ConnectionStatus): void {
     connectionStatus.textContent = label;
     connectionStatus.className = `status ${className}`;
+    const canForceReconnect = className === "disconnected" || className === "reconnecting";
+    connectionStatus.title = canForceReconnect ? "Click to reconnect now." : "";
+    connectionStatus.tabIndex = canForceReconnect ? 0 : -1;
   }
 
   function appendLog(message: string): void {
@@ -560,6 +577,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return false;
     }
     return connection.send(message);
+  }
+
+  function forceReconnectNow(): void {
+    if (!connection || connection.isOpen()) return;
+    appendLog("Reconnecting now.");
+    connection.connect();
   }
 
   function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" }>): void {
@@ -1195,9 +1218,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       case "sessions.snapshot":
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
+        syncTrackedSessionsWithSnapshot();
+        if (pendingRestoreAfterSessionsSnapshot) {
+          pendingRestoreAfterSessionsSnapshot = false;
+          restoreTrackedManagedSessions();
+        }
         render();
         break;
       case "session.snapshot": {
+        rememberTrackedSessionId(message.sessionId);
         const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
         ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
         if (createdByPendingRequest || !activeSessionId || activeSessionId === message.sessionId) {
@@ -1270,7 +1299,43 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function activateSession(sessionId: string): void {
     activeSessionId = activateSessionState(unreadSessions, sessionId);
+    rememberTrackedSessionId(sessionId);
+    writeStoredActiveSessionId(window.sessionStorage, sessionId);
     if (activeMobileView === "diff" && projections.has(sessionId)) requestMobileDiffState(sessionId);
+  }
+
+  function syncTrackedSessionsWithSnapshot(): void {
+    const visibleSessionIds = new Set(sessions.map(session => session.sessionId));
+    for (const sessionId of [...trackedSessionIds]) {
+      if (!visibleSessionIds.has(sessionId)) trackedSessionIds.delete(sessionId);
+    }
+    if (activeSessionId) writeStoredActiveSessionId(window.sessionStorage, activeSessionId);
+    else clearStoredActiveSessionId(window.sessionStorage);
+    writeStoredTrackedSessionIds(window.sessionStorage, trackedSessionIds);
+  }
+
+  function restoreTrackedManagedSessions(): void {
+    const managedSessionIds = new Set(
+      sessions
+        .filter(session => session.kind === "managed")
+        .map(session => session.sessionId),
+    );
+    const restoreIds = orderedTrackedSessionIds(activeSessionId, trackedSessionIds)
+      .filter(sessionId => managedSessionIds.has(sessionId));
+    for (const sessionId of restoreIds) {
+      send({ type: "state.refresh", sessionId });
+    }
+  }
+
+  function rememberTrackedSessionId(sessionId: string): void {
+    if (trackedSessionIds.has(sessionId)) trackedSessionIds.delete(sessionId);
+    trackedSessionIds.add(sessionId);
+    while (trackedSessionIds.size > MAX_TRACKED_MOBILE_SESSION_IDS) {
+      const oldestSessionId = trackedSessionIds.values().next().value;
+      if (!oldestSessionId) break;
+      trackedSessionIds.delete(oldestSessionId);
+    }
+    writeStoredTrackedSessionIds(window.sessionStorage, trackedSessionIds);
   }
 
   function render(): void {
@@ -1676,6 +1741,51 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   return { connect, send };
+}
+
+function readStoredActiveSessionId(storage: MobileSessionStorage): string | null {
+  const sessionId = storage.getItem(MOBILE_ACTIVE_SESSION_STORAGE_KEY)?.trim();
+  return sessionId || null;
+}
+
+function writeStoredActiveSessionId(storage: MobileSessionStorage, sessionId: string): void {
+  storage.setItem(MOBILE_ACTIVE_SESSION_STORAGE_KEY, sessionId);
+}
+
+function clearStoredActiveSessionId(storage: MobileSessionStorage): void {
+  storage.removeItem(MOBILE_ACTIVE_SESSION_STORAGE_KEY);
+}
+
+function readStoredTrackedSessionIds(storage: MobileSessionStorage): Set<string> {
+  const raw = storage.getItem(MOBILE_ATTACHED_SESSIONS_STORAGE_KEY);
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed
+        .filter((sessionId): sessionId is string => typeof sessionId === "string" && sessionId.trim().length > 0)
+        .map(sessionId => sessionId.trim())
+        .slice(-MAX_TRACKED_MOBILE_SESSION_IDS),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function writeStoredTrackedSessionIds(storage: MobileSessionStorage, sessionIds: ReadonlySet<string>): void {
+  const serialized = orderedTrackedSessionIds(null, sessionIds).slice(-MAX_TRACKED_MOBILE_SESSION_IDS);
+  if (serialized.length === 0) {
+    storage.removeItem(MOBILE_ATTACHED_SESSIONS_STORAGE_KEY);
+    return;
+  }
+  storage.setItem(MOBILE_ATTACHED_SESSIONS_STORAGE_KEY, JSON.stringify(serialized));
+}
+
+function orderedTrackedSessionIds(activeSessionId: string | null, sessionIds: ReadonlySet<string>): string[] {
+  const ordered = [...sessionIds];
+  if (!activeSessionId) return ordered;
+  return [activeSessionId, ...ordered.filter(sessionId => sessionId !== activeSessionId)];
 }
 
 function requireElement<T extends HTMLElement>(document: Document, id: string): T {
