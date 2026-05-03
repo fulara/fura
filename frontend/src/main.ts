@@ -103,11 +103,14 @@ import {
   type TranscriptReviewLine,
 } from "./transcriptReview";
 import {
+  buildPlanReviewPrompt,
   createApprovePlanReviewMessage,
   pendingPlanReviewFromMessage,
   planReviewRenderKey,
   renderPlanReviewCard,
+  planReviewTranscriptMessage,
   type PendingPlanReview,
+  type VisiblePlanReview,
 } from "./planReview";
 import {
   parentCodePath,
@@ -564,6 +567,7 @@ type TranscriptPreviewDraft = {
   sessionId: string;
   message: TranscriptMessage;
   comments: TranscriptReviewComment[];
+  promptText?: string;
 };
 type SessionCodeComments = Map<string, CodeFileComment[]>;
 type SessionNotice = { level: string; text: string };
@@ -638,7 +642,7 @@ let codePreviewDraft: CodePreviewDraft | null = null;
 let transcriptPreviewDraft: TranscriptPreviewDraft | null = null;
 const transcriptReviewActiveMessages = new Map<string, string>();
 const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
-const pendingPlanReviews = new Map<string, PendingPlanReview>();
+const visiblePlanReviews = new Map<string, VisiblePlanReview>();
 const PROMPT_HISTORY_LIMIT = 100;
 let modelPickerSessionId: string | null = null;
 let modelPickerModels: ModelSummary[] = [];
@@ -1534,11 +1538,11 @@ function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" 
 }
 
 function hasPendingPlanReview(sessionId: string): boolean {
-  return pendingPlanReviews.has(sessionId);
+  return visiblePlanReviews.get(sessionId)?.mode === "pending";
 }
 
 function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
-  pendingPlanReviews.set(message.sessionId, pendingPlanReviewFromMessage(message));
+  visiblePlanReviews.set(message.sessionId, { review: pendingPlanReviewFromMessage(message), mode: "pending" });
   appendLog(`[${message.sessionId}] plan ready for review`);
   if (message.sessionId === activeSessionId && workspaceMode === "session") {
     markTranscriptViewDirty();
@@ -1552,13 +1556,13 @@ function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" 
 function approvePendingPlanReview(review: PendingPlanReview): void {
   const accepted = send(createApprovePlanReviewMessage(review));
   if (!accepted) return;
-  pendingPlanReviews.delete(review.sessionId);
+  visiblePlanReviews.delete(review.sessionId);
   markTranscriptViewDirty();
   render();
 }
 
 function refinePendingPlanReview(review: PendingPlanReview): void {
-  pendingPlanReviews.delete(review.sessionId);
+  visiblePlanReviews.set(review.sessionId, { review, mode: "refining" });
   markTranscriptViewDirty();
   render();
   if (workspaceMode === "session" && activeSessionId === review.sessionId) {
@@ -2907,14 +2911,19 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
       render: () => renderCurrentTodoCard(currentTodos),
     });
   }
-  const pendingPlanReview = pendingPlanReviews.get(projection.summary.sessionId);
-  if (pendingPlanReview) {
+  const visiblePlanReview = visiblePlanReviews.get(projection.summary.sessionId);
+  if (visiblePlanReview) {
     items.push({
-      key: `plan-review:${planReviewRenderKey(pendingPlanReview)}`,
-      render: () => renderPlanReviewCard(pendingPlanReview, {
-        onApprove: approvePendingPlanReview,
-        onRefine: refinePendingPlanReview,
-      }),
+      key: `plan-review:${planReviewRenderKey(visiblePlanReview.review, visiblePlanReview.mode)}`,
+      render: () => renderPlanReviewCard(
+        visiblePlanReview.review,
+        {
+          onApprove: approvePendingPlanReview,
+          onRefine: refinePendingPlanReview,
+        },
+        visiblePlanReview.mode,
+        visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,
+      ),
     });
   }
   return items;
@@ -3175,12 +3184,13 @@ function addTranscriptReviewComment(
 function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
   const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
   if (comments.length === 0) return;
-  transcriptPreviewDraft = { sessionId, message, comments };
+  transcriptPreviewDraft = { sessionId, message, comments, promptText: buildTranscriptReviewPrompt(message, comments) };
   diffPreviewDraft = null;
   codePreviewDraft = null;
   diffPreviewTitle.textContent = "Preview transcript comments";
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
-  diffPreviewText.value = buildTranscriptReviewPrompt(message, comments);
+  const promptText = buildTranscriptReviewPrompt(message, comments);
+  diffPreviewText.value = promptText;
   diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
   diffPreviewSend.textContent = "Send comments";
   diffPreviewOverlay.hidden = false;
@@ -3192,6 +3202,7 @@ function sendTranscriptReviewComments(
   sessionId: string,
   message: TranscriptMessage,
   comments: TranscriptReviewComment[],
+  promptText = buildTranscriptReviewPrompt(message, comments),
 ): void {
   if (comments.length === 0) return;
   const clearFlushedComments = () => {
@@ -3205,7 +3216,7 @@ function sendTranscriptReviewComments(
   };
   sendPromptWithBusyHandling({
     sessionId,
-    text: buildTranscriptReviewPrompt(message, comments),
+    text: promptText,
     editorText: `Flush ${comments.length} transcript comment${comments.length === 1 ? "" : "s"}`,
     images: [],
     onSend: clearFlushedComments,
@@ -3220,6 +3231,36 @@ function transcriptReviewOptions(sessionId: string, message: TranscriptMessage) 
     onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
     onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
     onFlush: (target: TranscriptMessage) => flushTranscriptReviewComments(sessionId, target),
+  };
+}
+
+function flushPlanReviewComments(sessionId: string, review: PendingPlanReview): void {
+  const message = planReviewTranscriptMessage(review);
+  const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
+  if (comments.length === 0) return;
+  const promptText = buildPlanReviewPrompt(review, comments);
+  transcriptPreviewDraft = { sessionId, message, comments, promptText };
+  diffPreviewDraft = null;
+  codePreviewDraft = null;
+  diffPreviewTitle.textContent = "Preview plan comments";
+  diffPreviewSubtitle.textContent = "Review the refinement prompt that will be sent to OMP.";
+  diffPreviewText.value = promptText;
+  diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
+  diffPreviewSend.textContent = "Send refinement";
+  diffPreviewOverlay.hidden = false;
+  diffPreviewText.scrollTop = 0;
+  diffPreviewSend.focus();
+}
+
+function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
+  const message = planReviewTranscriptMessage(review);
+  return {
+    active: isTranscriptMessageUnderReview(sessionId, message.id),
+    comments: transcriptReviewCommentsForMessage(sessionId, message.id),
+    onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
+    onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
+    onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
+    onFlush: () => flushPlanReviewComments(sessionId, review),
   };
 }
 
@@ -3316,7 +3357,7 @@ function sendPromptPreviewDraft(): void {
     return;
   }
   if (transcriptDraft) {
-    sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments);
+    sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments, transcriptDraft.promptText);
   }
 }
 

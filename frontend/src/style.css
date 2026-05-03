@@ -1390,6 +1390,12 @@ h2 {
   font-weight: 700;
 }
 
+.plan-review-markdown {
+  max-height: min(48vh, 32rem);
+  overflow: auto;
+  border-top: 1px solid #303646;
+}
+
 .plan-review-body pre {
   max-height: min(48vh, 32rem);
   overflow: auto;

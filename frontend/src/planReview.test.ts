@@ -34,7 +34,7 @@ describe("plan review helpers", () => {
       planFilePath: "local://PLAN.md",
       finalPlanFilePath: "local://FINAL.md",
       title: "Migration",
-      content: "Plan body",
+      content: "# Plan body\n\n- First item\n- Second item",
     };
     const onApprove = vi.fn();
     const onRefine = vi.fn();
@@ -42,11 +42,40 @@ describe("plan review helpers", () => {
     const card = renderPlanReviewCard(review, { onApprove, onRefine });
 
     expect(card.textContent).toContain("Plan ready: Migration");
-    expect(card.textContent).toContain("Plan body");
+    expect(card.querySelector(".plan-review-markdown h1")?.textContent).toBe("Plan body");
+    expect(Array.from(card.querySelectorAll(".plan-review-markdown li")).map(item => item.textContent)).toEqual([
+      "First item",
+      "Second item",
+    ]);
+    expect(card.querySelector(".plan-review-markdown pre")).toBeNull();
     card.querySelector<HTMLButtonElement>(".plan-review-approve")?.click();
     card.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
 
     expect(onApprove).toHaveBeenCalledWith(review);
     expect(onRefine).toHaveBeenCalledWith(review);
+  });
+
+  it("keeps the plan visible with review controls while refining", () => {
+    const review: PendingPlanReview = {
+      sessionId: "session-1",
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Migration",
+      content: "# Plan body\n\n- First item",
+    };
+    const onStart = vi.fn();
+
+    const card = renderPlanReviewCard(
+      review,
+      { onApprove: vi.fn(), onRefine: vi.fn() },
+      "refining",
+      { active: false, comments: [], onStart },
+    );
+
+    expect(card.textContent).toContain("Refining plan: Migration");
+    expect(card.textContent).toContain("Use the composer below");
+    expect(card.querySelector(".plan-review-approve")).toBeNull();
+    card.querySelector<HTMLButtonElement>(".message-review-toggle")?.click();
+    expect(onStart).toHaveBeenCalled();
   });
 });

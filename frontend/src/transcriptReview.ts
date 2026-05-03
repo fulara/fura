@@ -14,6 +14,12 @@ export type TranscriptReviewComment = {
   lineText: string;
   text: string;
 };
+type TranscriptReviewPromptOptions = {
+  subject?: string;
+  roleLabel?: string;
+  contextDescription?: string;
+  closingInstruction?: string;
+};
 
 const REVIEW_CONTEXT_RADIUS = 4;
 
@@ -40,6 +46,7 @@ export function commentsForTranscriptLine(
 export function buildTranscriptReviewPrompt(
   message: TranscriptMessage,
   comments: TranscriptReviewComment[],
+  options: TranscriptReviewPromptOptions = {},
 ): string {
   const lines = transcriptReviewLines(message);
   const sortedComments = [...comments].sort((left, right) => left.lineNumber - right.lineNumber);
@@ -58,15 +65,15 @@ export function buildTranscriptReviewPrompt(
     .join("\n\n");
 
   return [
-    "I reviewed a transcript bubble in Fura and left comments on specific lines.",
+    `I reviewed ${options.subject ?? "a transcript bubble"} in Fura and left comments on specific lines.`,
     `Message id: ${message.id}`,
-    `Message role: ${formatTranscriptRole(message.role)}`,
+    `Message role: ${options.roleLabel ?? formatTranscriptRole(message.role)}`,
     "",
-    "Only the context around commented lines is included below; the full transcript is intentionally omitted.",
+    options.contextDescription ?? "Only the context around commented lines is included below; the full transcript is intentionally omitted.",
     "",
     commentSections,
     "",
-    "Please address these comments. Use the line numbers and quoted transcript context to understand exactly what each comment refers to.",
+    options.closingInstruction ?? "Please address these comments. Use the line numbers and quoted transcript context to understand exactly what each comment refers to.",
   ].join("\n");
 }
 

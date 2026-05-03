@@ -596,8 +596,20 @@ describe("mountMobileApp", () => {
     expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "should not send")).toBe(false);
 
     document.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
-    expect(document.querySelector(".plan-review-card")).toBeNull();
+    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Refining plan: Review me");
+    expect(document.querySelector(".message-review-toggle")?.textContent).toBe("Review");
     expect(input.disabled).toBe(false);
+    vi.spyOn(window, "prompt").mockReturnValue("Fix the second step");
+    document.querySelector<HTMLButtonElement>(".plan-review-card .message-review-toggle")?.click();
+    document.querySelector<HTMLButtonElement>(".plan-review-card .transcript-review-comment-btn")?.click();
+    document.querySelector<HTMLButtonElement>(".plan-review-card .transcript-review-actions button:last-child")?.click();
+    expect(document.querySelector<HTMLTextAreaElement>("#mobileReviewPreviewText")?.value).toContain("I reviewed a finalized plan");
+    document.querySelector<HTMLButtonElement>("#mobileReviewPreviewSend")?.click();
+    expect(connection.sent.some(message =>
+      message.type === "prompt.send" &&
+      message.sessionId === "live" &&
+      message.text.includes("Please refine the plan to address these comments"),
+    )).toBe(true);
 
     connection.emit({
       type: "plan.review",

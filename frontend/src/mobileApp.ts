@@ -76,10 +76,13 @@ import {
   type TranscriptReviewLine,
 } from "./transcriptReview";
 import {
+  buildPlanReviewPrompt,
   createApprovePlanReviewMessage,
   pendingPlanReviewFromMessage,
   renderPlanReviewCard,
+  planReviewTranscriptMessage,
   type PendingPlanReview,
+  type VisiblePlanReview,
 } from "./planReview";
 
 type MobileWindow = Pick<Window, "history" | "localStorage" | "sessionStorage" | "location" | "prompt" | "setTimeout">;
@@ -418,7 +421,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const reviewPreviewSend = requireElement<HTMLButtonElement>(document, "mobileReviewPreviewSend");
 
   let connection: FuraConnection | null = null;
-  let reviewPreviewDraft: { sessionId: string; message: TranscriptMessage; comments: TranscriptReviewComment[] } | null = null;
+  let reviewPreviewDraft: { sessionId: string; message: TranscriptMessage; comments: TranscriptReviewComment[]; promptText?: string } | null = null;
   const transcriptReviewActiveMessages = new Map<string, string>();
   const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
   let serverConfig: ServerConfig | null = null;
@@ -460,7 +463,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let busyPromptDraft: BusyPromptDraft | null = null;
   let activeDialog: ExtensionDialogRequest | null = null;
   const dialogQueue: ExtensionDialogRequest[] = [];
-  const pendingPlanReviews = new Map<string, PendingPlanReview>();
+  const visiblePlanReviews = new Map<string, VisiblePlanReview>();
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
@@ -672,11 +675,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   function hasPendingPlanReview(sessionId: string): boolean {
-    return pendingPlanReviews.has(sessionId);
+    return visiblePlanReviews.get(sessionId)?.mode === "pending";
   }
 
   function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
-    pendingPlanReviews.set(message.sessionId, pendingPlanReviewFromMessage(message));
+    visiblePlanReviews.set(message.sessionId, { review: pendingPlanReviewFromMessage(message), mode: "pending" });
     appendLog(`[${message.sessionId}] plan ready for review`);
     if (message.sessionId === activeSessionId) {
       renderActiveSession();
@@ -689,12 +692,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function approvePendingPlanReview(review: PendingPlanReview): void {
     const accepted = send(createApprovePlanReviewMessage(review));
     if (!accepted) return;
-    pendingPlanReviews.delete(review.sessionId);
+    visiblePlanReviews.delete(review.sessionId);
     renderActiveSession();
   }
 
   function refinePendingPlanReview(review: PendingPlanReview): void {
-    pendingPlanReviews.delete(review.sessionId);
+    visiblePlanReviews.set(review.sessionId, { review, mode: "refining" });
     renderActiveSession();
     if (activeSessionId === review.sessionId) promptInput.focus();
   }
@@ -1593,8 +1596,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
     const comments = reviewCommentsForMessage(sessionId, message.id);
     if (comments.length === 0) return;
-    reviewPreviewDraft = { sessionId, message, comments };
-    reviewPreviewText.value = buildTranscriptReviewPrompt(message, comments);
+    const promptText = buildTranscriptReviewPrompt(message, comments);
+    reviewPreviewDraft = { sessionId, message, comments, promptText };
+    reviewPreviewText.value = promptText;
     reviewPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
     reviewPreviewOverlay.hidden = false;
     reviewPreviewText.scrollTop = 0;
@@ -1614,7 +1618,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     closeReviewPreview();
     const accepted = send(createPromptSendMessage(
       draft.sessionId,
-      buildTranscriptReviewPrompt(draft.message, draft.comments),
+      draft.promptText ?? buildTranscriptReviewPrompt(draft.message, draft.comments),
       [],
     ));
     if (!accepted) return;
@@ -1634,6 +1638,31 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
       onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
       onFlush: (target: TranscriptMessage) => flushTranscriptReviewComments(sessionId, target),
+    };
+  }
+
+  function flushPlanReviewComments(sessionId: string, review: PendingPlanReview): void {
+    const message = planReviewTranscriptMessage(review);
+    const comments = reviewCommentsForMessage(sessionId, message.id);
+    if (comments.length === 0) return;
+    const promptText = buildPlanReviewPrompt(review, comments);
+    reviewPreviewDraft = { sessionId, message, comments, promptText };
+    reviewPreviewText.value = promptText;
+    reviewPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
+    reviewPreviewOverlay.hidden = false;
+    reviewPreviewText.scrollTop = 0;
+    reviewPreviewSend.focus();
+  }
+
+  function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
+    const message = planReviewTranscriptMessage(review);
+    return {
+      active: transcriptReviewActiveMessages.get(sessionId) === message.id,
+      comments: reviewCommentsForMessage(sessionId, message.id),
+      onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
+      onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
+      onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
+      onFlush: () => flushPlanReviewComments(sessionId, review),
     };
   }
 
@@ -1701,12 +1730,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       fragment.append(phaseCard);
     }
 
-    const pendingPlanReview = pendingPlanReviews.get(projection.summary.sessionId);
-    if (pendingPlanReview) {
-      fragment.append(renderPlanReviewCard(pendingPlanReview, {
-        onApprove: approvePendingPlanReview,
-        onRefine: refinePendingPlanReview,
-      }));
+    const visiblePlanReview = visiblePlanReviews.get(projection.summary.sessionId);
+    if (visiblePlanReview) {
+      fragment.append(renderPlanReviewCard(
+        visiblePlanReview.review,
+        {
+          onApprove: approvePendingPlanReview,
+          onRefine: refinePendingPlanReview,
+        },
+        visiblePlanReview.mode,
+        visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,
+      ));
     }
 
     if (!fragment.hasChildNodes()) {

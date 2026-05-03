@@ -248,6 +248,12 @@ body {
   font-weight: 700;
 }
 
+.mobile-transcript .plan-review-markdown {
+  max-height: 42vh;
+  overflow: auto;
+  border-top: 1px solid #303646;
+}
+
 .mobile-transcript .plan-review-body pre {
   max-height: 42vh;
   overflow: auto;
