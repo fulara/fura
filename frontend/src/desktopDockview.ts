@@ -1,5 +1,5 @@
 import "dockview-core/dist/styles/dockview.css";
-import { DockviewComponent, themeDark, type DockviewGroupPanel, type SerializedDockview } from "dockview-core";
+import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
 
 export type DesktopDockviewPanelId = "transcript" | "code" | "tools" | "diffs";
 
@@ -34,7 +34,6 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   const panelEls: Partial<Record<DesktopDockviewPanelId, HTMLElement>> = {};
   const owner = options.host.ownerDocument;
   const win = owner.defaultView ?? window;
-  let dockviewApi: DockviewComponent;
 
   const api = new DockviewComponent(options.host, {
     theme: themeDark,
@@ -45,19 +44,22 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
         return { element, init() {} };
       }
 
-      let group: DockviewGroupPanel | null = null;
+      let popoutPanel: (() => void) | null = null;
       const shell = createDesktopPanelShell(owner, panelId, () => {
-        if (!group) return;
-        void dockviewApi.addPopoutGroup(group, {
-          popoutUrl: "/popout.html",
-          onDidOpen: ({ window: popWin }) => copyStylesToPopout(owner, popWin),
-        });
+        popoutPanel?.();
       });
 
       return {
         element: shell.element,
         init(params) {
-          group = params.api.group;
+          popoutPanel = () => {
+            const panel = params.containerApi.getPanel(panelId);
+            if (!panel) return;
+            void params.containerApi.addPopoutGroup(panel, {
+              popoutUrl: "/popout.html",
+              onDidOpen: ({ window: popWin }) => copyStylesToPopout(owner, popWin),
+            });
+          };
           panelEls[panelId] = shell.scroll;
           options.onPanelReady(panelId, shell.scroll);
         },
@@ -65,7 +67,6 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     },
   });
 
-  dockviewApi = api;
   api.onDidActivePanelChange(panel => {
     const panelId = panel ? desktopPanelId(panel.id) : null;
     if (panelId) options.onPanelActivated(panelId);

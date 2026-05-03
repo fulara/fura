@@ -1,5 +1,81 @@
-import { describe, expect, it, vi } from "vitest";
-import { createDesktopPanelShell } from "./desktopDockview";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+type MockPanel = { id: string; group: MockGroup };
+type MockGroup = { id: string; panels: MockPanel[]; size: number };
+
+type MockDockviewInstance = {
+  panels: MockPanel[];
+  activePanel: MockPanel | undefined;
+  popoutCalls: Array<{ item: MockPanel | MockGroup; options: unknown }>;
+};
+
+const dockviewMock = vi.hoisted(() => {
+  const instances: MockDockviewInstance[] = [];
+
+  class MockDockviewComponent {
+    readonly panels: MockPanel[] = [];
+    activePanel: MockPanel | undefined;
+    readonly popoutCalls: Array<{ item: MockPanel | MockGroup; options: unknown }> = [];
+    private readonly createComponent: (options: { name: string }) => {
+      element: HTMLElement;
+      init(params: { api: MockPanel; containerApi: MockDockviewComponent }): void;
+    };
+
+    constructor(_host: HTMLElement, options: { createComponent: MockDockviewComponent["createComponent"] }) {
+      this.createComponent = options.createComponent;
+      instances.push(this);
+    }
+
+    addPanel(options: { id: string; component: string }): MockPanel {
+      const group: MockGroup = { id: `${options.id}-group`, panels: [], size: 0 };
+      const panel: MockPanel = { id: options.id, group };
+      group.panels.push(panel);
+      group.size = group.panels.length;
+      this.panels.push(panel);
+      this.createComponent({ name: options.component }).init({ api: panel, containerApi: this });
+      this.activePanel ??= panel;
+      return panel;
+    }
+
+    getGroupPanel(id: string): MockPanel | undefined {
+      return this.panels.find(panel => panel.id === id);
+    }
+
+    getPanel(id: string): MockPanel | undefined {
+      return this.getGroupPanel(id);
+    }
+
+    setActivePanel(panel: MockPanel): void {
+      this.activePanel = panel;
+    }
+
+    focus(): void {}
+
+    addPopoutGroup(item: MockPanel | MockGroup, options: unknown): Promise<boolean> {
+      this.popoutCalls.push({ item, options });
+      return Promise.resolve(true);
+    }
+
+    onDidActivePanelChange(): void {}
+    onDidOpenPopoutWindowFail(): void {}
+    onDidLayoutChange(): void {}
+
+    toJSON(): object {
+      return {};
+    }
+
+    fromJSON(): void {}
+  }
+
+  return { instances, MockDockviewComponent };
+});
+
+vi.mock("dockview-core", () => ({
+  DockviewComponent: dockviewMock.MockDockviewComponent,
+  themeDark: {},
+}));
+
+import { createDesktopPanelShell, initDesktopDockview } from "./desktopDockview";
 
 describe("createDesktopPanelShell", () => {
   it("creates a desktop panel content shell with toolbar and scroll container", () => {
@@ -21,5 +97,32 @@ describe("createDesktopPanelShell", () => {
 
     expect(onPopout).toHaveBeenCalledOnce();
     expect(shell.element.querySelector(".panel-popout-btn")?.textContent).toBe("Pop out");
+  });
+});
+
+describe("initDesktopDockview", () => {
+  beforeEach(() => {
+    dockviewMock.instances.length = 0;
+    window.localStorage.clear();
+  });
+
+  it("pops out the clicked panel rather than its whole Dockview group", () => {
+    const host = document.createElement("div") as HTMLDivElement;
+    const readyContainers = new Map<string, HTMLElement>();
+    initDesktopDockview({
+      host,
+      onPanelReady: (id, container) => readyContainers.set(id, container),
+      onPanelActivated: vi.fn(),
+      onPopoutBlocked: vi.fn(),
+    });
+    const dockview = dockviewMock.instances[0];
+    const codePanel = dockview.panels.find(panel => panel.id === "code");
+    const codeGroup = codePanel?.group;
+
+    readyContainers.get("code")?.parentElement?.querySelector<HTMLButtonElement>(".panel-popout-btn")?.click();
+
+    expect(dockview.popoutCalls).toHaveLength(1);
+    expect(dockview.popoutCalls[0].item).toBe(codePanel);
+    expect(dockview.popoutCalls[0].item).not.toBe(codeGroup);
   });
 });
