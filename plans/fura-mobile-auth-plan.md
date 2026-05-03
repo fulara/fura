@@ -176,23 +176,19 @@ cargo test
 ```
 
 
-## Phase 5: Tailscale Launch Path
+## Phase 5: Tailscale Launch Path (implemented explicit helper)
 
 Do this after token cleanup and WebSocket origin hardening pass.
 
 Goal: make mobile access obvious without Fura owning Tailscale installation.
 
-Recommended first iteration:
+Implemented first iteration:
 
 ```bash
-fura --host <tailscale-ip-or-name> --allowed-origin http://<tailscale-ip-or-name>:3737
+fura --host <tailscale-ip-or-bind-ip> --mobile-host <tailscale-name-or-ip>
 ```
 
-or a simpler wrapper flag if it stays explicit:
-
-```bash
-fura --mobile-host <tailscale-ip-or-name>
-```
+`--mobile-host` / `FURA_MOBILE_HOST` does not change the bind address. It adds `http://<mobile-host>:<port>` to the allowed Origin list and prints that URL as the configured Mobile URL.
 
 Rules:
 

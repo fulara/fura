@@ -32,6 +32,10 @@ pub(crate) struct Args {
     )]
     pub(crate) allowed_origins: Vec<String>,
 
+    /// Hostname or Tailscale IP shown as the mobile URL and added to allowed browser origins. Does not change the bind address.
+    #[arg(long, env = "FURA_MOBILE_HOST")]
+    pub(crate) mobile_host: Option<String>,
+
     #[arg(long, env = "FURA_TOKEN")]
     pub(crate) token: Option<String>,
 
@@ -101,6 +105,7 @@ pub(crate) fn allowed_origins_from_args(
     host: IpAddr,
     port: u16,
     configured: Vec<String>,
+    mobile_host: Option<&str>,
 ) -> Vec<String> {
     let mut origins = default_allowed_origins(host, port);
     for origin in configured {
@@ -108,6 +113,11 @@ pub(crate) fn allowed_origins_from_args(
             if !origins.contains(&origin) {
                 origins.push(origin);
             }
+        }
+    }
+    if let Some(origin) = mobile_origin(mobile_host, port) {
+        if !origins.contains(&origin) {
+            origins.push(origin);
         }
     }
     origins
@@ -130,6 +140,23 @@ pub(crate) fn default_allowed_origins(host: IpAddr, port: u16) -> Vec<String> {
 pub(crate) fn normalize_allowed_origin(origin: &str) -> Option<String> {
     let trimmed = origin.trim().trim_end_matches('/');
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+pub(crate) fn mobile_origin(mobile_host: Option<&str>, port: u16) -> Option<String> {
+    let host = normalize_mobile_host(mobile_host?)?;
+    Some(format!("http://{host}:{port}"))
+}
+
+pub(crate) fn mobile_url(mobile_host: Option<&str>, port: u16) -> Option<String> {
+    mobile_origin(mobile_host, port).map(|origin| format!("{origin}/"))
+}
+
+pub(crate) fn normalize_mobile_host(host: &str) -> Option<String> {
+    let trimmed = host.trim().trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.contains("://") || trimmed.contains('/') {
+        return None;
+    }
+    Some(trimmed.to_string())
 }
 
 fn origin_host(host: IpAddr) -> String {
@@ -258,6 +285,7 @@ mod tests {
                 " http://phone.tailnet.ts.net:3737/ ".to_string(),
                 "http://phone.tailnet.ts.net:3737".to_string(),
             ],
+            None,
         );
 
         assert_eq!(
@@ -267,5 +295,26 @@ mod tests {
                 .count(),
             1,
         );
+    }
+
+    #[test]
+    fn mobile_host_adds_allowed_origin() {
+        let origins = allowed_origins_from_args(
+            "127.0.0.1".parse().expect("ip"),
+            3737,
+            Vec::new(),
+            Some("desktop.tailnet.ts.net"),
+        );
+
+        assert!(origins.contains(&"http://desktop.tailnet.ts.net:3737".to_string()));
+    }
+
+    #[test]
+    fn mobile_host_rejects_full_urls() {
+        assert_eq!(
+            mobile_origin(Some("http://desktop.tailnet.ts.net"), 3737),
+            None
+        );
+        assert_eq!(mobile_url(Some("desktop.tailnet.ts.net/path"), 3737), None);
     }
 }
