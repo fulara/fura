@@ -234,6 +234,13 @@ pub(crate) enum ClientMessage {
     CodeFileOpen { workspace_id: String, path: String },
     #[serde(rename = "code.file.close")]
     CodeFileClose { workspace_id: String, path: String },
+    #[serde(rename = "code.file.search")]
+    CodeFileSearch {
+        workspace_id: String,
+        base_path: String,
+        query: String,
+        limit: Option<usize>,
+    },
     #[serde(rename = "raw.rpc")]
     RawRpc { session_id: String, command: Value },
 }
@@ -352,6 +359,13 @@ pub(crate) enum ServerMessage {
     CodeFile {
         workspace_id: String,
         file: CodeFileContent,
+    },
+    #[serde(rename = "code.file.searchResults")]
+    CodeFileSearchResults {
+        workspace_id: String,
+        base_path: String,
+        query: String,
+        entries: Vec<CodeTreeEntry>,
     },
     #[serde(rename = "code.error")]
     CodeError {

@@ -12,6 +12,12 @@ export type CodeViewerState = {
   loadingTree: boolean;
   loadingFile: boolean;
   error: string | null;
+  searchOpen: boolean;
+  searchBasePath: string;
+  searchQuery: string;
+  searchResults: CodeTreeEntry[];
+  searchLoading: boolean;
+  searchError: string | null;
 };
 
 export type CodeViewerActions = {
@@ -19,6 +25,12 @@ export type CodeViewerActions = {
   listTree(path: string): void;
   refreshTree(): void;
   openFile(path: string): void;
+  openSearch(): void;
+  closeSearch(): void;
+  updateSearchBasePath(path: string): void;
+  updateSearchQuery(query: string): void;
+  searchFiles(): void;
+  openSearchResult(path: string): void;
 };
 
 export function parentCodePath(path: string): string | null {
@@ -56,6 +68,8 @@ export function renderCodeViewer(
 
   root.append(sidebar, main);
   container.append(root);
+
+  if (state.searchOpen) root.append(renderFileSearchDialog(state, actions));
 }
 
 function renderCodeWorkspaceHeader(state: CodeViewerState, actions: CodeViewerActions): HTMLElement {
@@ -77,6 +91,11 @@ function renderCodeWorkspaceHeader(state: CodeViewerState, actions: CodeViewerAc
   refresh.addEventListener("click", actions.openWorkspace);
 
   header.append(title, refresh);
+
+  const hint = mkEl("span");
+  hint.className = "code-hotkey-hint";
+  hint.textContent = "Ctrl+F: search files";
+  header.append(hint);
 
   if (state.error) {
     const error = mkEl("p");
@@ -186,6 +205,98 @@ function renderTreeEntry(
   return button;
 }
 
+function renderFileSearchDialog(state: CodeViewerState, actions: CodeViewerActions): HTMLElement {
+  const overlay = mkEl("div");
+  overlay.className = "code-search-overlay";
+  overlay.addEventListener("click", event => {
+    if (event.target === overlay) actions.closeSearch();
+  });
+
+  const dialog = mkEl("section");
+  dialog.className = "code-search-dialog";
+  dialog.setAttribute("role", "dialog");
+  dialog.setAttribute("aria-modal", "true");
+  dialog.setAttribute("aria-label", "Search files");
+
+  const header = mkEl("header");
+  const title = mkEl("strong");
+  title.textContent = "Search files";
+  const close = mkEl("button");
+  close.type = "button";
+  close.textContent = "Close";
+  close.addEventListener("click", actions.closeSearch);
+  header.append(title, close);
+
+  const form = mkEl("form");
+  form.className = "code-search-form";
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    actions.searchFiles();
+  });
+
+  const baseLabel = mkEl("label");
+  baseLabel.textContent = "Base dir";
+  const baseInput = mkEl("input");
+  baseInput.id = "codeSearchBasePath";
+  baseInput.value = state.searchBasePath;
+  baseInput.spellcheck = false;
+  baseInput.addEventListener("input", () => actions.updateSearchBasePath(baseInput.value));
+  baseLabel.append(baseInput);
+
+  const queryLabel = mkEl("label");
+  queryLabel.textContent = "File name/path";
+  const queryInput = mkEl("input");
+  queryInput.id = "codeSearchQuery";
+  queryInput.value = state.searchQuery;
+  queryInput.placeholder = "main.rs";
+  queryInput.spellcheck = false;
+  queryInput.addEventListener("input", () => actions.updateSearchQuery(queryInput.value));
+  queryInput.addEventListener("keydown", event => {
+    if (event.key === "Escape") actions.closeSearch();
+  });
+  queryLabel.append(queryInput);
+
+  const submit = mkEl("button");
+  submit.type = "submit";
+  submit.textContent = state.searchLoading ? "Searching…" : "Search";
+  submit.disabled = state.searchLoading || !state.workspace || !state.searchQuery.trim();
+
+  form.append(baseLabel, queryLabel, submit);
+
+  const results = mkEl("div");
+  results.className = "code-search-results";
+  if (state.searchError) {
+    const error = mkEl("p");
+    error.className = "code-error";
+    error.textContent = state.searchError;
+    results.append(error);
+  } else if (state.searchLoading) {
+    results.append(renderSearchEmpty("Searching…"));
+  } else if (!state.searchQuery.trim()) {
+    results.append(renderSearchEmpty("Type a file name or path fragment."));
+  } else if (state.searchResults.length === 0) {
+    results.append(renderSearchEmpty("No matching files."));
+  } else {
+    for (const entry of state.searchResults) {
+      const button = mkEl("button");
+      button.type = "button";
+      button.className = "code-search-result";
+      const path = mkEl("code");
+      path.textContent = entry.path;
+      const meta = mkEl("span");
+      meta.textContent = formatCodeFileSize(entry.size);
+      button.append(path, meta);
+      button.addEventListener("click", () => actions.openSearchResult(entry.path));
+      results.append(button);
+    }
+  }
+
+  dialog.append(header, form, results);
+  overlay.append(dialog);
+  window.setTimeout(() => queryInput.focus(), 0);
+  return overlay;
+}
+
 function renderCodeMain(state: CodeViewerState): HTMLElement {
   const view = mkEl("section");
   view.className = "code-file-view";
@@ -235,6 +346,13 @@ function renderCodeMain(state: CodeViewerState): HTMLElement {
 function renderEmptyMain(text: string): HTMLElement {
   const empty = mkEl("p");
   empty.className = "code-empty code-empty-main";
+  empty.textContent = text;
+  return empty;
+}
+
+function renderSearchEmpty(text: string): HTMLElement {
+  const empty = mkEl("p");
+  empty.className = "code-empty";
   empty.textContent = text;
   return empty;
 }

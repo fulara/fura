@@ -665,6 +665,12 @@ let codeLoadingTree = false;
 let codeLoadingFile = false;
 let codeError: string | null = null;
 let pendingCodeOpenPath: string | null = null;
+let codeSearchOpen = false;
+let codeSearchBasePath = "";
+let codeSearchQuery = "";
+let codeSearchResults: CodeTreeEntry[] = [];
+let codeSearchLoading = false;
+let codeSearchError: string | null = null;
 
 const sessionListView = createSessionListView(sessionsList, {
   onSelectSession: handleSessionButtonClick,
@@ -740,6 +746,11 @@ voiceButton.addEventListener("pointercancel", () => { void stopVoiceRecording();
 voiceButton.addEventListener("lostpointercapture", () => { void stopVoiceRecording(); });
 voiceButton.addEventListener("contextmenu", event => event.preventDefault());
 window.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && desktopDockview?.isPanelActive("code")) {
+    event.preventDefault();
+    openCodeSearch();
+    return;
+  }
   if (event.altKey && event.key.toLowerCase() === "m" && !event.repeat && !voiceHotkeyActive) {
     event.preventDefault();
     voiceHotkeyActive = true;
@@ -1199,6 +1210,7 @@ function handleServerMessage(message: ServerMessage): void {
       codeTreeEntries = [];
       codeFile = null;
       codeError = null;
+      if (codeSearchOpen && !codeSearchBasePath) codeSearchBasePath = message.workspace.root;
       markCodeViewDirty();
       if (desktopDockview?.isPanelActive("code")) {
         renderCodePanelIfNeeded(true);
@@ -1232,12 +1244,25 @@ function handleServerMessage(message: ServerMessage): void {
         else renderCodePanelIfNeeded(true);
       }
       break;
+    case "code.file.searchResults":
+      if (codeWorkspace?.workspaceId === message.workspaceId) {
+        codeSearchLoading = false;
+        codeSearchError = null;
+        codeSearchResults = message.entries;
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      }
+      break;
     case "code.error":
       if (!message.workspaceId || codeWorkspace?.workspaceId === message.workspaceId) {
         codeLoadingWorkspace = false;
         codeLoadingTree = false;
         codeLoadingFile = false;
         codeError = message.path ? `${message.path}: ${message.message}` : message.message;
+        if (codeSearchOpen && codeSearchLoading) {
+          codeSearchLoading = false;
+          codeSearchError = codeError;
+        }
         markCodeViewDirty();
         renderCodePanelIfNeeded(true);
       }
@@ -2320,6 +2345,12 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeLoadingFile = false;
   codeError = null;
   pendingCodeOpenPath = null;
+  codeSearchOpen = false;
+  codeSearchBasePath = "";
+  codeSearchQuery = "";
+  codeSearchResults = [];
+  codeSearchLoading = false;
+  codeSearchError = null;
   markCodeViewDirty();
 }
 
@@ -2334,6 +2365,12 @@ function activeCodeViewState(): CodeViewerState {
     loadingTree: codeLoadingTree,
     loadingFile: codeLoadingFile,
     error: codeError,
+    searchOpen: codeSearchOpen,
+    searchBasePath: codeSearchBasePath,
+    searchQuery: codeSearchQuery,
+    searchResults: codeSearchResults,
+    searchLoading: codeSearchLoading,
+    searchError: codeSearchError,
   };
 }
 
@@ -2365,6 +2402,46 @@ function requestCodeFile(path: string): void {
   markCodeViewDirty();
   renderCodePanelIfNeeded(true);
   send({ type: "code.file.open", workspaceId: codeWorkspace.workspaceId, path });
+}
+
+function openCodeSearch(): void {
+  if (!desktopDockview?.isPanelActive("code")) return;
+  if (!codeWorkspace && !codeLoadingWorkspace) ensureActiveCodeWorkspace();
+  codeSearchOpen = true;
+  codeSearchBasePath = codeSearchBasePath || codeWorkspace?.root || "";
+  codeSearchError = null;
+  codeSearchResults = [];
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function closeCodeSearch(): void {
+  codeSearchOpen = false;
+  codeSearchLoading = false;
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function submitCodeSearch(): void {
+  if (!codeWorkspace || !codeSearchQuery.trim()) return;
+  codeSearchLoading = true;
+  codeSearchError = null;
+  codeSearchResults = [];
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  send({
+    type: "code.file.search",
+    workspaceId: codeWorkspace.workspaceId,
+    basePath: codeSearchBasePath || codeWorkspace.root,
+    query: codeSearchQuery,
+    limit: 100,
+  });
+}
+
+function openSearchResultInCode(path: string): void {
+  closeCodeSearch();
+  requestCodeTree(parentCodePath(path) ?? "");
+  requestCodeFile(path);
 }
 
 function openPathInCode(path: string): void {
@@ -2444,6 +2521,16 @@ function renderCodePanelIfNeeded(force = false): void {
       listTree: requestCodeTree,
       refreshTree: () => requestCodeTree(codeTreePath),
       openFile: requestCodeFile,
+      openSearch: openCodeSearch,
+      closeSearch: closeCodeSearch,
+      updateSearchBasePath: path => {
+        codeSearchBasePath = path;
+      },
+      updateSearchQuery: query => {
+        codeSearchQuery = query;
+      },
+      searchFiles: submitCodeSearch,
+      openSearchResult: openSearchResultInCode,
     });
   });
   if (!rendered) return;

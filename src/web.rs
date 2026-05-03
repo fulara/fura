@@ -496,6 +496,19 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             path = %file.path,
             bytes = file.text.len()
         ),
+        ServerMessage::CodeFileSearchResults {
+            workspace_id,
+            base_path,
+            query,
+            entries,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.file.searchResults",
+            workspace_id = %workspace_id,
+            base_path = %base_path,
+            query_len = query.len(),
+            entry_count = entries.len()
+        ),
         ServerMessage::CodeError {
             workspace_id,
             path,

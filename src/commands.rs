@@ -153,6 +153,12 @@ pub(crate) async fn handle_client_message(
         ClientMessage::CodeFileClose { workspace_id, path } => {
             handle_code_file_close(workspace_id, path).await
         }
+        ClientMessage::CodeFileSearch {
+            workspace_id,
+            base_path,
+            query,
+            limit,
+        } => handle_code_file_search(state, workspace_id, base_path, query, limit).await,
         ClientMessage::RawRpc {
             session_id,
             mut command,

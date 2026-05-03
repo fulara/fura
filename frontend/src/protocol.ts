@@ -255,6 +255,7 @@ export type ServerMessage =
   | { type: "code.workspace.ready"; workspace: CodeWorkspaceSummary }
   | { type: "code.tree"; workspaceId: string; path: string; entries: CodeTreeEntry[] }
   | { type: "code.file"; workspaceId: string; file: CodeFileContent }
+  | { type: "code.file.searchResults"; workspaceId: string; basePath: string; query: string; entries: CodeTreeEntry[] }
   | { type: "code.error"; workspaceId?: string | null; path?: string | null; message: string }
   | { type: "diff.state"; sessionId: string; state: RepoDiffState }
   | { type: "control.reply"; targetClientId: string; conversationId: string; message: string; candidates?: ControlCandidate[]; suggestedActions?: ControlSuggestedAction[] }
@@ -300,6 +301,7 @@ export type ClientMessage =
   | { type: "code.tree.list"; workspaceId: string; path?: string }
   | { type: "code.file.open"; workspaceId: string; path: string }
   | { type: "code.file.close"; workspaceId: string; path: string }
+  | { type: "code.file.search"; workspaceId: string; basePath: string; query: string; limit?: number }
   | { type: "raw.rpc"; sessionId: string; command: unknown }
   | { type: "session.fork"; sessionId: string; name: string }
   | { type: "control.prompt"; clientId: string; conversationId?: string; text: string; uiSnapshot: FrontendUiSnapshot }

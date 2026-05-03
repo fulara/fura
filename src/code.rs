@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::{Context, anyhow, bail};
 use git2::Repository;
+use ignore::WalkBuilder;
 use serde::Serialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -16,6 +17,7 @@ use crate::{AppState, ServerMessage};
 
 const MAX_CODE_FILE_BYTES: u64 = 1_000_000;
 const MAX_TREE_ENTRIES: usize = 500;
+const MAX_FILE_SEARCH_RESULTS: usize = 100;
 
 const IGNORED_DIRS: &[&str] = &[
     ".git",
@@ -139,6 +141,36 @@ pub(crate) async fn handle_code_file_close(
     Vec::new()
 }
 
+pub(crate) async fn handle_code_file_search(
+    state: &AppState,
+    workspace_id: String,
+    base_path: String,
+    query: String,
+    limit: Option<usize>,
+) -> Vec<ServerMessage> {
+    match search_workspace_files(
+        state,
+        &workspace_id,
+        &base_path,
+        &query,
+        limit.unwrap_or(MAX_FILE_SEARCH_RESULTS),
+    )
+    .await
+    {
+        Ok(entries) => vec![ServerMessage::CodeFileSearchResults {
+            workspace_id,
+            base_path,
+            query,
+            entries,
+        }],
+        Err(message) => vec![ServerMessage::CodeError {
+            workspace_id: Some(workspace_id),
+            path: Some(base_path),
+            message,
+        }],
+    }
+}
+
 async fn open_workspace_for_session(
     state: &AppState,
     session_id: &str,
@@ -178,6 +210,17 @@ async fn open_workspace_file(
 ) -> Result<CodeFileContent, String> {
     let workspace = workspace_by_id(&state.code_workspaces, workspace_id).await?;
     read_code_file(&workspace.root, path).map_err(|err| err.to_string())
+}
+
+async fn search_workspace_files(
+    state: &AppState,
+    workspace_id: &str,
+    base_path: &str,
+    query: &str,
+    limit: usize,
+) -> Result<Vec<CodeTreeEntry>, String> {
+    let workspace = workspace_by_id(&state.code_workspaces, workspace_id).await?;
+    find_files(&workspace.root, base_path, query, limit).map_err(|err| err.to_string())
 }
 
 async fn workspace_by_id(
@@ -360,6 +403,101 @@ fn read_code_file(root: &Path, requested_path: &str) -> anyhow::Result<CodeFileC
         size: metadata.len(),
         version,
     })
+}
+
+fn find_files(
+    root: &Path,
+    base_path: &str,
+    query: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<CodeTreeEntry>> {
+    let base_dir = resolve_search_base_dir(root, base_path)?;
+    if !base_dir.is_dir() {
+        bail!(
+            "base path is not a directory: {}",
+            display_protocol_path(base_path)
+        );
+    }
+
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let result_limit = limit.clamp(1, MAX_FILE_SEARCH_RESULTS);
+    let mut builder = WalkBuilder::new(&base_dir);
+    builder
+        .standard_filters(true)
+        .follow_links(false)
+        .sort_by_file_path(|left, right| left.cmp(right));
+
+    let mut entries = Vec::new();
+    for result in builder.build() {
+        let entry = match result {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let file_type = match entry.file_type() {
+            Some(file_type) if file_type.is_file() => file_type,
+            _ => continue,
+        };
+        if !file_type.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let relative_path = path
+            .strip_prefix(root)
+            .map_err(|_| anyhow!("search result escaped workspace root"))?;
+        let protocol_path = path_to_protocol(relative_path);
+        if !protocol_path.to_lowercase().contains(&normalized_query) {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        entries.push(CodeTreeEntry {
+            name: path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| protocol_path.clone()),
+            path: protocol_path,
+            kind: CodeTreeEntryKind::File,
+            size: Some(metadata.len()),
+        });
+        if entries.len() >= result_limit {
+            break;
+        }
+    }
+
+    entries.sort_by(|left, right| {
+        left.path
+            .to_lowercase()
+            .cmp(&right.path.to_lowercase())
+            .then_with(|| left.path.cmp(&right.path))
+    });
+    Ok(entries)
+}
+
+fn resolve_search_base_dir(root: &Path, base_path: &str) -> anyhow::Result<PathBuf> {
+    let trimmed = base_path.trim();
+    if trimmed.is_empty() || trimmed == root.display().to_string() {
+        return Ok(root.to_path_buf());
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        let resolved = candidate.canonicalize().with_context(|| {
+            format!(
+                "base path does not exist: {}",
+                display_protocol_path(base_path)
+            )
+        })?;
+        if !resolved.starts_with(root) {
+            bail!("base path must stay inside the workspace root");
+        }
+        return Ok(resolved);
+    }
+    resolve_workspace_path(root, base_path)
 }
 
 fn resolve_workspace_path(root: &Path, requested_path: &str) -> anyhow::Result<PathBuf> {
@@ -608,6 +746,59 @@ mod tests {
         assert_eq!(file.language, "rust");
         assert_eq!(file.text, "fn main() {}\n");
         assert!(file.version > 0);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn searches_files_from_workspace_root() {
+        let root = temp_workspace();
+        Repository::init(&root).expect("repo initialized");
+        fs::write(root.join(".gitignore"), "ignored.log\n").expect("gitignore written");
+        fs::create_dir_all(root.join("src/bin")).expect("src created");
+        fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("lib written");
+        fs::write(root.join("src/bin/main.rs"), "fn main() {}\n").expect("main written");
+        fs::write(root.join("ignored.log"), "ignored\n").expect("ignored written");
+
+        let entries =
+            find_files(&root, &root.display().to_string(), "rs", 20).expect("files searched");
+        let paths = entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["src/bin/main.rs", "src/lib.rs"]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn rejects_search_base_outside_workspace() {
+        let root = temp_workspace();
+        let outside = temp_workspace();
+
+        let error = find_files(&root, &outside.display().to_string(), "rs", 20)
+            .expect_err("outside base path rejected");
+
+        assert!(error.to_string().contains("workspace root"));
+        fs::remove_dir_all(root).ok();
+        fs::remove_dir_all(outside).ok();
+    }
+
+    #[test]
+    fn searches_files_from_nested_base_dir() {
+        let root = temp_workspace();
+        fs::create_dir_all(root.join("src")).expect("src created");
+        fs::create_dir_all(root.join("tests")).expect("tests created");
+        fs::write(root.join("src/alpha.rs"), "fn alpha() {}\n").expect("alpha written");
+        fs::write(root.join("src/beta.rs"), "fn beta() {}\n").expect("beta written");
+        fs::write(root.join("tests/alpha.rs"), "fn alpha_test() {}\n").expect("test written");
+
+        let entries = find_files(&root, "src", "rs", 1).expect("files searched");
+        let paths = entries
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(paths, vec!["src/alpha.rs"]);
         fs::remove_dir_all(root).ok();
     }
 

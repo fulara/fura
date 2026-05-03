@@ -18,6 +18,28 @@ function baseState(overrides: Partial<CodeViewerState> = {}): CodeViewerState {
     loadingTree: false,
     loadingFile: false,
     error: null,
+    searchOpen: false,
+    searchBasePath: "/repo",
+    searchQuery: "",
+    searchResults: [],
+    searchLoading: false,
+    searchError: null,
+    ...overrides,
+  };
+}
+
+function baseActions(overrides = {}) {
+  return {
+    openWorkspace: vi.fn(),
+    listTree: vi.fn(),
+    refreshTree: vi.fn(),
+    openFile: vi.fn(),
+    openSearch: vi.fn(),
+    closeSearch: vi.fn(),
+    updateSearchBasePath: vi.fn(),
+    updateSearchQuery: vi.fn(),
+    searchFiles: vi.fn(),
+    openSearchResult: vi.fn(),
     ...overrides,
   };
 }
@@ -38,12 +60,7 @@ describe("code viewer", () => {
   it("renders an empty session state", () => {
     const container = document.createElement("div");
 
-    renderCodeViewer(container, baseState({ activeSessionId: null, workspace: null }), {
-      openWorkspace: vi.fn(),
-      listTree: vi.fn(),
-      refreshTree: vi.fn(),
-      openFile: vi.fn(),
-    });
+    renderCodeViewer(container, baseState({ activeSessionId: null, workspace: null }), baseActions());
 
     expect(container.querySelector(".code-empty-main")?.textContent).toBe("Select a session to browse its workspace.");
   });
@@ -61,7 +78,7 @@ describe("code viewer", () => {
           { kind: "file", name: "Cargo.toml", path: "Cargo.toml", size: 120 },
         ],
       }),
-      { openWorkspace: vi.fn(), listTree, refreshTree: vi.fn(), openFile },
+      baseActions({ listTree, openFile }),
     );
 
     const buttons = [...container.querySelectorAll<HTMLButtonElement>(".code-tree-entry")];
@@ -72,7 +89,6 @@ describe("code viewer", () => {
     expect(openFile).toHaveBeenCalledWith("Cargo.toml");
   });
 
-
   it("refreshes the current tree on demand", () => {
     const container = document.createElement("div");
     const refreshTree = vi.fn();
@@ -80,7 +96,7 @@ describe("code viewer", () => {
     renderCodeViewer(
       container,
       baseState({ treePath: "src", entries: [{ kind: "file", name: "main.rs", path: "src/main.rs", size: 12 }] }),
-      { openWorkspace: vi.fn(), listTree: vi.fn(), refreshTree, openFile: vi.fn() },
+      baseActions({ refreshTree }),
     );
 
     const refreshButton = [...container.querySelectorAll<HTMLButtonElement>(".code-tree-actions button")]
@@ -89,6 +105,7 @@ describe("code viewer", () => {
 
     expect(refreshTree).toHaveBeenCalledOnce();
   });
+
   it("renders an active read-only file", () => {
     const container = document.createElement("div");
 
@@ -103,11 +120,38 @@ describe("code viewer", () => {
           version: 1,
         },
       }),
-      { openWorkspace: vi.fn(), listTree: vi.fn(), refreshTree: vi.fn(), openFile: vi.fn() },
+      baseActions(),
     );
 
     expect(container.querySelector(".code-file-header code")?.textContent).toBe("src/main.rs");
     expect(container.querySelector(".code-file-header span")?.textContent).toContain("read-only");
     expect(container.textContent).toContain("fn main");
+  });
+
+  it("renders file search dialog and routes search actions", () => {
+    const container = document.createElement("div");
+    const searchFiles = vi.fn();
+    const openSearchResult = vi.fn();
+
+    renderCodeViewer(
+      container,
+      baseState({
+        searchOpen: true,
+        searchQuery: "main",
+        searchResults: [{ kind: "file", name: "main.rs", path: "src/main.rs", size: 12 }],
+      }),
+      baseActions({ searchFiles, openSearchResult }),
+    );
+
+    container.querySelector<HTMLFormElement>(".code-search-form")?.requestSubmit();
+    container.querySelector<HTMLInputElement>("#codeSearchBasePath")!.value = "/repo/src";
+    container.querySelector<HTMLInputElement>("#codeSearchBasePath")!.dispatchEvent(new Event("input"));
+    container.querySelector<HTMLInputElement>("#codeSearchQuery")!.value = "lib";
+    container.querySelector<HTMLInputElement>("#codeSearchQuery")!.dispatchEvent(new Event("input"));
+    container.querySelector<HTMLButtonElement>(".code-search-result")?.click();
+
+    expect(container.querySelector(".code-search-dialog")?.textContent).toContain("Search files");
+    expect(searchFiles).toHaveBeenCalledOnce();
+    expect(openSearchResult).toHaveBeenCalledWith("src/main.rs");
   });
 });

@@ -523,6 +523,7 @@ h2 {
 }
 
 .code-viewer {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(13rem, 18rem) minmax(0, 1fr);
   height: 100%;
@@ -571,6 +572,11 @@ h2 {
 .code-empty {
   color: #8b95a7;
   font-size: 0.8rem;
+}
+
+.code-hotkey-hint {
+  color: #667085;
+  font-size: 0.72rem;
 }
 
 .code-error {
@@ -703,6 +709,99 @@ h2 {
 
 .code-empty-main {
   align-self: start;
+}
+
+.code-search-overlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding-top: 7vh;
+  background: rgba(5, 8, 14, 0.58);
+  z-index: 20;
+}
+
+.code-search-dialog {
+  width: min(46rem, calc(100% - 2rem));
+  max-height: 80vh;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 0.85rem;
+  padding: 1rem;
+  border: 1px solid #343a46;
+  border-radius: 0.8rem;
+  background: #111823;
+  box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, 0.42);
+}
+
+.code-search-dialog header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.code-search-form {
+  display: grid;
+  grid-template-columns: minmax(8rem, 14rem) minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  align-items: end;
+}
+
+.code-search-form label {
+  display: grid;
+  gap: 0.3rem;
+  color: #8b95a7;
+  font-size: 0.76rem;
+}
+
+.code-search-form input {
+  width: 100%;
+  min-width: 0;
+  border-radius: 0.45rem;
+  border: 1px solid #343a46;
+  background: #0d1118;
+  color: #eef1f8;
+  padding: 0.45rem 0.55rem;
+}
+
+.code-search-results {
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  align-content: start;
+  gap: 0.35rem;
+}
+
+.code-search-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  width: 100%;
+  text-align: left;
+  border-radius: 0.5rem;
+  border: 1px solid #252a35;
+  background: #0d1118;
+  color: #d7dce8;
+  padding: 0.5rem 0.6rem;
+}
+
+.code-search-result:hover:not(:disabled) {
+  border-color: #6d7cff;
+  background: #1a1f2a;
+}
+
+.code-search-result code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-search-result span {
+  color: #8b95a7;
+  font-size: 0.76rem;
 }
 
 .diffs-view {

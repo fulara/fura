@@ -96,11 +96,10 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       return api.activePanel?.id === id;
     },
     activatePanel(id) {
-      const panel = api.getPanel(id);
+      const panel = api.getGroupPanel(id);
       if (!panel) return false;
-      const activatable = api as unknown as { setActivePanel?(panel: unknown): void };
-      if (!activatable.setActivePanel) return false;
-      activatable.setActivePanel(panel);
+      api.setActivePanel(panel);
+      api.focus();
       return true;
     },
     withPanel(id, render) {
