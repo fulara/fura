@@ -270,6 +270,8 @@ pub(crate) enum ServerMessage {
         code: Option<i32>,
         signal: Option<String>,
     },
+    #[serde(rename = "dialog.request")]
+    DialogRequest { session_id: String, dialog: Value },
     #[serde(rename = "log.stderr")]
     LogStderr { session_id: String, text: String },
     #[serde(rename = "session.notice")]

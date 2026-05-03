@@ -1465,6 +1465,62 @@ h2 {
   gap: 0.5rem;
 }
 
+.extension-dialog.modal-panel {
+  width: min(720px, 100%);
+}
+
+.extension-dialog-body {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem 1rem 0;
+  color: #d7deea;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.extension-dialog-body:empty {
+  display: none;
+}
+
+.extension-dialog-form {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.extension-dialog-field {
+  display: grid;
+  gap: 0.65rem;
+  padding: 1rem;
+}
+
+.extension-dialog-field label {
+  display: grid;
+  gap: 0.4rem;
+  color: #c9d3e6;
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.extension-dialog-field textarea {
+  min-height: 14rem;
+  max-height: min(42vh, 28rem);
+  resize: vertical;
+}
+
+.extension-dialog-status {
+  min-height: 1rem;
+  margin: 0;
+  padding: 0 1rem 1rem;
+  color: #9ba4b5;
+  font-size: 0.86rem;
+}
+
+.extension-dialog-queue {
+  color: #9ba4b5;
+  font-size: 0.86rem;
+}
+
 .model-picker-search {
   border: 0;
   border-bottom: 1px solid #252a35;

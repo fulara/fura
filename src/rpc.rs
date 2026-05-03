@@ -356,13 +356,21 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         }
         OmpRpcFrame::AgentEnd { .. } => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
-            if let Err(message) =
-                send_rpc_command(state, &target_session_id, get_messages_command(next_rpc_id())).await
+            if let Err(message) = send_rpc_command(
+                state,
+                &target_session_id,
+                get_messages_command(next_rpc_id()),
+            )
+            .await
             {
                 warn!(session_id = %target_session_id, %message, "post-agent transcript refresh failed");
             }
-            if let Err(message) =
-                send_rpc_command(state, &target_session_id, get_session_stats_command(next_rpc_id())).await
+            if let Err(message) = send_rpc_command(
+                state,
+                &target_session_id,
+                get_session_stats_command(next_rpc_id()),
+            )
+            .await
             {
                 warn!(session_id = %target_session_id, %message, "post-agent stats refresh failed");
             }
@@ -575,8 +583,20 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             let _ = response.payload();
             apply_rpc_response(state, session_id, frame).await
         }
-        OmpRpcFrame::ExtensionUiRequest { .. }
-        | OmpRpcFrame::HostToolCall { .. }
+        OmpRpcFrame::ExtensionUiRequest {
+            id,
+            method,
+            payload,
+        } => {
+            let mut dialog = serde_json::Map::from_iter(payload);
+            dialog.insert("id".to_string(), Value::String(id));
+            dialog.insert("method".to_string(), Value::String(method));
+            let _ = state.events.send(ServerMessage::DialogRequest {
+                session_id: target_session_id,
+                dialog: Value::Object(dialog),
+            });
+        }
+        OmpRpcFrame::HostToolCall { .. }
         | OmpRpcFrame::HostToolCancel { .. }
         | OmpRpcFrame::Unknown => apply_rpc_response(state, session_id, frame).await,
     }

@@ -413,6 +413,82 @@ body {
   display: none;
 }
 
+.mobile-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  align-items: end;
+  padding: 1rem;
+  background: rgba(0, 0, 0, 0.58);
+}
+
+.mobile-dialog-overlay[hidden] {
+  display: none;
+}
+
+.mobile-dialog {
+  display: grid;
+  gap: 0.85rem;
+  width: min(100%, 32rem);
+  max-height: calc(100dvh - 2rem);
+  overflow: auto;
+  margin: 0 auto;
+  border: 1px solid #343a46;
+  border-radius: 1rem;
+  background: #151923;
+  box-shadow: 0 1.4rem 4rem rgba(0, 0, 0, 0.45);
+  padding: 1rem;
+}
+
+.mobile-dialog-header h2,
+.mobile-dialog-body p,
+.mobile-dialog-status {
+  margin: 0;
+}
+
+.mobile-dialog-kicker {
+  margin: 0 0 0.2rem;
+  color: #9ba4b5;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.mobile-dialog-body {
+  color: #d7deea;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.mobile-dialog-form,
+.mobile-dialog-field label {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.mobile-dialog-field label {
+  color: #c7cedc;
+  font-size: 0.82rem;
+}
+
+.mobile-dialog-field textarea {
+  min-height: 9rem;
+  resize: vertical;
+}
+
+.mobile-dialog-status {
+  min-height: 1rem;
+  color: #9ba4b5;
+  font-size: 0.78rem;
+}
+
+.mobile-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
 .mobile-empty-state {
   color: #9ba4b5;
   padding: 1rem;

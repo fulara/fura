@@ -310,6 +310,72 @@ describe("mountMobileApp", () => {
     });
   });
 
+  it("renders confirm dialog requests and sends confirmed responses", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "dialog-1",
+        method: "confirm",
+        title: "Continue?",
+        message: "Approve the operation?",
+        timeout: 30000,
+      },
+    });
+
+    const overlay = document.querySelector<HTMLElement>("#mobileDialogOverlay");
+    expect(overlay?.hidden).toBe(false);
+    expect(document.querySelector("#mobileDialogTitle")?.textContent).toBe("Continue?");
+    expect(document.querySelector("#mobileDialogBody")?.textContent).toContain("Approve the operation?");
+    expect(document.querySelector("#mobileDialogStatus")?.textContent).toContain("30s");
+
+    document.querySelector<HTMLButtonElement>("#mobileDialogSubmit")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "dialog.respond",
+      sessionId: "live",
+      dialogId: "dialog-1",
+      response: { confirmed: true },
+    });
+    expect(overlay?.hidden).toBe(true);
+  });
+
+  it("renders select dialog requests and sends selected values", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: { id: "dialog-2", method: "select", title: "Pick target", options: ["alpha", "beta"] },
+    });
+
+    const select = document.querySelector<HTMLSelectElement>("#mobileDialogField select");
+    if (!select) throw new Error("dialog select missing");
+    select.value = "beta";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector<HTMLFormElement>("#mobileDialogForm")?.requestSubmit();
+
+    expect(connection.sent).toContainEqual({
+      type: "dialog.respond",
+      sessionId: "live",
+      dialogId: "dialog-2",
+      response: { value: "beta" },
+    });
+  });
+
+  it("applies extension editor text updates to the mobile prompt draft", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: { id: "dialog-3", method: "set_editor_text", text: "draft from extension" },
+    });
+
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.value).toBe("draft from extension");
+    expect(document.querySelector("#mobileLog")?.textContent).toBe("Extension updated the mobile prompt draft.");
+    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
+  });
+
   it("disables the composer while the active session is busy", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });

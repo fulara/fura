@@ -18,6 +18,12 @@ import {
   summarizeDiffFiles,
   type ParsedDiffRow,
 } from "./diffState";
+import {
+  extensionDialogBodyText,
+  formatExtensionDialogNotification,
+  parseExtensionDialogRequest,
+  type ExtensionDialogRequest,
+} from "./extensionDialog";
 import { shortId } from "./format";
 import type {
   ClientMessage,
@@ -146,6 +152,25 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </form>
+      <section id="mobileDialogOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileDialogTitle" aria-describedby="mobileDialogBody">
+          <header class="mobile-dialog-header">
+            <div>
+              <p id="mobileDialogKicker" class="mobile-dialog-kicker">Extension request</p>
+              <h2 id="mobileDialogTitle"></h2>
+            </div>
+          </header>
+          <div id="mobileDialogBody" class="mobile-dialog-body"></div>
+          <form id="mobileDialogForm" class="mobile-dialog-form">
+            <div id="mobileDialogField" class="mobile-dialog-field"></div>
+            <p id="mobileDialogStatus" class="mobile-dialog-status" aria-live="polite"></p>
+            <div class="mobile-dialog-actions">
+              <button id="mobileDialogCancel" type="button">Cancel</button>
+              <button id="mobileDialogSubmit" type="submit">Submit</button>
+            </div>
+          </form>
+        </div>
+      </section>
     </main>
   `;
 
@@ -181,6 +206,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const imageInput = requireElement<HTMLInputElement>(document, "mobileImageInput");
   const composerStatus = requireElement<HTMLSpanElement>(document, "mobileComposerStatus");
   const mobileLog = requireElement<HTMLParagraphElement>(document, "mobileLog");
+  const dialogOverlay = requireElement<HTMLElement>(document, "mobileDialogOverlay");
+  const dialogTitle = requireElement<HTMLHeadingElement>(document, "mobileDialogTitle");
+  const dialogBody = requireElement<HTMLDivElement>(document, "mobileDialogBody");
+  const dialogForm = requireElement<HTMLFormElement>(document, "mobileDialogForm");
+  const dialogField = requireElement<HTMLDivElement>(document, "mobileDialogField");
+  const dialogStatus = requireElement<HTMLParagraphElement>(document, "mobileDialogStatus");
+  const dialogCancel = requireElement<HTMLButtonElement>(document, "mobileDialogCancel");
+  const dialogSubmit = requireElement<HTMLButtonElement>(document, "mobileDialogSubmit");
 
   let connection: FuraConnection | null = null;
   let serverConfig: ServerConfig | null = null;
@@ -207,6 +240,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const diffSelectedSnapshots = new Map<string, string>();
   const diffSelectedHeads = new Map<string, string | null>();
   const diffStatModes = new Map<string, boolean>();
+  let activeDialog: ExtensionDialogRequest | null = null;
+  const dialogQueue: ExtensionDialogRequest[] = [];
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
@@ -289,6 +324,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (accepted) clearPromptComposer();
   });
 
+  dialogForm.addEventListener("submit", event => {
+    event.preventDefault();
+    submitActiveDialog();
+  });
+  dialogCancel.addEventListener("click", () => respondToActiveDialog({ cancelled: true }));
+
   const initialToken = consumeBootstrapToken(
     window.location.href,
     window.localStorage,
@@ -329,6 +370,206 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return false;
     }
     return connection.send(message);
+  }
+
+  function handleDialogRequest(message: Extract<ServerMessage, { type: "dialog.request" }>): void {
+    const request = parseExtensionDialogRequest(message.sessionId, message.dialog);
+    if (!request) {
+      appendLog(`[${message.sessionId}] ignored malformed dialog request.`);
+      return;
+    }
+
+    switch (request.method) {
+      case "cancel":
+        cancelMobileDialog(request.targetId);
+        return;
+      case "notify":
+        appendLog(formatExtensionDialogNotification(request));
+        return;
+      case "set_editor_text":
+        promptInput.value = request.text ?? "";
+        appendLog("Extension updated the mobile prompt draft.");
+        return;
+      case "setStatus":
+        if (request.statusText) appendLog(`[${message.sessionId}] ${request.statusText}`);
+        return;
+      case "setWidget":
+        appendLog("Extension widget update received. Mobile shell does not display extension widgets yet.");
+        return;
+      case "setTitle":
+        return;
+      default:
+        enqueueMobileDialog(request);
+    }
+  }
+
+  function enqueueMobileDialog(request: ExtensionDialogRequest): void {
+    if (activeDialog) {
+      dialogQueue.push(request);
+      appendLog(`Queued dialog request: ${request.title}`);
+      return;
+    }
+    activeDialog = request;
+    renderMobileDialog();
+  }
+
+  function cancelMobileDialog(targetId: string | undefined): void {
+    if (!targetId) return;
+    if (activeDialog?.id === targetId) {
+      activeDialog = null;
+      showNextMobileDialog();
+      return;
+    }
+    const queuedIndex = dialogQueue.findIndex(request => request.id === targetId);
+    if (queuedIndex >= 0) dialogQueue.splice(queuedIndex, 1);
+  }
+
+  function showNextMobileDialog(): void {
+    activeDialog = dialogQueue.shift() ?? null;
+    renderMobileDialog();
+  }
+
+  function submitActiveDialog(): void {
+    if (!activeDialog) return;
+    switch (activeDialog.method) {
+      case "confirm":
+        respondToActiveDialog({ confirmed: true });
+        return;
+      case "select": {
+        const select = dialogField.querySelector<HTMLSelectElement>("select[data-dialog-value]");
+        if (!select || select.selectedIndex < 0) {
+          dialogStatus.textContent = "Choose an option or cancel the request.";
+          return;
+        }
+        respondToActiveDialog({ value: select.value });
+        return;
+      }
+      case "input":
+      case "editor": {
+        const input = dialogField.querySelector<HTMLInputElement | HTMLTextAreaElement>("[data-dialog-value]");
+        respondToActiveDialog({ value: input?.value ?? "" });
+        return;
+      }
+      default:
+        respondToActiveDialog({ cancelled: true });
+    }
+  }
+
+  function respondToActiveDialog(response: Record<string, unknown>): void {
+    if (!activeDialog) return;
+    const accepted = send({
+      type: "dialog.respond",
+      sessionId: activeDialog.sessionId,
+      dialogId: activeDialog.id,
+      response,
+    });
+    if (!accepted) {
+      dialogStatus.textContent = "Not connected to the Fura bridge.";
+      return;
+    }
+    showNextMobileDialog();
+  }
+
+  function renderMobileDialog(): void {
+    dialogOverlay.hidden = !activeDialog;
+    dialogBody.replaceChildren();
+    dialogField.replaceChildren();
+    dialogStatus.textContent = "";
+    dialogSubmit.hidden = false;
+    dialogSubmit.disabled = false;
+    dialogCancel.textContent = "Cancel";
+
+    if (!activeDialog) {
+      dialogTitle.textContent = "";
+      return;
+    }
+
+    dialogTitle.textContent = activeDialog.title;
+    const bodyText = extensionDialogBodyText(activeDialog);
+    if (bodyText) {
+      const paragraph = dialogBody.ownerDocument.createElement("p");
+      paragraph.textContent = bodyText;
+      dialogBody.append(paragraph);
+    }
+
+    if (activeDialog.timeoutMs !== undefined) {
+      dialogStatus.textContent = `Extension timeout: ${Math.ceil(activeDialog.timeoutMs / 1000)}s.`;
+    }
+
+    switch (activeDialog.method) {
+      case "confirm":
+        dialogSubmit.textContent = "Confirm";
+        break;
+      case "select":
+        renderMobileDialogSelect(activeDialog);
+        dialogSubmit.textContent = "Select";
+        break;
+      case "input":
+        renderMobileDialogInput(activeDialog);
+        dialogSubmit.textContent = "Submit";
+        break;
+      case "editor":
+        renderMobileDialogEditor(activeDialog);
+        dialogSubmit.textContent = "Submit";
+        break;
+      default:
+        dialogSubmit.hidden = true;
+        dialogCancel.textContent = "Dismiss";
+        if (!bodyText) {
+          const paragraph = dialogBody.ownerDocument.createElement("p");
+          paragraph.textContent = `Unsupported extension dialog method: ${activeDialog.method}.`;
+          dialogBody.append(paragraph);
+        }
+        break;
+    }
+
+    window.setTimeout(() => {
+      const target = dialogField.querySelector<HTMLElement>("[data-dialog-value]") ?? dialogSubmit;
+      target.focus();
+    }, 0);
+  }
+
+  function renderMobileDialogSelect(request: ExtensionDialogRequest): void {
+    const label = dialogField.ownerDocument.createElement("label");
+    label.textContent = "Choice";
+    const select = dialogField.ownerDocument.createElement("select");
+    select.dataset.dialogValue = "true";
+    for (const option of request.options ?? []) {
+      const optionElement = dialogField.ownerDocument.createElement("option");
+      optionElement.value = option;
+      optionElement.textContent = option;
+      select.append(optionElement);
+    }
+    if (!select.options.length) {
+      select.disabled = true;
+      dialogSubmit.disabled = true;
+      dialogStatus.textContent = "No options were provided for this dialog.";
+    }
+    label.append(select);
+    dialogField.append(label);
+  }
+
+  function renderMobileDialogInput(request: ExtensionDialogRequest): void {
+    const label = dialogField.ownerDocument.createElement("label");
+    label.textContent = "Response";
+    const input = dialogField.ownerDocument.createElement("input");
+    input.dataset.dialogValue = "true";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    if (request.placeholder) input.placeholder = request.placeholder;
+    label.append(input);
+    dialogField.append(label);
+  }
+
+  function renderMobileDialogEditor(request: ExtensionDialogRequest): void {
+    const label = dialogField.ownerDocument.createElement("label");
+    label.textContent = "Response";
+    const textarea = dialogField.ownerDocument.createElement("textarea");
+    textarea.dataset.dialogValue = "true";
+    textarea.rows = request.promptStyle ? 6 : 10;
+    textarea.value = request.prefill ?? "";
+    label.append(textarea);
+    dialogField.append(label);
   }
 
   function createPendingImageMarker(): string {
@@ -679,6 +920,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         if (handleCreateError(message.requestId ?? null, message.message)) break;
         break;
       case "dialog.request":
+        handleDialogRequest(message);
+        break;
       case "model.list":
       case "model.changed":
       case "plan.review":

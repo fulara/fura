@@ -93,13 +93,21 @@ pub(crate) async fn handle_client_message(
             response,
         } => {
             info!(action = "dialog.respond", session_id = %session_id, dialog_id = %dialog_id);
-            let command = serde_json::json!({
-                "id": next_rpc_id(),
-                "type": "extension_ui_response",
-                "requestId": dialog_id,
-                "response": response,
-            });
-            match send_rpc_command(state, &session_id, command).await {
+            let mut command = match response {
+                Value::Object(response) => response,
+                _ => {
+                    return vec![ServerMessage::Error {
+                        request_id: None,
+                        message: "dialog response must be a JSON object".to_string(),
+                    }];
+                }
+            };
+            command.insert("id".to_string(), Value::String(dialog_id));
+            command.insert(
+                "type".to_string(),
+                Value::String("extension_ui_response".to_string()),
+            );
+            match send_rpc_command(state, &session_id, Value::Object(command)).await {
                 Ok(()) => Vec::new(),
                 Err(message) => vec![ServerMessage::Error {
                     request_id: None,

@@ -62,6 +62,12 @@ import {
   hideCategoryCombobox,
   type CategoryCombobox,
 } from "./categoryCombobox";
+import {
+  extensionDialogBodyText,
+  formatExtensionDialogNotification,
+  parseExtensionDialogRequest,
+  type ExtensionDialogRequest,
+} from "./extensionDialog";
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
 import type {
@@ -200,6 +206,30 @@ app.innerHTML = `
           <button id="busyPromptFollowUp" type="button">Follow-up</button>
         </div>
       </footer>
+    </section>
+  </div>
+
+  <div id="extensionDialogOverlay" class="modal-overlay" hidden>
+    <section class="extension-dialog modal-panel" role="dialog" aria-modal="true" aria-labelledby="extensionDialogTitle" aria-describedby="extensionDialogBody">
+      <header class="modal-header">
+        <div>
+          <h2 id="extensionDialogTitle">Extension request</h2>
+          <p id="extensionDialogSubtitle">Respond to the active OMP extension request.</p>
+        </div>
+        <button id="extensionDialogClose" class="modal-close" type="button" aria-label="Cancel extension dialog">×</button>
+      </header>
+      <div id="extensionDialogBody" class="extension-dialog-body"></div>
+      <form id="extensionDialogForm" class="extension-dialog-form">
+        <div id="extensionDialogField" class="extension-dialog-field"></div>
+        <p id="extensionDialogStatus" class="extension-dialog-status" aria-live="polite"></p>
+        <footer class="modal-footer">
+          <span id="extensionDialogQueue" class="extension-dialog-queue"></span>
+          <div class="modal-actions">
+            <button id="extensionDialogCancel" type="button">Cancel</button>
+            <button id="extensionDialogSubmit" type="submit">Submit</button>
+          </div>
+        </footer>
+      </form>
     </section>
   </div>
 
@@ -393,6 +423,17 @@ const busyPromptAttachmentNote = requireElement<HTMLParagraphElement>("busyPromp
 const busyPromptCancel = requireElement<HTMLButtonElement>("busyPromptCancel");
 const busyPromptSteer = requireElement<HTMLButtonElement>("busyPromptSteer");
 const busyPromptFollowUp = requireElement<HTMLButtonElement>("busyPromptFollowUp");
+const extensionDialogOverlay = requireElement<HTMLDivElement>("extensionDialogOverlay");
+const extensionDialogTitle = requireElement<HTMLHeadingElement>("extensionDialogTitle");
+const extensionDialogSubtitle = requireElement<HTMLParagraphElement>("extensionDialogSubtitle");
+const extensionDialogClose = requireElement<HTMLButtonElement>("extensionDialogClose");
+const extensionDialogBody = requireElement<HTMLDivElement>("extensionDialogBody");
+const extensionDialogForm = requireElement<HTMLFormElement>("extensionDialogForm");
+const extensionDialogField = requireElement<HTMLDivElement>("extensionDialogField");
+const extensionDialogStatus = requireElement<HTMLParagraphElement>("extensionDialogStatus");
+const extensionDialogQueue = requireElement<HTMLSpanElement>("extensionDialogQueue");
+const extensionDialogCancel = requireElement<HTMLButtonElement>("extensionDialogCancel");
+const extensionDialogSubmit = requireElement<HTMLButtonElement>("extensionDialogSubmit");
 const voiceButton = requireElement<HTMLButtonElement>("voiceButton");
 const voiceStatus = requireElement<HTMLSpanElement>("voiceStatus");
 const sendButton = requireElement<HTMLButtonElement>("sendButton");
@@ -492,6 +533,8 @@ let cwdPickerBaseBranchAutofill = true;
 let lastAutofilledWorktreeDirectory = "";
 let lastAutofilledWorktreeBranch = "";
 const unreadSessions = new Set<string>();
+let activeExtensionDialog: ExtensionDialogRequest | null = null;
+const queuedExtensionDialogs: ExtensionDialogRequest[] = [];
 let sessions: SessionSummary[] = [];
 let workspaceMode: WorkspaceMode = "session";
 let sessionPromptDraft = "";
@@ -658,6 +701,18 @@ busyPromptOverlay.addEventListener("mousedown", event => {
 });
 busyPromptOverlay.addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); restoreBusyPromptDraft(); }
+});
+extensionDialogForm.addEventListener("submit", event => {
+  event.preventDefault();
+  submitActiveExtensionDialog();
+});
+extensionDialogClose.addEventListener("click", () => respondToActiveExtensionDialog({ cancelled: true }));
+extensionDialogCancel.addEventListener("click", () => respondToActiveExtensionDialog({ cancelled: true }));
+extensionDialogOverlay.addEventListener("mousedown", event => {
+  if (event.target === extensionDialogOverlay) respondToActiveExtensionDialog({ cancelled: true });
+});
+extensionDialogOverlay.addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); respondToActiveExtensionDialog({ cancelled: true }); }
 });
 deleteSessionButton.addEventListener("click", () => {
   if (activeSessionId) openDeleteSessionPicker(activeSessionId);
@@ -1081,7 +1136,7 @@ function handleServerMessage(message: ServerMessage): void {
       render();
       break;
     case "dialog.request":
-      appendLog(`Dialog request for ${message.sessionId}: ${JSON.stringify(message.dialog)}`);
+      handleExtensionDialogRequest(message);
       break;
     case "log.stderr":
       appendLog(`[${message.sessionId}] ${message.text}`);
@@ -1314,6 +1369,223 @@ function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" 
     renderSessions();
   }
 }
+
+function persistPromptDraftForWorkspace(): void {
+  if (workspaceMode === "controller") controllerPromptDraft = promptInput.value;
+  else sessionPromptDraft = promptInput.value;
+  resetPromptHistoryNavigation();
+  updatePalette();
+}
+
+
+function handleExtensionDialogRequest(message: Extract<ServerMessage, { type: "dialog.request" }>): void {
+  const request = parseExtensionDialogRequest(message.sessionId, message.dialog);
+  if (!request) {
+    appendLog(`[${message.sessionId}] ignored malformed dialog request.`);
+    return;
+  }
+
+  switch (request.method) {
+    case "cancel":
+      cancelExtensionDialog(request.targetId);
+      return;
+    case "notify":
+      appendLog(formatExtensionDialogNotification(request));
+      return;
+    case "set_editor_text":
+      promptInput.value = request.text ?? "";
+      persistPromptDraftForWorkspace();
+      appendLog("Extension updated the prompt draft.");
+      return;
+    case "setStatus":
+      if (request.statusText) appendLog(`[${message.sessionId}] ${request.statusText}`);
+      return;
+    case "setWidget":
+      appendLog("Extension widget update received. Desktop Fura does not display extension widgets yet.");
+      return;
+    case "setTitle":
+      return;
+    default:
+      enqueueExtensionDialog(request);
+  }
+}
+
+function enqueueExtensionDialog(request: ExtensionDialogRequest): void {
+  if (activeExtensionDialog) {
+    queuedExtensionDialogs.push(request);
+    appendLog(`Queued dialog request: ${request.title}`);
+    renderExtensionDialog();
+    return;
+  }
+  activeExtensionDialog = request;
+  renderExtensionDialog();
+}
+
+function cancelExtensionDialog(targetId: string | undefined): void {
+  if (!targetId) return;
+  if (activeExtensionDialog?.id === targetId) {
+    activeExtensionDialog = null;
+    showNextExtensionDialog();
+    return;
+  }
+  const queuedIndex = queuedExtensionDialogs.findIndex(request => request.id === targetId);
+  if (queuedIndex >= 0) {
+    queuedExtensionDialogs.splice(queuedIndex, 1);
+    renderExtensionDialog();
+  }
+}
+
+function showNextExtensionDialog(): void {
+  activeExtensionDialog = queuedExtensionDialogs.shift() ?? null;
+  renderExtensionDialog();
+}
+
+function submitActiveExtensionDialog(): void {
+  if (!activeExtensionDialog) return;
+  switch (activeExtensionDialog.method) {
+    case "confirm":
+      respondToActiveExtensionDialog({ confirmed: true });
+      return;
+    case "select": {
+      const select = extensionDialogField.querySelector<HTMLSelectElement>("select[data-dialog-value]");
+      if (!select || select.selectedIndex < 0) {
+        extensionDialogStatus.textContent = "Choose an option or cancel the request.";
+        return;
+      }
+      respondToActiveExtensionDialog({ value: select.value });
+      return;
+    }
+    case "input":
+    case "editor": {
+      const input = extensionDialogField.querySelector<HTMLInputElement | HTMLTextAreaElement>("[data-dialog-value]");
+      respondToActiveExtensionDialog({ value: input?.value ?? "" });
+      return;
+    }
+    default:
+      respondToActiveExtensionDialog({ cancelled: true });
+  }
+}
+
+function respondToActiveExtensionDialog(response: Record<string, unknown>): void {
+  if (!activeExtensionDialog) return;
+  const accepted = send({
+    type: "dialog.respond",
+    sessionId: activeExtensionDialog.sessionId,
+    dialogId: activeExtensionDialog.id,
+    response,
+  });
+  if (!accepted) {
+    extensionDialogStatus.textContent = "Not connected to the Fura bridge.";
+    return;
+  }
+  showNextExtensionDialog();
+}
+
+function renderExtensionDialog(): void {
+  extensionDialogOverlay.hidden = !activeExtensionDialog;
+  extensionDialogBody.replaceChildren();
+  extensionDialogField.replaceChildren();
+  extensionDialogStatus.textContent = "";
+  extensionDialogSubmit.hidden = false;
+  extensionDialogSubmit.disabled = false;
+  extensionDialogSubmit.textContent = "Submit";
+  extensionDialogCancel.textContent = "Cancel";
+  extensionDialogSubtitle.textContent = "Respond to the active OMP extension request.";
+  extensionDialogQueue.textContent = queuedExtensionDialogs.length > 0
+    ? `${queuedExtensionDialogs.length} queued`
+    : "";
+
+  if (!activeExtensionDialog) {
+    extensionDialogTitle.textContent = "Extension request";
+    return;
+  }
+
+  extensionDialogTitle.textContent = activeExtensionDialog.title;
+  const bodyText = extensionDialogBodyText(activeExtensionDialog);
+  if (bodyText) {
+    const paragraph = mkEl("p");
+    paragraph.textContent = bodyText;
+    extensionDialogBody.append(paragraph);
+  }
+
+  if (activeExtensionDialog.timeoutMs !== undefined) {
+    extensionDialogStatus.textContent = `Extension timeout: ${Math.ceil(activeExtensionDialog.timeoutMs / 1000)}s.`;
+  }
+
+  switch (activeExtensionDialog.method) {
+    case "confirm":
+      extensionDialogSubmit.textContent = "Confirm";
+      break;
+    case "select":
+      renderExtensionDialogSelect(activeExtensionDialog);
+      extensionDialogSubmit.textContent = "Select";
+      break;
+    case "input":
+      renderExtensionDialogInput(activeExtensionDialog);
+      break;
+    case "editor":
+      renderExtensionDialogEditor(activeExtensionDialog);
+      break;
+    default:
+      extensionDialogSubmit.hidden = true;
+      extensionDialogCancel.textContent = "Dismiss";
+      if (!bodyText) {
+        const paragraph = mkEl("p");
+        paragraph.textContent = `Unsupported extension dialog method: ${activeExtensionDialog.method}.`;
+        extensionDialogBody.append(paragraph);
+      }
+      break;
+  }
+
+  window.setTimeout(() => {
+    const target = extensionDialogField.querySelector<HTMLElement>("[data-dialog-value]") ?? extensionDialogSubmit;
+    target.focus();
+  }, 0);
+}
+
+function renderExtensionDialogSelect(request: ExtensionDialogRequest): void {
+  const label = mkEl("label");
+  label.textContent = "Choice";
+  const select = document.createElement("select");
+  select.dataset.dialogValue = "true";
+  for (const option of request.options ?? []) {
+    const optionElement = document.createElement("option");
+    optionElement.value = option;
+    optionElement.textContent = option;
+    select.append(optionElement);
+  }
+  if (!select.options.length) {
+    select.disabled = true;
+    extensionDialogSubmit.disabled = true;
+    extensionDialogStatus.textContent = "No options were provided for this dialog.";
+  }
+  label.append(select);
+  extensionDialogField.append(label);
+}
+
+function renderExtensionDialogInput(request: ExtensionDialogRequest): void {
+  const label = mkEl("label");
+  label.textContent = "Response";
+  const input = document.createElement("input");
+  input.dataset.dialogValue = "true";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  if (request.placeholder) input.placeholder = request.placeholder;
+  label.append(input);
+  extensionDialogField.append(label);
+}
+
+function renderExtensionDialogEditor(request: ExtensionDialogRequest): void {
+  const label = mkEl("label");
+  label.textContent = "Response";
+  const textarea = document.createElement("textarea");
+  textarea.dataset.dialogValue = "true";
+  textarea.rows = request.promptStyle ? 6 : 12;
+  textarea.value = request.prefill ?? "";
+  label.append(textarea);
+  extensionDialogField.append(label);
+}
+
 
 function sendPromptMessage(
   sessionId: string,

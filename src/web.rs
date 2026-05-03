@@ -300,6 +300,13 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             code = ?code,
             signal = ?signal
         ),
+        ServerMessage::DialogRequest { session_id, dialog } => info!(
+            direction = "bridge_to_client",
+            message_type = "dialog.request",
+            session_id = %session_id,
+            dialog_id = dialog.get("id").and_then(|value| value.as_str()).unwrap_or("unknown"),
+            method = dialog.get("method").and_then(|value| value.as_str()).unwrap_or("unknown")
+        ),
         ServerMessage::LogStderr { session_id, text } => info!(
             direction = "bridge_to_client",
             message_type = "log.stderr",

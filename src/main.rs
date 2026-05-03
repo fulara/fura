@@ -960,6 +960,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn extension_ui_request_event_emits_dialog_request() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("transport-1".to_string(), "s1".to_string());
+        let mut events = state.events.subscribe();
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "extension_ui_request",
+                "id": "dialog-1",
+                "method": "confirm",
+                "title": "Continue?",
+                "message": "Approve the operation?",
+                "timeout": 30000
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("dialog request event") {
+            ServerMessage::DialogRequest { session_id, dialog } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(dialog["id"], "dialog-1");
+                assert_eq!(dialog["method"], "confirm");
+                assert_eq!(dialog["title"], "Continue?");
+                assert_eq!(dialog["message"], "Approve the operation?");
+                assert_eq!(dialog["timeout"], 30000);
+                assert!(dialog.get("type").is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn exit_plan_mode_tool_end_does_not_request_preview() {
         let state = test_state(8, None);
         state
@@ -1051,10 +1094,21 @@ mod tests {
 
         let first = commands.recv().await.expect("first refresh command");
         let second = commands.recv().await.expect("second refresh command");
-        assert_eq!(first.get("type").and_then(|value| value.as_str()), Some("get_messages"));
-        assert_eq!(second.get("type").and_then(|value| value.as_str()), Some("get_session_stats"));
         assert_eq!(
-            state.rpc_session_targets.read().await.get("transport-1").map(String::as_str),
+            first.get("type").and_then(|value| value.as_str()),
+            Some("get_messages")
+        );
+        assert_eq!(
+            second.get("type").and_then(|value| value.as_str()),
+            Some("get_session_stats")
+        );
+        assert_eq!(
+            state
+                .rpc_session_targets
+                .read()
+                .await
+                .get("transport-1")
+                .map(String::as_str),
             Some("real-s1")
         );
     }
@@ -1520,6 +1574,64 @@ mod tests {
                     message.starts_with("worktree creation failed:"),
                     "unexpected message: {message}"
                 );
+            }
+            other => panic!("unexpected responses: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn dialog_respond_sends_rpc_extension_ui_response() {
+        let state = test_state(8, None);
+        let (stdin, mut commands) = mpsc::channel(4);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::DialogRespond {
+                session_id: "s1".to_string(),
+                dialog_id: "dialog-1".to_string(),
+                response: serde_json::json!({ "confirmed": true }),
+            },
+        )
+        .await;
+
+        assert!(responses.is_empty());
+        let command = commands.recv().await.expect("dialog response command sent");
+        assert_eq!(
+            command.get("type").and_then(Value::as_str),
+            Some("extension_ui_response")
+        );
+        assert_eq!(command.get("id").and_then(Value::as_str), Some("dialog-1"));
+        assert_eq!(
+            command.get("confirmed").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(command.get("requestId").is_none());
+        assert!(command.get("response").is_none());
+    }
+
+    #[tokio::test]
+    async fn dialog_respond_rejects_non_object_response() {
+        let state = test_state(8, None);
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::DialogRespond {
+                session_id: "s1".to_string(),
+                dialog_id: "dialog-1".to_string(),
+                response: Value::String("yes".to_string()),
+            },
+        )
+        .await;
+
+        match responses.as_slice() {
+            [ServerMessage::Error { message, .. }] => {
+                assert_eq!(message, "dialog response must be a JSON object");
             }
             other => panic!("unexpected responses: {other:?}"),
         }
@@ -2709,11 +2821,10 @@ mod tests {
         let state = test_state(8, None);
         let (stdin, _commands) = mpsc::channel(1);
         let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("transport-live".to_string(), RpcSessionHandle { stdin, stop });
+        state.rpc_sessions.write().await.insert(
+            "transport-live".to_string(),
+            RpcSessionHandle { stdin, stop },
+        );
         state
             .rpc_session_targets
             .write()
