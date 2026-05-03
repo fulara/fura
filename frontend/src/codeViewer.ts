@@ -1,12 +1,13 @@
+import hljs from "highlight.js/lib/common";
 import { setRenderDocument, mkEl } from "./dom";
-import { renderCodeBlock } from "./transcriptView";
-import type { CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary } from "./protocol";
+import type { CodeFileComment } from "./codeComments";
+import type { CodeFileContent, CodeWorkspaceSummary } from "./protocol";
 
 export type CodeViewerState = {
   activeSessionId: string | null;
   workspace: CodeWorkspaceSummary | null;
   treePath: string;
-  entries: CodeTreeEntry[];
+  entries: Array<{ name: string; path: string; kind: "directory" | "file"; size?: number | null }>;
   file: CodeFileContent | null;
   loadingWorkspace: boolean;
   loadingTree: boolean;
@@ -15,9 +16,10 @@ export type CodeViewerState = {
   searchOpen: boolean;
   searchBasePath: string;
   searchQuery: string;
-  searchResults: CodeTreeEntry[];
+  searchResults: Array<{ name: string; path: string; kind: "directory" | "file"; size?: number | null }>;
   searchLoading: boolean;
   searchError: string | null;
+  fileComments: CodeFileComment[];
 };
 
 export type CodeViewerActions = {
@@ -31,6 +33,9 @@ export type CodeViewerActions = {
   updateSearchQuery(query: string): void;
   searchFiles(): void;
   openSearchResult(path: string): void;
+  addComment(lineNumber: number, lineText: string): void;
+  previewComments(): void;
+  flushComments(): void;
 };
 
 export function parentCodePath(path: string): string | null {
@@ -64,7 +69,7 @@ export function renderCodeViewer(
 
   const main = mkEl("main");
   main.className = "code-main";
-  main.append(renderCodeMain(state));
+  main.append(renderCodeMain(state, actions));
 
   root.append(sidebar, main);
   container.append(root);
@@ -180,7 +185,7 @@ function renderCodeTree(state: CodeViewerState, actions: CodeViewerActions): HTM
 }
 
 function renderTreeEntry(
-  entry: CodeTreeEntry,
+  entry: CodeViewerState["entries"][number],
   activePath: string | null,
   actions: CodeViewerActions,
 ): HTMLElement {
@@ -297,7 +302,7 @@ function renderFileSearchDialog(state: CodeViewerState, actions: CodeViewerActio
   return overlay;
 }
 
-function renderCodeMain(state: CodeViewerState): HTMLElement {
+function renderCodeMain(state: CodeViewerState, actions: CodeViewerActions): HTMLElement {
   const view = mkEl("section");
   view.className = "code-file-view";
 
@@ -325,6 +330,21 @@ function renderCodeMain(state: CodeViewerState): HTMLElement {
   meta.textContent = `${state.file.language || "text"} · ${formatCodeFileSize(state.file.size)} · read-only`;
   title.append(path, meta);
 
+  const actionsBar = mkEl("div");
+  actionsBar.className = "code-file-actions";
+
+  const preview = mkEl("button");
+  preview.type = "button";
+  preview.textContent = "Preview comments";
+  preview.disabled = state.fileComments.length === 0;
+  preview.addEventListener("click", actions.previewComments);
+
+  const flush = mkEl("button");
+  flush.type = "button";
+  flush.textContent = `Preview & flush (${state.fileComments.length})`;
+  flush.disabled = state.fileComments.length === 0;
+  flush.addEventListener("click", actions.flushComments);
+
   const copy = mkEl("button");
   copy.type = "button";
   copy.textContent = "Copy";
@@ -334,13 +354,92 @@ function renderCodeMain(state: CodeViewerState): HTMLElement {
     window.setTimeout(() => { copy.textContent = "Copy"; }, 900);
   });
 
-  header.append(title, copy);
+  actionsBar.append(preview, flush, copy);
+  header.append(title, actionsBar);
   view.append(header);
 
-  const codeBlock = renderCodeBlock(state.file.language, state.file.text);
-  codeBlock.classList.add("code-file-block");
-  view.append(codeBlock);
+  const lines = renderCodeLines(state, actions);
+  view.append(lines);
   return view;
+}
+
+function renderCodeLines(state: CodeViewerState, actions: CodeViewerActions): HTMLElement {
+  const container = mkEl("div");
+  container.className = "code-review-lines";
+  const file = state.file;
+  if (!file) return container;
+
+  const lines = codeFileLines(file.text);
+  for (const [index, lineText] of lines.entries()) {
+    const lineNumber = index + 1;
+    const lineComments = state.fileComments.filter(comment => comment.lineNumber === lineNumber && comment.lineText === lineText);
+    const lineWrap = mkEl("div");
+    lineWrap.className = "code-line-wrap";
+
+    const line = mkEl("div");
+    line.className = "code-line";
+
+    const commentBtn = mkEl("button");
+    commentBtn.type = "button";
+    commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
+    commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
+    commentBtn.title = "Comment on this code line";
+    commentBtn.addEventListener("click", () => actions.addComment(lineNumber, lineText));
+
+    const gutter = mkEl("span");
+    gutter.className = "diff-gutter";
+    gutter.textContent = String(lineNumber);
+
+    const content = mkEl("div");
+    content.className = "code-line-content";
+    const codeEl = mkEl("code");
+    const renderText = lineText.length === 0 ? " " : lineText;
+    if (file.language && hljs.getLanguage(file.language)) {
+      codeEl.innerHTML = hljs.highlight(renderText, { language: file.language }).value;
+      codeEl.className = `hljs language-${file.language}`;
+    } else {
+      codeEl.textContent = renderText;
+    }
+    content.append(codeEl);
+
+    line.append(commentBtn, gutter, content);
+    lineWrap.append(line);
+
+    if (lineComments.length > 0) {
+      const thread = mkEl("div");
+      thread.className = "diff-inline-comments code-inline-comments";
+      for (const comment of lineComments) {
+        const item = mkEl("div");
+        item.className = "diff-inline-comment";
+        item.textContent = comment.text;
+        thread.append(item);
+      }
+      lineWrap.append(thread);
+    }
+
+    container.append(lineWrap);
+  }
+
+  if (state.fileComments.length > 0) {
+    const commentsPanel = mkEl("section");
+    commentsPanel.className = "diff-comments code-comments";
+    const title = mkEl("strong");
+    title.textContent = "Comments";
+    commentsPanel.append(title);
+    for (const comment of state.fileComments) {
+      const item = mkEl("article");
+      item.className = "diff-comment";
+      const loc = mkEl("code");
+      loc.textContent = `${comment.path}:${comment.lineNumber}`;
+      const body = mkEl("p");
+      body.textContent = comment.text;
+      item.append(loc, body);
+      commentsPanel.append(item);
+    }
+    container.append(commentsPanel);
+  }
+
+  return container;
 }
 
 function renderEmptyMain(text: string): HTMLElement {
@@ -355,6 +454,12 @@ function renderSearchEmpty(text: string): HTMLElement {
   empty.className = "code-empty";
   empty.textContent = text;
   return empty;
+}
+
+function codeFileLines(text: string): string[] {
+  const parts = text.split("\n");
+  if (parts.length > 0 && parts[parts.length - 1] === "") parts.pop();
+  return parts;
 }
 
 function normalizeCodePath(path: string): string {

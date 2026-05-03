@@ -682,19 +682,56 @@ h2 {
   border-bottom: 1px solid #252a35;
 }
 
-.code-file-header > div {
-  min-width: 0;
+.code-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.code-review-lines {
+  min-height: 0;
+  overflow: auto;
   display: grid;
-  gap: 0.25rem;
+  align-content: start;
+  gap: 0.2rem;
+  padding: 0.75rem 1rem 1rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.82rem;
 }
 
-.code-file-header code {
-  color: #eef1f8;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.code-line-wrap {
+  display: grid;
+  gap: 0.2rem;
 }
 
+.code-line {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: start;
+  gap: 0.5rem;
+  padding: 0.2rem 0.4rem;
+  border-radius: 0.35rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.code-line-content {
+  min-width: 0;
+}
+
+.code-line-content code {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-inline-comments {
+  margin-left: calc(1.5rem + 3.5rem + 0.35rem);
+}
+
+.code-comments {
+  margin-top: 1rem;
+}
 .code-file-block {
   min-height: 0;
   overflow: auto;

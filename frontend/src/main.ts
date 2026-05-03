@@ -65,6 +65,16 @@ import {
   type DiffPreviewDraft,
 } from "./diffComments";
 import {
+  buildCodeCommentPrompt,
+  codeCommentFlushEditorText,
+  codeCommentPreviewStatus,
+  createCodeFileComment,
+  removeSelectedCodeComments,
+  selectedCodeComments,
+  type CodeFileComment,
+  type CodePreviewDraft,
+} from "./codeComments";
+import {
   deriveWorktreeCreateView,
   resolveSessionCreateMessage,
   type SessionCreateValidationTarget,
@@ -546,6 +556,7 @@ type TranscriptPreviewDraft = {
   message: TranscriptMessage;
   comments: TranscriptReviewComment[];
 };
+type SessionCodeComments = Map<string, CodeFileComment[]>;
 type SessionNotice = { level: string; text: string };
 type ControlChatMessage = {
   role: "user" | "assistant" | "system";
@@ -605,6 +616,7 @@ const diffSelectedRepos = new Map<string, string>();
 const diffSelectedSnapshots = new Map<string, string>();
 const diffSelectedHeads = new Map<string, string | null>();
 const diffComments = new Map<string, DiffComment[]>();
+const codeComments = new Map<string, SessionCodeComments>();
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
@@ -613,6 +625,7 @@ let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
+let codePreviewDraft: CodePreviewDraft | null = null;
 let transcriptPreviewDraft: TranscriptPreviewDraft | null = null;
 const transcriptReviewActiveMessages = new Map<string, string>();
 const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
@@ -2359,6 +2372,7 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeSearchResults = [];
   codeSearchLoading = false;
   codeSearchError = null;
+  codePreviewDraft = null;
   clearPendingCodeSearchRequest();
   markCodeViewDirty();
 }
@@ -2380,6 +2394,9 @@ function activeCodeViewState(): CodeViewerState {
     searchResults: codeSearchResults,
     searchLoading: codeSearchLoading,
     searchError: codeSearchError,
+    fileComments: workspaceMode === "session" && activeSessionId && codeFile
+      ? (codeComments.get(activeSessionId)?.get(codeFile.path) ?? [])
+      : [],
   };
 }
 
@@ -2472,6 +2489,73 @@ function submitCodeSearch(): void {
     query: codeSearchQuery,
     limit: 100,
   });
+}
+
+function sessionCodeComments(sessionId: string): SessionCodeComments {
+  const existing = codeComments.get(sessionId);
+  if (existing) return existing;
+  const created: SessionCodeComments = new Map();
+  codeComments.set(sessionId, created);
+  return created;
+}
+
+function addCodeComment(
+  sessionId: string,
+  file: CodeFileContent,
+  lineNumber: number,
+  lineText: string,
+): void {
+  const comment = window.prompt("Comment on this code line");
+  if (!comment?.trim()) return;
+  const commentsByFile = sessionCodeComments(sessionId);
+  const existing = commentsByFile.get(file.path) ?? [];
+  existing.push(createCodeFileComment({
+    id: `${Date.now()}-${existing.length}`,
+    file,
+    lineNumber,
+    lineText,
+    text: comment,
+  }));
+  commentsByFile.set(file.path, existing);
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function sendCodeComments(sessionId: string, file: CodeFileContent, comments: CodeFileComment[]): void {
+  if (comments.length === 0) return;
+  const clearFlushedComments = () => {
+    const commentsByFile = sessionCodeComments(sessionId);
+    commentsByFile.set(file.path, removeSelectedCodeComments(commentsByFile.get(file.path) ?? [], file.path));
+    markCodeViewDirty();
+    renderCodePanelIfNeeded(true);
+  };
+  sendPromptWithBusyHandling({
+    sessionId,
+    text: buildCodeCommentPrompt(file, comments),
+    editorText: codeCommentFlushEditorText(comments.length),
+    images: [],
+    onSend: clearFlushedComments,
+  });
+}
+
+function previewCodeComments(sessionId: string, file: CodeFileContent): void {
+  const comments = selectedCodeComments(sessionCodeComments(sessionId).get(file.path) ?? [], file.path);
+  if (comments.length === 0) return;
+  codePreviewDraft = { sessionId, file, comments };
+  diffPreviewDraft = null;
+  transcriptPreviewDraft = null;
+  diffPreviewTitle.textContent = "Preview code comments";
+  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewSend.textContent = "Send comments";
+  diffPreviewText.value = buildCodeCommentPrompt(file, comments);
+  diffPreviewStatus.textContent = codeCommentPreviewStatus(comments.length);
+  diffPreviewOverlay.hidden = false;
+  diffPreviewText.scrollTop = 0;
+  diffPreviewSend.focus();
+}
+
+function flushCodeComments(sessionId: string, file: CodeFileContent): void {
+  previewCodeComments(sessionId, file);
 }
 
 function openSearchResultInCode(path: string): void {
@@ -2571,6 +2655,21 @@ function renderCodePanelIfNeeded(force = false): void {
       },
       searchFiles: submitCodeSearch,
       openSearchResult: openSearchResultInCode,
+      addComment: (lineNumber, lineText) => {
+        if (workspaceMode === "session" && activeSessionId && codeFile) {
+          addCodeComment(activeSessionId, codeFile, lineNumber, lineText);
+        }
+      },
+      previewComments: () => {
+        if (workspaceMode === "session" && activeSessionId && codeFile) {
+          previewCodeComments(activeSessionId, codeFile);
+        }
+      },
+      flushComments: () => {
+        if (workspaceMode === "session" && activeSessionId && codeFile) {
+          flushCodeComments(activeSessionId, codeFile);
+        }
+      },
     });
   });
   if (!rendered) return;
@@ -3064,6 +3163,7 @@ function flushTranscriptReviewComments(sessionId: string, message: TranscriptMes
   if (comments.length === 0) return;
   transcriptPreviewDraft = { sessionId, message, comments };
   diffPreviewDraft = null;
+  codePreviewDraft = null;
   diffPreviewTitle.textContent = "Preview transcript comments";
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewText.value = buildTranscriptReviewPrompt(message, comments);
@@ -3165,6 +3265,7 @@ function previewDiffComments(
   if (comments.length === 0) return;
   diffPreviewDraft = { sessionId, state, baseSnapshot, headSnapshot, comments };
   transcriptPreviewDraft = null;
+  codePreviewDraft = null;
   diffPreviewTitle.textContent = "Preview diff comments";
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewSend.textContent = "Send comments";
@@ -3183,15 +3284,21 @@ function closeDiffPreview(): void {
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewSend.textContent = "Send comments";
   diffPreviewDraft = null;
+  codePreviewDraft = null;
   transcriptPreviewDraft = null;
 }
 
 function sendPromptPreviewDraft(): void {
   const diffDraft = diffPreviewDraft;
+  const codeDraft = codePreviewDraft;
   const transcriptDraft = transcriptPreviewDraft;
   closeDiffPreview();
   if (diffDraft) {
     sendDiffComments(diffDraft.sessionId, diffDraft.state, diffDraft.baseSnapshot, diffDraft.headSnapshot, diffDraft.comments);
+    return;
+  }
+  if (codeDraft) {
+    sendCodeComments(codeDraft.sessionId, codeDraft.file, codeDraft.comments);
     return;
   }
   if (transcriptDraft) {

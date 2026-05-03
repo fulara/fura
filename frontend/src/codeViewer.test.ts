@@ -24,6 +24,7 @@ function baseState(overrides: Partial<CodeViewerState> = {}): CodeViewerState {
     searchResults: [],
     searchLoading: false,
     searchError: null,
+    fileComments: [],
     ...overrides,
   };
 }
@@ -40,6 +41,9 @@ function baseActions(overrides = {}) {
     updateSearchQuery: vi.fn(),
     searchFiles: vi.fn(),
     openSearchResult: vi.fn(),
+    addComment: vi.fn(),
+    previewComments: vi.fn(),
+    flushComments: vi.fn(),
     ...overrides,
   };
 }
@@ -106,8 +110,11 @@ describe("code viewer", () => {
     expect(refreshTree).toHaveBeenCalledOnce();
   });
 
-  it("renders an active read-only file", () => {
+  it("renders an active read-only file with comment actions", () => {
     const container = document.createElement("div");
+    const addComment = vi.fn();
+    const previewComments = vi.fn();
+    const flushComments = vi.fn();
 
     renderCodeViewer(
       container,
@@ -119,19 +126,30 @@ describe("code viewer", () => {
           size: 13,
           version: 1,
         },
+        fileComments: [{ id: "c1", path: "src/main.rs", lineNumber: 1, lineText: "fn main() {}", text: "comment" }],
       }),
-      baseActions(),
+      baseActions({ addComment, previewComments, flushComments }),
     );
 
     expect(container.querySelector(".code-file-header code")?.textContent).toBe("src/main.rs");
     expect(container.querySelector(".code-file-header span")?.textContent).toContain("read-only");
     expect(container.textContent).toContain("fn main");
+
+    container.querySelector<HTMLButtonElement>(".diff-comment-btn")?.click();
+    container.querySelectorAll<HTMLButtonElement>(".code-file-actions button")[0]?.click();
+    container.querySelectorAll<HTMLButtonElement>(".code-file-actions button")[1]?.click();
+
+    expect(addComment).toHaveBeenCalledWith(1, "fn main() {}");
+    expect(previewComments).toHaveBeenCalledOnce();
+    expect(flushComments).toHaveBeenCalledOnce();
   });
 
   it("renders file search dialog and routes search actions", () => {
     const container = document.createElement("div");
     const searchFiles = vi.fn();
     const openSearchResult = vi.fn();
+    const updateSearchBasePath = vi.fn();
+    const updateSearchQuery = vi.fn();
 
     renderCodeViewer(
       container,
@@ -140,17 +158,19 @@ describe("code viewer", () => {
         searchQuery: "main",
         searchResults: [{ kind: "file", name: "main.rs", path: "src/main.rs", size: 12 }],
       }),
-      baseActions({ searchFiles, openSearchResult }),
+      baseActions({ searchFiles, openSearchResult, updateSearchBasePath, updateSearchQuery }),
     );
 
-    container.querySelector<HTMLFormElement>(".code-search-form")?.requestSubmit();
     container.querySelector<HTMLInputElement>("#codeSearchBasePath")!.value = "/repo/src";
     container.querySelector<HTMLInputElement>("#codeSearchBasePath")!.dispatchEvent(new Event("input"));
     container.querySelector<HTMLInputElement>("#codeSearchQuery")!.value = "lib";
     container.querySelector<HTMLInputElement>("#codeSearchQuery")!.dispatchEvent(new Event("input"));
+    container.querySelector<HTMLFormElement>(".code-search-form")?.requestSubmit();
     container.querySelector<HTMLButtonElement>(".code-search-result")?.click();
 
     expect(container.querySelector(".code-search-dialog")?.textContent).toContain("Search files");
+    expect(updateSearchBasePath).toHaveBeenCalledWith("/repo/src");
+    expect(updateSearchQuery).toHaveBeenCalledWith("lib");
     expect(searchFiles).toHaveBeenCalledOnce();
     expect(openSearchResult).toHaveBeenCalledWith("src/main.rs");
   });
