@@ -595,6 +595,12 @@ h2 {
   border-bottom: 1px solid #1f2530;
 }
 
+.code-tree-actions {
+  display: flex;
+  gap: 0.35rem;
+  flex: 0 0 auto;
+}
+
 .code-tree-toolbar code {
   min-width: 0;
   color: #c7cedc;
@@ -751,7 +757,15 @@ h2 {
 
 .diffs-file-item {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 0.35rem;
+}
+
+.diffs-file-jump {
+  display: grid;
   gap: 0.15rem;
+  min-width: 0;
   text-align: left;
   padding: 0.55rem 0.65rem;
   border-radius: 0.5rem;
@@ -760,9 +774,31 @@ h2 {
   color: #d7dae4;
 }
 
-.diffs-file-item span {
+.diffs-file-code {
+  align-self: stretch;
+  border-radius: 0.5rem;
+  padding: 0 0.55rem;
+  border-color: #343a46;
+  background: #171b24;
+  color: #c7cedc;
+  font-size: 0.78rem;
+}
+
+.diffs-file-code:hover:not(:disabled),
+.diffs-file-jump:hover:not(:disabled) {
+  border-color: #6d7cff;
+  background: #1a1f2a;
+}
+
+.diffs-file-jump span {
   color: #8b95a7;
   font-size: 0.78rem;
+}
+
+.diffs-file-jump code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .diff-compare-select {

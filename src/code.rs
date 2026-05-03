@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow, bail};
+use git2::Repository;
 use serde::Serialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -277,6 +278,8 @@ fn list_tree_entries(root: &Path, requested_path: &str) -> anyhow::Result<Vec<Co
         );
     }
 
+    let repo = Repository::discover(root).ok();
+
     let mut entries = Vec::new();
     for entry in fs::read_dir(&dir)
         .with_context(|| format!("failed to read directory: {}", dir.display()))?
@@ -285,13 +288,13 @@ fn list_tree_entries(root: &Path, requested_path: &str) -> anyhow::Result<Vec<Co
         let file_name = entry.file_name();
         let name = file_name.to_string_lossy().to_string();
         let metadata = entry.metadata()?;
-        if metadata.is_dir() && should_ignore_dir(&name) {
-            continue;
-        }
         let entry_path = entry.path();
         let relative_path = entry_path
             .strip_prefix(root)
             .map_err(|_| anyhow!("directory entry escaped workspace root"))?;
+        if should_ignore_entry(root, relative_path, &name, metadata.is_dir(), repo.as_ref()) {
+            continue;
+        }
         let kind = if metadata.is_dir() {
             CodeTreeEntryKind::Directory
         } else {
@@ -426,6 +429,41 @@ fn should_ignore_dir(name: &str) -> bool {
     IGNORED_DIRS.iter().any(|ignored| name == *ignored)
 }
 
+fn should_ignore_entry(
+    root: &Path,
+    relative_path: &Path,
+    name: &str,
+    is_dir: bool,
+    repo: Option<&Repository>,
+) -> bool {
+    if is_dir && should_ignore_dir(name) {
+        return true;
+    }
+    if is_hidden_name(name) {
+        return true;
+    }
+    is_git_ignored(root, relative_path, repo)
+}
+
+fn is_git_ignored(root: &Path, relative_path: &Path, repo: Option<&Repository>) -> bool {
+    let Some(repo) = repo else {
+        return false;
+    };
+    let Some(workdir) = repo.workdir() else {
+        return false;
+    };
+    let absolute_path = root.join(relative_path);
+    let Ok(repo_relative_path) = absolute_path.strip_prefix(workdir) else {
+        return false;
+    };
+    repo.status_should_ignore(repo_relative_path)
+        .unwrap_or(false)
+}
+
+fn is_hidden_name(name: &str) -> bool {
+    name.starts_with('.')
+}
+
 fn language_for_path(path: &str) -> String {
     let file_name = path.rsplit('/').next().unwrap_or(path).to_lowercase();
     if file_name == "dockerfile" || file_name.starts_with("dockerfile.") {
@@ -532,6 +570,29 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(names, vec!["src", "Cargo.toml", "README.md"]);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn list_tree_uses_rg_like_hidden_and_gitignore_filters() {
+        let root = temp_workspace();
+        Repository::init(&root).expect("repo initialized");
+        fs::write(root.join(".gitignore"), "ignored.log\nignored-dir/\n")
+            .expect("gitignore written");
+        fs::write(root.join("visible.rs"), "fn visible() {}\n").expect("visible written");
+        fs::write(root.join("ignored.log"), "ignored\n").expect("ignored file written");
+        fs::write(root.join(".hidden.rs"), "fn hidden() {}\n").expect("hidden file written");
+        fs::create_dir_all(root.join("ignored-dir")).expect("ignored dir created");
+        fs::write(root.join("ignored-dir/file.rs"), "fn ignored() {}\n")
+            .expect("ignored nested file written");
+
+        let entries = list_tree_entries(&root, "").expect("tree listed");
+        let names = entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(names, vec!["visible.rs"]);
         fs::remove_dir_all(root).ok();
     }
 

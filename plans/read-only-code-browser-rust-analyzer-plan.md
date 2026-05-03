@@ -14,6 +14,33 @@ The browser should support:
 - go-to-definition,
 - truthful errors for unavailable, stale, external, binary, or too-large content.
 
+## Current implementation status
+
+Implemented in commit `e3a446c Add read-only code viewer`:
+
+- Desktop Dockview tab/panel named **Code**.
+- Filesystem-only read-only browser; rust-analyzer is not started yet.
+- Bridge protocol messages: `code.workspace.open`, `code.tree.list`, `code.file.open`, `code.file.close`, `code.workspace.ready`, `code.tree`, `code.file`, and `code.error`.
+- Backend module `src/code.rs` owns workspace resolution, path validation, tree listing, file reads, file limits, binary detection, and `Cargo.toml` discovery.
+- Workspace roots are resolved from active session worktree path or cwd.
+- Tree listing is on-demand per directory and filters generated/heavy directories including `.git`, `target`, `node_modules`, `.next`, `dist`, `build`, and `coverage`.
+- File opening is read-only, UTF-8 only, rejects binary files, and rejects files larger than 1 MB.
+- Frontend module `frontend/src/codeViewer.ts` renders the Code panel, directory navigation, one active read-only file, syntax highlighting, and copy actions.
+- Protocol and viewer tests were added.
+
+Current status is intentionally `filesOnly`. `Cargo.toml` discovery exists so future rust-analyzer startup can be gated correctly, but rust-analyzer lifecycle, diagnostics, symbols, hover, and definition are still pending.
+
+Observed verification for `e3a446c`:
+
+```text
+cargo fmt
+cargo check
+cargo test                         # 90 passed
+npm --prefix frontend test          # 28 files, 199 tests passed
+npm --prefix frontend run build      # passed; existing Mermaid chunk-size warning remains
+```
+
+
 ## Core decisions
 
 ### Use rust-analyzer, not RLS
@@ -256,7 +283,7 @@ Use domain-preserving DTOs. Do not forward arbitrary rust-analyzer payloads as t
 
 ## Implementation milestones
 
-### Milestone 1: read-only filesystem browser
+### Milestone 1: read-only filesystem browser — done in `e3a446c`
 
 Deliverables:
 
@@ -287,7 +314,14 @@ Frontend behavior:
 
 Reason: this provides product value and validates UI shape before LSP complexity.
 
-### Milestone 2: rust-analyzer lifecycle and status
+Implemented notes:
+
+- `code.workspace.open`, `code.tree.list`, `code.file.open`, and `code.file.close` are wired through `ClientMessage`, `commands.rs`, and backend handlers.
+- `code.workspace.ready`, `code.tree`, `code.file`, and `code.error` are emitted as domain DTOs, not raw filesystem or LSP payloads.
+- The Code panel is added to Dockview with `renderer: "always"`, adjacent to Transcript.
+- Viewer renders one active file and avoids editor semantics: no mutation, save, cursor protocol, or `didChange`.
+
+### Milestone 2: rust-analyzer lifecycle and status — partially prepared, not implemented
 
 Deliverables:
 
@@ -308,6 +342,19 @@ Behavior:
 - no UI feature should hang indefinitely waiting for analyzer readiness,
 - opening Code for a non-Rust workspace must not start rust-analyzer,
 - opening Code must still allow file tree and read-only file viewing before analyzer readiness.
+
+Prepared in `e3a446c`:
+
+- `Cargo.toml` discovery exists in `src/code.rs`.
+- Non-Rust workspaces remain usable in files-only mode.
+- Workspace summaries include `rustRoot` and `status: "filesOnly"`.
+
+Still pending:
+
+- `rust-analyzer` process lifecycle.
+- LSP stdio transport and initialization.
+- analyzer status events beyond `filesOnly`.
+- diagnostics, symbols, hover, definition, cancellation, and analyzer idle shutdown.
 
 ### Milestone 3: diagnostics and document symbols
 

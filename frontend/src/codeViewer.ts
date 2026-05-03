@@ -17,6 +17,7 @@ export type CodeViewerState = {
 export type CodeViewerActions = {
   openWorkspace(): void;
   listTree(path: string): void;
+  refreshTree(): void;
   openFile(path: string): void;
 };
 
@@ -113,7 +114,17 @@ function renderCodeTree(state: CodeViewerState, actions: CodeViewerActions): HTM
     if (parent !== null) actions.listTree(parent);
   });
 
-  toolbar.append(path, up);
+  const refresh = mkEl("button");
+  refresh.type = "button";
+  refresh.textContent = "Refresh tree";
+  refresh.disabled = !state.workspace || state.loadingTree;
+  refresh.addEventListener("click", actions.refreshTree);
+
+  const actionsWrap = mkEl("div");
+  actionsWrap.className = "code-tree-actions";
+  actionsWrap.append(up, refresh);
+
+  toolbar.append(path, actionsWrap);
   tree.append(toolbar);
 
   if (!state.workspace) {

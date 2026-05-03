@@ -7,6 +7,7 @@ export type DesktopDockview = {
   panelMounted(id: DesktopDockviewPanelId): boolean;
   panelContains(id: DesktopDockviewPanelId, element: Element): boolean;
   isPanelActive(id: DesktopDockviewPanelId): boolean;
+  activatePanel(id: DesktopDockviewPanelId): boolean;
   withPanel(id: DesktopDockviewPanelId, render: (container: HTMLElement) => void): boolean;
 };
 
@@ -93,6 +94,14 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     },
     isPanelActive(id) {
       return api.activePanel?.id === id;
+    },
+    activatePanel(id) {
+      const panel = api.getPanel(id);
+      if (!panel) return false;
+      const activatable = api as unknown as { setActivePanel?(panel: unknown): void };
+      if (!activatable.setActivePanel) return false;
+      activatable.setActivePanel(panel);
+      return true;
     },
     withPanel(id, render) {
       const panel = panelEls[id];

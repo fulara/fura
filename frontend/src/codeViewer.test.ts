@@ -41,6 +41,7 @@ describe("code viewer", () => {
     renderCodeViewer(container, baseState({ activeSessionId: null, workspace: null }), {
       openWorkspace: vi.fn(),
       listTree: vi.fn(),
+      refreshTree: vi.fn(),
       openFile: vi.fn(),
     });
 
@@ -60,7 +61,7 @@ describe("code viewer", () => {
           { kind: "file", name: "Cargo.toml", path: "Cargo.toml", size: 120 },
         ],
       }),
-      { openWorkspace: vi.fn(), listTree, openFile },
+      { openWorkspace: vi.fn(), listTree, refreshTree: vi.fn(), openFile },
     );
 
     const buttons = [...container.querySelectorAll<HTMLButtonElement>(".code-tree-entry")];
@@ -71,6 +72,23 @@ describe("code viewer", () => {
     expect(openFile).toHaveBeenCalledWith("Cargo.toml");
   });
 
+
+  it("refreshes the current tree on demand", () => {
+    const container = document.createElement("div");
+    const refreshTree = vi.fn();
+
+    renderCodeViewer(
+      container,
+      baseState({ treePath: "src", entries: [{ kind: "file", name: "main.rs", path: "src/main.rs", size: 12 }] }),
+      { openWorkspace: vi.fn(), listTree: vi.fn(), refreshTree, openFile: vi.fn() },
+    );
+
+    const refreshButton = [...container.querySelectorAll<HTMLButtonElement>(".code-tree-actions button")]
+      .find(button => button.textContent === "Refresh tree");
+    refreshButton?.click();
+
+    expect(refreshTree).toHaveBeenCalledOnce();
+  });
   it("renders an active read-only file", () => {
     const container = document.createElement("div");
 
@@ -85,7 +103,7 @@ describe("code viewer", () => {
           version: 1,
         },
       }),
-      { openWorkspace: vi.fn(), listTree: vi.fn(), openFile: vi.fn() },
+      { openWorkspace: vi.fn(), listTree: vi.fn(), refreshTree: vi.fn(), openFile: vi.fn() },
     );
 
     expect(container.querySelector(".code-file-header code")?.textContent).toBe("src/main.rs");

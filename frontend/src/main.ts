@@ -664,6 +664,7 @@ let codeLoadingWorkspace = false;
 let codeLoadingTree = false;
 let codeLoadingFile = false;
 let codeError: string | null = null;
+let pendingCodeOpenPath: string | null = null;
 
 const sessionListView = createSessionListView(sessionsList, {
   onSelectSession: handleSessionButtonClick,
@@ -1201,7 +1202,14 @@ function handleServerMessage(message: ServerMessage): void {
       markCodeViewDirty();
       if (desktopDockview?.isPanelActive("code")) {
         renderCodePanelIfNeeded(true);
-        requestCodeTree("");
+        const pendingPath = pendingCodeOpenPath;
+        if (pendingPath) {
+          pendingCodeOpenPath = null;
+          requestCodeTree(parentCodePath(pendingPath) ?? "");
+          requestCodeFile(pendingPath);
+        } else {
+          requestCodeTree("");
+        }
       }
       break;
     case "code.tree":
@@ -2311,6 +2319,7 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeLoadingTree = false;
   codeLoadingFile = false;
   codeError = null;
+  pendingCodeOpenPath = null;
   markCodeViewDirty();
 }
 
@@ -2356,6 +2365,24 @@ function requestCodeFile(path: string): void {
   markCodeViewDirty();
   renderCodePanelIfNeeded(true);
   send({ type: "code.file.open", workspaceId: codeWorkspace.workspaceId, path });
+}
+
+function openPathInCode(path: string): void {
+  const sessionId = workspaceMode === "session" ? activeSessionId : null;
+  if (!sessionId) return;
+  if (codeSessionId !== sessionId) resetCodeViewForSession(sessionId);
+  pendingCodeOpenPath = path;
+  codeError = null;
+  markCodeViewDirty();
+  desktopDockview?.activatePanel("code");
+  if (codeWorkspace) {
+    pendingCodeOpenPath = null;
+    requestCodeTree(parentCodePath(path) ?? "");
+    requestCodeFile(path);
+  } else {
+    ensureActiveCodeWorkspace();
+    renderCodePanelIfNeeded(true);
+  }
 }
 
 
@@ -2415,6 +2442,7 @@ function renderCodePanelIfNeeded(force = false): void {
         renderCodePanelIfNeeded(true);
       },
       listTree: requestCodeTree,
+      refreshTree: () => requestCodeTree(codeTreePath),
       openFile: requestCodeFile,
     });
   });
@@ -3351,19 +3379,31 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     filesSection.append(filesTitle);
     const filesList = mkEl("div");
     filesList.className = "diffs-file-list";
-    for (const [index, file] of fileSummaries.entries()) {
-      const button = mkEl("button");
-      button.type = "button";
-      button.className = "diffs-file-item";
+    for (const file of fileSummaries) {
+      const item = mkEl("div");
+      item.className = "diffs-file-item";
+
+      const jumpButton = mkEl("button");
+      jumpButton.type = "button";
+      jumpButton.className = "diffs-file-jump";
       const name = mkEl("code");
       name.textContent = file.filePath;
       const meta = mkEl("span");
       meta.textContent = `+${file.added} -${file.removed}${file.commentCount > 0 ? ` · ${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : ""}`;
-      button.append(name, meta);
-      button.addEventListener("click", () => {
+      jumpButton.append(name, meta);
+      jumpButton.addEventListener("click", () => {
         scrollDiffsToFile(container, file.filePath);
       });
-      filesList.append(button);
+
+      const codeButton = mkEl("button");
+      codeButton.type = "button";
+      codeButton.className = "diffs-file-code";
+      codeButton.textContent = "Code";
+      codeButton.title = "Open current file version in Code";
+      codeButton.addEventListener("click", () => openPathInCode(file.filePath));
+
+      item.append(jumpButton, codeButton);
+      filesList.append(item);
     }
     filesSection.append(filesList);
     sidebarScroll.append(filesSection);
