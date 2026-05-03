@@ -99,6 +99,51 @@ describe("renderMessage", () => {
     expect(button?.textContent).toBe("Copy");
     vi.useRealTimers();
   });
+
+  it("renders transcript review mode with line comments and actions", () => {
+    const onStart = vi.fn();
+    const onAddComment = vi.fn();
+    const onCancel = vi.fn();
+    const onFlush = vi.fn();
+    const message: TranscriptMessage = {
+      id: "m-review",
+      role: "assistant",
+      isNew: false,
+      blocks: [{ kind: "text", text: "line one\nline two" }],
+    };
+
+    const node = renderMessage(message, {
+      thinkingVisibilityMode: "auto",
+      review: {
+        active: true,
+        comments: [{
+          id: "c1",
+          messageId: "m-review",
+          role: "assistant",
+          lineNumber: 2,
+          lineText: "line two",
+          text: "Explain this.",
+        }],
+        onStart,
+        onAddComment,
+        onCancel,
+        onFlush,
+      },
+    });
+
+    expect(node.className).toContain("message-reviewing");
+    expect(node.querySelector(".text-block")).toBeNull();
+    expect(Array.from(node.querySelectorAll(".transcript-review-gutter")).map(el => el.textContent)).toEqual(["1", "2"]);
+    expect(node.querySelector(".transcript-review-inline-comment")?.textContent).toBe("Explain this.");
+
+    node.querySelector<HTMLButtonElement>(".transcript-review-comment-btn")?.click();
+    expect(onAddComment).toHaveBeenCalledWith(message, { lineNumber: 1, text: "line one" });
+
+    node.querySelectorAll<HTMLButtonElement>(".transcript-review-actions button")[0]?.click();
+    expect(onCancel).toHaveBeenCalledWith(message);
+    node.querySelectorAll<HTMLButtonElement>(".transcript-review-actions button")[1]?.click();
+    expect(onFlush).toHaveBeenCalledWith(message);
+  });
 });
 
 describe("renderMarkdown", () => {

@@ -1,12 +1,11 @@
 // fura-gui: native desktop window for a running Fura server.
 //
-// Opens the browser frontend in a native window. The initial URL includes the bootstrap
-// token; the frontend exchanges it for an HttpOnly browser auth session before opening WebSocket.
+// Opens the browser frontend in a native window. Authentication uses the same in-page
+// bridge token entry flow as browser clients; the token is never placed in the URL.
 //
 // Usage:
-//   fura-gui --token dev
-//   fura-gui --host 127.0.0.1 --port 3737 --token dev
-//   FURA_TOKEN=dev fura-gui
+//   fura-gui
+//   fura-gui --host 127.0.0.1 --port 3737
 
 use anyhow::Context;
 use clap::Parser;
@@ -19,15 +18,11 @@ struct Args {
 
     #[arg(long, default_value_t = 3737)]
     port: u16,
-
-    /// Bootstrap token used to create the browser auth session.
-    #[arg(long, env = "FURA_TOKEN")]
-    token: String,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    let url = format!("http://{}:{}/?token={}", args.host, args.port, args.token);
+    let url = format!("http://{}:{}/", args.host, args.port);
     open_window(url)
 }
 

@@ -1,13 +1,16 @@
+use anyhow::{Context, ensure};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     env, fs,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tokio::fs as async_fs;
 use tracing::warn;
+use x509_parser::pem::Pem;
 
 use crate::{AppState, ServerMessage};
 
@@ -18,11 +21,29 @@ use crate::{AppState, ServerMessage};
     about = "Local browser bridge for Oh My Pi RPC sessions"
 )]
 pub(crate) struct Args {
-    #[arg(long, default_value = "127.0.0.1")]
-    pub(crate) host: IpAddr,
+    #[arg(long, default_value = "127.0.0.1:3737")]
+    pub(crate) bind: SocketAddr,
 
-    #[arg(long, default_value_t = 3737)]
-    pub(crate) port: u16,
+    #[arg(long, env = "FURA_REMOTE_BIND")]
+    pub(crate) remote_bind: Option<SocketAddr>,
+
+    /// Public HTTPS host name used by remote browser clients. Must match the TLS certificate host name.
+    #[arg(long, env = "FURA_REMOTE_HOST")]
+    pub(crate) remote_host: Option<String>,
+
+    /// Additional exact browser Origin values allowed for the remote HTTPS listener.
+    #[arg(
+        long = "allowed-origin",
+        env = "FURA_ALLOWED_ORIGINS",
+        value_delimiter = ','
+    )]
+    pub(crate) allowed_origins: Vec<String>,
+
+    #[arg(long, env = "FURA_TLS_CERT")]
+    pub(crate) tls_cert: Option<PathBuf>,
+
+    #[arg(long, env = "FURA_TLS_KEY")]
+    pub(crate) tls_key: Option<PathBuf>,
 
     #[arg(long, env = "FURA_TOKEN")]
     pub(crate) token: Option<String>,
@@ -58,6 +79,15 @@ pub(crate) struct Args {
     pub(crate) session_root: Option<PathBuf>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteListenerConfig {
+    pub(crate) bind: SocketAddr,
+    pub(crate) host: String,
+    pub(crate) cert_path: PathBuf,
+    pub(crate) key_path: PathBuf,
+    pub(crate) allowed_origins: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct FuraConfig {
@@ -87,6 +117,144 @@ pub(crate) struct ClientConfig {
 
 pub(crate) fn default_voice_language() -> String {
     "pl-PL".to_string()
+}
+
+const MIN_REMOTE_CERT_VALIDITY: Duration = Duration::from_secs(5 * 24 * 60 * 60);
+
+pub(crate) fn local_bind_url(bind: SocketAddr) -> String {
+    format!("http://{bind}/")
+}
+
+pub(crate) fn remote_listener_from_args(
+    remote_bind: Option<SocketAddr>,
+    remote_host: Option<&str>,
+    tls_cert: Option<&Path>,
+    tls_key: Option<&Path>,
+    configured_allowed_origins: Vec<String>,
+) -> anyhow::Result<Option<RemoteListenerConfig>> {
+    let remote_parts_present = remote_bind.is_some()
+        || remote_host.is_some()
+        || tls_cert.is_some()
+        || tls_key.is_some()
+        || !configured_allowed_origins.is_empty();
+    if !remote_parts_present {
+        return Ok(None);
+    }
+
+    let bind = remote_bind
+        .ok_or_else(|| anyhow::anyhow!("--remote-bind is required when remote TLS is enabled"))?;
+    let host =
+        normalize_remote_host(remote_host.ok_or_else(|| {
+            anyhow::anyhow!("--remote-host is required when remote TLS is enabled")
+        })?)
+        .ok_or_else(|| {
+            anyhow::anyhow!("--remote-host must be a bare host name or IP without scheme/path")
+        })?;
+    let cert_path = tls_cert
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("--tls-cert is required when remote TLS is enabled"))?;
+    let key_path = tls_key
+        .map(Path::to_path_buf)
+        .ok_or_else(|| anyhow::anyhow!("--tls-key is required when remote TLS is enabled"))?;
+    ensure!(
+        cert_path != key_path,
+        "--tls-cert and --tls-key must point to different files"
+    );
+
+    let mut allowed_origins = vec![remote_origin(&host, bind.port())];
+    for origin in configured_allowed_origins {
+        if let Some(origin) = normalize_allowed_origin(&origin) {
+            if !allowed_origins.contains(&origin) {
+                allowed_origins.push(origin);
+            }
+        }
+    }
+
+    Ok(Some(RemoteListenerConfig {
+        bind,
+        host,
+        cert_path,
+        key_path,
+        allowed_origins,
+    }))
+}
+
+pub(crate) fn validate_remote_cert_expiry(remote: &RemoteListenerConfig) -> anyhow::Result<()> {
+    let cert_bytes = fs::read(&remote.cert_path)
+        .with_context(|| format!("failed to read TLS cert {}", remote.cert_path.display()))?;
+    let mut cert_count = 0usize;
+    for pem in Pem::iter_from_buffer(&cert_bytes) {
+        let pem = pem.with_context(|| {
+            format!(
+                "failed to parse PEM block in {}",
+                remote.cert_path.display()
+            )
+        })?;
+        let cert = pem.parse_x509().with_context(|| {
+            format!(
+                "failed to parse X.509 certificate in {}",
+                remote.cert_path.display()
+            )
+        })?;
+        cert_count += 1;
+        ensure!(
+            cert.validity().is_valid(),
+            "TLS cert {} is not currently valid",
+            remote.cert_path.display()
+        );
+        let remaining = cert.validity().time_to_expiration().ok_or_else(|| {
+            anyhow::anyhow!(
+                "TLS cert {} does not report a usable expiration time",
+                remote.cert_path.display()
+            )
+        })?;
+        ensure!(
+            remaining >= MIN_REMOTE_CERT_VALIDITY,
+            "TLS cert {} expires in less than 5 days",
+            remote.cert_path.display()
+        );
+    }
+    ensure!(
+        cert_count > 0,
+        "TLS cert {} does not contain any PEM certificate blocks",
+        remote.cert_path.display()
+    );
+    Ok(())
+}
+
+pub(crate) fn normalize_allowed_origin(origin: &str) -> Option<String> {
+    let trimmed = origin.trim().trim_end_matches('/');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+pub(crate) fn remote_origin(host: &str, port: u16) -> String {
+    format!("https://{}:{port}", format_public_host(host))
+}
+
+pub(crate) fn remote_url(host: &str, port: u16) -> String {
+    format!("{}/", remote_origin(host, port))
+}
+
+pub(crate) fn normalize_remote_host(host: &str) -> Option<String> {
+    let trimmed = host.trim().trim_end_matches('/').trim_end_matches('.');
+    if trimmed.is_empty() || trimmed.contains("://") || trimmed.contains('/') {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn format_public_host(host: &str) -> String {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return origin_host(ip);
+    }
+    host.to_string()
+}
+
+fn origin_host(host: IpAddr) -> String {
+    match host {
+        IpAddr::V4(host) => host.to_string(),
+        IpAddr::V6(host) => format!("[{host}]"),
+    }
 }
 
 pub(crate) fn default_config_path() -> Option<PathBuf> {
@@ -184,4 +352,127 @@ pub(crate) async fn save_default_cwd(state: &AppState, cwd: &str) {
 
     save_fura_config(state).await;
     broadcast_config(state).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rcgen::{CertificateParams, KeyPair};
+    use tempfile::tempdir;
+    use time::{Duration as TimeDuration, OffsetDateTime};
+
+    fn write_test_cert(path: &Path, not_after: OffsetDateTime) {
+        let mut params =
+            CertificateParams::new(vec!["serwer-mini.caracal-porgy.ts.net".to_string()])
+                .expect("params");
+        params.not_before = OffsetDateTime::now_utc() - TimeDuration::days(1);
+        params.not_after = not_after;
+        let key = KeyPair::generate().expect("key");
+        let cert = params.self_signed(&key).expect("cert");
+        fs::write(path, cert.pem()).expect("write cert");
+    }
+
+    #[test]
+    fn local_bind_url_formats_socket_addr() {
+        assert_eq!(
+            local_bind_url("127.0.0.1:3737".parse().expect("socket")),
+            "http://127.0.0.1:3737/"
+        );
+    }
+
+    #[test]
+    fn remote_listener_requires_all_tls_fields_when_enabled() {
+        let error = remote_listener_from_args(
+            Some("100.117.222.49:4450".parse().expect("socket")),
+            Some("serwer-mini.caracal-porgy.ts.net"),
+            None,
+            None,
+            Vec::new(),
+        )
+        .expect_err("missing tls fields should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("--tls-cert is required when remote TLS is enabled")
+        );
+    }
+
+    #[test]
+    fn remote_listener_builds_https_origin_and_deduplicates_extras() {
+        let remote = remote_listener_from_args(
+            Some("100.117.222.49:4450".parse().expect("socket")),
+            Some("serwer-mini.caracal-porgy.ts.net."),
+            Some(Path::new("cert.pem")),
+            Some(Path::new("key.pem")),
+            vec![
+                " https://serwer-mini.caracal-porgy.ts.net:4450/ ".to_string(),
+                "https://alt.tailnet.ts.net:4450".to_string(),
+            ],
+        )
+        .expect("config should parse")
+        .expect("remote config should exist");
+
+        assert_eq!(remote.host, "serwer-mini.caracal-porgy.ts.net");
+        assert_eq!(
+            remote.allowed_origins,
+            vec![
+                "https://serwer-mini.caracal-porgy.ts.net:4450".to_string(),
+                "https://alt.tailnet.ts.net:4450".to_string(),
+            ]
+        );
+        assert_eq!(
+            remote_url(&remote.host, remote.bind.port()),
+            "https://serwer-mini.caracal-porgy.ts.net:4450/"
+        );
+    }
+
+    #[test]
+    fn normalize_remote_host_rejects_scheme_and_path() {
+        assert_eq!(normalize_remote_host("https://host.example"), None);
+        assert_eq!(normalize_remote_host("host.example/path"), None);
+        assert_eq!(
+            normalize_remote_host(" serwer-mini.caracal-porgy.ts.net. "),
+            Some("serwer-mini.caracal-porgy.ts.net".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_remote_cert_expiry_accepts_cert_with_more_than_five_days_left() {
+        let dir = tempdir().expect("tempdir");
+        let cert_path = dir.path().join("cert.pem");
+        write_test_cert(
+            &cert_path,
+            OffsetDateTime::now_utc() + TimeDuration::days(6),
+        );
+        let remote = RemoteListenerConfig {
+            bind: "100.117.222.49:4450".parse().expect("socket"),
+            host: "serwer-mini.caracal-porgy.ts.net".to_string(),
+            cert_path,
+            key_path: dir.path().join("key.pem"),
+            allowed_origins: vec!["https://serwer-mini.caracal-porgy.ts.net:4450".to_string()],
+        };
+
+        validate_remote_cert_expiry(&remote).expect("cert should be accepted");
+    }
+
+    #[test]
+    fn validate_remote_cert_expiry_rejects_cert_with_less_than_five_days_left() {
+        let dir = tempdir().expect("tempdir");
+        let cert_path = dir.path().join("cert.pem");
+        write_test_cert(
+            &cert_path,
+            OffsetDateTime::now_utc() + TimeDuration::days(4),
+        );
+        let remote = RemoteListenerConfig {
+            bind: "100.117.222.49:4450".parse().expect("socket"),
+            host: "serwer-mini.caracal-porgy.ts.net".to_string(),
+            cert_path,
+            key_path: dir.path().join("key.pem"),
+            allowed_origins: vec!["https://serwer-mini.caracal-porgy.ts.net:4450".to_string()],
+        };
+
+        let error = validate_remote_cert_expiry(&remote).expect_err("cert should be rejected");
+        assert!(error.to_string().contains("expires in less than 5 days"));
+    }
 }

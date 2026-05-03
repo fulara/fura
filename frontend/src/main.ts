@@ -1,10 +1,10 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
-import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
+import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
-import { createFuraConnection, type FuraConnection } from "./connection";
+import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
 import { mkEl, mkFrag, requireElement, setRenderDocument } from "./dom";
 import {
   isCompactReadCard,
@@ -85,8 +85,21 @@ import {
 } from "./extensionDialog";
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
+import {
+  buildTranscriptReviewPrompt,
+  type TranscriptReviewComment,
+  type TranscriptReviewLine,
+} from "./transcriptReview";
+import {
+  parentCodePath,
+  renderCodeViewer,
+  type CodeViewerState,
+} from "./codeViewer";
 import type {
   ClientMessage,
+  CodeFileContent,
+  CodeTreeEntry,
+  CodeWorkspaceSummary,
   ControlCandidate,
   ControlStatusProjection,
   ControlSuggestedAction,
@@ -198,6 +211,26 @@ app.innerHTML = `
     </section>
 
   </main>
+
+  <div id="authGate" class="modal-overlay auth-gate" hidden>
+    <section class="modal-panel auth-panel" role="dialog" aria-modal="true" aria-labelledby="authGateTitle" aria-describedby="authGateDescription">
+      <header class="modal-header">
+        <div>
+          <h2 id="authGateTitle">Connect to Fura</h2>
+          <p id="authGateDescription">Enter the bridge token from your local Fura startup output. The token is not accepted from URLs.</p>
+        </div>
+      </header>
+      <form id="authForm" class="auth-form">
+        <label for="authTokenInput">Bridge token</label>
+        <input id="authTokenInput" type="password" autocomplete="current-password" spellcheck="false" required />
+        <p id="authStatus" class="auth-status" aria-live="polite"></p>
+        <footer class="modal-footer auth-actions">
+          <span>Use Tailscale or localhost for private access.</span>
+          <button id="authSubmit" type="submit">Connect</button>
+        </footer>
+      </form>
+    </section>
+  </div>
 
   <div id="busyPromptOverlay" class="modal-overlay" hidden>
     <section class="busy-prompt modal-panel" role="dialog" aria-modal="true" aria-labelledby="busyPromptTitle" aria-describedby="busyPromptDescription">
@@ -411,6 +444,11 @@ app.innerHTML = `
   </div>
 `;
 
+const authGate = requireElement<HTMLDivElement>("authGate");
+const authForm = requireElement<HTMLFormElement>("authForm");
+const authTokenInput = requireElement<HTMLInputElement>("authTokenInput");
+const authStatus = requireElement<HTMLParagraphElement>("authStatus");
+const authSubmit = requireElement<HTMLButtonElement>("authSubmit");
 const connectionStatus = requireElement<HTMLSpanElement>("connectionStatus");
 const createSessionButton = requireElement<HTMLButtonElement>("createSessionButton");
 const sessionsList = requireElement<HTMLElement>("sessionsList");
@@ -496,11 +534,18 @@ const handoffPickerCancel = requireElement<HTMLButtonElement>("handoffPickerCanc
 const handoffPickerCreate = requireElement<HTMLButtonElement>("handoffPickerCreate");
 const diffPreviewOverlay = requireElement<HTMLDivElement>("diffPreviewOverlay");
 const diffPreviewClose = requireElement<HTMLButtonElement>("diffPreviewClose");
+const diffPreviewTitle = requireElement<HTMLHeadingElement>("diffPreviewTitle");
+const diffPreviewSubtitle = requireElement<HTMLParagraphElement>("diffPreviewSubtitle");
 const diffPreviewText = requireElement<HTMLTextAreaElement>("diffPreviewText");
 const diffPreviewStatus = requireElement<HTMLSpanElement>("diffPreviewStatus");
 const diffPreviewCancel = requireElement<HTMLButtonElement>("diffPreviewCancel");
 const diffPreviewSend = requireElement<HTMLButtonElement>("diffPreviewSend");
 
+type TranscriptPreviewDraft = {
+  sessionId: string;
+  message: TranscriptMessage;
+  comments: TranscriptReviewComment[];
+};
 type SessionNotice = { level: string; text: string };
 type ControlChatMessage = {
   role: "user" | "assistant" | "system";
@@ -568,6 +613,9 @@ let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
+let transcriptPreviewDraft: TranscriptPreviewDraft | null = null;
+const transcriptReviewActiveMessages = new Map<string, string>();
+const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
 const PROMPT_HISTORY_LIMIT = 100;
 let modelPickerSessionId: string | null = null;
 let modelPickerModels: ModelSummary[] = [];
@@ -595,7 +643,7 @@ let controlMessages: ControlChatMessage[] = [];
 let controlStatusState: ControlStatusProjection = { status: "idle" };
 const initialToken = consumeBootstrapToken(
   window.location.href,
-  window.localStorage,
+  window.sessionStorage,
   url => window.history.replaceState(null, "", url),
 );
 let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
@@ -607,6 +655,24 @@ syncThinkingVisibilityToggle();
 // --- Desktop workspace state ---
 
 let desktopDockview: DesktopDockview | null = null;
+let codePanelDirty = true;
+let codeSessionId: string | null = null;
+let codeWorkspace: CodeWorkspaceSummary | null = null;
+let codeTreePath = "";
+let codeTreeEntries: CodeTreeEntry[] = [];
+let codeFile: CodeFileContent | null = null;
+let codeLoadingWorkspace = false;
+let codeLoadingTree = false;
+let codeLoadingFile = false;
+let codeError: string | null = null;
+let pendingCodeOpenPath: string | null = null;
+let codeSearchOpen = false;
+let codeSearchBasePath = "";
+let codeSearchQuery = "";
+let codeSearchResults: CodeTreeEntry[] = [];
+let codeSearchLoading = false;
+let codeSearchError: string | null = null;
+let codeSearchRequestTimer: number | null = null;
 
 const sessionListView = createSessionListView(sessionsList, {
   onSelectSession: handleSessionButtonClick,
@@ -630,6 +696,16 @@ activeCategoryCombobox = createCategoryCombobox({
 
 
 // --- Event wiring ---
+authForm.addEventListener("submit", event => {
+  event.preventDefault();
+  connect(authTokenInput.value);
+});
+connectionStatus.addEventListener("click", forceReconnectNow);
+connectionStatus.addEventListener("keydown", event => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  forceReconnectNow();
+});
 
 askFuraButton.addEventListener("click", activateControllerWorkspace);
 createSessionButton.addEventListener("click", () => {
@@ -678,6 +754,11 @@ voiceButton.addEventListener("pointercancel", () => { void stopVoiceRecording();
 voiceButton.addEventListener("lostpointercapture", () => { void stopVoiceRecording(); });
 voiceButton.addEventListener("contextmenu", event => event.preventDefault());
 window.addEventListener("keydown", event => {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && desktopDockview?.isPanelActive("code")) {
+    event.preventDefault();
+    openCodeSearch();
+    return;
+  }
   if (event.altKey && event.key.toLowerCase() === "m" && !event.repeat && !voiceHotkeyActive) {
     event.preventDefault();
     voiceHotkeyActive = true;
@@ -817,7 +898,7 @@ handoffPickerInstructions.addEventListener("keydown", event => {
 });
 diffPreviewClose.addEventListener("click", closeDiffPreview);
 diffPreviewCancel.addEventListener("click", closeDiffPreview);
-diffPreviewSend.addEventListener("click", sendDiffPreviewDraft);
+diffPreviewSend.addEventListener("click", sendPromptPreviewDraft);
 diffPreviewOverlay.addEventListener("mousedown", event => {
   if (event.target === diffPreviewOverlay) closeDiffPreview();
 });
@@ -950,23 +1031,28 @@ promptInput.addEventListener("keydown", event => {
 render();
 if (initialToken) {
   connect(initialToken);
+} else {
+  showAuthGate("Enter the bridge token to connect.");
 }
 initDesktopWorkspace();
 
 // --- Core session logic ---
 
 function connect(token: string): void {
-  const bridgeToken = storeBootstrapToken(token, window.localStorage);
+  const bridgeToken = storeBootstrapToken(token, window.sessionStorage);
   if (!bridgeToken) {
-    appendLog("No bridge token found. Load Fura with ?token=<token> from the Rust server URL.");
+    showAuthGate("Enter the bridge token to connect.");
     return;
   }
 
+  authSubmit.disabled = true;
+  authStatus.textContent = "Connecting…";
   connection?.disconnect();
   connection = createFuraConnection({
     auth: { type: "sessionCookie", token: bridgeToken },
     onStatus: setStatus,
     onOpen: () => {
+      hideAuthGate();
       send({ type: "session.list" });
     },
     onClose: () => {
@@ -977,10 +1063,28 @@ function connect(token: string): void {
         );
       }
     },
+    onAuthFailure: message => {
+      clearBootstrapToken(window.sessionStorage);
+      showAuthGate(message);
+      authTokenInput.select();
+    },
     onMessage: handleServerMessage,
     onLog: appendLog,
   });
   connection.connect();
+}
+
+function showAuthGate(message: string): void {
+  authGate.hidden = false;
+  authSubmit.disabled = false;
+  authStatus.textContent = message;
+}
+
+function hideAuthGate(): void {
+  authGate.hidden = true;
+  authSubmit.disabled = false;
+  authStatus.textContent = "";
+  authTokenInput.value = "";
 }
 
 function activeWorkspaceKey(): string | null {
@@ -1106,6 +1210,71 @@ function handleServerMessage(message: ServerMessage): void {
       }
       break;
     }
+    case "code.workspace.ready":
+      codeLoadingWorkspace = false;
+      codeWorkspace = message.workspace;
+      codeSessionId = message.workspace.sessionId;
+      codeTreePath = "";
+      codeTreeEntries = [];
+      codeFile = null;
+      codeError = null;
+      if (codeSearchOpen && !codeSearchBasePath) codeSearchBasePath = message.workspace.root;
+      markCodeViewDirty();
+      if (desktopDockview?.isPanelActive("code")) {
+        renderCodePanelIfNeeded(true);
+        const pendingPath = pendingCodeOpenPath;
+        if (pendingPath) {
+          pendingCodeOpenPath = null;
+          requestCodeTree(parentCodePath(pendingPath) ?? "");
+          requestCodeFile(pendingPath);
+        } else {
+          requestCodeTree("");
+        }
+      }
+      break;
+    case "code.tree":
+      if (codeWorkspace?.workspaceId === message.workspaceId) {
+        codeLoadingTree = false;
+        codeTreePath = message.path;
+        codeTreeEntries = message.entries;
+        codeError = null;
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      }
+      break;
+    case "code.file":
+      if (codeWorkspace?.workspaceId === message.workspaceId) {
+        codeLoadingFile = false;
+        codeFile = message.file;
+        codeError = null;
+        const parent = parentCodePath(message.file.path) ?? "";
+        if (parent !== codeTreePath && !codeLoadingTree) requestCodeTree(parent);
+        else renderCodePanelIfNeeded(true);
+      }
+      break;
+    case "code.file.searchResults":
+      if (codeWorkspace?.workspaceId === message.workspaceId) {
+        codeSearchLoading = false;
+        codeSearchError = null;
+        codeSearchResults = message.entries;
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      }
+      break;
+    case "code.error":
+      if (!message.workspaceId || codeWorkspace?.workspaceId === message.workspaceId) {
+        codeLoadingWorkspace = false;
+        codeLoadingTree = false;
+        codeLoadingFile = false;
+        codeError = message.path ? `${message.path}: ${message.message}` : message.message;
+        if (codeSearchOpen && codeSearchLoading) {
+          codeSearchLoading = false;
+          codeSearchError = codeError;
+        }
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      }
+      break;
     case "plan.review": {
       const preview = message.content.length > 6000 ? `${message.content.slice(0, 6000)}\n\n… truncated …` : message.content;
       const approved = window.confirm(
@@ -2169,12 +2338,176 @@ function markToolsViewDirty(): void {
   toolsPanelDirty = true;
 }
 
+function markCodeViewDirty(): void {
+  codePanelDirty = true;
+}
+
+function resetCodeViewForSession(sessionId: string | null): void {
+  codeSessionId = sessionId;
+  codeWorkspace = null;
+  codeTreePath = "";
+  codeTreeEntries = [];
+  codeFile = null;
+  codeLoadingWorkspace = false;
+  codeLoadingTree = false;
+  codeLoadingFile = false;
+  codeError = null;
+  pendingCodeOpenPath = null;
+  codeSearchOpen = false;
+  codeSearchBasePath = "";
+  codeSearchQuery = "";
+  codeSearchResults = [];
+  codeSearchLoading = false;
+  codeSearchError = null;
+  clearPendingCodeSearchRequest();
+  markCodeViewDirty();
+}
+
+function activeCodeViewState(): CodeViewerState {
+  return {
+    activeSessionId: workspaceMode === "session" ? activeSessionId : null,
+    workspace: codeWorkspace,
+    treePath: codeTreePath,
+    entries: codeTreeEntries,
+    file: codeFile,
+    loadingWorkspace: codeLoadingWorkspace,
+    loadingTree: codeLoadingTree,
+    loadingFile: codeLoadingFile,
+    error: codeError,
+    searchOpen: codeSearchOpen,
+    searchBasePath: codeSearchBasePath,
+    searchQuery: codeSearchQuery,
+    searchResults: codeSearchResults,
+    searchLoading: codeSearchLoading,
+    searchError: codeSearchError,
+  };
+}
+
+function clearPendingCodeSearchRequest(): void {
+  if (codeSearchRequestTimer !== null) {
+    window.clearTimeout(codeSearchRequestTimer);
+    codeSearchRequestTimer = null;
+  }
+}
+
+function scheduleCodeSearch(): void {
+  clearPendingCodeSearchRequest();
+  if (!codeSearchOpen || !codeWorkspace || !codeSearchQuery.trim()) {
+    codeSearchLoading = false;
+    codeSearchResults = [];
+    markCodeViewDirty();
+    renderCodePanelIfNeeded(true);
+    return;
+  }
+  codeSearchLoading = true;
+  codeSearchError = null;
+  codeSearchResults = [];
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  codeSearchRequestTimer = window.setTimeout(() => {
+    codeSearchRequestTimer = null;
+    submitCodeSearch();
+  }, 120);
+}
+
+function ensureActiveCodeWorkspace(): void {
+  if (!desktopDockview?.isPanelActive("code")) return;
+  const sessionId = workspaceMode === "session" ? activeSessionId : null;
+  if (codeSessionId !== sessionId) resetCodeViewForSession(sessionId);
+  if (!sessionId || codeWorkspace || codeLoadingWorkspace) return;
+  codeLoadingWorkspace = true;
+  codeError = null;
+  markCodeViewDirty();
+  send({ type: "code.workspace.open", sessionId });
+}
+
+function requestCodeTree(path: string): void {
+  if (!codeWorkspace) return;
+  codeTreePath = path;
+  codeLoadingTree = true;
+  codeError = null;
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  send({ type: "code.tree.list", workspaceId: codeWorkspace.workspaceId, path });
+}
+
+function requestCodeFile(path: string): void {
+  if (!codeWorkspace) return;
+  codeLoadingFile = true;
+  codeError = null;
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  send({ type: "code.file.open", workspaceId: codeWorkspace.workspaceId, path });
+}
+
+function openCodeSearch(): void {
+  if (!desktopDockview?.isPanelActive("code")) return;
+  if (!codeWorkspace && !codeLoadingWorkspace) ensureActiveCodeWorkspace();
+  codeSearchOpen = true;
+  codeSearchBasePath = codeSearchBasePath || codeWorkspace?.root || "";
+  codeSearchError = null;
+  codeSearchResults = [];
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function closeCodeSearch(): void {
+  clearPendingCodeSearchRequest();
+  codeSearchOpen = false;
+  codeSearchLoading = false;
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function submitCodeSearch(): void {
+  if (!codeWorkspace || !codeSearchQuery.trim()) return;
+  codeSearchLoading = true;
+  codeSearchError = null;
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  send({
+    type: "code.file.search",
+    workspaceId: codeWorkspace.workspaceId,
+    basePath: codeSearchBasePath || codeWorkspace.root,
+    query: codeSearchQuery,
+    limit: 100,
+  });
+}
+
+function openSearchResultInCode(path: string): void {
+  closeCodeSearch();
+  requestCodeTree(parentCodePath(path) ?? "");
+  requestCodeFile(path);
+}
+
+function openPathInCode(path: string): void {
+  const sessionId = workspaceMode === "session" ? activeSessionId : null;
+  if (!sessionId) return;
+  if (codeSessionId !== sessionId) resetCodeViewForSession(sessionId);
+  pendingCodeOpenPath = path;
+  codeError = null;
+  markCodeViewDirty();
+  desktopDockview?.activatePanel("code");
+  if (codeWorkspace) {
+    pendingCodeOpenPath = null;
+    requestCodeTree(parentCodePath(path) ?? "");
+    requestCodeFile(path);
+  } else {
+    ensureActiveCodeWorkspace();
+    renderCodePanelIfNeeded(true);
+  }
+}
+
 
 function renderActiveDockviewPanel(projection: SessionProjection | undefined): void {
   renderTranscriptPanelIfNeeded(projection);
   renderToolsPanelIfNeeded(projection);
   if (desktopDockview?.isPanelActive("diffs") && shouldRenderDiffsView(projection)) {
     desktopDockview.withPanel("diffs", container => renderDiffsView(container, projection));
+  }
+  if (desktopDockview?.isPanelActive("code")) {
+    ensureActiveCodeWorkspace();
+    renderCodePanelIfNeeded();
   }
 }
 
@@ -2206,6 +2539,42 @@ function renderToolsPanelIfNeeded(projection: SessionProjection | undefined, for
   if (!rendered) return;
   toolsPanelDirty = false;
   lastToolsRenderedSessionId = workspaceKey;
+}
+
+function renderCodePanelIfNeeded(force = false): void {
+  if (!desktopDockview?.panelMounted("code")) return;
+  const sessionId = workspaceMode === "session" ? activeSessionId : null;
+  const sessionChanged = codeSessionId !== sessionId;
+  if (sessionChanged) resetCodeViewForSession(sessionId);
+  if (!force && !codePanelDirty && !sessionChanged) return;
+  const rendered = desktopDockview.withPanel("code", container => {
+    renderCodeViewer(container, activeCodeViewState(), {
+      openWorkspace: () => {
+        resetCodeViewForSession(workspaceMode === "session" ? activeSessionId : null);
+        ensureActiveCodeWorkspace();
+        renderCodePanelIfNeeded(true);
+      },
+      listTree: requestCodeTree,
+      refreshTree: () => requestCodeTree(codeTreePath),
+      openFile: requestCodeFile,
+      openSearch: openCodeSearch,
+      closeSearch: closeCodeSearch,
+      updateSearchBasePath: path => {
+        codeSearchBasePath = path;
+        codeSearchError = null;
+        scheduleCodeSearch();
+      },
+      updateSearchQuery: query => {
+        codeSearchQuery = query;
+        codeSearchError = null;
+        scheduleCodeSearch();
+      },
+      searchFiles: submitCodeSearch,
+      openSearchResult: openSearchResultInCode,
+    });
+  });
+  if (!rendered) return;
+  codePanelDirty = false;
 }
 
 // --- Panel render functions ---
@@ -2377,7 +2746,7 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
     if (entry.kind === "message") {
       items.push({
         key: `message:${entry.id}:${startIndex}`,
-        render: () => renderMessage(entry),
+        render: () => renderMessage(entry, projection.summary.sessionId),
       });
       continue;
     }
@@ -2645,6 +3014,101 @@ function rerenderDiffsViewPreservingScroll(sessionId: string): void {
   });
 }
 
+function transcriptReviewCommentsForMessage(sessionId: string, messageId: string): TranscriptReviewComment[] {
+  return (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId === messageId);
+}
+
+function isTranscriptMessageUnderReview(sessionId: string, messageId: string): boolean {
+  return transcriptReviewActiveMessages.get(sessionId) === messageId;
+}
+
+function startTranscriptReview(sessionId: string, message: TranscriptMessage): void {
+  transcriptReviewActiveMessages.set(sessionId, message.id);
+  markTranscriptViewDirty({ resetCache: true });
+  render();
+}
+
+function cancelTranscriptReview(sessionId: string, message: TranscriptMessage): void {
+  transcriptReviewActiveMessages.delete(sessionId);
+  transcriptReviewComments.set(
+    sessionId,
+    (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId !== message.id),
+  );
+  markTranscriptViewDirty({ resetCache: true });
+  render();
+}
+
+function addTranscriptReviewComment(
+  sessionId: string,
+  message: TranscriptMessage,
+  line: TranscriptReviewLine,
+): void {
+  const comment = window.prompt("Comment on this transcript line");
+  if (!comment?.trim()) return;
+  const comments = transcriptReviewComments.get(sessionId) ?? [];
+  comments.push({
+    id: `${Date.now()}-${comments.length}`,
+    messageId: message.id,
+    role: message.role,
+    lineNumber: line.lineNumber,
+    lineText: line.text,
+    text: comment.trim(),
+  });
+  transcriptReviewComments.set(sessionId, comments);
+  markTranscriptViewDirty({ resetCache: true });
+  render();
+}
+
+function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
+  const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
+  if (comments.length === 0) return;
+  transcriptPreviewDraft = { sessionId, message, comments };
+  diffPreviewDraft = null;
+  diffPreviewTitle.textContent = "Preview transcript comments";
+  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewText.value = buildTranscriptReviewPrompt(message, comments);
+  diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
+  diffPreviewSend.textContent = "Send comments";
+  diffPreviewOverlay.hidden = false;
+  diffPreviewText.scrollTop = 0;
+  diffPreviewSend.focus();
+}
+
+function sendTranscriptReviewComments(
+  sessionId: string,
+  message: TranscriptMessage,
+  comments: TranscriptReviewComment[],
+): void {
+  if (comments.length === 0) return;
+  const clearFlushedComments = () => {
+    transcriptReviewComments.set(
+      sessionId,
+      (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId !== message.id),
+    );
+    transcriptReviewActiveMessages.delete(sessionId);
+    markTranscriptViewDirty({ resetCache: true });
+    render();
+  };
+  sendPromptWithBusyHandling({
+    sessionId,
+    text: buildTranscriptReviewPrompt(message, comments),
+    editorText: `Flush ${comments.length} transcript comment${comments.length === 1 ? "" : "s"}`,
+    images: [],
+    onSend: clearFlushedComments,
+  });
+}
+
+function transcriptReviewOptions(sessionId: string, message: TranscriptMessage) {
+  return {
+    active: isTranscriptMessageUnderReview(sessionId, message.id),
+    comments: transcriptReviewCommentsForMessage(sessionId, message.id),
+    onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
+    onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
+    onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
+    onFlush: (target: TranscriptMessage) => flushTranscriptReviewComments(sessionId, target),
+  };
+}
+
 function addDiffComment(
   sessionId: string,
   baseSnapshot: DiffSnapshotSummary,
@@ -2700,6 +3164,10 @@ function previewDiffComments(
   const comments = selectedDiffComments(diffComments.get(sessionId) ?? [], baseSnapshot, headSnapshot);
   if (comments.length === 0) return;
   diffPreviewDraft = { sessionId, state, baseSnapshot, headSnapshot, comments };
+  transcriptPreviewDraft = null;
+  diffPreviewTitle.textContent = "Preview diff comments";
+  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewSend.textContent = "Send comments";
   diffPreviewText.value = buildDiffCommentPrompt(state, comments, baseSnapshot, headSnapshot);
   diffPreviewStatus.textContent = diffCommentPreviewStatus(comments.length);
   diffPreviewOverlay.hidden = false;
@@ -2711,14 +3179,24 @@ function closeDiffPreview(): void {
   diffPreviewOverlay.hidden = true;
   diffPreviewText.value = "";
   diffPreviewStatus.textContent = "";
+  diffPreviewTitle.textContent = "Preview diff comments";
+  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewSend.textContent = "Send comments";
   diffPreviewDraft = null;
+  transcriptPreviewDraft = null;
 }
 
-function sendDiffPreviewDraft(): void {
-  const draft = diffPreviewDraft;
-  if (!draft) return;
+function sendPromptPreviewDraft(): void {
+  const diffDraft = diffPreviewDraft;
+  const transcriptDraft = transcriptPreviewDraft;
   closeDiffPreview();
-  sendDiffComments(draft.sessionId, draft.state, draft.baseSnapshot, draft.headSnapshot, draft.comments);
+  if (diffDraft) {
+    sendDiffComments(diffDraft.sessionId, diffDraft.state, diffDraft.baseSnapshot, diffDraft.headSnapshot, diffDraft.comments);
+    return;
+  }
+  if (transcriptDraft) {
+    sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments);
+  }
 }
 
 function flushDiffComments(
@@ -2877,19 +3355,31 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     filesSection.append(filesTitle);
     const filesList = mkEl("div");
     filesList.className = "diffs-file-list";
-    for (const [index, file] of fileSummaries.entries()) {
-      const button = mkEl("button");
-      button.type = "button";
-      button.className = "diffs-file-item";
+    for (const file of fileSummaries) {
+      const item = mkEl("div");
+      item.className = "diffs-file-item";
+
+      const jumpButton = mkEl("button");
+      jumpButton.type = "button";
+      jumpButton.className = "diffs-file-jump";
       const name = mkEl("code");
       name.textContent = file.filePath;
       const meta = mkEl("span");
       meta.textContent = `+${file.added} -${file.removed}${file.commentCount > 0 ? ` · ${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : ""}`;
-      button.append(name, meta);
-      button.addEventListener("click", () => {
+      jumpButton.append(name, meta);
+      jumpButton.addEventListener("click", () => {
         scrollDiffsToFile(container, file.filePath);
       });
-      filesList.append(button);
+
+      const codeButton = mkEl("button");
+      codeButton.type = "button";
+      codeButton.className = "diffs-file-code";
+      codeButton.textContent = "Code";
+      codeButton.title = "Open current file version in Code";
+      codeButton.addEventListener("click", () => openPathInCode(file.filePath));
+
+      item.append(jumpButton, codeButton);
+      filesList.append(item);
     }
     filesSection.append(filesList);
     sidebarScroll.append(filesSection);
@@ -3079,6 +3569,7 @@ function initDesktopWorkspace(): void {
       if (id === "transcript") markTranscriptViewDirty();
       if (id === "tools") markToolsViewDirty();
       if (id === "diffs") markDiffsViewDirty();
+      if (id === "code") markCodeViewDirty();
     },
     onPanelActivated: id => {
       const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
@@ -3088,6 +3579,11 @@ function initDesktopWorkspace(): void {
       }
       if (id === "tools") {
         renderToolsPanelIfNeeded(projection, true);
+        return;
+      }
+      if (id === "code") {
+        ensureActiveCodeWorkspace();
+        renderCodePanelIfNeeded(true);
         return;
       }
       if (id === "diffs") {
@@ -3187,8 +3683,11 @@ function statusInterruptButton(): HTMLButtonElement {
 
 // --- Message rendering ---
 
-function renderMessage(message: TranscriptMessage): HTMLElement {
-  return renderTranscriptMessage(message, { thinkingVisibilityMode });
+function renderMessage(message: TranscriptMessage, sessionId = activeSessionId): HTMLElement {
+  return renderTranscriptMessage(message, {
+    thinkingVisibilityMode,
+    review: sessionId ? transcriptReviewOptions(sessionId, message) : undefined,
+  });
 }
 
 
@@ -3706,9 +4205,18 @@ function send(message: ClientMessage): boolean {
   return connection.send(message);
 }
 
-function setStatus(label: string, className: string): void {
+function setStatus(label: string, className: ConnectionStatus): void {
   connectionStatus.textContent = label;
   connectionStatus.className = `status ${className}`;
+  const canForceReconnect = className === "disconnected" || className === "reconnecting";
+  connectionStatus.title = canForceReconnect ? "Click to reconnect now." : "";
+  connectionStatus.tabIndex = canForceReconnect ? 0 : -1;
+}
+
+function forceReconnectNow(): void {
+  if (!connection || connection.isOpen()) return;
+  appendLog("Reconnecting now.");
+  connection.connect();
 }
 
 function appendLog(line: string): void {

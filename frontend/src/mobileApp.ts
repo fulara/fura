@@ -6,7 +6,7 @@ import {
   type PendingImage,
 } from "./composerAttachments";
 import { createPromptSendMessage, type PromptBehavior } from "./composer";
-import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
+import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
 import {
@@ -55,6 +55,7 @@ import type {
   SessionProjection,
   SessionSummary,
   TodoPhase,
+  TranscriptMessage,
 } from "./protocol";
 import { sessionCategories, visibleSessions } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
@@ -67,14 +68,25 @@ import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView }
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
+import {
+  buildTranscriptReviewPrompt,
+  type TranscriptReviewComment,
+  type TranscriptReviewLine,
+} from "./transcriptReview";
 
-type MobileWindow = Pick<Window, "history" | "localStorage" | "location" | "setTimeout">;
+type MobileWindow = Pick<Window, "history" | "localStorage" | "sessionStorage" | "location" | "prompt" | "setTimeout">;
+type MobileSessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+const MOBILE_ACTIVE_SESSION_STORAGE_KEY = "fura.mobile.activeSessionId";
+const MOBILE_ATTACHED_SESSIONS_STORAGE_KEY = "fura.mobile.attachedSessionIds";
+const MAX_TRACKED_MOBILE_SESSION_IDS = 20;
 
 export type MobileConnectionOptions = {
   auth: WebSocketAuth;
-  onStatus(status: ConnectionStatus, label: string): void;
+  onStatus(label: string, className: ConnectionStatus): void;
   onOpen?(): void;
   onClose?(): void;
+  onAuthFailure?(message: string): void;
   onMessage(message: ServerMessage): void;
   onLog(message: string): void;
 };
@@ -179,6 +191,27 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </form>
+      <section id="mobileAuthGate" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-auth-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileAuthTitle" aria-describedby="mobileAuthDescription">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Bridge auth</p>
+              <h2 id="mobileAuthTitle">Connect to Fura</h2>
+            </div>
+          </header>
+          <div id="mobileAuthDescription" class="mobile-dialog-body">
+            <p>Enter the bridge token from the Fura startup output. URL tokens are ignored and removed.</p>
+          </div>
+          <form id="mobileAuthForm" class="mobile-dialog-form">
+            <label for="mobileAuthToken">Bridge token</label>
+            <input id="mobileAuthToken" type="password" autocomplete="current-password" spellcheck="false" required />
+            <p id="mobileAuthStatus" class="mobile-dialog-status" aria-live="polite"></p>
+            <div class="mobile-dialog-actions">
+              <button id="mobileAuthSubmit" type="submit">Connect</button>
+            </div>
+          </form>
+        </div>
+      </section>
       <section id="mobileBusyPromptOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog mobile-busy-prompt" role="dialog" aria-modal="true" aria-labelledby="mobileBusyPromptTitle" aria-describedby="mobileBusyPromptDescription">
           <header class="mobile-dialog-header">
@@ -281,10 +314,31 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </form>
         </div>
       </section>
+      <section id="mobileReviewPreviewOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-review-preview" role="dialog" aria-modal="true" aria-labelledby="mobileReviewPreviewTitle">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Transcript review</p>
+              <h2 id="mobileReviewPreviewTitle">Preview transcript comments</h2>
+            </div>
+          </header>
+          <textarea id="mobileReviewPreviewText" class="mobile-review-preview-text" readonly spellcheck="false"></textarea>
+          <p id="mobileReviewPreviewStatus" class="mobile-dialog-status" aria-live="polite"></p>
+          <div class="mobile-dialog-actions mobile-review-preview-actions">
+            <button id="mobileReviewPreviewCancel" type="button">Cancel</button>
+            <button id="mobileReviewPreviewSend" type="button">Send comments</button>
+          </div>
+        </div>
+      </section>
     </main>
   `;
 
   const connectionStatus = requireElement<HTMLSpanElement>(document, "mobileConnectionStatus");
+  const authGate = requireElement<HTMLElement>(document, "mobileAuthGate");
+  const authForm = requireElement<HTMLFormElement>(document, "mobileAuthForm");
+  const authTokenInput = requireElement<HTMLInputElement>(document, "mobileAuthToken");
+  const authStatus = requireElement<HTMLParagraphElement>(document, "mobileAuthStatus");
+  const authSubmit = requireElement<HTMLButtonElement>(document, "mobileAuthSubmit");
   const sessionTitle = requireElement<HTMLHeadingElement>(document, "mobileSessionTitle");
   const sessionMeta = requireElement<HTMLParagraphElement>(document, "mobileSessionMeta");
   const createToggle = requireElement<HTMLButtonElement>(document, "mobileCreateToggle");
@@ -349,12 +403,22 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const dialogStatus = requireElement<HTMLParagraphElement>(document, "mobileDialogStatus");
   const dialogCancel = requireElement<HTMLButtonElement>(document, "mobileDialogCancel");
   const dialogSubmit = requireElement<HTMLButtonElement>(document, "mobileDialogSubmit");
+  const reviewPreviewOverlay = requireElement<HTMLElement>(document, "mobileReviewPreviewOverlay");
+  const reviewPreviewText = requireElement<HTMLTextAreaElement>(document, "mobileReviewPreviewText");
+  const reviewPreviewStatus = requireElement<HTMLParagraphElement>(document, "mobileReviewPreviewStatus");
+  const reviewPreviewCancel = requireElement<HTMLButtonElement>(document, "mobileReviewPreviewCancel");
+  const reviewPreviewSend = requireElement<HTMLButtonElement>(document, "mobileReviewPreviewSend");
 
   let connection: FuraConnection | null = null;
+  let reviewPreviewDraft: { sessionId: string; message: TranscriptMessage; comments: TranscriptReviewComment[] } | null = null;
+  const transcriptReviewActiveMessages = new Map<string, string>();
+  const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
   let serverConfig: ServerConfig | null = null;
   let sessions: SessionSummary[] = [];
-  let activeSessionId: string | null = null;
+  let activeSessionId: string | null = readStoredActiveSessionId(window.sessionStorage);
   let projections = new Map<string, SessionProjection>();
+  const trackedSessionIds = readStoredTrackedSessionIds(window.sessionStorage);
+  let pendingRestoreAfterSessionsSnapshot = false;
   const unreadSessions = new Set<string>();
   let selectedCategoryFilter = "";
   let deleteSessionTarget: SessionDeleteView | null = null;
@@ -453,6 +517,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (!createPendingRequestId) createStatus.textContent = "";
   });
 
+  authForm.addEventListener("submit", event => {
+    event.preventDefault();
+    connect(authTokenInput.value);
+  });
+  connectionStatus.addEventListener("click", forceReconnectNow);
+  connectionStatus.addEventListener("keydown", event => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    forceReconnectNow();
+  });
+
   createForm.addEventListener("submit", event => {
     event.preventDefault();
     submitCreateSession();
@@ -491,34 +566,69 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   diffCommentCancel.addEventListener("click", closeDiffCommentEditor);
   diffPreviewCancel.addEventListener("click", closeDiffPreview);
   diffPreviewSend.addEventListener("click", sendDiffPreviewDraft);
+  reviewPreviewCancel.addEventListener("click", closeReviewPreview);
+  reviewPreviewSend.addEventListener("click", sendReviewPreviewDraft);
+  reviewPreviewOverlay.addEventListener("mousedown", event => {
+    if (event.target === reviewPreviewOverlay) closeReviewPreview();
+  });
 
   const initialToken = consumeBootstrapToken(
     window.location.href,
-    window.localStorage,
+    window.sessionStorage,
     url => window.history.replaceState(null, "", url),
   );
   render();
   if (initialToken) connect(initialToken);
-  else appendLog("No bridge token found. Open mobile.html with ?token=<token> from the Rust server URL.");
+  else showAuthGate("Enter the bridge token to connect.");
 
   function connect(token: string): void {
-    const bridgeToken = storeBootstrapToken(token, window.localStorage);
-    if (!bridgeToken) return;
+    const bridgeToken = storeBootstrapToken(token, window.sessionStorage);
+    if (!bridgeToken) {
+      showAuthGate("Enter the bridge token to connect.");
+      return;
+    }
+    authSubmit.disabled = true;
+    authStatus.textContent = "Connecting…";
     connection?.disconnect();
     connection = createConnection({
       auth: { type: "sessionCookie", token: bridgeToken },
       onStatus: setStatus,
-      onOpen: () => send({ type: "session.list" }),
+      onOpen: () => {
+        pendingRestoreAfterSessionsSnapshot = true;
+        hideAuthGate();
+        send({ type: "session.list" });
+      },
       onClose: () => handleConnectionClosed(),
+      onAuthFailure: message => {
+        clearBootstrapToken(window.sessionStorage);
+        showAuthGate(message);
+        authTokenInput.select();
+      },
       onMessage: handleServerMessage,
       onLog: appendLog,
     });
     connection.connect();
   }
 
-  function setStatus(label: string, className: string): void {
+  function showAuthGate(message: string): void {
+    authGate.hidden = false;
+    authSubmit.disabled = false;
+    authStatus.textContent = message;
+  }
+
+  function hideAuthGate(): void {
+    authGate.hidden = true;
+    authSubmit.disabled = false;
+    authStatus.textContent = "";
+    authTokenInput.value = "";
+  }
+
+  function setStatus(label: string, className: ConnectionStatus): void {
     connectionStatus.textContent = label;
     connectionStatus.className = `status ${className}`;
+    const canForceReconnect = className === "disconnected" || className === "reconnecting";
+    connectionStatus.title = canForceReconnect ? "Click to reconnect now." : "";
+    connectionStatus.tabIndex = canForceReconnect ? 0 : -1;
   }
 
   function appendLog(message: string): void {
@@ -532,6 +642,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return false;
     }
     return connection.send(message);
+  }
+
+  function forceReconnectNow(): void {
+    if (!connection || connection.isOpen()) return;
+    appendLog("Reconnecting now.");
+    connection.connect();
   }
 
   function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" }>): void {
@@ -1296,9 +1412,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       case "sessions.snapshot":
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
+        syncTrackedSessionsWithSnapshot();
+        if (pendingRestoreAfterSessionsSnapshot) {
+          pendingRestoreAfterSessionsSnapshot = false;
+          restoreTrackedManagedSessions();
+        }
         render();
         break;
       case "session.snapshot": {
+        rememberTrackedSessionId(message.sessionId);
         const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
         ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
         if (createdByPendingRequest || !activeSessionId || activeSessionId === message.sessionId) {
@@ -1371,7 +1493,43 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function activateSession(sessionId: string): void {
     activeSessionId = activateSessionState(unreadSessions, sessionId);
+    rememberTrackedSessionId(sessionId);
+    writeStoredActiveSessionId(window.sessionStorage, sessionId);
     if (activeMobileView === "diff" && projections.has(sessionId)) requestMobileDiffState(sessionId);
+  }
+
+  function syncTrackedSessionsWithSnapshot(): void {
+    const visibleSessionIds = new Set(sessions.map(session => session.sessionId));
+    for (const sessionId of [...trackedSessionIds]) {
+      if (!visibleSessionIds.has(sessionId)) trackedSessionIds.delete(sessionId);
+    }
+    if (activeSessionId) writeStoredActiveSessionId(window.sessionStorage, activeSessionId);
+    else clearStoredActiveSessionId(window.sessionStorage);
+    writeStoredTrackedSessionIds(window.sessionStorage, trackedSessionIds);
+  }
+
+  function restoreTrackedManagedSessions(): void {
+    const managedSessionIds = new Set(
+      sessions
+        .filter(session => session.kind === "managed")
+        .map(session => session.sessionId),
+    );
+    const restoreIds = orderedTrackedSessionIds(activeSessionId, trackedSessionIds)
+      .filter(sessionId => managedSessionIds.has(sessionId));
+    for (const sessionId of restoreIds) {
+      send({ type: "state.refresh", sessionId });
+    }
+  }
+
+  function rememberTrackedSessionId(sessionId: string): void {
+    if (trackedSessionIds.has(sessionId)) trackedSessionIds.delete(sessionId);
+    trackedSessionIds.add(sessionId);
+    while (trackedSessionIds.size > MAX_TRACKED_MOBILE_SESSION_IDS) {
+      const oldestSessionId = trackedSessionIds.values().next().value;
+      if (!oldestSessionId) break;
+      trackedSessionIds.delete(oldestSessionId);
+    }
+    writeStoredTrackedSessionIds(window.sessionStorage, trackedSessionIds);
   }
 
   function render(): void {
@@ -1392,6 +1550,87 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     });
   }
 
+  function reviewCommentsForMessage(sessionId: string, messageId: string): TranscriptReviewComment[] {
+    return (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId === messageId);
+  }
+
+  function startTranscriptReview(sessionId: string, message: TranscriptMessage): void {
+    transcriptReviewActiveMessages.set(sessionId, message.id);
+    renderActiveSession();
+  }
+
+  function cancelTranscriptReview(sessionId: string, message: TranscriptMessage): void {
+    transcriptReviewActiveMessages.delete(sessionId);
+    transcriptReviewComments.set(
+      sessionId,
+      (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId !== message.id),
+    );
+    renderActiveSession();
+  }
+
+  function addTranscriptReviewComment(sessionId: string, message: TranscriptMessage, line: TranscriptReviewLine): void {
+    const comment = window.prompt("Comment on this transcript line");
+    if (!comment?.trim()) return;
+    const comments = transcriptReviewComments.get(sessionId) ?? [];
+    comments.push({
+      id: `${Date.now()}-${comments.length}`,
+      messageId: message.id,
+      role: message.role,
+      lineNumber: line.lineNumber,
+      lineText: line.text,
+      text: comment.trim(),
+    });
+    transcriptReviewComments.set(sessionId, comments);
+    renderActiveSession();
+  }
+
+  function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
+    const comments = reviewCommentsForMessage(sessionId, message.id);
+    if (comments.length === 0) return;
+    reviewPreviewDraft = { sessionId, message, comments };
+    reviewPreviewText.value = buildTranscriptReviewPrompt(message, comments);
+    reviewPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
+    reviewPreviewOverlay.hidden = false;
+    reviewPreviewText.scrollTop = 0;
+    reviewPreviewSend.focus();
+  }
+
+  function closeReviewPreview(): void {
+    reviewPreviewOverlay.hidden = true;
+    reviewPreviewText.value = "";
+    reviewPreviewStatus.textContent = "";
+    reviewPreviewDraft = null;
+  }
+
+  function sendReviewPreviewDraft(): void {
+    const draft = reviewPreviewDraft;
+    if (!draft) return;
+    closeReviewPreview();
+    const accepted = send(createPromptSendMessage(
+      draft.sessionId,
+      buildTranscriptReviewPrompt(draft.message, draft.comments),
+      [],
+    ));
+    if (!accepted) return;
+    transcriptReviewComments.set(
+      draft.sessionId,
+      (transcriptReviewComments.get(draft.sessionId) ?? []).filter(comment => comment.messageId !== draft.message.id),
+    );
+    transcriptReviewActiveMessages.delete(draft.sessionId);
+    renderActiveSession();
+  }
+
+  function transcriptReviewOptions(sessionId: string, message: TranscriptMessage) {
+    return {
+      active: transcriptReviewActiveMessages.get(sessionId) === message.id,
+      comments: reviewCommentsForMessage(sessionId, message.id),
+      onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
+      onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
+      onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
+      onFlush: (target: TranscriptMessage) => flushTranscriptReviewComments(sessionId, target),
+    };
+  }
+
   function renderActiveSession(): void {
     const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
     const summary = projection?.summary ?? sessions.find(session => session.sessionId === activeSessionId);
@@ -1405,6 +1644,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       promptInput.placeholder = "Select a session first";
       composerStatus.textContent = "No active session";
       updateMobileStatusBar(undefined);
+      closeReviewPreview();
       renderTranscript(undefined);
       renderDiffView(undefined);
       renderBusyPromptChoice();
@@ -1441,7 +1681,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const fragment = transcript.ownerDocument.createDocumentFragment();
     for (const entry of projection.transcript) {
       if (entry.kind === "message") {
-        fragment.append(renderMessage(entry, { thinkingVisibilityMode: "auto" }));
+        fragment.append(renderMessage(entry, {
+          thinkingVisibilityMode: "auto",
+          review: activeSessionId ? transcriptReviewOptions(activeSessionId, entry) : undefined,
+        }));
       } else {
         fragment.append(renderToolCard(entry));
       }
@@ -1777,6 +2020,51 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   return { connect, send };
+}
+
+function readStoredActiveSessionId(storage: MobileSessionStorage): string | null {
+  const sessionId = storage.getItem(MOBILE_ACTIVE_SESSION_STORAGE_KEY)?.trim();
+  return sessionId || null;
+}
+
+function writeStoredActiveSessionId(storage: MobileSessionStorage, sessionId: string): void {
+  storage.setItem(MOBILE_ACTIVE_SESSION_STORAGE_KEY, sessionId);
+}
+
+function clearStoredActiveSessionId(storage: MobileSessionStorage): void {
+  storage.removeItem(MOBILE_ACTIVE_SESSION_STORAGE_KEY);
+}
+
+function readStoredTrackedSessionIds(storage: MobileSessionStorage): Set<string> {
+  const raw = storage.getItem(MOBILE_ATTACHED_SESSIONS_STORAGE_KEY);
+  if (!raw) return new Set();
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(
+      parsed
+        .filter((sessionId): sessionId is string => typeof sessionId === "string" && sessionId.trim().length > 0)
+        .map(sessionId => sessionId.trim())
+        .slice(-MAX_TRACKED_MOBILE_SESSION_IDS),
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function writeStoredTrackedSessionIds(storage: MobileSessionStorage, sessionIds: ReadonlySet<string>): void {
+  const serialized = orderedTrackedSessionIds(null, sessionIds).slice(-MAX_TRACKED_MOBILE_SESSION_IDS);
+  if (serialized.length === 0) {
+    storage.removeItem(MOBILE_ATTACHED_SESSIONS_STORAGE_KEY);
+    return;
+  }
+  storage.setItem(MOBILE_ATTACHED_SESSIONS_STORAGE_KEY, JSON.stringify(serialized));
+}
+
+function orderedTrackedSessionIds(activeSessionId: string | null, sessionIds: ReadonlySet<string>): string[] {
+  const ordered = [...sessionIds];
+  if (!activeSessionId) return ordered;
+  return [activeSessionId, ...ordered.filter(sessionId => sessionId !== activeSessionId)];
 }
 
 function requireElement<T extends HTMLElement>(document: Document, id: string): T {

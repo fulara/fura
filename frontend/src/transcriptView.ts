@@ -5,6 +5,12 @@ import { appendEventTimestamp } from "./eventTime";
 import { imagePlaceholderText, renderImageAttachment } from "./imageRendering";
 import { renderMermaidBlock } from "./mermaidRendering";
 import type { ContentBlock, TranscriptMessage } from "./protocol";
+import {
+  commentsForTranscriptLine,
+  transcriptReviewLines,
+  type TranscriptReviewComment,
+  type TranscriptReviewLine,
+} from "./transcriptReview";
 import type { ThinkingVisibilityMode } from "./uiPreferences";
 
 export function messageText(message: TranscriptMessage): string {
@@ -21,11 +27,21 @@ export function messageText(message: TranscriptMessage): string {
 
 type RenderMessageOptions = {
   thinkingVisibilityMode: ThinkingVisibilityMode;
+  review?: RenderMessageReviewOptions;
+};
+
+type RenderMessageReviewOptions = {
+  active: boolean;
+  comments: TranscriptReviewComment[];
+  onStart?(message: TranscriptMessage): void;
+  onAddComment?(message: TranscriptMessage, line: TranscriptReviewLine): void;
+  onCancel?(message: TranscriptMessage): void;
+  onFlush?(message: TranscriptMessage): void;
 };
 
 export function renderMessage(message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const article = mkEl("article");
-  article.className = `message ${message.role}`;
+  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
   const visibleBlocks = message.blocks
     .map((block, index) => ({ block, index }))
@@ -42,6 +58,8 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
   roleLabel.textContent = message.role === "user" ? "You" : message.role;
   heading.append(roleLabel);
   appendEventTimestamp(heading, message.timestamp);
+  const actions = mkEl("div");
+  actions.className = "message-actions";
   const copy = mkEl("button");
   copy.type = "button";
   copy.textContent = "Copy";
@@ -52,16 +70,111 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
       copy.textContent = "Copy";
     }, 900);
   });
-  header.append(heading, copy);
+  actions.append(copy);
+  if (options.review?.onStart) {
+    const review = mkEl("button");
+    review.type = "button";
+    review.className = "message-review-toggle";
+    review.textContent = options.review.active ? "Reviewing" : "Review";
+    review.setAttribute("aria-pressed", options.review.active ? "true" : "false");
+    review.disabled = options.review.active;
+    review.addEventListener("click", () => options.review?.onStart?.(message));
+    actions.append(review);
+  }
+  header.append(heading, actions);
   article.append(header);
 
-  for (const { block, index } of visibleBlocks) {
-    article.append(renderBlock(block, message.isNew, message.id, index, {
-      thinkingVisibilityMode: options.thinkingVisibilityMode,
-    }));
+  if (options.review?.active) {
+    article.append(renderTranscriptReviewBody(message, options.review));
+  } else {
+    for (const { block, index } of visibleBlocks) {
+      article.append(renderBlock(block, message.isNew, message.id, index, {
+        thinkingVisibilityMode: options.thinkingVisibilityMode,
+      }));
+    }
   }
 
   return article;
+}
+
+function renderTranscriptReviewBody(message: TranscriptMessage, review: RenderMessageReviewOptions): HTMLElement {
+  const wrapper = mkEl("section");
+  wrapper.className = "transcript-review-body";
+  wrapper.setAttribute("aria-label", "Transcript review lines");
+
+  const lines = transcriptReviewLines(message);
+  const list = mkEl("div");
+  list.className = "transcript-review-lines";
+  for (const line of lines) {
+    list.append(renderTranscriptReviewLine(message, line, review));
+  }
+  wrapper.append(list);
+
+  const footer = mkEl("footer");
+  footer.className = "transcript-review-footer";
+  const status = mkEl("span");
+  const commentCount = review.comments.length;
+  status.className = "transcript-review-status";
+  status.textContent = `${commentCount} comment${commentCount === 1 ? "" : "s"}`;
+
+  const actions = mkEl("div");
+  actions.className = "transcript-review-actions";
+  const cancel = mkEl("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel review";
+  cancel.addEventListener("click", () => review.onCancel?.(message));
+  const flush = mkEl("button");
+  flush.type = "button";
+  flush.textContent = "Flush comments";
+  flush.disabled = commentCount === 0;
+  flush.addEventListener("click", () => review.onFlush?.(message));
+  actions.append(cancel, flush);
+  footer.append(status, actions);
+  wrapper.append(footer);
+  return wrapper;
+}
+
+function renderTranscriptReviewLine(
+  message: TranscriptMessage,
+  line: TranscriptReviewLine,
+  review: RenderMessageReviewOptions,
+): HTMLElement {
+  const lineComments = commentsForTranscriptLine(review.comments, line);
+  const row = mkEl("div");
+  row.className = "transcript-review-line-wrap";
+
+  const lineEl = mkEl("div");
+  lineEl.className = "transcript-review-line";
+  const commentBtn = mkEl("button");
+  commentBtn.type = "button";
+  commentBtn.className = `transcript-review-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
+  commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
+  commentBtn.title = "Comment on this transcript line";
+  commentBtn.addEventListener("click", () => review.onAddComment?.(message, line));
+
+  const gutter = mkEl("span");
+  gutter.className = "transcript-review-gutter";
+  gutter.textContent = String(line.lineNumber);
+
+  const content = mkEl("code");
+  content.className = "transcript-review-line-content";
+  content.textContent = line.text || " ";
+  lineEl.append(commentBtn, gutter, content);
+  row.append(lineEl);
+
+  if (lineComments.length > 0) {
+    const thread = mkEl("div");
+    thread.className = "transcript-review-inline-comments";
+    for (const comment of lineComments) {
+      const item = mkEl("div");
+      item.className = "transcript-review-inline-comment";
+      item.textContent = comment.text;
+      thread.append(item);
+    }
+    row.append(thread);
+  }
+
+  return row;
 }
 
 export function renderMarkdown(text: string): HTMLElement {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { consumeBootstrapToken, FURA_TOKEN_STORAGE_KEY, storeBootstrapToken } from "./bootstrapAuth";
+import { clearBootstrapToken, consumeBootstrapToken, FURA_TOKEN_STORAGE_KEY, storeBootstrapToken, stripUrlToken } from "./bootstrapAuth";
 
 class MemoryStorage {
   private values = new Map<string, string>();
@@ -11,10 +11,14 @@ class MemoryStorage {
   setItem(key: string, value: string): void {
     this.values.set(key, value);
   }
+
+  removeItem(key: string): void {
+    this.values.delete(key);
+  }
 }
 
 describe("consumeBootstrapToken", () => {
-  it("uses the URL token, stores it, and removes it from the URL", () => {
+  it("strips the URL token without using or storing it", () => {
     const storage = new MemoryStorage();
     storage.setItem(FURA_TOKEN_STORAGE_KEY, "stored");
     const replacements: string[] = [];
@@ -25,8 +29,8 @@ describe("consumeBootstrapToken", () => {
       url => replacements.push(url),
     );
 
-    expect(token).toBe("dev");
-    expect(storage.getItem(FURA_TOKEN_STORAGE_KEY)).toBe("dev");
+    expect(token).toBe("stored");
+    expect(storage.getItem(FURA_TOKEN_STORAGE_KEY)).toBe("stored");
     expect(replacements).toEqual(["/mobile.html?view=mobile#session"]);
   });
 
@@ -66,5 +70,23 @@ describe("storeBootstrapToken", () => {
 
     expect(storeBootstrapToken("  ", storage)).toBe("");
     expect(storage.getItem(FURA_TOKEN_STORAGE_KEY)).toBe("stored");
+  });
+
+  it("clears stored tokens", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(FURA_TOKEN_STORAGE_KEY, "stored");
+
+    clearBootstrapToken(storage);
+
+    expect(storage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+  });
+});
+
+describe("stripUrlToken", () => {
+  it("returns false when the URL has no token", () => {
+    const replacements: string[] = [];
+
+    expect(stripUrlToken("http://127.0.0.1:3737/mobile.html?view=mobile", url => replacements.push(url))).toBe(false);
+    expect(replacements).toEqual([]);
   });
 });

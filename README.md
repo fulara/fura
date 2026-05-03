@@ -81,7 +81,7 @@ cargo build
 FURA_TOKEN=dev cargo run -- --static-dir frontend/dist
 ```
 
-Open: `http://127.0.0.1:3737/?token=dev`
+Open: `http://127.0.0.1:3737/`, then enter bridge token `dev` in the auth screen.
 
 ### Against a local OMP checkout
 
@@ -95,9 +95,29 @@ Environment overrides for `run-local-omp.sh`:
 |---|---|---|
 | `OMP_REPO` | `~/repos/oh-my-pi` | Path to the OMP monorepo checkout |
 | `BUN_BIN` | `~/.bun/bin/bun` | Path to the `bun` executable |
-| `FURA_TOKEN` | `dev` | Bootstrap token for creating the browser auth session |
+| `FURA_TOKEN` | `dev` | Bridge token entered in the browser auth screen |
 | `FURA_BRIDGE_DEBUG_FILE` | `./bridge-debug.jsonl` | Raw RPC frame log (contains prompts — do not commit) |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
+
+### Against a local OMP checkout over Tailscale + HTTPS
+
+```bash
+./run-local-with-tailscale.sh
+```
+
+Defaults: keep local development on `http://127.0.0.1:3737/`, add a remote HTTPS listener on `https://serwer-mini.caracal-porgy.ts.net:4450/mobile.html`, and bind that remote listener to this machine's `tailscale ip -4`. The script expects matching TLS files at `./.cert/serwer-mini.caracal-porgy.ts.net.crt` and `.key` unless you override them. Fura refuses to start the remote listener if that certificate is expired or has less than 5 days of validity remaining.
+
+Override the remote host, TLS file paths, or token explicitly if needed:
+
+
+```bash
+FURA_TOKEN=<explicit-token> \
+FURA_REMOTE_HOST=<machine>.<tailnet>.ts.net \
+FURA_TLS_CERT=/path/to/<machine>.<tailnet>.ts.net.crt \
+FURA_TLS_KEY=/path/to/<machine>.<tailnet>.ts.net.key \
+./run-local-with-tailscale.sh
+```
+
 
 ### Mock RPC (no OMP required)
 
@@ -105,14 +125,14 @@ Environment overrides for `run-local-omp.sh`:
 ./run-mock-rpc.sh
 ```
 
-Open: `http://127.0.0.1:3737/?token=dev`
+Open: `http://127.0.0.1:38737/`, then enter bridge token `dev` in the auth screen.
 
 Environment overrides for `run-mock-rpc.sh`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `FURA_TOKEN` | `dev` | Bootstrap token for creating the browser auth session |
-| `FURA_PORT` | `3737` | Listen port |
+| `FURA_TOKEN` | `dev` | Bridge token entered in the browser auth screen |
+| `FURA_PORT` | `38737` | Listen port for mock smoke runs; intentionally avoids the normal `3737` dev port |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
 ## Configuration
@@ -121,9 +141,13 @@ All flags can also be set via environment variables:
 
 | Flag | Env var | Default | Description |
 |---|---|---|---|
-| `--host` | — | `127.0.0.1` | Bind address |
-| `--port` | — | `3737` | Listen port |
-| `--token` | `FURA_TOKEN` | random UUID (logged) | Bootstrap token for browser auth session creation |
+| `--bind` | `FURA_BIND` | `127.0.0.1:3737` | Local HTTP bind address used for laptop development |
+| `--remote-bind` | `FURA_REMOTE_BIND` | — | Optional remote HTTPS bind address, typically a Tailscale IP plus phone port |
+| `--remote-host` | `FURA_REMOTE_HOST` | — | Public HTTPS host name used by remote browsers; must match the TLS certificate host name |
+| `--allowed-origin` | `FURA_ALLOWED_ORIGINS` | — | Additional exact remote HTTPS origins allowed for the remote listener |
+| `--tls-cert` | `FURA_TLS_CERT` | — | PEM certificate file for the remote HTTPS listener |
+| `--tls-key` | `FURA_TLS_KEY` | — | PEM private key file for the remote HTTPS listener |
+| `--token` | `FURA_TOKEN` | random UUID (logged separately when generated) | Bridge token entered in the browser auth screen |
 | `--static-dir` | — | `frontend/dist` | Frontend static files |
 | `--rpc-program` | `FURA_RPC_PROGRAM` | `omp` | RPC child executable |
 | `--rpc-arg` | `FURA_RPC_ARGS` | — | Extra args for RPC child (repeatable) |

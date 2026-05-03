@@ -8,7 +8,7 @@ use axum::{
     Json,
     extract::{
         Json as JsonBody, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
@@ -25,6 +25,7 @@ use crate::{
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
 const AUTH_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const MAX_CLIENT_TEXT_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct AuthSessionRequest {
@@ -34,6 +35,13 @@ pub(crate) struct AuthSessionRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WebSocketAuth {
     SessionCookie,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OriginError {
+    Missing,
+    Invalid,
+    NotAllowed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,7 +58,25 @@ pub(crate) async fn auth_session_handler(
     }
 
     let mut auth_sessions = state.auth_sessions.write().await;
-    build_auth_session_response(issue_auth_session(&mut auth_sessions, Instant::now()))
+    build_auth_session_response(
+        issue_auth_session(&mut auth_sessions, Instant::now()),
+        state.secure_auth_cookie,
+    )
+}
+
+pub(crate) fn authenticate_websocket_origin(
+    headers: &HeaderMap,
+    allowed_origins: &[String],
+) -> Result<(), OriginError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Err(OriginError::Missing);
+    };
+    let origin = origin.to_str().map_err(|_| OriginError::Invalid)?;
+    if allowed_origins.iter().any(|allowed| allowed == origin) {
+        Ok(())
+    } else {
+        Err(OriginError::NotAllowed)
+    }
 }
 
 pub(crate) async fn authenticate_websocket_headers(
@@ -80,10 +106,13 @@ pub(crate) fn issue_auth_session(
     session_id
 }
 
-pub(crate) fn build_auth_session_response(session_id: String) -> Response {
+pub(crate) fn build_auth_session_response(session_id: String, secure: bool) -> Response {
     (
         StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, auth_session_cookie_header(&session_id))],
+        [(
+            header::SET_COOKIE,
+            auth_session_cookie_header(&session_id, secure),
+        )],
     )
         .into_response()
 }
@@ -111,9 +140,10 @@ fn auth_session_cookie(headers: &HeaderMap) -> Option<String> {
     })
 }
 
-fn auth_session_cookie_header(session_id: &str) -> String {
+fn auth_session_cookie_header(session_id: &str, secure: bool) -> String {
+    let secure_attr = if secure { "; Secure" } else { "" };
     format!(
-        "{AUTH_SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
+        "{AUTH_SESSION_COOKIE}={session_id}; HttpOnly{secure_attr}; SameSite=Lax; Path=/; Max-Age={}",
         AUTH_SESSION_TTL.as_secs(),
     )
 }
@@ -127,6 +157,19 @@ pub(crate) async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
+    if let Some(allowed_origins) = state.allowed_origins.as_deref() {
+        match authenticate_websocket_origin(&headers, allowed_origins) {
+            Ok(()) => {}
+            Err(error) => {
+                warn!(
+                    ?error,
+                    "rejected websocket connection with disallowed origin"
+                );
+                return (StatusCode::FORBIDDEN, "missing or disallowed origin").into_response();
+            }
+        }
+    }
+
     match authenticate_websocket_headers(&headers, &state, Instant::now()).await {
         Ok(WebSocketAuth::SessionCookie) => {
             ws.on_upgrade(move |socket| handle_socket(socket, state))
@@ -188,6 +231,28 @@ pub(crate) async fn handle_socket(mut socket: WebSocket, state: AppState) {
     }
 }
 
+fn client_text_frame_too_large(text: &str) -> bool {
+    text.len() > MAX_CLIENT_TEXT_FRAME_BYTES
+}
+
+async fn close_for_text_frame_too_large(
+    socket: &mut WebSocket,
+    bytes: usize,
+) -> Result<(), axum::Error> {
+    warn!(
+        bytes,
+        limit = MAX_CLIENT_TEXT_FRAME_BYTES,
+        "websocket text frame too large"
+    );
+    socket
+        .send(Message::Close(Some(CloseFrame {
+            code: close_code::SIZE,
+            reason: "message too large".into(),
+        })))
+        .await?;
+    Err(axum::Error::new(anyhow!("websocket text frame too large")))
+}
+
 pub(crate) async fn handle_websocket_frame(
     socket: &mut WebSocket,
     state: &AppState,
@@ -203,6 +268,10 @@ pub(crate) async fn handle_websocket_frame(
 
     match frame {
         Message::Text(text) => {
+            if client_text_frame_too_large(&text) {
+                return close_for_text_frame_too_large(socket, text.len()).await;
+            }
+
             if state.log_frames {
                 info!(direction = "client_to_bridge", frame = %text, "websocket frame");
             }
@@ -402,6 +471,55 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "frontend.control",
             target_client_id = %target_client_id
         ),
+        ServerMessage::CodeWorkspaceReady { workspace } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.workspace.ready",
+            workspace_id = %workspace.workspace_id,
+            session_id = %workspace.session_id,
+            root = %workspace.root
+        ),
+        ServerMessage::CodeTree {
+            workspace_id,
+            path,
+            entries,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.tree",
+            workspace_id = %workspace_id,
+            path = %path,
+            entry_count = entries.len()
+        ),
+        ServerMessage::CodeFile { workspace_id, file } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.file",
+            workspace_id = %workspace_id,
+            path = %file.path,
+            bytes = file.text.len()
+        ),
+        ServerMessage::CodeFileSearchResults {
+            workspace_id,
+            base_path,
+            query,
+            entries,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.file.searchResults",
+            workspace_id = %workspace_id,
+            base_path = %base_path,
+            query_len = query.len(),
+            entry_count = entries.len()
+        ),
+        ServerMessage::CodeError {
+            workspace_id,
+            path,
+            message,
+        } => warn!(
+            direction = "bridge_to_client",
+            message_type = "code.error",
+            workspace_id = ?workspace_id,
+            path = ?path,
+            bytes = message.len()
+        ),
         ServerMessage::RawOmp { session_id, frame } => info!(
             direction = "bridge_to_client",
             message_type = "raw.omp",
@@ -463,7 +581,7 @@ mod tests {
 
     #[test]
     fn build_auth_session_response_sets_http_only_cookie() {
-        let response = build_auth_session_response("session-1".to_string());
+        let response = build_auth_session_response("session-1".to_string(), false);
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let cookie = response
@@ -476,6 +594,19 @@ mod tests {
         assert!(cookie.contains("SameSite=Lax"));
         assert!(cookie.contains("Path=/"));
         assert!(cookie.contains("Max-Age=43200"));
+        assert!(!cookie.contains("Secure"));
+    }
+
+    #[test]
+    fn build_auth_session_response_adds_secure_cookie_when_requested() {
+        let response = build_auth_session_response("session-1".to_string(), true);
+
+        let cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .expect("set-cookie header");
+        assert!(cookie.contains("Secure"));
     }
 
     #[test]
@@ -492,6 +623,54 @@ mod tests {
 
         assert!(!sessions.contains_key("expired"));
         assert!(sessions.contains_key(&issued));
+    }
+
+    #[test]
+    fn authenticate_websocket_origin_accepts_exact_allowed_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://127.0.0.1:3737"),
+        );
+        let allowed = vec!["http://127.0.0.1:3737".to_string()];
+
+        assert_eq!(authenticate_websocket_origin(&headers, &allowed), Ok(()));
+    }
+
+    #[test]
+    fn authenticate_websocket_origin_rejects_disallowed_origin() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ORIGIN,
+            axum::http::HeaderValue::from_static("http://evil.example"),
+        );
+        let allowed = vec!["http://127.0.0.1:3737".to_string()];
+
+        assert_eq!(
+            authenticate_websocket_origin(&headers, &allowed),
+            Err(OriginError::NotAllowed),
+        );
+    }
+
+    #[test]
+    fn authenticate_websocket_origin_rejects_missing_origin() {
+        let headers = HeaderMap::new();
+        let allowed = vec!["http://127.0.0.1:3737".to_string()];
+
+        assert_eq!(
+            authenticate_websocket_origin(&headers, &allowed),
+            Err(OriginError::Missing),
+        );
+    }
+
+    #[test]
+    fn client_text_frame_size_limit_is_explicit() {
+        assert!(!client_text_frame_too_large(
+            &"a".repeat(MAX_CLIENT_TEXT_FRAME_BYTES)
+        ));
+        assert!(client_text_frame_too_large(
+            &"a".repeat(MAX_CLIENT_TEXT_FRAME_BYTES + 1)
+        ));
     }
 
     #[test]

@@ -39,4 +39,43 @@ describe("protocol type fixtures", () => {
     expect(message.type).toBe("prompt.send");
     expect(message.behavior).toBe("followUp");
   });
+
+  it("preserves code viewer message shapes", () => {
+    const open = {
+      type: "code.workspace.open",
+      sessionId: "session-1",
+    } satisfies ClientMessage;
+
+    const ready = {
+      type: "code.workspace.ready",
+      workspace: {
+        workspaceId: "workspace-1",
+        sessionId: "session-1",
+        root: "/repo",
+        status: "filesOnly",
+      },
+    } satisfies ServerMessage;
+
+    expect(open.type).toBe("code.workspace.open");
+    expect(ready.workspace.status).toBe("filesOnly");
+
+    const search = {
+      type: "code.file.search",
+      workspaceId: "workspace-1",
+      basePath: "/repo",
+      query: "main",
+      limit: 20,
+    } satisfies ClientMessage;
+
+    const results = {
+      type: "code.file.searchResults",
+      workspaceId: "workspace-1",
+      basePath: "/repo",
+      query: "main",
+      entries: [{ kind: "file", name: "main.rs", path: "src/main.rs", size: 12 }],
+    } satisfies ServerMessage;
+
+    expect(search.query).toBe("main");
+    expect(results.entries[0]?.path).toBe("src/main.rs");
+  });
 });

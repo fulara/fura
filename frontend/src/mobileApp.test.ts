@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { FuraConnection } from "./connection";
+import type { ConnectionStatus, FuraConnection } from "./connection";
 import { mountMobileApp, type MobileConnectionOptions } from "./mobileApp";
+import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ClientMessage, ServerConfig, ServerMessage, SessionProjection, SessionSummary } from "./protocol";
 
 class FakeConnection implements FuraConnection {
@@ -12,11 +13,13 @@ class FakeConnection implements FuraConnection {
 
   connect(): void {
     this.connected = true;
+    this.closed = false;
     this.options.onStatus("connected", "connected");
     this.options.onOpen?.();
   }
 
   disconnect(): void {
+    this.connected = false;
     this.closed = true;
   }
 
@@ -32,13 +35,21 @@ class FakeConnection implements FuraConnection {
   emit(message: ServerMessage): void {
     this.options.onMessage(message);
   }
+
+  emitClose(label = "reconnecting in 500ms", status: ConnectionStatus = "reconnecting"): void {
+    this.connected = false;
+    this.options.onStatus(label, status);
+    this.options.onClose?.();
+  }
 }
 
 const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en" };
 
-function createHarness(path = "/mobile.html?token=dev") {
+function createHarness(path = "/mobile.html", storedToken = "dev") {
   document.body.innerHTML = `<div id="app"></div>`;
   window.localStorage.clear();
+  window.sessionStorage.clear();
+  if (storedToken) window.sessionStorage.setItem(FURA_TOKEN_STORAGE_KEY, storedToken);
   window.history.replaceState(null, "", path);
   const connections: FakeConnection[] = [];
   const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
@@ -55,6 +66,25 @@ function createHarness(path = "/mobile.html?token=dev") {
   if (!connection) throw new Error("connection missing");
   connection.emit({ type: "hello", serverVersion: "test", protocolVersion: 1, config });
   return { app, connection, connections, debug };
+}
+
+function createUnauthenticatedHarness(path = "/mobile.html") {
+  document.body.innerHTML = `<div id="app"></div>`;
+  window.localStorage.clear();
+  window.sessionStorage.clear();
+  window.history.replaceState(null, "", path);
+  const connections: FakeConnection[] = [];
+  const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  const app = mountMobileApp({
+    document,
+    window,
+    createConnection: options => {
+      const connection = new FakeConnection(options);
+      connections.push(connection);
+      return connection;
+    },
+  });
+  return { app, connections, debug };
 }
 
 function summary(sessionId: string, overrides: Partial<SessionSummary> = {}): SessionSummary {
@@ -112,7 +142,7 @@ function diffState(
 }
 
 function clickSession(index = 0): void {
-  const buttons = document.querySelectorAll<HTMLButtonElement>("#mobileSessionsList .session-item button");
+  const buttons = document.querySelectorAll<HTMLButtonElement>("#mobileSessionsList .session-item > button:not(.session-delete)");
   const button = buttons[index];
   if (!button) throw new Error(`session button ${index} missing`);
   button.click();
@@ -198,14 +228,38 @@ beforeEach(() => {
 });
 
 describe("mountMobileApp", () => {
-  it("bootstraps cookie auth from the URL token and requests sessions on open", () => {
-    const { connection, debug } = createHarness();
+  it("uses a sessionStorage token and strips URL tokens without storing them", () => {
+    const { connection, debug } = createHarness("/mobile.html?token=url-token", "stored-token");
 
     expect(window.location.href).toBe("http://localhost:3000/mobile.html");
-    expect(window.localStorage.getItem("fura.token")).toBe("dev");
-    expect(connection.options.auth).toEqual({ type: "sessionCookie", token: "dev" });
+    expect(window.localStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBe("stored-token");
+    expect(connection.options.auth).toEqual({ type: "sessionCookie", token: "stored-token" });
     expect(connection.sent).toContainEqual({ type: "session.list" });
     expect(document.querySelector("#mobileConnectionStatus")?.textContent).toBe("connected");
+    debug.mockRestore();
+  });
+
+  it("shows the auth gate instead of connecting without a stored token", () => {
+    const { connections, debug } = createUnauthenticatedHarness("/mobile.html?token=url-token");
+
+    expect(window.location.href).toBe("http://localhost:3000/mobile.html");
+    expect(connections).toEqual([]);
+    expect(document.querySelector<HTMLElement>("#mobileAuthGate")?.hidden).toBe(false);
+    expect(document.querySelector("#mobileAuthStatus")?.textContent).toBe("Enter the bridge token to connect.");
+    expect(window.localStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(window.sessionStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+    debug.mockRestore();
+  });
+
+  it("clears the attempted session token when auth fails", () => {
+    const { connection, debug } = createHarness();
+
+    connection.options.onAuthFailure?.("invalid token");
+
+    expect(window.sessionStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBeNull();
+    expect(document.querySelector<HTMLElement>("#mobileAuthGate")?.hidden).toBe(false);
+    expect(document.querySelector("#mobileAuthStatus")?.textContent).toBe("invalid token");
     debug.mockRestore();
   });
 
@@ -232,6 +286,37 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileSessionMeta")?.hasAttribute("hidden")).toBe(true);
     expect(document.querySelector("#mobileStatusBar")?.textContent).toContain("/repo");
     expect(connection.sent).toContainEqual({ type: "session.attach", sessionId: "live" });
+  });
+
+  it("forces an immediate reconnect when the disconnected status is clicked", () => {
+    const { connection } = createHarness();
+    connection.sent = [];
+    connection.emitClose("disconnected", "disconnected");
+
+    document.querySelector<HTMLElement>("#mobileConnectionStatus")?.click();
+
+    expect(connection.connected).toBe(true);
+    expect(connection.sent).toEqual([{ type: "session.list" }]);
+    expect(document.querySelector("#mobileConnectionStatus")?.textContent).toBe("connected");
+  });
+
+  it("refreshes the active and previously attached managed sessions after reconnect", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+    clickSession(0);
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    clickSession(1);
+    connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+    connection.sent = [];
+
+    connection.options.onOpen?.();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+
+    expect(connection.sent).toEqual([
+      { type: "session.list" },
+      { type: "state.refresh", sessionId: "other" },
+      { type: "state.refresh", sessionId: "live" },
+    ]);
   });
 
   it("filters sessions by category without exposing mobile category editing", () => {
@@ -294,6 +379,47 @@ describe("mountMobileApp", () => {
 
     expect(connection.sent).toContainEqual({ type: "prompt.send", sessionId: "live", text: "hello mobile" });
     expect(input.value).toBe("");
+  });
+
+  it("reviews transcript lines on mobile and sends previewed comments", () => {
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("Please clarify line two");
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [{
+          kind: "message",
+          id: "message-live",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "line one\nline two" }],
+          timestamp: null,
+          isNew: false,
+        }],
+      }),
+    });
+
+    const reviewButton = [...document.querySelectorAll<HTMLButtonElement>(".message-actions button")]
+      .find(button => button.textContent === "Review");
+    reviewButton?.click();
+    document.querySelectorAll<HTMLButtonElement>(".transcript-review-comment-btn")[1]?.click();
+    expect(prompt).toHaveBeenCalledWith("Comment on this transcript line");
+    expect(document.querySelector(".transcript-review-inline-comment")?.textContent).toBe("Please clarify line two");
+
+    document.querySelector<HTMLButtonElement>(".transcript-review-actions button:last-child")?.click();
+    expect(document.querySelector<HTMLElement>("#mobileReviewPreviewOverlay")?.hidden).toBe(false);
+    expect(document.querySelector<HTMLTextAreaElement>("#mobileReviewPreviewText")?.value).toContain("Comment: Please clarify line two");
+
+    document.querySelector<HTMLButtonElement>("#mobileReviewPreviewSend")?.click();
+
+    const sentPrompt = connection.sent.find(
+      message => message.type === "prompt.send" && message.sessionId === "live" && message.text.includes("Please clarify line two"),
+    );
+    expect(sentPrompt).toBeTruthy();
+    expect(document.querySelector<HTMLElement>("#mobileReviewPreviewOverlay")?.hidden).toBe(true);
+    expect(document.querySelector(".transcript-review-body")).toBeNull();
   });
 
   it("attaches and removes mobile image previews", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildAuthSessionUrl,
   buildWebSocketUrl,
@@ -62,6 +62,10 @@ async function flushPromises(): Promise<void> {
   await Promise.resolve();
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("auth and WebSocket URLs", () => {
   it("builds auth session URLs from the current page origin", () => {
     expect(buildAuthSessionUrl("http://127.0.0.1:3737/app?token=dev")).toBe("http://127.0.0.1:3737/auth/session");
@@ -94,7 +98,8 @@ describe("auth and WebSocket URLs", () => {
 });
 
 describe("createFuraConnection", () => {
-  it("authenticates, reports status changes, and requests the session list on open", async () => {
+  it("authenticates, reports status changes, and automatically reconnects after close", async () => {
+    vi.useFakeTimers();
     resetFakeWebSockets();
     const statuses: string[] = [];
     const logs: string[] = [];
@@ -116,18 +121,35 @@ describe("createFuraConnection", () => {
     const socket = FakeWebSocket.instances[0];
     socket.emit("open");
     socket.emit("close");
+    await vi.advanceTimersByTimeAsync(500);
+    await flushPromises();
+    const reconnectSocket = FakeWebSocket.instances[1];
+    reconnectSocket.emit("open");
 
-    expect(fetchCalls.map(call => call.input)).toEqual(["http://localhost:3737/auth/session"]);
+    expect(fetchCalls.map(call => call.input)).toEqual([
+      "http://localhost:3737/auth/session",
+      "http://localhost:3737/auth/session",
+    ]);
     expect(socket.url).toBe("ws://localhost:3737/ws");
-    expect(statuses).toEqual(["connecting", "connected", "disconnected"]);
+    expect(reconnectSocket.url).toBe("ws://localhost:3737/ws");
+    expect(statuses).toEqual([
+      "connecting",
+      "connected",
+      "reconnecting in 500ms",
+      "connecting",
+      "connected",
+    ]);
     expect(socket.sent).toEqual([JSON.stringify({ type: "session.list" })]);
+    expect(reconnectSocket.sent).toEqual([JSON.stringify({ type: "session.list" })]);
     expect(logs).toEqual(["closed"]);
+    connection.disconnect();
   });
 
   it("does not open a WebSocket when authentication fails", async () => {
     resetFakeWebSockets();
     const statuses: string[] = [];
     const logs: string[] = [];
+    const authFailures: string[] = [];
     const connection = createFuraConnection({
       auth: { type: "sessionCookie", token: "bad" },
       locationHref: "http://localhost:3737/",
@@ -136,6 +158,7 @@ describe("createFuraConnection", () => {
       onStatus: status => statuses.push(status),
       onMessage: () => {},
       onLog: message => logs.push(message),
+      onAuthFailure: message => authFailures.push(message),
     });
 
     connection.connect();
@@ -144,6 +167,7 @@ describe("createFuraConnection", () => {
     expect(FakeWebSocket.instances).toEqual([]);
     expect(statuses).toEqual(["connecting", "disconnected"]);
     expect(logs).toEqual(["Authentication failed. Check the token and bridge server."]);
+    expect(authFailures).toEqual(["Authentication failed. Check the token and bridge server."]);
   });
 
   it("routes text messages and ignores non-text frames", async () => {
