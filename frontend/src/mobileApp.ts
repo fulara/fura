@@ -10,12 +10,14 @@ import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from 
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
 import {
+  deriveDiffSelection,
+  diffHeadSelectionFromEntryId,
   diffRepoRoots,
   diffSnapshotsForRepo,
   formatDiffRepoLabel,
-  inferDiffRepoRootFromCwd,
   parseDiffRows,
   summarizeDiffFiles,
+  type DiffSelection,
   type ParsedDiffRow,
 } from "./diffState";
 import {
@@ -1319,60 +1321,23 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     renderActiveSession();
   }
 
-  type MobileDiffSelection = {
-    repoRoot: string | null;
-    selectedSnapshot: DiffSnapshotSummary | null;
-    headSnapshot: DiffSnapshotSummary | null;
-    snapshots: DiffSnapshotSummary[];
-    stat: boolean;
-  };
-
-  function resolveMobileDiffRepoRoot(
-    sessionId: string,
-    projection: SessionProjection | undefined,
-    state: RepoDiffState | undefined,
-  ): string | null {
-    const repoRoots = diffRepoRoots(state);
-    const explicit = diffSelectedRepos.get(sessionId);
-    if (explicit && repoRoots.includes(explicit)) return explicit;
-
-    const selectedRepoRoot = state?.selectedSnapshot?.repoRoot;
-    if (selectedRepoRoot && repoRoots.includes(selectedRepoRoot)) {
-      diffSelectedRepos.set(sessionId, selectedRepoRoot);
-      return selectedRepoRoot;
-    }
-
-    const inferred = inferDiffRepoRootFromCwd(projection?.summary.cwd ?? undefined, repoRoots);
-    const fallback = inferred ?? repoRoots[0] ?? null;
-    if (fallback) diffSelectedRepos.set(sessionId, fallback);
-    else diffSelectedRepos.delete(sessionId);
-    return fallback;
-  }
-
   function resolveMobileDiffSelection(
     sessionId: string,
     projection: SessionProjection | undefined,
     state: RepoDiffState | undefined,
-  ): MobileDiffSelection {
-    const repoRoot = resolveMobileDiffRepoRoot(sessionId, projection, state);
-    const snapshots = diffSnapshotsForRepo(state, repoRoot);
-    const selectedSnapshot = snapshots.find(snapshot => snapshot.entryId === diffSelectedSnapshots.get(sessionId))
-      ?? (state?.selectedSnapshot?.repoRoot === repoRoot ? state.selectedSnapshot : null)
-      ?? snapshots[snapshots.length - 1]
-      ?? null;
-    const explicitHead = diffSelectedHeads.get(sessionId);
-    const headSnapshot = explicitHead === null && diffSelectedHeads.has(sessionId)
-      ? null
-      : snapshots.find(snapshot => snapshot.entryId === explicitHead)
-        ?? (state?.headSnapshot?.repoRoot === repoRoot ? state.headSnapshot : null)
-        ?? null;
-    return {
-      repoRoot,
-      selectedSnapshot,
-      headSnapshot,
-      snapshots,
-      stat: diffStatModes.get(sessionId) ?? state?.stat ?? true,
-    };
+  ): DiffSelection {
+    const selection = deriveDiffSelection({
+      state,
+      cwd: projection?.summary.cwd ?? undefined,
+      explicitRepoRoot: diffSelectedRepos.get(sessionId),
+      explicitSnapshotEntryId: diffSelectedSnapshots.get(sessionId),
+      headSelection: diffHeadSelectionFromEntryId(diffSelectedHeads.get(sessionId), diffSelectedHeads.has(sessionId)),
+      stat: diffStatModes.get(sessionId),
+      defaultStat: true,
+    });
+    if (selection.repoRoot) diffSelectedRepos.set(sessionId, selection.repoRoot);
+    else diffSelectedRepos.delete(sessionId);
+    return selection;
   }
 
   function requestMobileDiffState(

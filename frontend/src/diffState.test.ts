@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseDiffRows, summarizeDiffFiles } from "./diffState";
+import { deriveDiffSelection, parseDiffRows, summarizeDiffFiles } from "./diffState";
 
 const patch = [
   "diff --git a/src/old.ts b/src/new.ts",
@@ -47,5 +47,62 @@ describe("diffState", () => {
     const rows = parseDiffRows(patch);
 
     expect(summarizeDiffFiles(rows)).toEqual([{ filePath: "src/new.ts", added: 2, removed: 1, commentCount: 0 }]);
+  });
+
+  it("prefers the cwd-matching repository before backend selected snapshot defaults", () => {
+    const repoA = { entryId: "repo-a-base", label: "repo A", kind: "session-start" as const, createdAt: "2026-05-02T00:00:00Z", repoRoot: "/repo-a" };
+    const repoB = { entryId: "repo-b-base", label: "repo B", kind: "session-start" as const, createdAt: "2026-05-02T00:00:00Z", repoRoot: "/work/repo-b" };
+
+    expect(deriveDiffSelection({
+      state: { snapshots: [repoA, repoB], selectedSnapshot: repoA, headSnapshot: null, diff: "", stat: false },
+      cwd: "/work/repo-b/src",
+    })).toMatchObject({
+      repoRoot: "/work/repo-b",
+      selectedSnapshot: repoB,
+      headSnapshot: null,
+    });
+  });
+
+  it("preserves an explicit working-tree comparison instead of falling back to backend head snapshot", () => {
+    const base = { entryId: "base", label: "base", kind: "session-start" as const, createdAt: "2026-05-02T00:00:00Z", repoRoot: "/repo" };
+    const head = { entryId: "head", label: "head", kind: "manual" as const, createdAt: "2026-05-02T01:00:00Z", repoRoot: "/repo" };
+
+    expect(deriveDiffSelection({
+      state: { snapshots: [base, head], selectedSnapshot: base, headSnapshot: head, diff: "", stat: false },
+      cwd: "/repo",
+      headSelection: { kind: "working-tree" },
+    }).headSnapshot).toBeNull();
+  });
+
+  it("falls back to the backend head snapshot when head selection is unset", () => {
+    const base = { entryId: "base", label: "base", kind: "session-start" as const, createdAt: "2026-05-02T00:00:00Z", repoRoot: "/repo" };
+    const head = { entryId: "head", label: "head", kind: "manual" as const, createdAt: "2026-05-02T01:00:00Z", repoRoot: "/repo" };
+
+    expect(deriveDiffSelection({
+      state: { snapshots: [base, head], selectedSnapshot: base, headSnapshot: head, diff: "", stat: false },
+      cwd: "/repo",
+    }).headSnapshot).toBe(head);
+  });
+
+  it("uses an explicit snapshot head selection", () => {
+    const base = { entryId: "base", label: "base", kind: "session-start" as const, createdAt: "2026-05-02T00:00:00Z", repoRoot: "/repo" };
+    const head = { entryId: "head", label: "head", kind: "manual" as const, createdAt: "2026-05-02T01:00:00Z", repoRoot: "/repo" };
+
+    expect(deriveDiffSelection({
+      state: { snapshots: [base, head], selectedSnapshot: base, headSnapshot: null, diff: "", stat: false },
+      cwd: "/repo",
+      headSelection: { kind: "snapshot", entryId: "head" },
+    }).headSnapshot).toBe(head);
+  });
+
+  it("does not fall back to backend head snapshot when explicit snapshot head is stale", () => {
+    const base = { entryId: "base", label: "base", kind: "session-start" as const, createdAt: "2026-05-02T00:00:00Z", repoRoot: "/repo" };
+    const head = { entryId: "head", label: "head", kind: "manual" as const, createdAt: "2026-05-02T01:00:00Z", repoRoot: "/repo" };
+
+    expect(deriveDiffSelection({
+      state: { snapshots: [base, head], selectedSnapshot: base, headSnapshot: head, diff: "", stat: false },
+      cwd: "/repo",
+      headSelection: { kind: "snapshot", entryId: "deleted-head" },
+    }).headSnapshot).toBeNull();
   });
 });

@@ -46,12 +46,14 @@ import {
 } from "./sessionList";
 import { applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
+  deriveDiffSelection,
+  diffHeadSelectionFromEntryId,
   diffRepoRoots,
   diffSnapshotsForRepo,
   formatDiffRepoLabel,
-  inferDiffRepoRootFromCwd,
   parseDiffRows,
   summarizeDiffFiles,
+  type DiffSelection,
 } from "./diffState";
 import {
   buildDiffCommentPrompt,
@@ -1204,17 +1206,16 @@ function handleServerMessage(message: ServerMessage): void {
       diffErrors.delete(message.sessionId);
       diffStates.set(message.sessionId, message.state);
       const projection = projections.get(message.sessionId);
-      const repoRoot = resolveSelectedDiffRepoRoot(message.sessionId, projection, message.state);
-      const { selectedSnapshot, headSnapshot } = resolveDiffSelection(message.sessionId, message.state, repoRoot);
-      if (selectedSnapshot) diffSelectedSnapshots.set(message.sessionId, selectedSnapshot.entryId);
+      const selection = deriveCurrentDiffSelection(message.sessionId, projection, message.state);
+      if (selection.selectedSnapshot) diffSelectedSnapshots.set(message.sessionId, selection.selectedSnapshot.entryId);
       else diffSelectedSnapshots.delete(message.sessionId);
-      diffSelectedHeads.set(message.sessionId, headSnapshot?.entryId ?? null);
+      diffSelectedHeads.set(message.sessionId, selection.headSnapshot?.entryId ?? null);
       if (
-        repoRoot &&
-        selectedSnapshot &&
-        message.state.selectedSnapshot?.repoRoot !== repoRoot
+        selection.repoRoot &&
+        selection.selectedSnapshot &&
+        message.state.selectedSnapshot?.repoRoot !== selection.repoRoot
       ) {
-        requestDiffState(message.sessionId, selectedSnapshot.entryId, headSnapshot?.entryId ?? null);
+        requestDiffState(message.sessionId, selection.selectedSnapshot.entryId, selection.headSnapshot?.entryId ?? null);
         break;
       }
       markDiffsViewDirty();
@@ -2992,47 +2993,21 @@ function renderToolsView(
 
 
 
-function resolveSelectedDiffRepoRoot(
+function deriveCurrentDiffSelection(
   sessionId: string,
   projection: SessionProjection | undefined,
   state: RepoDiffState | undefined,
-): string | null {
-  const repoRoots = diffRepoRoots(state);
-  const explicit = diffSelectedRepos.get(sessionId);
-  if (explicit && repoRoots.includes(explicit)) return explicit;
-
-  const inferred = inferDiffRepoRootFromCwd(projection?.summary.cwd ?? undefined, repoRoots);
-  if (inferred) {
-    diffSelectedRepos.set(sessionId, inferred);
-    return inferred;
-  }
-
-  const selectedRepoRoot = state?.selectedSnapshot?.repoRoot;
-  if (selectedRepoRoot && repoRoots.includes(selectedRepoRoot)) {
-    diffSelectedRepos.set(sessionId, selectedRepoRoot);
-    return selectedRepoRoot;
-  }
-
-  const fallback = repoRoots[0] ?? null;
-  if (fallback) diffSelectedRepos.set(sessionId, fallback);
+): DiffSelection {
+  const selection = deriveDiffSelection({
+    state,
+    cwd: projection?.summary.cwd ?? undefined,
+    explicitRepoRoot: diffSelectedRepos.get(sessionId),
+    explicitSnapshotEntryId: diffSelectedSnapshots.get(sessionId),
+    headSelection: diffHeadSelectionFromEntryId(diffSelectedHeads.get(sessionId), diffSelectedHeads.has(sessionId)),
+  });
+  if (selection.repoRoot) diffSelectedRepos.set(sessionId, selection.repoRoot);
   else diffSelectedRepos.delete(sessionId);
-  return fallback;
-}
-
-function resolveDiffSelection(
-  sessionId: string,
-  state: RepoDiffState | undefined,
-  repoRoot: string | null,
-): { selectedSnapshot: DiffSnapshotSummary | null; headSnapshot: DiffSnapshotSummary | null; snapshots: DiffSnapshotSummary[] } {
-  const snapshots = diffSnapshotsForRepo(state, repoRoot);
-  const selectedSnapshot = snapshots.find(snapshot => snapshot.entryId === diffSelectedSnapshots.get(sessionId))
-    ?? (state?.selectedSnapshot?.repoRoot === repoRoot ? state.selectedSnapshot : null)
-    ?? snapshots[snapshots.length - 1]
-    ?? null;
-  const headSnapshot = snapshots.find(snapshot => snapshot.entryId === diffSelectedHeads.get(sessionId))
-    ?? (state?.headSnapshot?.repoRoot === repoRoot ? state.headSnapshot : null)
-    ?? null;
-  return { selectedSnapshot, headSnapshot, snapshots };
+  return selection;
 }
 
 
@@ -3069,9 +3044,8 @@ function requestActiveDiffState(): void {
 
   const projection = projections.get(activeSessionId);
   const state = diffStates.get(activeSessionId);
-  const repoRoot = resolveSelectedDiffRepoRoot(activeSessionId, projection, state);
-  const { selectedSnapshot, headSnapshot } = resolveDiffSelection(activeSessionId, state, repoRoot);
-  if (!selectedSnapshot && state && diffRepoRoots(state).length > 0) {
+  const selection = deriveCurrentDiffSelection(activeSessionId, projection, state);
+  if (!selection.selectedSnapshot && state && diffRepoRoots(state).length > 0) {
     markDiffsViewDirty();
     desktopDockview?.withPanel("diffs", container => renderDiffsView(container, projection));
     return;
@@ -3079,8 +3053,8 @@ function requestActiveDiffState(): void {
 
   requestDiffState(
     activeSessionId,
-    selectedSnapshot?.entryId,
-    headSnapshot?.entryId ?? diffSelectedHeads.get(activeSessionId),
+    selection.selectedSnapshot?.entryId,
+    selection.headSnapshot?.entryId ?? diffSelectedHeads.get(activeSessionId),
   );
 }
 
@@ -3359,8 +3333,9 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const sessionId = activeSessionId;
   const state = diffStates.get(sessionId);
   const repoRoots = diffRepoRoots(state);
-  const selectedRepoRoot = resolveSelectedDiffRepoRoot(sessionId, projection, state);
-  const { selectedSnapshot, headSnapshot, snapshots } = resolveDiffSelection(sessionId, state, selectedRepoRoot);
+  const selection = deriveCurrentDiffSelection(sessionId, projection, state);
+  const selectedRepoRoot = selection.repoRoot;
+  const { selectedSnapshot, headSnapshot, snapshots } = selection;
   const diffError = diffErrors.get(sessionId) ?? null;
   const comments = diffComments.get(sessionId) ?? [];
   const selectedComments = selectedDiffComments(comments, selectedSnapshot, headSnapshot);
