@@ -671,6 +671,7 @@ let codeSearchQuery = "";
 let codeSearchResults: CodeTreeEntry[] = [];
 let codeSearchLoading = false;
 let codeSearchError: string | null = null;
+let codeSearchRequestTimer: number | null = null;
 
 const sessionListView = createSessionListView(sessionsList, {
   onSelectSession: handleSessionButtonClick,
@@ -2357,6 +2358,7 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeSearchResults = [];
   codeSearchLoading = false;
   codeSearchError = null;
+  clearPendingCodeSearchRequest();
   markCodeViewDirty();
 }
 
@@ -2378,6 +2380,33 @@ function activeCodeViewState(): CodeViewerState {
     searchLoading: codeSearchLoading,
     searchError: codeSearchError,
   };
+}
+
+function clearPendingCodeSearchRequest(): void {
+  if (codeSearchRequestTimer !== null) {
+    window.clearTimeout(codeSearchRequestTimer);
+    codeSearchRequestTimer = null;
+  }
+}
+
+function scheduleCodeSearch(): void {
+  clearPendingCodeSearchRequest();
+  if (!codeSearchOpen || !codeWorkspace || !codeSearchQuery.trim()) {
+    codeSearchLoading = false;
+    codeSearchResults = [];
+    markCodeViewDirty();
+    renderCodePanelIfNeeded(true);
+    return;
+  }
+  codeSearchLoading = true;
+  codeSearchError = null;
+  codeSearchResults = [];
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  codeSearchRequestTimer = window.setTimeout(() => {
+    codeSearchRequestTimer = null;
+    submitCodeSearch();
+  }, 120);
 }
 
 function ensureActiveCodeWorkspace(): void {
@@ -2422,6 +2451,7 @@ function openCodeSearch(): void {
 }
 
 function closeCodeSearch(): void {
+  clearPendingCodeSearchRequest();
   codeSearchOpen = false;
   codeSearchLoading = false;
   markCodeViewDirty();
@@ -2432,7 +2462,6 @@ function submitCodeSearch(): void {
   if (!codeWorkspace || !codeSearchQuery.trim()) return;
   codeSearchLoading = true;
   codeSearchError = null;
-  codeSearchResults = [];
   markCodeViewDirty();
   renderCodePanelIfNeeded(true);
   send({
@@ -2531,9 +2560,13 @@ function renderCodePanelIfNeeded(force = false): void {
       closeSearch: closeCodeSearch,
       updateSearchBasePath: path => {
         codeSearchBasePath = path;
+        codeSearchError = null;
+        scheduleCodeSearch();
       },
       updateSearchQuery: query => {
         codeSearchQuery = query;
+        codeSearchError = null;
+        scheduleCodeSearch();
       },
       searchFiles: submitCodeSearch,
       openSearchResult: openSearchResultInCode,

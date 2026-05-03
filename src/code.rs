@@ -431,7 +431,7 @@ fn find_files(
         .follow_links(false)
         .sort_by_file_path(|left, right| left.cmp(right));
 
-    let mut entries = Vec::new();
+    let mut entries_with_score = Vec::new();
     for result in builder.build() {
         let entry = match result {
             Ok(entry) => entry,
@@ -449,33 +449,43 @@ fn find_files(
             .strip_prefix(root)
             .map_err(|_| anyhow!("search result escaped workspace root"))?;
         let protocol_path = path_to_protocol(relative_path);
-        if !protocol_path.to_lowercase().contains(&normalized_query) {
+        let Some(score) = fuzzy_match_score(&protocol_path, &normalized_query) else {
             continue;
-        }
+        };
         let metadata = match entry.metadata() {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        entries.push(CodeTreeEntry {
-            name: path
-                .file_name()
-                .map(|name| name.to_string_lossy().to_string())
-                .unwrap_or_else(|| protocol_path.clone()),
-            path: protocol_path,
-            kind: CodeTreeEntryKind::File,
-            size: Some(metadata.len()),
-        });
-        if entries.len() >= result_limit {
-            break;
-        }
+        entries_with_score.push((
+            score,
+            CodeTreeEntry {
+                name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().to_string())
+                    .unwrap_or_else(|| protocol_path.clone()),
+                path: protocol_path,
+                kind: CodeTreeEntryKind::File,
+                size: Some(metadata.len()),
+            },
+        ));
     }
 
-    entries.sort_by(|left, right| {
-        left.path
-            .to_lowercase()
-            .cmp(&right.path.to_lowercase())
-            .then_with(|| left.path.cmp(&right.path))
+    entries_with_score.sort_by(|(left_score, left_entry), (right_score, right_entry)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| {
+                left_entry
+                    .path
+                    .to_lowercase()
+                    .cmp(&right_entry.path.to_lowercase())
+            })
+            .then_with(|| left_entry.path.cmp(&right_entry.path))
     });
+
+    let mut entries = Vec::new();
+    for (_, entry) in entries_with_score.into_iter().take(result_limit) {
+        entries.push(entry);
+    }
     Ok(entries)
 }
 
@@ -498,6 +508,63 @@ fn resolve_search_base_dir(root: &Path, base_path: &str) -> anyhow::Result<PathB
         return Ok(resolved);
     }
     resolve_workspace_path(root, base_path)
+}
+
+fn fuzzy_match_score(path: &str, query: &str) -> Option<i64> {
+    let path_lower = path.to_lowercase();
+    let file_name = path.rsplit('/').next().unwrap_or(path);
+    let file_name_lower = file_name.to_lowercase();
+
+    let mut score = if let Some(index) = path_lower.find(query) {
+        10_000 - index as i64
+    } else {
+        subsequence_score(&path_lower, query)?
+    };
+
+    if let Some(index) = file_name_lower.find(query) {
+        score += 20_000 - index as i64;
+    } else if let Some(file_name_score) = subsequence_score(&file_name_lower, query) {
+        score += 5_000 + file_name_score;
+    }
+
+    Some(score)
+}
+
+fn subsequence_score(candidate: &str, query: &str) -> Option<i64> {
+    let mut score = 0_i64;
+    let mut last_match = None;
+    let mut cursor = 0usize;
+
+    for query_char in query.chars() {
+        let rest = candidate.get(cursor..)?;
+        let mut matched = None;
+        for (offset, candidate_char) in rest.char_indices() {
+            if candidate_char == query_char {
+                matched = Some((cursor + offset, candidate_char.len_utf8()));
+                break;
+            }
+        }
+        let (index, width) = matched?;
+        score += 10;
+        if let Some(previous) = last_match {
+            if index == previous + 1 {
+                score += 8;
+            }
+        }
+        if index == 0
+            || candidate[..index].ends_with('/')
+            || candidate[..index].ends_with('_')
+            || candidate[..index].ends_with('-')
+            || candidate[..index].ends_with('.')
+        {
+            score += 6;
+        }
+        last_match = Some(index);
+        cursor = index + width;
+    }
+
+    score -= candidate.len() as i64;
+    Some(score)
 }
 
 fn resolve_workspace_path(root: &Path, requested_path: &str) -> anyhow::Result<PathBuf> {
@@ -766,7 +833,9 @@ mod tests {
             .map(|entry| entry.path.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(paths, vec!["src/bin/main.rs", "src/lib.rs"]);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"src/bin/main.rs"));
+        assert!(paths.contains(&"src/lib.rs"));
         fs::remove_dir_all(root).ok();
     }
 
@@ -792,7 +861,7 @@ mod tests {
         fs::write(root.join("src/beta.rs"), "fn beta() {}\n").expect("beta written");
         fs::write(root.join("tests/alpha.rs"), "fn alpha_test() {}\n").expect("test written");
 
-        let entries = find_files(&root, "src", "rs", 1).expect("files searched");
+        let entries = find_files(&root, "src", "alpha", 1).expect("files searched");
         let paths = entries
             .iter()
             .map(|entry| entry.path.as_str())
