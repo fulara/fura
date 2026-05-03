@@ -14,7 +14,7 @@ set -euo pipefail
 #   BUN_BIN=/path/to/bun
 #   FURA_TOKEN=dev
 #   FURA_PORT=4450
-#   FURA_MOBILE_HOST=fura-mini-laptop
+#   FURA_MOBILE_HOST=<tailscale-ip-or-dns-name>  # defaults to tailscale ip -4
 #   FURA_BRIDGE_DEBUG_FILE=/path/to/bridge-debug.jsonl
 #   FURA_SKIP_FRONTEND_BUILD=1
 #
@@ -26,7 +26,10 @@ OMP_REPO=${OMP_REPO:-/home/aleksander/repos/oh-my-pi}
 BUN_BIN=${BUN_BIN:-${HOME}/.bun/bin/bun}
 FURA_TOKEN=${FURA_TOKEN:-dev}
 FURA_PORT=${FURA_PORT:-4450}
-FURA_MOBILE_HOST=${FURA_MOBILE_HOST:-fura-mini-laptop}
+MOBILE_HOST_OVERRIDDEN=0
+if [[ -n "${FURA_MOBILE_HOST+x}" ]]; then
+  MOBILE_HOST_OVERRIDDEN=1
+fi
 FURA_BRIDGE_DEBUG_FILE=${FURA_BRIDGE_DEBUG_FILE:-${SCRIPT_DIR}/bridge-debug.jsonl}
 
 if ! command -v tailscale >/dev/null 2>&1; then
@@ -39,6 +42,8 @@ if [[ -z "${TAILSCALE_IP}" ]]; then
   echo "No Tailscale IPv4 address found. Is Tailscale running and connected?" >&2
   exit 1
 fi
+
+FURA_MOBILE_HOST=${FURA_MOBILE_HOST:-${TAILSCALE_IP}}
 
 if [[ ! -x "${BUN_BIN}" ]]; then
   echo "Bun not found or not executable at: ${BUN_BIN}" >&2
@@ -62,8 +67,7 @@ if (( ${#native_addons[@]} == 0 )); then
   exit 1
 fi
 
-resolved_mobile_ip=""
-if command -v python >/dev/null 2>&1; then
+if (( MOBILE_HOST_OVERRIDDEN )) && command -v python >/dev/null 2>&1; then
   resolved_mobile_ip=$(python - "${FURA_MOBILE_HOST}" <<'PY' || true
 import socket
 import sys
@@ -73,11 +77,10 @@ except Exception:
     pass
 PY
 )
-fi
 
-if [[ -n "${resolved_mobile_ip}" && "${resolved_mobile_ip}" != "${TAILSCALE_IP}" ]]; then
-  echo "Warning: FURA_MOBILE_HOST=${FURA_MOBILE_HOST} resolves to ${resolved_mobile_ip}, but this machine's Tailscale IP is ${TAILSCALE_IP}." >&2
-  echo "If ${FURA_MOBILE_HOST} is not a Tailscale service forwarding to this machine, use FURA_MOBILE_HOST=$(tailscale status --json | python -c 'import json,sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))' 2>/dev/null || echo "${TAILSCALE_IP}")." >&2
+  if [[ -n "${resolved_mobile_ip}" && "${resolved_mobile_ip}" != "${TAILSCALE_IP}" ]]; then
+    echo "Warning: FURA_MOBILE_HOST=${FURA_MOBILE_HOST} resolves to ${resolved_mobile_ip}, but this machine's Tailscale IP is ${TAILSCALE_IP}." >&2
+  fi
 fi
 
 export FURA_TOKEN
@@ -94,6 +97,7 @@ cat >&2 <<EOF
 Starting Fura for Tailscale mobile access:
   Bind address: ${TAILSCALE_IP}:${FURA_PORT}
   Mobile URL:   http://${FURA_MOBILE_HOST}:${FURA_PORT}/mobile.html
+  Allowed Origin: http://${FURA_MOBILE_HOST}:${FURA_PORT}
   Auth token:   enter FURA_TOKEN in the browser auth screen (default: dev)
 EOF
 

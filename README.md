@@ -105,9 +105,9 @@ Environment overrides for `run-local-omp.sh`:
 ./run-local-with-tailscale.sh
 ```
 
-Defaults: bind to this machine's `tailscale ip -4`, listen on port `4450`, and advertise `FURA_MOBILE_HOST=fura-mini-laptop`. Open `http://fura-mini-laptop:4450/mobile.html` on a phone connected to the same tailnet and enter the bridge token (`dev` by default).
+Defaults: bind to this machine's `tailscale ip -4`, listen on port `4450`, and advertise the same Tailscale IPv4 as `FURA_MOBILE_HOST`. Open `http://<tailscale-ip>:4450/mobile.html` on a phone connected to the same tailnet and enter the bridge token (`dev` by default).
 
-If `fura-mini-laptop` is not the Tailscale name/service that routes to this machine, the script prints a warning with the machine's Tailscale DNS name. Override it with that value:
+If you later want to use a Tailscale DNS name or service name instead of the raw IP, override it explicitly:
 
 ```bash
 FURA_MOBILE_HOST=<machine>.<tailnet>.ts.net ./run-local-with-tailscale.sh
