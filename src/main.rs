@@ -89,6 +89,7 @@ async fn main() -> anyhow::Result<()> {
     let fura_config = load_fura_config(config_path.as_deref());
     let default_cwd = default_cwd_from_config(&fura_config, &startup_cwd);
     let voice_language = fura_config.voice_language.clone();
+    let allowed_origins = allowed_origins_from_args(args.host, args.port, args.allowed_origins);
     let session_categories = fura_config
         .session_categories
         .into_iter()
@@ -124,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         default_cwd: Arc::new(RwLock::new(default_cwd)),
         config_path,
         voice_language: Arc::new(RwLock::new(voice_language)),
+        allowed_origins: Arc::new(allowed_origins),
     };
 
     start_session_catalog_watcher(state.clone());
@@ -427,6 +429,10 @@ mod tests {
             default_cwd: Arc::new(RwLock::new(env::temp_dir().to_string_lossy().into_owned())),
             config_path: None,
             voice_language: Arc::new(RwLock::new(default_voice_language())),
+            allowed_origins: Arc::new(default_allowed_origins(
+                "127.0.0.1".parse().expect("test ip"),
+                3737,
+            )),
         }
     }
 

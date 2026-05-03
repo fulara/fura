@@ -123,7 +123,8 @@ All flags can also be set via environment variables:
 |---|---|---|---|
 | `--host` | — | `127.0.0.1` | Bind address |
 | `--port` | — | `3737` | Listen port |
-| `--token` | `FURA_TOKEN` | random UUID (logged) | Bootstrap token for browser auth session creation |
+| `--token` | `FURA_TOKEN` | random UUID (logged separately when generated) | Bridge token entered in the browser auth screen |
+| `--allowed-origin` | `FURA_ALLOWED_ORIGINS` | `http://127.0.0.1:<port>`, `http://localhost:<port>` | Allowed browser WebSocket origins; repeat flag or comma-separate env values for Tailscale/HTTPS origins |
 | `--static-dir` | — | `frontend/dist` | Frontend static files |
 | `--rpc-program` | `FURA_RPC_PROGRAM` | `omp` | RPC child executable |
 | `--rpc-arg` | `FURA_RPC_ARGS` | — | Extra args for RPC child (repeatable) |

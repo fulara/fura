@@ -24,6 +24,14 @@ pub(crate) struct Args {
     #[arg(long, default_value_t = 3737)]
     pub(crate) port: u16,
 
+    /// Allowed browser Origin values for WebSocket handshakes. Repeat or pass comma-separated values via FURA_ALLOWED_ORIGINS.
+    #[arg(
+        long = "allowed-origin",
+        env = "FURA_ALLOWED_ORIGINS",
+        value_delimiter = ','
+    )]
+    pub(crate) allowed_origins: Vec<String>,
+
     #[arg(long, env = "FURA_TOKEN")]
     pub(crate) token: Option<String>,
 
@@ -87,6 +95,48 @@ pub(crate) struct ClientConfig {
 
 pub(crate) fn default_voice_language() -> String {
     "pl-PL".to_string()
+}
+
+pub(crate) fn allowed_origins_from_args(
+    host: IpAddr,
+    port: u16,
+    configured: Vec<String>,
+) -> Vec<String> {
+    let mut origins = default_allowed_origins(host, port);
+    for origin in configured {
+        if let Some(origin) = normalize_allowed_origin(&origin) {
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+    }
+    origins
+}
+
+pub(crate) fn default_allowed_origins(host: IpAddr, port: u16) -> Vec<String> {
+    let mut origins = vec![
+        format!("http://127.0.0.1:{port}"),
+        format!("http://localhost:{port}"),
+    ];
+    if host.is_loopback() {
+        let host_origin = format!("http://{}:{port}", origin_host(host));
+        if !origins.contains(&host_origin) {
+            origins.push(host_origin);
+        }
+    }
+    origins
+}
+
+pub(crate) fn normalize_allowed_origin(origin: &str) -> Option<String> {
+    let trimmed = origin.trim().trim_end_matches('/');
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn origin_host(host: IpAddr) -> String {
+    match host {
+        IpAddr::V4(host) => host.to_string(),
+        IpAddr::V6(host) => format!("[{host}]"),
+    }
 }
 
 pub(crate) fn default_config_path() -> Option<PathBuf> {
@@ -184,4 +234,38 @@ pub(crate) async fn save_default_cwd(state: &AppState, cwd: &str) {
 
     save_fura_config(state).await;
     broadcast_config(state).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_allowed_origins_include_loopback_browser_origins() {
+        let origins = default_allowed_origins("127.0.0.1".parse().expect("ip"), 3737);
+
+        assert!(origins.contains(&"http://127.0.0.1:3737".to_string()));
+        assert!(origins.contains(&"http://localhost:3737".to_string()));
+        assert_eq!(origins.len(), 2);
+    }
+
+    #[test]
+    fn configured_allowed_origins_are_trimmed_and_deduplicated() {
+        let origins = allowed_origins_from_args(
+            "127.0.0.1".parse().expect("ip"),
+            3737,
+            vec![
+                " http://phone.tailnet.ts.net:3737/ ".to_string(),
+                "http://phone.tailnet.ts.net:3737".to_string(),
+            ],
+        );
+
+        assert_eq!(
+            origins
+                .iter()
+                .filter(|origin| origin.as_str() == "http://phone.tailnet.ts.net:3737")
+                .count(),
+            1,
+        );
+    }
 }
