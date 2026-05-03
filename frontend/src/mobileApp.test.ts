@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { FuraConnection } from "./connection";
+import type { ConnectionStatus, FuraConnection } from "./connection";
 import { mountMobileApp, type MobileConnectionOptions } from "./mobileApp";
 import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ClientMessage, ServerConfig, ServerMessage, SessionProjection, SessionSummary } from "./protocol";
@@ -13,11 +13,13 @@ class FakeConnection implements FuraConnection {
 
   connect(): void {
     this.connected = true;
+    this.closed = false;
     this.options.onStatus("connected", "connected");
     this.options.onOpen?.();
   }
 
   disconnect(): void {
+    this.connected = false;
     this.closed = true;
   }
 
@@ -32,6 +34,12 @@ class FakeConnection implements FuraConnection {
 
   emit(message: ServerMessage): void {
     this.options.onMessage(message);
+  }
+
+  emitClose(label = "reconnecting in 500ms", status: ConnectionStatus = "reconnecting"): void {
+    this.connected = false;
+    this.options.onStatus(label, status);
+    this.options.onClose?.();
   }
 }
 
@@ -134,7 +142,7 @@ function diffState(
 }
 
 function clickSession(index = 0): void {
-  const buttons = document.querySelectorAll<HTMLButtonElement>("#mobileSessionsList .session-item button");
+  const buttons = document.querySelectorAll<HTMLButtonElement>("#mobileSessionsList .session-item > button:not(.session-delete)");
   const button = buttons[index];
   if (!button) throw new Error(`session button ${index} missing`);
   button.click();
@@ -274,6 +282,37 @@ describe("mountMobileApp", () => {
     clickSession();
 
     expect(connection.sent).toContainEqual({ type: "session.attach", sessionId: "live" });
+  });
+
+  it("forces an immediate reconnect when the disconnected status is clicked", () => {
+    const { connection } = createHarness();
+    connection.sent = [];
+    connection.emitClose("disconnected", "disconnected");
+
+    document.querySelector<HTMLElement>("#mobileConnectionStatus")?.click();
+
+    expect(connection.connected).toBe(true);
+    expect(connection.sent).toEqual([{ type: "session.list" }]);
+    expect(document.querySelector("#mobileConnectionStatus")?.textContent).toBe("connected");
+  });
+
+  it("refreshes the active and previously attached managed sessions after reconnect", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+    clickSession(0);
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    clickSession(1);
+    connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+    connection.sent = [];
+
+    connection.options.onOpen?.();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+
+    expect(connection.sent).toEqual([
+      { type: "session.list" },
+      { type: "state.refresh", sessionId: "other" },
+      { type: "state.refresh", sessionId: "live" },
+    ]);
   });
 
   it("filters sessions by category and updates the active category", () => {

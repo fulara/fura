@@ -133,7 +133,8 @@ h2 {
   color: #82e6aa;
 }
 
-.status.connecting {
+.status.connecting,
+.status.reconnecting {
   background: rgba(255, 196, 87, 0.18);
   color: #ffd681;
 }
@@ -141,6 +142,11 @@ h2 {
 .status.disconnected {
   background: rgba(255, 107, 107, 0.16);
   color: #ffaaa6;
+}
+
+.status.disconnected,
+.status.reconnecting {
+  cursor: pointer;
 }
 
 .sidebar-actions,

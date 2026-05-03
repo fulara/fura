@@ -4,7 +4,7 @@ import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from 
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
-import { createFuraConnection, type FuraConnection } from "./connection";
+import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
 import { mkEl, mkFrag, requireElement, setRenderDocument } from "./dom";
 import {
   isCompactReadCard,
@@ -691,6 +691,12 @@ activeCategoryCombobox = createCategoryCombobox({
 authForm.addEventListener("submit", event => {
   event.preventDefault();
   connect(authTokenInput.value);
+});
+connectionStatus.addEventListener("click", forceReconnectNow);
+connectionStatus.addEventListener("keydown", event => {
+  if (event.key !== "Enter" && event.key !== " ") return;
+  event.preventDefault();
+  forceReconnectNow();
 });
 
 askFuraButton.addEventListener("click", activateControllerWorkspace);
@@ -4229,9 +4235,18 @@ function send(message: ClientMessage): boolean {
   return connection.send(message);
 }
 
-function setStatus(label: string, className: string): void {
+function setStatus(label: string, className: ConnectionStatus): void {
   connectionStatus.textContent = label;
   connectionStatus.className = `status ${className}`;
+  const canForceReconnect = className === "disconnected" || className === "reconnecting";
+  connectionStatus.title = canForceReconnect ? "Click to reconnect now." : "";
+  connectionStatus.tabIndex = canForceReconnect ? 0 : -1;
+}
+
+function forceReconnectNow(): void {
+  if (!connection || connection.isOpen()) return;
+  appendLog("Reconnecting now.");
+  connection.connect();
 }
 
 function appendLog(line: string): void {
