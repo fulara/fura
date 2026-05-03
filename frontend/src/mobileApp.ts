@@ -27,13 +27,27 @@ import {
 import {
   busyPromptAttachmentNote as formatBusyPromptAttachmentNote,
   busyPromptDisplayText,
+  createBusyPromptDraft,
   createBusyPromptDraftFromServer,
   restoreBusyPromptEditorText,
   type BusyPromptDraft,
 } from "./promptBusy";
+import {
+  buildDiffCommentPrompt,
+  commentsForDiffLocation,
+  createDiffComment,
+  diffCommentFlushEditorText,
+  diffCommentPreviewStatus,
+  formatDiffLocation,
+  removeSelectedDiffComments,
+  selectedDiffComments,
+  type DiffPreviewDraft,
+} from "./diffComments";
 import { shortId } from "./format";
 import type {
   ClientMessage,
+  DiffComment,
+  DiffLineLocation,
   DiffSnapshotSummary,
   RepoDiffState,
   ServerConfig,
@@ -216,6 +230,44 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </section>
+      <section id="mobileDiffCommentOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-diff-comment-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileDiffCommentTitle" aria-describedby="mobileDiffCommentBody">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Diff comment</p>
+              <h2 id="mobileDiffCommentTitle">Comment on diff line</h2>
+            </div>
+          </header>
+          <form id="mobileDiffCommentForm" class="mobile-dialog-form">
+            <p id="mobileDiffCommentBody" class="mobile-dialog-body">Add a note to the selected diff line. It stays local until you preview and flush comments to the agent.</p>
+            <label class="mobile-dialog-field" for="mobileDiffCommentText">Comment</label>
+            <textarea id="mobileDiffCommentText" class="mobile-diff-comment-text" rows="5" spellcheck="true"></textarea>
+            <p id="mobileDiffCommentStatus" class="mobile-dialog-status" aria-live="polite"></p>
+            <div class="mobile-dialog-actions">
+              <button id="mobileDiffCommentCancel" type="button">Cancel</button>
+              <button id="mobileDiffCommentSave" type="submit">Save comment</button>
+            </div>
+          </form>
+        </div>
+      </section>
+      <section id="mobileDiffPreviewOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-diff-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileDiffPreviewTitle">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Diff comments</p>
+              <h2 id="mobileDiffPreviewTitle">Preview flush prompt</h2>
+            </div>
+          </header>
+          <div class="mobile-dialog-form">
+            <textarea id="mobileDiffPreviewText" class="mobile-diff-preview-text" readonly spellcheck="false"></textarea>
+            <p id="mobileDiffPreviewStatus" class="mobile-dialog-status" aria-live="polite"></p>
+            <div class="mobile-dialog-actions">
+              <button id="mobileDiffPreviewCancel" type="button">Cancel</button>
+              <button id="mobileDiffPreviewSend" type="button">Send to agent</button>
+            </div>
+          </div>
+        </div>
+      </section>
       <section id="mobileDialogOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileDialogTitle" aria-describedby="mobileDialogBody">
           <header class="mobile-dialog-header">
@@ -287,6 +339,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const busyPromptCancel = requireElement<HTMLButtonElement>(document, "mobileBusyPromptCancel");
   const busyPromptSteer = requireElement<HTMLButtonElement>(document, "mobileBusyPromptSteer");
   const busyPromptFollowUp = requireElement<HTMLButtonElement>(document, "mobileBusyPromptFollowUp");
+  const diffCommentOverlay = requireElement<HTMLElement>(document, "mobileDiffCommentOverlay");
+  const diffCommentForm = requireElement<HTMLFormElement>(document, "mobileDiffCommentForm");
+  const diffCommentText = requireElement<HTMLTextAreaElement>(document, "mobileDiffCommentText");
+  const diffCommentStatus = requireElement<HTMLParagraphElement>(document, "mobileDiffCommentStatus");
+  const diffCommentCancel = requireElement<HTMLButtonElement>(document, "mobileDiffCommentCancel");
+  const diffPreviewOverlay = requireElement<HTMLElement>(document, "mobileDiffPreviewOverlay");
+  const diffPreviewText = requireElement<HTMLTextAreaElement>(document, "mobileDiffPreviewText");
+  const diffPreviewStatus = requireElement<HTMLParagraphElement>(document, "mobileDiffPreviewStatus");
+  const diffPreviewCancel = requireElement<HTMLButtonElement>(document, "mobileDiffPreviewCancel");
+  const diffPreviewSend = requireElement<HTMLButtonElement>(document, "mobileDiffPreviewSend");
   const dialogOverlay = requireElement<HTMLElement>(document, "mobileDialogOverlay");
   const dialogTitle = requireElement<HTMLHeadingElement>(document, "mobileDialogTitle");
   const dialogBody = requireElement<HTMLDivElement>(document, "mobileDialogBody");
@@ -325,6 +387,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const diffSelectedSnapshots = new Map<string, string>();
   const diffSelectedHeads = new Map<string, string | null>();
   const diffStatModes = new Map<string, boolean>();
+  const diffComments = new Map<string, DiffComment[]>();
+  let pendingDiffComment: {
+    sessionId: string;
+    baseSnapshot: DiffSnapshotSummary;
+    headSnapshot: DiffSnapshotSummary | null;
+    location: DiffLineLocation;
+  } | null = null;
+  let diffPreviewDraft: DiffPreviewDraft | null = null;
   let busyPromptDraft: BusyPromptDraft | null = null;
   let activeDialog: ExtensionDialogRequest | null = null;
   const dialogQueue: ExtensionDialogRequest[] = [];
@@ -426,6 +496,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   categorySave.addEventListener("click", submitActiveCategory);
   deleteSessionCancel.addEventListener("click", closeDeleteSessionPicker);
   deleteSessionConfirm.addEventListener("click", submitDeleteSessionPicker);
+  diffCommentForm.addEventListener("submit", event => {
+    event.preventDefault();
+    savePendingDiffComment();
+  });
+  diffCommentCancel.addEventListener("click", closeDiffCommentEditor);
+  diffPreviewCancel.addEventListener("click", closeDiffPreview);
+  diffPreviewSend.addEventListener("click", sendDiffPreviewDraft);
 
   const initialToken = consumeBootstrapToken(
     window.location.href,
@@ -529,9 +606,120 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       busyPromptAttachmentNote.hidden = false;
       return;
     }
+    const onSend = draft.onSend;
     busyPromptDraft = null;
+    onSend?.();
     renderBusyPromptChoice();
     renderActiveSession();
+  }
+
+  function openDiffCommentEditor(
+    sessionId: string,
+    baseSnapshot: DiffSnapshotSummary,
+    headSnapshot: DiffSnapshotSummary | null,
+    location: DiffLineLocation,
+  ): void {
+    pendingDiffComment = { sessionId, baseSnapshot, headSnapshot, location };
+    diffCommentText.value = "";
+    diffCommentStatus.textContent = formatDiffLocation(createDiffComment({
+      id: "preview",
+      baseSnapshot,
+      headSnapshot,
+      location,
+      text: "preview",
+    }));
+    diffCommentOverlay.hidden = false;
+    window.setTimeout(() => diffCommentText.focus(), 0);
+  }
+
+  function closeDiffCommentEditor(): void {
+    pendingDiffComment = null;
+    diffCommentOverlay.hidden = true;
+    diffCommentText.value = "";
+    diffCommentStatus.textContent = "";
+  }
+
+  function savePendingDiffComment(): void {
+    const pending = pendingDiffComment;
+    if (!pending) return;
+    const text = diffCommentText.value.trim();
+    if (!text) {
+      diffCommentStatus.textContent = "Comment text is required.";
+      diffCommentText.focus();
+      return;
+    }
+
+    const comments = diffComments.get(pending.sessionId) ?? [];
+    comments.push(createDiffComment({
+      id: `${Date.now()}-${comments.length}`,
+      baseSnapshot: pending.baseSnapshot,
+      headSnapshot: pending.headSnapshot,
+      location: pending.location,
+      text,
+    }));
+    diffComments.set(pending.sessionId, comments);
+    closeDiffCommentEditor();
+    renderActiveSession();
+  }
+
+  function openDiffPreview(
+    sessionId: string,
+    state: RepoDiffState,
+    baseSnapshot: DiffSnapshotSummary | null,
+    headSnapshot: DiffSnapshotSummary | null,
+  ): void {
+    if (!baseSnapshot) return;
+    const comments = selectedDiffComments(diffComments.get(sessionId) ?? [], baseSnapshot, headSnapshot);
+    if (comments.length === 0) return;
+    diffPreviewDraft = { sessionId, state, baseSnapshot, headSnapshot, comments };
+    diffPreviewText.value = buildDiffCommentPrompt(state, comments, baseSnapshot, headSnapshot);
+    diffPreviewStatus.textContent = diffCommentPreviewStatus(comments.length);
+    diffPreviewOverlay.hidden = false;
+    diffPreviewText.scrollTop = 0;
+    window.setTimeout(() => diffPreviewSend.focus(), 0);
+  }
+
+  function closeDiffPreview(): void {
+    diffPreviewDraft = null;
+    diffPreviewOverlay.hidden = true;
+    diffPreviewText.value = "";
+    diffPreviewStatus.textContent = "";
+  }
+
+  function clearFlushedDiffComments(
+    sessionId: string,
+    baseSnapshot: DiffSnapshotSummary,
+    headSnapshot: DiffSnapshotSummary | null,
+  ): void {
+    diffComments.set(sessionId, removeSelectedDiffComments(diffComments.get(sessionId) ?? [], baseSnapshot, headSnapshot));
+    renderActiveSession();
+  }
+
+  function sendDiffPreviewDraft(): void {
+    const draft = diffPreviewDraft;
+    if (!draft) return;
+    const text = buildDiffCommentPrompt(draft.state, draft.comments, draft.baseSnapshot, draft.headSnapshot);
+    const clearComments = () => clearFlushedDiffComments(draft.sessionId, draft.baseSnapshot, draft.headSnapshot);
+    if (projections.get(draft.sessionId)?.isBusy) {
+      busyPromptDraft = createBusyPromptDraft({
+        sessionId: draft.sessionId,
+        text,
+        editorText: diffCommentFlushEditorText(draft.comments.length),
+        images: [],
+        onSend: clearComments,
+      });
+      closeDiffPreview();
+      renderBusyPromptChoice();
+      return;
+    }
+
+    const accepted = send(createPromptSendMessage(draft.sessionId, text, []));
+    if (!accepted) {
+      diffPreviewStatus.textContent = "Not connected to the Fura bridge.";
+      return;
+    }
+    closeDiffPreview();
+    clearComments();
   }
 
   function handleDialogRequest(message: Extract<ServerMessage, { type: "dialog.request" }>): void {
@@ -1315,12 +1503,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
 
-    renderMobileDiffBody(state);
+    renderMobileDiffBody(state, sessionId, projection);
   }
 
   function renderDiffControls(sessionId: string, projection: SessionProjection, state: RepoDiffState): void {
     const selection = resolveMobileDiffSelection(sessionId, projection, state);
     const roots = diffRepoRoots(state);
+    const currentComments = diffComments.get(sessionId) ?? [];
+    const selectedComments = selectedDiffComments(currentComments, selection.selectedSnapshot, selection.headSnapshot);
     const controls = diffView.ownerDocument.createElement("section");
     controls.className = "mobile-diff-controls";
 
@@ -1395,7 +1585,19 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       diffLoadingSessions.has(sessionId),
       () => requestMobileDiffState(sessionId),
     );
-    actions.append(statButton, fullButton, refreshButton);
+    const previewButton = renderDiffAction(
+      "Preview comments",
+      false,
+      diffLoadingSessions.has(sessionId) || !selection.selectedSnapshot || selectedComments.length === 0,
+      () => openDiffPreview(sessionId, state, selection.selectedSnapshot, selection.headSnapshot),
+    );
+    const flushButton = renderDiffAction(
+      `Preview & flush (${selectedComments.length})`,
+      false,
+      diffLoadingSessions.has(sessionId) || !selection.selectedSnapshot || selectedComments.length === 0,
+      () => openDiffPreview(sessionId, state, selection.selectedSnapshot, selection.headSnapshot),
+    );
+    actions.append(statButton, fullButton, refreshButton, previewButton, flushButton);
 
     controls.append(fields, actions);
     diffView.append(controls);
@@ -1437,25 +1639,30 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return button;
   }
 
-  function renderMobileDiffBody(state: RepoDiffState): void {
+  function renderMobileDiffBody(state: RepoDiffState, sessionId: string, projection: SessionProjection): void {
+    const selection = resolveMobileDiffSelection(sessionId, projection, state);
+    const comments = diffComments.get(sessionId) ?? [];
+    const selectedComments = selectedDiffComments(comments, selection.selectedSnapshot, selection.headSnapshot);
     const rows = parseDiffRows(state.diff);
-    const fileSummaries = summarizeDiffFiles(rows);
+    const fileSummaries = summarizeDiffFiles(rows, comments, selection.selectedSnapshot, selection.headSnapshot);
     if (fileSummaries.length > 0) renderMobileDiffFiles(fileSummaries);
     if (!rows.some(row => row.type === "file" || row.type === "hunk" || (row.type === "line" && row.location.filePath))) {
       const pre = diffView.ownerDocument.createElement("pre");
       pre.className = "mobile-diff-pre";
       pre.textContent = state.diff;
       diffView.append(pre);
+      renderMobileDiffComments(selectedComments);
       return;
     }
 
     const diff = diffView.ownerDocument.createElement("div");
     diff.className = "mobile-diff-lines";
     for (const row of rows) {
-      const line = renderMobileDiffRow(row);
+      const line = renderMobileDiffRow(row, sessionId, selection.selectedSnapshot, selection.headSnapshot, comments);
       if (line) diff.append(line);
     }
     diffView.append(diff);
+    renderMobileDiffComments(selectedComments);
   }
 
   function renderMobileDiffFiles(files: ReturnType<typeof summarizeDiffFiles>): void {
@@ -1472,7 +1679,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       const path = diffView.ownerDocument.createElement("code");
       path.textContent = file.filePath;
       const meta = diffView.ownerDocument.createElement("span");
-      meta.textContent = `+${file.added} -${file.removed}`;
+      meta.textContent = `+${file.added} -${file.removed}${file.commentCount > 0 ? ` · ${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : ""}`;
       item.append(path, meta);
       list.append(item);
     }
@@ -1480,21 +1687,85 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     diffView.append(section);
   }
 
-  function renderMobileDiffRow(row: ParsedDiffRow): HTMLElement | null {
+  function renderMobileDiffRow(
+    row: ParsedDiffRow,
+    sessionId: string,
+    baseSnapshot: DiffSnapshotSummary | null,
+    headSnapshot: DiffSnapshotSummary | null,
+    comments: DiffComment[],
+  ): HTMLElement | null {
     if (row.type === "meta" && !row.text.trim()) return null;
-    const line = diffView.ownerDocument.createElement("div");
-    line.className = row.type === "line" ? `mobile-diff-line mobile-diff-line-${row.location.kind}` : `mobile-diff-line mobile-diff-${row.type}`;
-    if (row.type === "file") line.dataset.diffFilePath = row.filePath;
+    if (row.type !== "line") {
+      const line = diffView.ownerDocument.createElement("div");
+      line.className = `mobile-diff-line mobile-diff-${row.type}`;
+      if (row.type === "file") line.dataset.diffFilePath = row.filePath;
+      const spacer = diffView.ownerDocument.createElement("span");
+      spacer.className = "mobile-diff-comment-spacer";
+      const text = diffView.ownerDocument.createElement("code");
+      text.textContent = row.text;
+      line.append(spacer, text);
+      return line;
+    }
 
+    const lineComments = commentsForDiffLocation(comments, baseSnapshot, headSnapshot, row.location);
+    const wrap = diffView.ownerDocument.createElement("div");
+    wrap.className = "mobile-diff-line-wrap";
+    const line = diffView.ownerDocument.createElement("div");
+    line.className = `mobile-diff-line mobile-diff-line-${row.location.kind}`;
+    const commentButton = diffView.ownerDocument.createElement("button");
+    commentButton.type = "button";
+    commentButton.className = `mobile-diff-comment-button${lineComments.length > 0 ? " has-comments" : ""}`;
+    commentButton.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
+    commentButton.title = "Comment on this diff line";
+    commentButton.disabled = !baseSnapshot;
+    commentButton.addEventListener("click", () => {
+      if (baseSnapshot) openDiffCommentEditor(sessionId, baseSnapshot, headSnapshot, row.location);
+    });
     const gutter = diffView.ownerDocument.createElement("span");
     gutter.className = "mobile-diff-gutter";
-    gutter.textContent = row.type === "line"
-      ? String(row.location.newLine ?? row.location.oldLine ?? "")
-      : "";
+    gutter.textContent = String(row.location.newLine ?? row.location.oldLine ?? "");
     const text = diffView.ownerDocument.createElement("code");
-    text.textContent = row.type === "line" ? row.location.text : row.text;
-    line.append(gutter, text);
-    return line;
+    text.textContent = row.location.text;
+    line.append(commentButton, gutter, text);
+    wrap.append(line);
+    if (lineComments.length > 0) {
+      const thread = diffView.ownerDocument.createElement("div");
+      thread.className = "mobile-diff-inline-comments";
+      for (const comment of lineComments) {
+        const item = diffView.ownerDocument.createElement("div");
+        item.className = "mobile-diff-inline-comment";
+        item.textContent = comment.text;
+        thread.append(item);
+      }
+      wrap.append(thread);
+    }
+    return wrap;
+  }
+
+  function renderMobileDiffComments(comments: DiffComment[]): void {
+    const section = diffView.ownerDocument.createElement("section");
+    section.className = "mobile-diff-comments";
+    const title = diffView.ownerDocument.createElement("strong");
+    title.textContent = "Comments";
+    section.append(title);
+    if (comments.length === 0) {
+      const empty = diffView.ownerDocument.createElement("p");
+      empty.className = "mobile-empty-state";
+      empty.textContent = "No comments on this diff yet.";
+      section.append(empty);
+    } else {
+      for (const comment of comments) {
+        const item = diffView.ownerDocument.createElement("article");
+        item.className = "mobile-diff-comment";
+        const location = diffView.ownerDocument.createElement("code");
+        location.textContent = formatDiffLocation(comment);
+        const body = diffView.ownerDocument.createElement("p");
+        body.textContent = comment.text;
+        item.append(location, body);
+        section.append(item);
+      }
+    }
+    diffView.append(section);
   }
 
   return { connect, send };

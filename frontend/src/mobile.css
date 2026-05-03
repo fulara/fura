@@ -255,7 +255,7 @@ body {
 
 .mobile-diff-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(6.5rem, 1fr));
   gap: 0.45rem;
 }
 
@@ -308,8 +308,9 @@ body {
 
 .mobile-diff-line {
   display: grid;
-  grid-template-columns: 3.2rem minmax(0, 1fr);
+  grid-template-columns: 2rem 3.2rem minmax(0, 1fr);
   gap: 0.5rem;
+  align-items: start;
   padding: 0.08rem 0.65rem;
 }
 
@@ -356,6 +357,69 @@ body {
   color: #c9d1d9;
 }
 
+
+.mobile-diff-comment-spacer {
+  width: 2rem;
+}
+
+.mobile-diff-comment-button {
+  min-height: 1.65rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  border-color: #343a46;
+  color: #9ba4b5;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.75rem;
+}
+
+.mobile-diff-comment-button.has-comments {
+  border-color: #7f8cff;
+  color: #e5e8ff;
+  background: rgba(127, 140, 255, 0.2);
+}
+
+.mobile-diff-line-wrap {
+  display: grid;
+}
+
+.mobile-diff-inline-comments {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0.35rem 0.65rem 0.45rem 5.7rem;
+}
+
+.mobile-diff-inline-comment,
+.mobile-diff-comment {
+  border: 1px solid #343a46;
+  border-radius: 0.65rem;
+  background: rgba(127, 140, 255, 0.08);
+  color: #d7deea;
+  padding: 0.55rem;
+}
+
+.mobile-diff-comments {
+  display: grid;
+  gap: 0.55rem;
+  margin-top: 0.75rem;
+  border: 1px solid #252a35;
+  border-radius: 0.75rem;
+  background: rgba(16, 19, 26, 0.72);
+  padding: 0.75rem;
+}
+
+.mobile-diff-comment {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.mobile-diff-comment code {
+  color: #9ba4b5;
+  overflow-wrap: anywhere;
+}
+
+.mobile-diff-comment p {
+  margin: 0;
+}
 .mobile-composer {
   display: grid;
   gap: 0.6rem;
@@ -458,6 +522,21 @@ body {
   resize: vertical;
 }
 
+.mobile-diff-comment-text,
+.mobile-diff-preview-text {
+  min-height: 9rem;
+  resize: vertical;
+}
+
+.mobile-diff-preview-text {
+  min-height: min(55dvh, 24rem);
+  white-space: pre;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .mobile-dialog-overlay {
   position: fixed;
   inset: 0;
@@ -507,11 +586,12 @@ body {
 }
 
 .mobile-dialog-form,
-.mobile-dialog-field label {
+.mobile-dialog-field {
   display: grid;
   gap: 0.55rem;
 }
 
+.mobile-dialog-field,
 .mobile-dialog-field label {
   color: #c7cedc;
   font-size: 0.82rem;

@@ -709,4 +709,79 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileDiff")?.hasAttribute("hidden")).toBe(false);
     expect(document.querySelector("#mobileTranscript")?.hasAttribute("hidden")).toBe(true);
   });
+
+  it("adds, previews, and flushes mobile diff comments", () => {
+    const { connection } = createHarness();
+    const patch = [
+      "diff --git a/src/main.ts b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-console.log('old')",
+      "+console.log('new')",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    connection.emit({ type: "diff.state", sessionId: "live", state: diffState(patch, { stat: false }) });
+
+    document.querySelector<HTMLButtonElement>(".mobile-diff-line-add .mobile-diff-comment-button")?.click();
+    const commentText = document.querySelector<HTMLTextAreaElement>("#mobileDiffCommentText");
+    if (!commentText) throw new Error("comment textarea missing");
+    commentText.value = "Please avoid console logging.";
+    commentText.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLFormElement>("#mobileDiffCommentForm")?.requestSubmit();
+
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Please avoid console logging.");
+    expect(document.querySelector(".mobile-diff-file-item")?.textContent).toContain("1 comment");
+    const flushButton = [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
+      .find(button => button.textContent === "Preview & flush (1)");
+    expect(flushButton?.disabled).toBe(false);
+    flushButton?.click();
+
+    const preview = document.querySelector<HTMLTextAreaElement>("#mobileDiffPreviewText");
+    expect(preview?.value).toContain("Comment: Please avoid console logging.");
+    expect(document.querySelector("#mobileDiffPreviewStatus")?.textContent).toBe("1 comment ready to send");
+
+    document.querySelector<HTMLButtonElement>("#mobileDiffPreviewSend")?.click();
+
+    const promptMessage = connection.sent.filter(message => message.type === "prompt.send").at(-1);
+    expect(promptMessage).toMatchObject({ type: "prompt.send", sessionId: "live" });
+    expect(promptMessage && "text" in promptMessage ? promptMessage.text : "").toContain("Please avoid console logging.");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No comments on this diff yet.");
+  });
+
+  it("keeps mobile diff comments queued until busy prompt follow-up is sent", () => {
+    const { connection } = createHarness();
+    const patch = [
+      "diff --git a/src/main.ts b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-console.log('old')",
+      "+console.log('new')",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { isBusy: true }) });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    connection.emit({ type: "diff.state", sessionId: "live", state: diffState(patch, { stat: false }) });
+
+    document.querySelector<HTMLButtonElement>(".mobile-diff-line-add .mobile-diff-comment-button")?.click();
+    const commentText = document.querySelector<HTMLTextAreaElement>("#mobileDiffCommentText");
+    if (!commentText) throw new Error("comment textarea missing");
+    commentText.value = "Queue this while busy.";
+    document.querySelector<HTMLFormElement>("#mobileDiffCommentForm")?.requestSubmit();
+    [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
+      .find(button => button.textContent === "Preview & flush (1)")
+      ?.click();
+    document.querySelector<HTMLButtonElement>("#mobileDiffPreviewSend")?.click();
+
+    expect(connection.sent.filter(message => message.type === "prompt.send")).toHaveLength(0);
+    expect(document.querySelector("#mobileBusyPromptOverlay")?.hasAttribute("hidden")).toBe(false);
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Queue this while busy.");
+
+    document.querySelector<HTMLButtonElement>("#mobileBusyPromptFollowUp")?.click();
+
+    const promptMessage = connection.sent.filter(message => message.type === "prompt.send").at(-1);
+    expect(promptMessage).toMatchObject({ type: "prompt.send", sessionId: "live", behavior: "followUp" });
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No comments on this diff yet.");
+  });
 });
