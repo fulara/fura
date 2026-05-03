@@ -1,6 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-type MockPanel = { id: string; group: MockGroup };
+type MockPanel = {
+  id: string;
+  group: MockGroup;
+  setActiveCalls: number;
+  windowFocusCalls: number;
+  setActive(): void;
+  getWindow(): { focus(): void };
+};
 type MockGroup = { id: string; panels: MockPanel[]; size: number };
 
 type MockDockviewInstance = {
@@ -28,7 +35,14 @@ const dockviewMock = vi.hoisted(() => {
 
     addPanel(options: { id: string; component: string }): MockPanel {
       const group: MockGroup = { id: `${options.id}-group`, panels: [], size: 0 };
-      const panel: MockPanel = { id: options.id, group };
+      const panel: MockPanel = {
+        id: options.id,
+        group,
+        setActiveCalls: 0,
+        windowFocusCalls: 0,
+        setActive: () => { panel.setActiveCalls += 1; this.activePanel = panel; },
+        getWindow: () => ({ focus: () => { panel.windowFocusCalls += 1; } }),
+      };
       group.panels.push(panel);
       group.size = group.panels.length;
       this.panels.push(panel);
@@ -124,5 +138,27 @@ describe("initDesktopDockview", () => {
     expect(dockview.popoutCalls).toHaveLength(1);
     expect(dockview.popoutCalls[0].item).toBe(codePanel);
     expect(dockview.popoutCalls[0].item).not.toBe(codeGroup);
+  });
+
+  it("activates and focuses a popped-out panel through its panel API", () => {
+    const host = document.createElement("div") as HTMLDivElement;
+    const readyContainers = new Map<string, HTMLElement>();
+    const desktopDockview = initDesktopDockview({
+      host,
+      onPanelReady: (id, container) => readyContainers.set(id, container),
+      onPanelActivated: vi.fn(),
+      onPopoutBlocked: vi.fn(),
+    });
+    const dockview = dockviewMock.instances[0];
+    const codePanel = dockview.panels.find(panel => panel.id === "code");
+    expect(codePanel).toBeDefined();
+    readyContainers.get("code")?.parentElement?.querySelector<HTMLButtonElement>(".panel-popout-btn")?.click();
+
+    const activated = desktopDockview.activatePanel("code");
+
+    expect(activated).toBe(true);
+    expect(codePanel?.setActiveCalls).toBe(1);
+    expect(codePanel?.windowFocusCalls).toBe(1);
+    expect(dockview.activePanel).toBe(codePanel);
   });
 });
