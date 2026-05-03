@@ -306,8 +306,8 @@ Run only relevant checks after implementation:
   - use the OMP repo's targeted TypeScript/test command for `packages/coding-agent/src/modes/rpc/rpc-types.ts` and `rpc-mode.ts` if available; otherwise run the package typecheck/build command documented in that repo.
 - Manual/mock smoke:
   - build frontend;
-  - run Fura against `fixtures/mock-omp-rpc.mjs` with `FURA_TOKEN=dev FURA_PORT=38737 ./run-mock-rpc.sh`;
-  - connect browser to `http://127.0.0.1:38737/` and enter bridge token `dev` in the auth screen;
+  - run Fura against `fixtures/mock-omp-rpc.mjs` with `FURA_TOKEN=dev`;
+  - connect browser to `http://127.0.0.1:3737/` and enter bridge token `dev` in the auth screen;
   - send a controller prompt like "find me a session where I talked about mock";
   - verify the controller replies with candidates and does not open a session;
   - send "open the second one" or click an "Open" suggestion;
