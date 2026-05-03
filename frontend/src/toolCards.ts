@@ -1,4 +1,5 @@
 import { appendEventTimestamp, renderEventTimestamp } from "./eventTime";
+import { filePathWithIcon } from "./fileTypeIcons";
 import { formatTokens, shortPath } from "./format";
 import { renderImageAttachment, type RenderableImage } from "./imageRendering";
 import { mkEl } from "./dom";
@@ -107,7 +108,7 @@ function readArgSummary(card: ToolCard): string {
   const path = correctedPath ?? stringArg(card.args, "file_path") ?? stringArg(card.args, "path");
   const selection = stringArg(card.args, "sel");
   const suffix = selection ? `:${selection}` : "";
-  const summary = path ? `${shortPath(path)}${suffix}` : suffix || "…";
+  const summary = path ? `${filePathWithIcon(path, shortPath)}${suffix}` : suffix || "…";
   const correctedFrom = readSuffixResolution(card)?.from;
   return correctedFrom ? `${summary} (corrected from ${shortPath(correctedFrom)})` : summary;
 }
@@ -626,7 +627,7 @@ function taskResultTotals(results: TaskResult[], source: unknown): string {
 
 function toolArgSummary(args: Record<string, unknown>): string {
   const path = typeof args.path === "string" ? args.path : undefined;
-  if (path) return shortPath(path);
+  if (path) return filePathWithIcon(path, shortPath);
   for (const key of ["subject", "command", "message", "input", "pattern"]) {
     const value = args[key];
     if (typeof value === "string" && value.trim()) return truncate(value.trim(), 70);

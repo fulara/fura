@@ -42,6 +42,16 @@ describe("renderToolCard", () => {
     expect(node.querySelector(".tool-result-text")?.textContent).toBe("ok");
   });
 
+  it("renders file type icons for generic file tools", () => {
+    const node = renderToolCard(tool({
+      toolName: "write",
+      args: { path: "/home/aleksander/repos/fura/frontend/src/main.ts" },
+      result: { text: "wrote file" },
+    }));
+
+    expect(node.querySelector(".tool-args-summary")?.textContent).toBe("🟦 …/src/main.ts");
+  });
+
   it("marks active and error tools", () => {
     const node = renderToolCard(tool({ isActive: true, isError: true }));
 
@@ -80,7 +90,7 @@ describe("read tool cards", () => {
 
     expect(node.className).toContain("tool-compact");
     expect(node.querySelector(".tool-name")?.textContent).toBe("Read");
-    expect(node.querySelector(".tool-args-summary")?.textContent).toBe("…/src/main.rs:10-20");
+    expect(node.querySelector(".tool-args-summary")?.textContent).toBe("🦀 …/src/main.rs:10-20");
     expect(node.querySelector(".tool-result-body")).toBeNull();
   });
 
@@ -119,7 +129,7 @@ describe("read tool cards", () => {
 
     const node = renderReadToolGroup([first, second]);
     expect(node.querySelector(".tool-count")?.textContent).toBe("(2)");
-    expect(Array.from(node.querySelectorAll(".read-tool-path")).map(el => el.textContent)).toEqual(["a.ts", "b.ts"]);
+    expect(Array.from(node.querySelectorAll(".read-tool-path")).map(el => el.textContent)).toEqual(["🟦 a.ts", "🟦 b.ts"]);
   });
 });
 
