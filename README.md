@@ -105,9 +105,10 @@ Environment overrides for `run-local-omp.sh`:
 ./run-local-with-tailscale.sh
 ```
 
-Defaults: keep local development on `http://127.0.0.1:3737/`, add a remote HTTPS listener on `https://serwer-mini.caracal-porgy.ts.net:4450/mobile.html`, and bind that remote listener to this machine's `tailscale ip -4`. The script expects matching TLS files at `~/tmp/serwer-mini.caracal-porgy.ts.net.crt` and `.key` unless you override them.
+Defaults: keep local development on `http://127.0.0.1:3737/`, add a remote HTTPS listener on `https://serwer-mini.caracal-porgy.ts.net:4450/mobile.html`, and bind that remote listener to this machine's `tailscale ip -4`. The script expects matching TLS files at `./.cert/serwer-mini.caracal-porgy.ts.net.crt` and `.key` unless you override them.
 
 Override the remote host or TLS file paths explicitly if needed:
+
 
 ```bash
 FURA_REMOTE_HOST=<machine>.<tailnet>.ts.net \

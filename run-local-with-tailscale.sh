@@ -9,7 +9,7 @@ set -euo pipefail
 # - local listener stays on 127.0.0.1:3737
 # - remote listener binds to `tailscale ip -4`:4450
 # - remote host defaults to the user's configured Tailscale DNS name
-# - TLS cert/key default to ~/tmp/<remote-host>.crt and .key
+# - TLS cert/key default to ./.cert/<remote-host>.crt and .key
 #
 # Environment overrides:
 #   OMP_REPO=/path/to/oh-my-pi
@@ -18,9 +18,8 @@ set -euo pipefail
 #   FURA_LOCAL_BIND=127.0.0.1:3737
 #   FURA_REMOTE_PORT=4450
 #   FURA_REMOTE_HOST=serwer-mini.caracal-porgy.ts.net
-#   FURA_TLS_CERT=/path/to/<remote-host>.crt
-#   FURA_TLS_KEY=/path/to/<remote-host>.key
-#   FURA_BRIDGE_DEBUG_FILE=/path/to/bridge-debug.jsonl
+#   FURA_TLS_CERT=./.cert/<remote-host>.crt
+#   FURA_TLS_KEY=./.cert/<remote-host>.key
 #   FURA_SKIP_FRONTEND_BUILD=1
 #
 # Any arguments passed to this script are forwarded to Fura after the local OMP
@@ -33,8 +32,8 @@ FURA_TOKEN=${FURA_TOKEN:-dev}
 FURA_LOCAL_BIND=${FURA_LOCAL_BIND:-127.0.0.1:3737}
 FURA_REMOTE_PORT=${FURA_REMOTE_PORT:-4450}
 FURA_REMOTE_HOST=${FURA_REMOTE_HOST:-serwer-mini.caracal-porgy.ts.net}
-FURA_TLS_CERT=${FURA_TLS_CERT:-${HOME}/tmp/${FURA_REMOTE_HOST}.crt}
-FURA_TLS_KEY=${FURA_TLS_KEY:-${HOME}/tmp/${FURA_REMOTE_HOST}.key}
+FURA_TLS_CERT=${FURA_TLS_CERT:-${SCRIPT_DIR}/.cert/${FURA_REMOTE_HOST}.crt}
+FURA_TLS_KEY=${FURA_TLS_KEY:-${SCRIPT_DIR}/.cert/${FURA_REMOTE_HOST}.key}
 FURA_BRIDGE_DEBUG_FILE=${FURA_BRIDGE_DEBUG_FILE:-${SCRIPT_DIR}/bridge-debug.jsonl}
 
 if ! command -v tailscale >/dev/null 2>&1; then

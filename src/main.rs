@@ -62,6 +62,10 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|_| "fura=info,tower_http=info".into()),
         )
         .init();
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
 
     let args = Args::parse();
     let configured_token = args.token.and_then(|token| {
