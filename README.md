@@ -99,6 +99,21 @@ Environment overrides for `run-local-omp.sh`:
 | `FURA_BRIDGE_DEBUG_FILE` | `./bridge-debug.jsonl` | Raw RPC frame log (contains prompts — do not commit) |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
+### Against a local OMP checkout over Tailscale
+
+```bash
+./run-local-with-tailscale.sh
+```
+
+Defaults: bind to this machine's `tailscale ip -4`, listen on port `4450`, and advertise `FURA_MOBILE_HOST=fura-mini-laptop`. Open `http://fura-mini-laptop:4450/mobile.html` on a phone connected to the same tailnet and enter the bridge token (`dev` by default).
+
+If `fura-mini-laptop` is not the Tailscale name/service that routes to this machine, the script prints a warning with the machine's Tailscale DNS name. Override it with that value:
+
+```bash
+FURA_MOBILE_HOST=<machine>.<tailnet>.ts.net ./run-local-with-tailscale.sh
+```
+
+
 ### Mock RPC (no OMP required)
 
 ```bash
