@@ -1,6 +1,6 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
-import { consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
+import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
@@ -189,6 +189,26 @@ app.innerHTML = `
     </section>
 
   </main>
+
+  <div id="authGate" class="modal-overlay auth-gate" hidden>
+    <section class="modal-panel auth-panel" role="dialog" aria-modal="true" aria-labelledby="authGateTitle" aria-describedby="authGateDescription">
+      <header class="modal-header">
+        <div>
+          <h2 id="authGateTitle">Connect to Fura</h2>
+          <p id="authGateDescription">Enter the bridge token from your local Fura startup output. The token is not accepted from URLs.</p>
+        </div>
+      </header>
+      <form id="authForm" class="auth-form">
+        <label for="authTokenInput">Bridge token</label>
+        <input id="authTokenInput" type="password" autocomplete="current-password" spellcheck="false" required />
+        <p id="authStatus" class="auth-status" aria-live="polite"></p>
+        <footer class="modal-footer auth-actions">
+          <span>Use Tailscale or localhost for private access.</span>
+          <button id="authSubmit" type="submit">Connect</button>
+        </footer>
+      </form>
+    </section>
+  </div>
 
   <div id="busyPromptOverlay" class="modal-overlay" hidden>
     <section class="busy-prompt modal-panel" role="dialog" aria-modal="true" aria-labelledby="busyPromptTitle" aria-describedby="busyPromptDescription">
@@ -402,6 +422,11 @@ app.innerHTML = `
   </div>
 `;
 
+const authGate = requireElement<HTMLDivElement>("authGate");
+const authForm = requireElement<HTMLFormElement>("authForm");
+const authTokenInput = requireElement<HTMLInputElement>("authTokenInput");
+const authStatus = requireElement<HTMLParagraphElement>("authStatus");
+const authSubmit = requireElement<HTMLButtonElement>("authSubmit");
 const connectionStatus = requireElement<HTMLSpanElement>("connectionStatus");
 const createSessionButton = requireElement<HTMLButtonElement>("createSessionButton");
 const sessionsList = requireElement<HTMLElement>("sessionsList");
@@ -594,7 +619,7 @@ let controlMessages: ControlChatMessage[] = [];
 let controlStatusState: ControlStatusProjection = { status: "idle" };
 const initialToken = consumeBootstrapToken(
   window.location.href,
-  window.localStorage,
+  window.sessionStorage,
   url => window.history.replaceState(null, "", url),
 );
 let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
@@ -629,6 +654,10 @@ activeCategoryCombobox = createCategoryCombobox({
 
 
 // --- Event wiring ---
+authForm.addEventListener("submit", event => {
+  event.preventDefault();
+  connect(authTokenInput.value);
+});
 
 askFuraButton.addEventListener("click", activateControllerWorkspace);
 createSessionButton.addEventListener("click", () => {
@@ -949,23 +978,28 @@ promptInput.addEventListener("keydown", event => {
 render();
 if (initialToken) {
   connect(initialToken);
+} else {
+  showAuthGate("Enter the bridge token to connect.");
 }
 initDesktopWorkspace();
 
 // --- Core session logic ---
 
 function connect(token: string): void {
-  const bridgeToken = storeBootstrapToken(token, window.localStorage);
+  const bridgeToken = storeBootstrapToken(token, window.sessionStorage);
   if (!bridgeToken) {
-    appendLog("No bridge token found. Load Fura with ?token=<token> from the Rust server URL.");
+    showAuthGate("Enter the bridge token to connect.");
     return;
   }
 
+  authSubmit.disabled = true;
+  authStatus.textContent = "Connecting…";
   connection?.disconnect();
   connection = createFuraConnection({
     auth: { type: "sessionCookie", token: bridgeToken },
     onStatus: setStatus,
     onOpen: () => {
+      hideAuthGate();
       send({ type: "session.list" });
     },
     onClose: () => {
@@ -976,10 +1010,28 @@ function connect(token: string): void {
         );
       }
     },
+    onAuthFailure: message => {
+      clearBootstrapToken(window.sessionStorage);
+      showAuthGate(message);
+      authTokenInput.select();
+    },
     onMessage: handleServerMessage,
     onLog: appendLog,
   });
   connection.connect();
+}
+
+function showAuthGate(message: string): void {
+  authGate.hidden = false;
+  authSubmit.disabled = false;
+  authStatus.textContent = message;
+}
+
+function hideAuthGate(): void {
+  authGate.hidden = true;
+  authSubmit.disabled = false;
+  authStatus.textContent = "";
+  authTokenInput.value = "";
 }
 
 function activeWorkspaceKey(): string | null {

@@ -45,6 +45,12 @@ use web::*;
 const SESSION_CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const SESSION_CATALOG_PRELOAD_LIMIT: usize = 30;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BridgeTokenSource {
+    Configured,
+    Generated,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -55,10 +61,14 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
-    let token = args
-        .token
-        .filter(|token| !token.trim().is_empty())
-        .unwrap_or_else(generate_token);
+    let configured_token = args.token.and_then(|token| {
+        let trimmed = token.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    let (token, token_source) = match configured_token {
+        Some(token) => (token, BridgeTokenSource::Configured),
+        None => (generate_token(), BridgeTokenSource::Generated),
+    };
 
     if !args.host.is_loopback() {
         warn!(
@@ -130,7 +140,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind {}:{}", args.host, args.port))?;
 
-    log_server_ready(&state, args.host, args.port);
+    log_server_ready(&state, args.host, args.port, token_source);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -149,14 +159,25 @@ fn start_session_catalog_watcher(state: AppState) {
     });
 }
 
-fn log_server_ready(state: &AppState, host: std::net::IpAddr, port: u16) {
+fn log_server_ready(
+    state: &AppState,
+    host: std::net::IpAddr,
+    port: u16,
+    token_source: BridgeTokenSource,
+) {
     info!(
-        url = %format!("http://{host}:{port}"),
-        token = %state.token,
+        url = %bridge_listen_url(host, port),
+        auth = startup_auth_label(token_source),
         rpc_program = %state.rpc_config.program,
         rpc_arg_count = state.rpc_config.args.len(),
         "fura bridge listening"
     );
+    if token_source == BridgeTokenSource::Generated {
+        warn!(
+            bridge_token = %state.token,
+            "generated bridge token; enter it in the Fura auth screen and keep it secret"
+        );
+    }
     if state.log_frames {
         warn!(
             "full frame logging is enabled; logs may include prompts, file contents, command output, and secrets"
@@ -177,6 +198,17 @@ async fn broadcast_sessions_snapshot(state: &AppState) {
 
 fn next_rpc_id() -> String {
     Uuid::new_v4().to_string()
+}
+
+fn bridge_listen_url(host: std::net::IpAddr, port: u16) -> String {
+    format!("http://{host}:{port}/")
+}
+
+fn startup_auth_label(token_source: BridgeTokenSource) -> &'static str {
+    match token_source {
+        BridgeTokenSource::Configured => "configured bridge token",
+        BridgeTokenSource::Generated => "generated bridge token",
+    }
 }
 
 fn generate_token() -> String {
@@ -346,6 +378,26 @@ mod tests {
                 .as_ref()
                 .map(|worktree| worktree.path.as_str()),
             Some("/repo-feature")
+        );
+    }
+
+    #[test]
+    fn bridge_listen_url_never_contains_token() {
+        let url = bridge_listen_url("127.0.0.1".parse().expect("ip"), 3737);
+
+        assert_eq!(url, "http://127.0.0.1:3737/");
+        assert!(!url.contains("token"));
+    }
+
+    #[test]
+    fn startup_auth_label_names_token_source_without_secret() {
+        assert_eq!(
+            startup_auth_label(BridgeTokenSource::Configured),
+            "configured bridge token"
+        );
+        assert_eq!(
+            startup_auth_label(BridgeTokenSource::Generated),
+            "generated bridge token"
         );
     }
 

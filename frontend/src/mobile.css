@@ -522,6 +522,10 @@ body {
   resize: vertical;
 }
 
+.mobile-auth-dialog input {
+  width: 100%;
+}
+
 .mobile-dialog-status {
   min-height: 1rem;
   color: #9ba4b5;

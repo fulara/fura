@@ -128,6 +128,7 @@ describe("createFuraConnection", () => {
     resetFakeWebSockets();
     const statuses: string[] = [];
     const logs: string[] = [];
+    const authFailures: string[] = [];
     const connection = createFuraConnection({
       auth: { type: "sessionCookie", token: "bad" },
       locationHref: "http://localhost:3737/",
@@ -136,6 +137,7 @@ describe("createFuraConnection", () => {
       onStatus: status => statuses.push(status),
       onMessage: () => {},
       onLog: message => logs.push(message),
+      onAuthFailure: message => authFailures.push(message),
     });
 
     connection.connect();
@@ -144,6 +146,7 @@ describe("createFuraConnection", () => {
     expect(FakeWebSocket.instances).toEqual([]);
     expect(statuses).toEqual(["connecting", "disconnected"]);
     expect(logs).toEqual(["Authentication failed. Check the token and bridge server."]);
+    expect(authFailures).toEqual(["Authentication failed. Check the token and bridge server."]);
   });
 
   it("routes text messages and ignores non-text frames", async () => {
