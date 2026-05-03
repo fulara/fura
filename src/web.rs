@@ -402,6 +402,42 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "frontend.control",
             target_client_id = %target_client_id
         ),
+        ServerMessage::CodeWorkspaceReady { workspace } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.workspace.ready",
+            workspace_id = %workspace.workspace_id,
+            session_id = %workspace.session_id,
+            root = %workspace.root
+        ),
+        ServerMessage::CodeTree {
+            workspace_id,
+            path,
+            entries,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.tree",
+            workspace_id = %workspace_id,
+            path = %path,
+            entry_count = entries.len()
+        ),
+        ServerMessage::CodeFile { workspace_id, file } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.file",
+            workspace_id = %workspace_id,
+            path = %file.path,
+            bytes = file.text.len()
+        ),
+        ServerMessage::CodeError {
+            workspace_id,
+            path,
+            message,
+        } => warn!(
+            direction = "bridge_to_client",
+            message_type = "code.error",
+            workspace_id = ?workspace_id,
+            path = ?path,
+            bytes = message.len()
+        ),
         ServerMessage::RawOmp { session_id, frame } => info!(
             direction = "bridge_to_client",
             message_type = "raw.omp",

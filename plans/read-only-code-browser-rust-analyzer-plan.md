@@ -1,0 +1,484 @@
+# Read-only Code Browser with rust-analyzer
+
+## Goal
+
+Add a read-only code browser to Fura for reviewing code generated or modified by the model. This is not an editor and should not grow into a full IDE.
+
+The browser should support:
+
+- browsing a session/worktree repository tree,
+- opening files read-only,
+- viewing an outline/document symbols,
+- viewing diagnostics,
+- hover,
+- go-to-definition,
+- truthful errors for unavailable, stale, external, binary, or too-large content.
+
+## Core decisions
+
+### Use rust-analyzer, not RLS
+
+Do not build against old Rust RLS. RLS is deprecated; the bridge-side language backend should use `rust-analyzer` through LSP.
+
+Use “rust-analyzer/LSP worker” terminology in code and docs rather than “RLS”.
+
+### Name the feature Code, not Editor
+
+Use **Code** as the UI panel/tab name and `code.*` as the protocol namespace. Use **read-only code browser** in planning/docs.
+
+Do not call the feature an editor in UI, code, or docs. “Editor” implies file mutation, cursor ownership, save semantics, completion, rename, formatting, and code actions; those are explicit non-goals.
+
+### Keep rust-analyzer inside the bridge
+
+Architecture:
+
+```text
+Browser
+  |
+  | Fura code protocol
+  v
+Fura bridge
+  |
+  | internal LSP JSON-RPC
+  v
+rust-analyzer
+```
+
+Do not expose raw LSP as the normal browser protocol:
+
+```text
+Browser <-> raw LSP <-> rust-analyzer
+```
+
+The frontend should not own LSP capability negotiation, document sync, cancellation, request routing, URI mapping, or rust-analyzer-specific quirks.
+
+### Desktop-only v1
+
+The first implementation is desktop-only. It belongs in the existing Dockview workspace as a **Code** panel/tab, not in the mobile shell.
+
+Mobile support is intentionally out of scope for v1. Mobile code browsing is a separate UX problem and should not block the desktop workflow.
+
+### Bridge owns the projection/cache
+
+The bridge should cache projected code-browser state:
+
+- workspace registry,
+- rust-analyzer process handles,
+- file tree snapshots,
+- open file content metadata,
+- diagnostics by file,
+- symbols by file/version,
+- short-lived hover/definition results,
+- mapping between `file://` URIs and workspace-relative paths.
+
+The cache is not the source of truth.
+
+Sources of truth:
+
+- filesystem for saved file contents,
+- rust-analyzer for semantic analysis,
+- session/worktree cwd for workspace discovery.
+
+Every cached analysis result should be tied to:
+
+```text
+workspaceId
+path
+version/content hash
+```
+
+If a result is stale, the bridge must report or refresh it rather than returning plausible but outdated data.
+
+### Read-only means read-only
+
+For the initial product scope, do not implement:
+
+- file editing,
+- saving,
+- LSP `didChange`,
+- completion,
+- rename,
+- code actions,
+- formatting,
+- full semantic token rendering,
+- browser-side raw LSP.
+
+The browser may open documents in rust-analyzer using `didOpen`, but only from the current filesystem content.
+
+
+### Lazy analyzer startup
+
+Opening the Code panel must not require rust-analyzer. Filesystem browsing should work immediately from the bridge.
+
+rust-analyzer should start lazily only when all of these are true:
+
+- desktop Code panel is opened/activated or an `Open in Code` action requires code analysis,
+- the bridge resolves a valid workspace root for the active session/worktree,
+- the workspace is detected as a Rust workspace,
+- a feature that needs analysis is requested or enabled: diagnostics, document symbols, hover, or go-to-definition.
+
+Do not start rust-analyzer on Fura startup, WebSocket connect, session creation, or ordinary session attach.
+
+### Rust workspace detection
+
+Only start rust-analyzer for workspaces with a discovered `Cargo.toml`. Detection should be conservative:
+
+1. Start from the session cwd or worktree path.
+2. Prefer the git/worktree root if it contains `Cargo.toml`.
+3. Otherwise walk ancestors from cwd until the workspace boundary and use the nearest directory containing `Cargo.toml`.
+4. If no `Cargo.toml` is found, keep the Code panel in files-only mode and do not start rust-analyzer.
+
+No `Cargo.toml` is not an error for the Code panel. It means: browse files, but no Rust diagnostics/symbols/hover/definition.
+
+Expose this state truthfully in UI, for example:
+
+```text
+Files only
+Rust analysis starting…
+Rust analysis ready
+Rust analysis unavailable: Cargo.toml not found
+Rust analysis failed: rust-analyzer not found
+Rust analysis limited: safe mode
+```
+
+### Security default is conservative
+
+rust-analyzer assumes trusted code. Cargo metadata, build scripts, proc macros, project config, and toolchain config can cause code execution or executable overrides.
+
+Default mode should be conservative:
+
+- disable proc macros initially,
+- avoid automatic build-script/check execution where practical,
+- show limited-analysis status honestly,
+- add a separate explicit trusted-workspace mode only if needed later.
+
+Do not silently enable full trusted rust-analyzer behavior for arbitrary worktrees.
+
+## Backend design
+
+### New module
+
+Add a dedicated backend module, likely:
+
+```text
+src/code.rs
+```
+
+This module owns:
+
+- workspace discovery,
+- path validation,
+- file tree listing,
+- file reads,
+- binary/large-file classification,
+- rust-analyzer lifecycle,
+- LSP transport,
+- LSP-to-Fura projection,
+- cache invalidation.
+
+Avoid making this a generic utility module or leaking responsibilities into `commands.rs` beyond dispatch.
+
+### AppState addition
+
+Add a code workspace registry to `AppState`, conceptually:
+
+```rust
+code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>
+```
+
+Conceptual internal types:
+
+```rust
+struct CodeWorkspaceRegistry {
+    by_id: HashMap<String, CodeWorkspace>,
+    by_root: HashMap<PathBuf, String>,
+}
+
+struct CodeWorkspace {
+    workspace_id: String,
+    root: PathBuf,
+    analyzer: Option<AnalyzerHandle>,
+    files: FileTreeCache,
+    open_documents: HashMap<RelativePath, OpenDocument>,
+    diagnostics: HashMap<RelativePath, Vec<CodeDiagnostic>>,
+}
+
+struct OpenDocument {
+    path: RelativePath,
+    version: u64,
+    content_hash: String,
+    text_len: usize,
+}
+```
+
+Do not let the browser select arbitrary host paths. The browser may request a workspace for a session, but the bridge resolves and validates the root.
+
+### Workspace identity
+
+Prefer workspace identity by canonical repository/worktree root rather than by session id.
+
+Reason: multiple sessions may point at the same repo/worktree. Reusing one analyzer per root avoids unnecessary rust-analyzer processes.
+
+A simple v1 can still expose `workspaceId` as an opaque bridge-generated id.
+
+## Protocol plan
+
+Extend `src/protocol.rs` and `frontend/src/protocol.ts` with Fura-domain code browser messages.
+
+### Client to bridge
+
+```ts
+| { type: "code.workspace.open"; sessionId: string }
+| { type: "code.tree.list"; workspaceId: string; path?: string }
+| { type: "code.file.open"; workspaceId: string; path: string }
+| { type: "code.file.close"; workspaceId: string; path: string }
+| { type: "code.symbols"; workspaceId: string; path: string }
+| { type: "code.hover"; workspaceId: string; path: string; line: number; character: number }
+| { type: "code.definition"; workspaceId: string; path: string; line: number; character: number }
+| { type: "code.diagnostics"; workspaceId: string; path?: string }
+```
+
+### Bridge to client
+
+```ts
+| { type: "code.workspace.ready"; workspace: CodeWorkspaceSummary }
+| { type: "code.tree"; workspaceId: string; path: string; entries: CodeTreeEntry[] }
+| { type: "code.file"; workspaceId: string; file: CodeFileContent }
+| { type: "code.symbols"; workspaceId: string; path: string; symbols: CodeSymbol[] }
+| { type: "code.hover"; workspaceId: string; path: string; range?: CodeRange; markdown?: string; text?: string }
+| { type: "code.definition"; workspaceId: string; path: string; locations: CodeLocation[] }
+| { type: "code.diagnostics"; workspaceId: string; diagnostics: CodeDiagnostic[] }
+| { type: "code.status"; workspaceId: string; status: "filesOnly" | "starting" | "indexing" | "ready" | "limited" | "unavailable" | "error"; message?: string }
+| { type: "code.error"; workspaceId?: string; path?: string; message: string }
+```
+
+Use domain-preserving DTOs. Do not forward arbitrary rust-analyzer payloads as the public contract.
+
+## Implementation milestones
+
+### Milestone 1: read-only filesystem browser
+
+Deliverables:
+
+- `code.workspace.open`,
+- `code.tree.list`,
+- `code.file.open`,
+- desktop Code panel,
+- syntax highlighting using existing frontend code/highlight.js patterns,
+- no rust-analyzer dependency yet.
+
+Backend behavior:
+
+- resolve workspace root from session cwd/worktree,
+- validate all paths stay inside root,
+- reject path traversal,
+- filter `.git`, `target`, `node_modules`, and other heavy generated directories,
+- reject binary files truthfully,
+- reject too-large files truthfully,
+- sort tree entries consistently.
+
+Frontend behavior:
+
+- desktop-only Dockview panel named Code,
+- file tree on the left,
+- read-only viewer on the right,
+- copy button for file contents,
+- clear empty/error states.
+
+Reason: this provides product value and validates UI shape before LSP complexity.
+
+### Milestone 2: rust-analyzer lifecycle and status
+
+Deliverables:
+
+- discover `Cargo.toml` before launching rust-analyzer,
+- launch rust-analyzer lazily per Rust workspace root,
+- keep non-Rust workspaces in files-only mode,
+- internal LSP stdio transport using `Content-Length`,
+- `initialize` / `initialized`,
+- conservative rust-analyzer configuration,
+- `code.status` events including files-only/unavailable states,
+- clean shutdown or idle timeout.
+
+Behavior:
+
+- one analyzer per workspace root where practical,
+- truthful status if rust-analyzer binary is missing,
+- truthful status if the process exits,
+- no UI feature should hang indefinitely waiting for analyzer readiness,
+- opening Code for a non-Rust workspace must not start rust-analyzer,
+- opening Code must still allow file tree and read-only file viewing before analyzer readiness.
+
+### Milestone 3: diagnostics and document symbols
+
+Deliverables:
+
+- `code.diagnostics`,
+- diagnostics cache by file,
+- diagnostics list/badges in the Code panel,
+- `code.symbols`,
+- outline for the current file.
+
+Behavior:
+
+- debounce diagnostics broadcasts,
+- do not spam the full workspace to the browser,
+- cache symbols by file version/content hash,
+- stale symbols must be refreshed or rejected.
+
+### Milestone 4: hover and go-to-definition
+
+Deliverables:
+
+- `code.hover`,
+- `code.definition`,
+- local go-to-definition opens the target file,
+- external definitions are classified honestly.
+
+External definition handling:
+
+```ts
+{ kind: "external"; uri: string; label: string }
+```
+
+Do not expand v1 into browsing the full Cargo registry unless explicitly chosen later.
+
+### Milestone 5: product integration polish
+
+Deliverables:
+
+- “Open in Code” from diff file paths,
+- “Open in Code” from relevant tool/read outputs,
+- file-change invalidation,
+- analyzer idle shutdown,
+- possible trusted-workspace toggle decision.
+
+This milestone should happen after the core panel is useful and stable.
+
+## UI scope
+
+Start desktop-only.
+
+Do not add mobile support in v1. Mobile code browsing is a separate UX problem and should not block desktop value.
+
+Place the feature as a Dockview panel/tab named **Code**, adjacent to the existing Transcript panel. It should not be a modal, overlay, or header-owned “editor” window.
+
+Recommended Dockview shape:
+
+```text
+Dockview
+├─ main group
+│  ├─ Transcript
+│  └─ Code
+└─ side group
+   ├─ Tools
+   └─ Diffs
+```
+
+The panel activates lazily. Opening Code should immediately show filesystem browsing if a workspace is available; rust-analyzer status appears separately and must not block file viewing.
+
+Initial Code panel layout:
+
+```text
+Code panel
+├─ workspace/session indicator
+├─ file tree
+├─ read-only file viewer
+└─ outline / diagnostics area
+```
+
+Avoid file tabs initially unless needed. A single active file is enough for v1.
+
+A header button is optional later as a shortcut to activate the Code panel, but the primary UI affordance should be the Dockview tab.
+
+## Test plan
+
+### Backend tests
+
+Path validation:
+
+- normal relative path is accepted,
+- `../` traversal is rejected,
+- absolute path from client is rejected,
+- symlink escape is rejected or explicitly handled by canonicalization,
+- missing file reports not found.
+
+File classification:
+
+- text file opens,
+- binary file is rejected,
+- too-large file is rejected,
+- UTF-8 handling is explicit.
+
+Tree listing:
+
+- `.git` hidden,
+- `target` hidden,
+- regular files/directories returned in stable order,
+- large ignored directories do not explode response size.
+
+LSP projection:
+
+- workspace-relative path maps to `file://` URI,
+- diagnostic URI maps back to workspace path,
+- external URI is classified as external,
+- malformed LSP response becomes a truthful `code.error`.
+
+Lifecycle:
+
+- missing rust-analyzer reports an error,
+- analyzer exit updates status,
+- requests while analyzer is unavailable return a truthful error.
+- analyzer is not launched when `Cargo.toml` is absent,
+- analyzer is not launched before Code/analysis activation,
+- files-only mode remains usable without rust-analyzer.
+
+### Frontend tests
+
+- protocol type coverage for new messages,
+- file tree rendering,
+- open-file rendering,
+- diagnostics rendering,
+- outline rendering/click behavior,
+- no mobile boundary regression if shared modules are introduced.
+
+### Manual smoke
+
+- launch Fura,
+- open a Rust session/worktree,
+- open Code panel,
+- confirm file tree and file open work before rust-analyzer readiness,
+- browse `src/main.rs`,
+- open a file,
+- see outline,
+- see diagnostics/status,
+- hover a symbol,
+- go to a local definition,
+- try a large/binary file and confirm UI does not freeze.
+
+## Explicit non-goals
+
+Do not implement in this plan:
+
+- editing,
+- save,
+- completion,
+- rename,
+- code actions,
+- formatting,
+- inlay hints,
+- semantic tokens,
+- multi-language LSP abstraction,
+- public raw LSP protocol,
+- mobile code browser.
+
+These are separate product decisions, not prerequisites for reviewing generated code.
+
+## Main risks
+
+1. Security: rust-analyzer/Cargo can execute workspace-controlled code in trusted modes.
+2. Lifecycle: rust-analyzer can be heavy on large workspaces.
+3. Stale cache: browser must not show old analysis as if fresh.
+4. Scope creep: read-only browser can easily become a partial editor.
+
+The implementation should preserve the product boundary: Fura helps inspect and navigate generated code; it does not become a full IDE.

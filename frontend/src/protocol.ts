@@ -212,6 +212,32 @@ export type ControlStatusProjection = {
   message?: string | null;
 };
 
+export type CodeStatus = "filesOnly";
+
+export type CodeWorkspaceSummary = {
+  workspaceId: string;
+  sessionId: string;
+  root: string;
+  rustRoot?: string | null;
+  status: CodeStatus;
+  statusMessage?: string | null;
+};
+
+export type CodeTreeEntry = {
+  name: string;
+  path: string;
+  kind: "directory" | "file";
+  size?: number | null;
+};
+
+export type CodeFileContent = {
+  path: string;
+  language: string;
+  text: string;
+  size: number;
+  version: number;
+};
+
 export type ServerMessage =
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
   | { type: "config.updated"; config: ServerConfig }
@@ -226,6 +252,10 @@ export type ServerMessage =
   | { type: "plan.review"; sessionId: string; planFilePath: string; finalPlanFilePath: string; title?: string | null; content: string }
   | { type: "model.changed"; sessionId: string; model: ModelSummary }
   | { type: "raw.omp"; sessionId: string; frame: unknown }
+  | { type: "code.workspace.ready"; workspace: CodeWorkspaceSummary }
+  | { type: "code.tree"; workspaceId: string; path: string; entries: CodeTreeEntry[] }
+  | { type: "code.file"; workspaceId: string; file: CodeFileContent }
+  | { type: "code.error"; workspaceId?: string | null; path?: string | null; message: string }
   | { type: "diff.state"; sessionId: string; state: RepoDiffState }
   | { type: "control.reply"; targetClientId: string; conversationId: string; message: string; candidates?: ControlCandidate[]; suggestedActions?: ControlSuggestedAction[] }
   | { type: "control.status"; targetClientId?: string | null; status: ControlStatusProjection }
@@ -266,6 +296,10 @@ export type ClientMessage =
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }
   | { type: "diff.refresh"; sessionId: string; selector?: string; headSelector?: string; stat?: boolean }
   | { type: "diff.snapshot"; sessionId: string; label?: string }
+  | { type: "code.workspace.open"; sessionId: string }
+  | { type: "code.tree.list"; workspaceId: string; path?: string }
+  | { type: "code.file.open"; workspaceId: string; path: string }
+  | { type: "code.file.close"; workspaceId: string; path: string }
   | { type: "raw.rpc"; sessionId: string; command: unknown }
   | { type: "session.fork"; sessionId: string; name: string }
   | { type: "control.prompt"; clientId: string; conversationId?: string; text: string; uiSnapshot: FrontendUiSnapshot }

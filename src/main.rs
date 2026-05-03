@@ -15,6 +15,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 mod catalog;
+mod code;
 mod commands;
 mod config;
 mod control;
@@ -29,6 +30,7 @@ mod voice;
 mod web;
 
 use catalog::*;
+use code::*;
 use commands::*;
 use config::*;
 use control::*;
@@ -110,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
         pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
+        code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
         voice_sessions: Arc::new(RwLock::new(HashMap::new())),
         events,
@@ -413,6 +416,7 @@ mod tests {
             pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
+            code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
             voice_sessions: Arc::new(RwLock::new(HashMap::new())),
             events,

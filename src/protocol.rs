@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ClientConfig, SessionProjection, SessionSummary};
+use crate::{
+    ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, SessionProjection,
+    SessionSummary,
+};
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub(crate) enum PromptBehavior {
@@ -220,6 +223,17 @@ pub(crate) enum ClientMessage {
         name: String,
         custom_instructions: Option<String>,
     },
+    #[serde(rename = "code.workspace.open")]
+    CodeWorkspaceOpen { session_id: String },
+    #[serde(rename = "code.tree.list")]
+    CodeTreeList {
+        workspace_id: String,
+        path: Option<String>,
+    },
+    #[serde(rename = "code.file.open")]
+    CodeFileOpen { workspace_id: String, path: String },
+    #[serde(rename = "code.file.close")]
+    CodeFileClose { workspace_id: String, path: String },
     #[serde(rename = "raw.rpc")]
     RawRpc { session_id: String, command: Value },
 }
@@ -325,6 +339,25 @@ pub(crate) enum ServerMessage {
     FrontendControl {
         target_client_id: String,
         action: FrontendControlAction,
+    },
+    #[serde(rename = "code.workspace.ready")]
+    CodeWorkspaceReady { workspace: CodeWorkspaceSummary },
+    #[serde(rename = "code.tree")]
+    CodeTree {
+        workspace_id: String,
+        path: String,
+        entries: Vec<CodeTreeEntry>,
+    },
+    #[serde(rename = "code.file")]
+    CodeFile {
+        workspace_id: String,
+        file: CodeFileContent,
+    },
+    #[serde(rename = "code.error")]
+    CodeError {
+        workspace_id: Option<String>,
+        path: Option<String>,
+        message: String,
     },
     #[serde(rename = "raw.omp")]
     RawOmp { session_id: String, frame: Value },

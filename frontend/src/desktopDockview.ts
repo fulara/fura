@@ -1,7 +1,7 @@
 import "dockview-core/dist/styles/dockview.css";
 import { DockviewComponent, themeDark, type DockviewGroupPanel, type SerializedDockview } from "dockview-core";
 
-export type DesktopDockviewPanelId = "transcript" | "tools" | "diffs";
+export type DesktopDockviewPanelId = "transcript" | "code" | "tools" | "diffs";
 
 export type DesktopDockview = {
   panelMounted(id: DesktopDockviewPanelId): boolean;
@@ -72,6 +72,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   api.onDidOpenPopoutWindowFail(options.onPopoutBlocked);
 
   restoreOrCreateLayout(api, storage(win));
+  ensureCodePanel(api);
   ensureDiffsPanel(api);
 
   let layoutSaveTimer: number | undefined;
@@ -158,6 +159,14 @@ function loadDefaultLayout(api: DockviewComponent): void {
     renderer: "always",
   });
   api.addPanel({
+    id: "code",
+    component: "code",
+    title: "Code",
+    position: { referencePanel: "transcript", direction: "within" },
+    inactive: true,
+    renderer: "always",
+  });
+  api.addPanel({
     id: "tools",
     component: "tools",
     title: "Tools",
@@ -169,6 +178,19 @@ function loadDefaultLayout(api: DockviewComponent): void {
     component: "diffs",
     title: "Diffs",
     position: { referencePanel: "tools", direction: "below" },
+    renderer: "always",
+  });
+}
+
+function ensureCodePanel(api: DockviewComponent): void {
+  const hasCodePanel = api.panels.some(panel => panel.id === "code");
+  if (hasCodePanel) return;
+  api.addPanel({
+    id: "code",
+    component: "code",
+    title: "Code",
+    position: { referencePanel: "transcript", direction: "within" },
+    inactive: true,
     renderer: "always",
   });
 }
@@ -186,12 +208,14 @@ function ensureDiffsPanel(api: DockviewComponent): void {
 }
 
 function desktopPanelId(name: string): DesktopDockviewPanelId | null {
-  return name === "transcript" || name === "tools" || name === "diffs" ? name : null;
+  return name === "transcript" || name === "code" || name === "tools" || name === "diffs" ? name : null;
 }
 
 function copyStylesToPopout(owner: Document, popWin: Window): void {
+  const head = popWin.document.head;
+  if (!head) return;
   owner.querySelectorAll('link[rel="stylesheet"], style').forEach(node => {
-    popWin.document.head.appendChild(popWin.document.importNode(node, true));
+    head.appendChild(popWin.document.importNode(node, true));
   });
 }
 

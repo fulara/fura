@@ -4,9 +4,9 @@ use serde_json::Value;
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
 use crate::{
-    ControlCandidate, FrontendUiSnapshot, ServerMessage, SessionRecord, Timestamp, VoiceCommand,
+    CodeWorkspaceRegistry, ControlCandidate, FrontendUiSnapshot, ServerMessage, SessionRecord,
+    Timestamp, VoiceCommand,
 };
-
 #[derive(Clone)]
 pub(crate) struct AppState {
     pub(crate) token: Arc<String>,
@@ -22,6 +22,7 @@ pub(crate) struct AppState {
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
+    pub(crate) code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>,
     pub(crate) bridge_controller: Arc<RwLock<BridgeControllerState>>,
     pub(crate) voice_sessions: Arc<RwLock<HashMap<String, VoiceSessionHandle>>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,

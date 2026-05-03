@@ -141,6 +141,18 @@ pub(crate) async fn handle_client_message(
         ClientMessage::DiffSnapshot { session_id, label } => {
             handle_diff_snapshot(state, session_id, label).await
         }
+        ClientMessage::CodeWorkspaceOpen { session_id } => {
+            handle_code_workspace_open(state, session_id).await
+        }
+        ClientMessage::CodeTreeList { workspace_id, path } => {
+            handle_code_tree_list(state, workspace_id, path).await
+        }
+        ClientMessage::CodeFileOpen { workspace_id, path } => {
+            handle_code_file_open(state, workspace_id, path).await
+        }
+        ClientMessage::CodeFileClose { workspace_id, path } => {
+            handle_code_file_close(workspace_id, path).await
+        }
         ClientMessage::RawRpc {
             session_id,
             mut command,
