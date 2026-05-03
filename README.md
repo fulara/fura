@@ -105,7 +105,7 @@ Environment overrides for `run-local-omp.sh`:
 ./run-local-with-tailscale.sh
 ```
 
-Defaults: keep local development on `http://127.0.0.1:3737/`, add a remote HTTPS listener on `https://serwer-mini.caracal-porgy.ts.net:4450/mobile.html`, and bind that remote listener to this machine's `tailscale ip -4`. The script expects matching TLS files at `./.cert/serwer-mini.caracal-porgy.ts.net.crt` and `.key` unless you override them. If `FURA_TOKEN` is unset, Fura generates a random bridge token and logs it at startup for you to copy into the phone auth screen.
+Defaults: keep local development on `http://127.0.0.1:3737/`, add a remote HTTPS listener on `https://serwer-mini.caracal-porgy.ts.net:4450/mobile.html`, and bind that remote listener to this machine's `tailscale ip -4`. The script expects matching TLS files at `./.cert/serwer-mini.caracal-porgy.ts.net.crt` and `.key` unless you override them. Fura refuses to start the remote listener if that certificate is expired or has less than 5 days of validity remaining.
 
 Override the remote host, TLS file paths, or token explicitly if needed:
 

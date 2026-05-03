@@ -10,6 +10,7 @@ set -euo pipefail
 # - remote listener binds to `tailscale ip -4`:4450
 # - remote host defaults to the user's configured Tailscale DNS name
 # - TLS cert/key default to ./.cert/<remote-host>.crt and .key
+# - startup refuses remote TLS certs that are expired or have less than 5 days left
 #
 # Environment overrides:
 #   OMP_REPO=/path/to/oh-my-pi
@@ -119,6 +120,7 @@ Starting Fura for local + Tailscale development:
   Remote URL:       https://${FURA_REMOTE_HOST}:${FURA_REMOTE_PORT}/mobile.html
   Remote Origin:    https://${FURA_REMOTE_HOST}:${FURA_REMOTE_PORT}
   TLS cert:         ${FURA_TLS_CERT}
+  TLS policy:       startup refuses expired certs or certs with less than 5 days left
   TLS key:          ${FURA_TLS_KEY}
   Auth token:       use FURA_TOKEN if set; otherwise copy the random token that Fura logs at startup
 EOF

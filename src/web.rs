@@ -109,7 +109,10 @@ pub(crate) fn issue_auth_session(
 pub(crate) fn build_auth_session_response(session_id: String, secure: bool) -> Response {
     (
         StatusCode::NO_CONTENT,
-        [(header::SET_COOKIE, auth_session_cookie_header(&session_id, secure))],
+        [(
+            header::SET_COOKIE,
+            auth_session_cookie_header(&session_id, secure),
+        )],
     )
         .into_response()
 }

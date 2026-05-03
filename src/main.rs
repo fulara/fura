@@ -66,7 +66,6 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .expect("failed to install rustls crypto provider");
 
-
     let args = Args::parse();
     let configured_token = args.token.and_then(|token| {
         let trimmed = token.trim().to_string();
@@ -164,6 +163,7 @@ async fn main() -> anyhow::Result<()> {
         let mut remote_state = shared_state.clone();
         remote_state.allowed_origins = Some(Arc::new(remote.allowed_origins.clone()));
         remote_state.secure_auth_cookie = true;
+        validate_remote_cert_expiry(remote)?;
         let remote_app = build_app(remote_state, args.static_dir.clone());
         let tls_config = RustlsConfig::from_pem_file(&remote.cert_path, &remote.key_path)
             .await
@@ -198,20 +198,15 @@ async fn main() -> anyhow::Result<()> {
             remote_shutdown.graceful_shutdown(Some(Duration::from_secs(5)));
         });
 
-        let local_server = axum::serve(local_listener, local_app).with_graceful_shutdown(
-            wait_for_shutdown(shutdown_rx),
-        );
+        let local_server = axum::serve(local_listener, local_app)
+            .with_graceful_shutdown(wait_for_shutdown(shutdown_rx));
         let remote_server = axum_server::bind_rustls(remote.bind, tls_config)
             .handle(remote_handle)
             .serve(remote_app.into_make_service());
 
         tokio::try_join!(
-            async {
-                local_server.await.context("local server failed")
-            },
-            async {
-                remote_server.await.context("remote TLS server failed")
-            },
+            async { local_server.await.context("local server failed") },
+            async { remote_server.await.context("remote TLS server failed") },
         )
         .map(|_| ())
     } else {
@@ -290,7 +285,6 @@ async fn broadcast_sessions_snapshot(state: &AppState) {
 fn next_rpc_id() -> String {
     Uuid::new_v4().to_string()
 }
-
 
 fn startup_auth_label(token_source: BridgeTokenSource) -> &'static str {
     match token_source {

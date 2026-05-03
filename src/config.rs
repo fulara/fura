@@ -1,4 +1,4 @@
-use anyhow::ensure;
+use anyhow::{Context, ensure};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -6,9 +6,11 @@ use std::{
     env, fs,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tokio::fs as async_fs;
 use tracing::warn;
+use x509_parser::pem::Pem;
 
 use crate::{AppState, ServerMessage};
 
@@ -117,6 +119,8 @@ pub(crate) fn default_voice_language() -> String {
     "pl-PL".to_string()
 }
 
+const MIN_REMOTE_CERT_VALIDITY: Duration = Duration::from_secs(5 * 24 * 60 * 60);
+
 pub(crate) fn local_bind_url(bind: SocketAddr) -> String {
     format!("http://{bind}/")
 }
@@ -137,11 +141,15 @@ pub(crate) fn remote_listener_from_args(
         return Ok(None);
     }
 
-    let bind = remote_bind.ok_or_else(|| anyhow::anyhow!("--remote-bind is required when remote TLS is enabled"))?;
-    let host = normalize_remote_host(
-        remote_host.ok_or_else(|| anyhow::anyhow!("--remote-host is required when remote TLS is enabled"))?,
-    )
-    .ok_or_else(|| anyhow::anyhow!("--remote-host must be a bare host name or IP without scheme/path"))?;
+    let bind = remote_bind
+        .ok_or_else(|| anyhow::anyhow!("--remote-bind is required when remote TLS is enabled"))?;
+    let host =
+        normalize_remote_host(remote_host.ok_or_else(|| {
+            anyhow::anyhow!("--remote-host is required when remote TLS is enabled")
+        })?)
+        .ok_or_else(|| {
+            anyhow::anyhow!("--remote-host must be a bare host name or IP without scheme/path")
+        })?;
     let cert_path = tls_cert
         .map(Path::to_path_buf)
         .ok_or_else(|| anyhow::anyhow!("--tls-cert is required when remote TLS is enabled"))?;
@@ -169,6 +177,49 @@ pub(crate) fn remote_listener_from_args(
         key_path,
         allowed_origins,
     }))
+}
+
+pub(crate) fn validate_remote_cert_expiry(remote: &RemoteListenerConfig) -> anyhow::Result<()> {
+    let cert_bytes = fs::read(&remote.cert_path)
+        .with_context(|| format!("failed to read TLS cert {}", remote.cert_path.display()))?;
+    let mut cert_count = 0usize;
+    for pem in Pem::iter_from_buffer(&cert_bytes) {
+        let pem = pem.with_context(|| {
+            format!(
+                "failed to parse PEM block in {}",
+                remote.cert_path.display()
+            )
+        })?;
+        let cert = pem.parse_x509().with_context(|| {
+            format!(
+                "failed to parse X.509 certificate in {}",
+                remote.cert_path.display()
+            )
+        })?;
+        cert_count += 1;
+        ensure!(
+            cert.validity().is_valid(),
+            "TLS cert {} is not currently valid",
+            remote.cert_path.display()
+        );
+        let remaining = cert.validity().time_to_expiration().ok_or_else(|| {
+            anyhow::anyhow!(
+                "TLS cert {} does not report a usable expiration time",
+                remote.cert_path.display()
+            )
+        })?;
+        ensure!(
+            remaining >= MIN_REMOTE_CERT_VALIDITY,
+            "TLS cert {} expires in less than 5 days",
+            remote.cert_path.display()
+        );
+    }
+    ensure!(
+        cert_count > 0,
+        "TLS cert {} does not contain any PEM certificate blocks",
+        remote.cert_path.display()
+    );
+    Ok(())
 }
 
 pub(crate) fn normalize_allowed_origin(origin: &str) -> Option<String> {
@@ -306,6 +357,20 @@ pub(crate) async fn save_default_cwd(state: &AppState, cwd: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rcgen::{CertificateParams, KeyPair};
+    use tempfile::tempdir;
+    use time::{Duration as TimeDuration, OffsetDateTime};
+
+    fn write_test_cert(path: &Path, not_after: OffsetDateTime) {
+        let mut params =
+            CertificateParams::new(vec!["serwer-mini.caracal-porgy.ts.net".to_string()])
+                .expect("params");
+        params.not_before = OffsetDateTime::now_utc() - TimeDuration::days(1);
+        params.not_after = not_after;
+        let key = KeyPair::generate().expect("key");
+        let cert = params.self_signed(&key).expect("cert");
+        fs::write(path, cert.pem()).expect("write cert");
+    }
 
     #[test]
     fn local_bind_url_formats_socket_addr() {
@@ -370,5 +435,44 @@ mod tests {
             normalize_remote_host(" serwer-mini.caracal-porgy.ts.net. "),
             Some("serwer-mini.caracal-porgy.ts.net".to_string())
         );
+    }
+
+    #[test]
+    fn validate_remote_cert_expiry_accepts_cert_with_more_than_five_days_left() {
+        let dir = tempdir().expect("tempdir");
+        let cert_path = dir.path().join("cert.pem");
+        write_test_cert(
+            &cert_path,
+            OffsetDateTime::now_utc() + TimeDuration::days(6),
+        );
+        let remote = RemoteListenerConfig {
+            bind: "100.117.222.49:4450".parse().expect("socket"),
+            host: "serwer-mini.caracal-porgy.ts.net".to_string(),
+            cert_path,
+            key_path: dir.path().join("key.pem"),
+            allowed_origins: vec!["https://serwer-mini.caracal-porgy.ts.net:4450".to_string()],
+        };
+
+        validate_remote_cert_expiry(&remote).expect("cert should be accepted");
+    }
+
+    #[test]
+    fn validate_remote_cert_expiry_rejects_cert_with_less_than_five_days_left() {
+        let dir = tempdir().expect("tempdir");
+        let cert_path = dir.path().join("cert.pem");
+        write_test_cert(
+            &cert_path,
+            OffsetDateTime::now_utc() + TimeDuration::days(4),
+        );
+        let remote = RemoteListenerConfig {
+            bind: "100.117.222.49:4450".parse().expect("socket"),
+            host: "serwer-mini.caracal-porgy.ts.net".to_string(),
+            cert_path,
+            key_path: dir.path().join("key.pem"),
+            allowed_origins: vec!["https://serwer-mini.caracal-porgy.ts.net:4450".to_string()],
+        };
+
+        let error = validate_remote_cert_expiry(&remote).expect_err("cert should be rejected");
+        assert!(error.to_string().contains("expires in less than 5 days"));
     }
 }
