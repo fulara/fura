@@ -105,14 +105,14 @@ Environment overrides for `run-local-omp.sh`:
 ./run-mock-rpc.sh
 ```
 
-Open: `http://127.0.0.1:3737/`, then enter bridge token `dev` in the auth screen.
+Open: `http://127.0.0.1:38737/`, then enter bridge token `dev` in the auth screen.
 
 Environment overrides for `run-mock-rpc.sh`:
 
 | Variable | Default | Description |
 |---|---|---|
 | `FURA_TOKEN` | `dev` | Bridge token entered in the browser auth screen |
-| `FURA_PORT` | `3737` | Listen port |
+| `FURA_PORT` | `38737` | Listen port for mock smoke runs; intentionally avoids the normal `3737` dev port |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
 ## Configuration
