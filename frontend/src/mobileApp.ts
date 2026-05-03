@@ -43,7 +43,7 @@ import {
   selectedDiffComments,
   type DiffPreviewDraft,
 } from "./diffComments";
-import { shortId } from "./format";
+import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import type {
   ClientMessage,
   DiffComment,
@@ -56,7 +56,7 @@ import type {
   SessionSummary,
   TodoPhase,
 } from "./protocol";
-import { normalizedCategory, sessionCategories, sessionKindLabel, sessionStatusLabel, visibleSessions } from "./sessionList";
+import { sessionCategories, visibleSessions } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   deriveWorktreeCreateView,
@@ -103,7 +103,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         <div class="mobile-brand-row">
           <div class="mobile-brand">
             <h1>Fura</h1>
-            <p>Mobile session shell</p>
+            <p>mobile</p>
           </div>
           <span id="mobileConnectionStatus" class="status disconnected">disconnected</span>
         </div>
@@ -111,13 +111,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           <div class="mobile-session-heading">
             <h2 id="mobileSessionTitle">No session selected</h2>
             <p id="mobileSessionMeta">Choose a session to view its transcript.</p>
-            <div id="mobileCategoryEditor" class="mobile-category-editor">
-              <label for="mobileCategoryInput">Category</label>
-              <div class="mobile-category-actions">
-                <input id="mobileCategoryInput" autocomplete="off" spellcheck="false" maxlength="80" placeholder="category" />
-                <button id="mobileCategorySave" type="button">Save</button>
-              </div>
-            </div>
           </div>
           <div class="mobile-header-actions">
             <button id="mobileCreateToggle" class="mobile-create-toggle" type="button" aria-expanded="false" aria-controls="mobileCreateDrawer">New</button>
@@ -173,6 +166,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       </section>
 
       <form id="mobilePromptForm" class="mobile-composer">
+        <div id="mobileStatusBar" class="mobile-status-bar" aria-label="Session status"></div>
         <div id="mobileImagePreviews" class="mobile-image-previews" hidden></div>
         <textarea id="mobilePromptInput" rows="3" placeholder="Select a session first"></textarea>
         <div class="mobile-composer-actions">
@@ -318,13 +312,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const promptForm = requireElement<HTMLFormElement>(document, "mobilePromptForm");
   const promptInput = requireElement<HTMLTextAreaElement>(document, "mobilePromptInput");
   const sendButton = requireElement<HTMLButtonElement>(document, "mobileSendButton");
+  const statusBar = requireElement<HTMLDivElement>(document, "mobileStatusBar");
   const imagePreviews = requireElement<HTMLDivElement>(document, "mobileImagePreviews");
   const imageInput = requireElement<HTMLInputElement>(document, "mobileImageInput");
   const composerStatus = requireElement<HTMLSpanElement>(document, "mobileComposerStatus");
   const mobileLog = requireElement<HTMLParagraphElement>(document, "mobileLog");
-  const categoryEditor = requireElement<HTMLDivElement>(document, "mobileCategoryEditor");
-  const categoryInput = requireElement<HTMLInputElement>(document, "mobileCategoryInput");
-  const categorySave = requireElement<HTMLButtonElement>(document, "mobileCategorySave");
   const categoryFilter = requireElement<HTMLSelectElement>(document, "mobileSessionCategoryFilter");
   const deleteSessionOverlay = requireElement<HTMLElement>(document, "mobileDeleteSessionOverlay");
   const deleteSessionMessage = requireElement<HTMLParagraphElement>(document, "mobileDeleteSessionMessage");
@@ -365,8 +357,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let projections = new Map<string, SessionProjection>();
   const unreadSessions = new Set<string>();
   let selectedCategoryFilter = "";
-  let activeCategoryDirty = false;
-  let activeCategorySessionId: string | null = null;
   let deleteSessionTarget: SessionDeleteView | null = null;
   let createCwdDirty = false;
   let createWorktreeSourceDirty = false;
@@ -492,8 +482,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     selectedCategoryFilter = categoryFilter.value;
     renderSessions();
   });
-  categoryInput.addEventListener("input", markActiveCategoryDirty);
-  categorySave.addEventListener("click", submitActiveCategory);
   deleteSessionCancel.addEventListener("click", closeDeleteSessionPicker);
   deleteSessionConfirm.addEventListener("click", submitDeleteSessionPicker);
   diffCommentForm.addEventListener("submit", event => {
@@ -738,13 +726,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         return;
       case "set_editor_text":
         promptInput.value = request.text ?? "";
-        appendLog("Extension updated the mobile prompt draft.");
         return;
       case "setStatus":
-        if (request.statusText) appendLog(`[${message.sessionId}] ${request.statusText}`);
-        return;
       case "setWidget":
-        appendLog("Extension widget update received. Mobile shell does not display extension widgets yet.");
         return;
       case "setTitle":
         return;
@@ -922,37 +906,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     dialogField.append(label);
   }
 
-  function markActiveCategoryDirty(): void {
-    activeCategoryDirty = true;
-    activeCategorySessionId = activeSessionId;
-    categorySave.disabled = !activeSessionId;
-  }
-
-  function syncActiveCategoryEditor(summary: SessionSummary | undefined): void {
-    const canEdit = Boolean(activeSessionId && summary);
-    const category = normalizedCategory(summary?.category);
-    const shouldReset = activeCategorySessionId !== activeSessionId || !activeCategoryDirty;
-    categoryEditor.hidden = !canEdit;
-    categoryInput.disabled = !canEdit;
-    categorySave.disabled = !canEdit || (!activeCategoryDirty && categoryInput.value.trim() === category);
-    if (!canEdit || shouldReset) {
-      categoryInput.value = canEdit ? category : "";
-      activeCategorySessionId = activeSessionId;
-      activeCategoryDirty = false;
-      categorySave.disabled = true;
-    }
-  }
-
-  function submitActiveCategory(): void {
-    if (!activeSessionId) return;
-    const category = normalizedCategory(categoryInput.value);
-    send(category
-      ? { type: "session.setCategory", sessionId: activeSessionId, category }
-      : { type: "session.setCategory", sessionId: activeSessionId });
-    activeCategoryDirty = false;
-    activeCategorySessionId = activeSessionId;
-    categorySave.disabled = true;
-  }
 
   function openDeleteSessionPicker(sessionId: string): void {
     const session = sessions.find(candidate => candidate.sessionId === sessionId);
@@ -1034,11 +987,64 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const projection = projections.get(activeSessionId);
     const summary = sessions.find(session => session.sessionId === activeSessionId);
     const isBusy = projection?.isBusy ?? summary?.status === "busy";
-    composerStatus.textContent = isBusy
-      ? "Agent busy"
-      : pendingImages.length > 0
-        ? `Ready · ${pendingImages.length} image${pendingImages.length === 1 ? "" : "s"}`
-        : "Ready";
+    if (isBusy) {
+      composerStatus.textContent = "Agent busy";
+    } else if (pendingImages.length > 0) {
+      composerStatus.textContent = `${pendingImages.length} image${pendingImages.length === 1 ? "" : "s"} attached`;
+    } else {
+      composerStatus.textContent = "";
+    }
+  }
+
+  function updateMobileStatusBar(projection: SessionProjection | undefined, summary?: SessionSummary): void {
+    statusBar.replaceChildren();
+    statusBar.classList.toggle("busy", Boolean(projection?.isBusy ?? summary?.status === "busy"));
+    const parts: HTMLElement[] = [];
+    const pi = mobileStatusPart("π", "status-pi");
+    if (projection?.isBusy ?? summary?.status === "busy") pi.classList.add("is-running");
+    parts.push(pi);
+
+    if (!projection && !summary) {
+      parts.push(mobileStatusPart("No session", "muted"));
+      statusBar.append(...interleaveMobileStatusParts(parts));
+      return;
+    }
+
+    if (projection) {
+      parts.push(mobileStatusPart(projection.model ?? "model unknown", "model"));
+      parts.push(mobileStatusPart(projection.thinkingLevel ?? "thinking inherit", "thinking"));
+      if (projection.planMode?.enabled) parts.push(mobileStatusPart("Plan", "mode"));
+    } else {
+      parts.push(mobileStatusPart("Loading session", "muted"));
+    }
+
+    const cwd = projection?.summary.cwd ?? summary?.cwd;
+    if (cwd) parts.push(mobileStatusPart(`📁 ${shortPath(cwd)}`, "cwd"));
+    if (projection) {
+      parts.push(mobileStatusPart(formatTokens(projection.tokensTotal), "tokens"));
+      parts.push(mobileStatusPart(formatCost(projection.costUsd), "cost"));
+      if (projection.contextPercent != null && projection.contextWindow != null) {
+        parts.push(mobileStatusPart(formatContext(projection.contextPercent, projection.contextWindow), "context"));
+      }
+    }
+
+    statusBar.append(...interleaveMobileStatusParts(parts));
+  }
+
+  function interleaveMobileStatusParts(parts: HTMLElement[]): Node[] {
+    const nodes: Node[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      if (i > 0) nodes.push(mobileStatusPart("›", "separator"));
+      nodes.push(parts[i]);
+    }
+    return nodes;
+  }
+
+  function mobileStatusPart(text: string, className: string): HTMLElement {
+    const span = statusBar.ownerDocument.createElement("span");
+    span.className = `mobile-status-part ${className}`;
+    span.textContent = text;
+    return span;
   }
 
   function setCreateDrawerOpen(open: boolean): void {
@@ -1282,7 +1288,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "hello":
         serverConfig = message.config;
         syncCreateCwdDefault();
-        appendLog(`Connected to fura ${message.serverVersion}.`);
+        console.debug(`[fura-mobile] Connected to fura ${message.serverVersion}.`);
         break;
       case "config.updated":
         serverConfig = message.config;
@@ -1321,7 +1327,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         handlePromptBusy(message);
         break;
       case "log.stderr":
-        appendLog(`[${message.sessionId}] ${message.text}`);
+        console.debug(`[fura-mobile] [${message.sessionId}] ${message.text}`);
         break;
       case "error":
         appendLog(`Error: ${message.message}`);
@@ -1391,23 +1397,25 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const summary = projection?.summary ?? sessions.find(session => session.sessionId === activeSessionId);
     if (!activeSessionId || !summary) {
       sessionTitle.textContent = "No session selected";
-      sessionMeta.textContent = serverConfig ? "Choose a session to view its transcript." : "Waiting for bridge connection.";
+      sessionMeta.hidden = false;
+      sessionMeta.textContent = serverConfig ? "Choose a session." : "Waiting for bridge connection.";
       promptInput.disabled = true;
       sendButton.disabled = true;
       imageInput.disabled = true;
       promptInput.placeholder = "Select a session first";
       composerStatus.textContent = "No active session";
+      updateMobileStatusBar(undefined);
       renderTranscript(undefined);
       renderDiffView(undefined);
-      syncActiveCategoryEditor(undefined);
       renderBusyPromptChoice();
       return;
     }
 
     const isBusy = projection?.isBusy ?? summary.status === "busy";
     sessionTitle.textContent = summary.title || `Session ${shortId(summary.sessionId)}`;
-    sessionMeta.textContent = `${sessionKindLabel(summary.kind)} · ${sessionStatusLabel(summary)} · ${summary.cwd ?? "no dir"}`;
-    syncActiveCategoryEditor(summary);
+    sessionMeta.hidden = true;
+    sessionMeta.textContent = "";
+    updateMobileStatusBar(projection, summary);
     promptInput.disabled = !projection || isBusy;
     sendButton.disabled = !projection || isBusy;
     imageInput.disabled = !projection || isBusy;

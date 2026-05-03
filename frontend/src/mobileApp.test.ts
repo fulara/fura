@@ -227,10 +227,14 @@ describe("mountMobileApp", () => {
 
     clickSession();
 
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    expect(document.querySelector("#mobileSessionMeta")?.hasAttribute("hidden")).toBe(true);
+    expect(document.querySelector("#mobileStatusBar")?.textContent).toContain("/repo");
     expect(connection.sent).toContainEqual({ type: "session.attach", sessionId: "live" });
   });
 
-  it("filters sessions by category and updates the active category", () => {
+  it("filters sessions by category without exposing mobile category editing", () => {
     const { connection } = createHarness();
     connection.emit({
       type: "sessions.snapshot",
@@ -245,20 +249,8 @@ describe("mountMobileApp", () => {
 
     expect(document.querySelector("#mobileSessionsList")?.textContent).toContain("ops");
     expect(document.querySelector("#mobileSessionsList")?.textContent).not.toContain("personal");
-
-    clickSession();
-    connection.emit({
-      type: "session.snapshot",
-      sessionId: "live",
-      state: projection("live", { summary: summary("live", { title: "Ops session", category: "ops" }) }),
-    });
-    const input = document.querySelector<HTMLInputElement>("#mobileCategoryInput");
-    if (!input) throw new Error("category input missing");
-    input.value = "infra";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    document.querySelector<HTMLButtonElement>("#mobileCategorySave")?.click();
-
-    expect(connection.sent).toContainEqual({ type: "session.setCategory", sessionId: "live", category: "infra" });
+    expect(document.querySelector("#mobileCategoryInput")).toBeNull();
+    expect(document.querySelector("#mobileCategorySave")).toBeNull();
   });
 
   it("deletes sessions with a worktree option only for managed worktree sessions", () => {
@@ -316,13 +308,13 @@ describe("mountMobileApp", () => {
     const previews = document.querySelector<HTMLElement>("#mobileImagePreviews");
     expect(previews?.hidden).toBe(false);
     expect(previews?.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,aW1hZ2U=");
-    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Ready · 1 image");
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("1 image attached");
 
     previews?.querySelector<HTMLButtonElement>('button[aria-label="Remove image"]')?.click();
 
     expect(previews?.hidden).toBe(true);
     expect(previews?.querySelector("img")).toBeNull();
-    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Ready");
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("");
   });
 
   it("sends mobile prompts with attached images and clears accepted drafts", async () => {
@@ -347,7 +339,7 @@ describe("mountMobileApp", () => {
     });
     expect(input.value).toBe("");
     expect(document.querySelector<HTMLElement>("#mobileImagePreviews")?.hidden).toBe(true);
-    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Ready");
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("");
   });
 
   it("sends image-only mobile prompts", async () => {
@@ -430,7 +422,7 @@ describe("mountMobileApp", () => {
     });
 
     expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.value).toBe("draft from extension");
-    expect(document.querySelector("#mobileLog")?.textContent).toBe("Extension updated the mobile prompt draft.");
+    expect(document.querySelector("#mobileLog")?.textContent).toBe("");
     expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
   });
 

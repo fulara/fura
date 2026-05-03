@@ -15,8 +15,8 @@ body {
 
 .mobile-topbar {
   display: grid;
-  gap: 0.75rem;
-  padding: 0.9rem;
+  gap: 0.45rem;
+  padding: 0.65rem 0.75rem;
   border-bottom: 1px solid #252a35;
   background: rgba(16, 19, 26, 0.9);
 }
@@ -29,6 +29,12 @@ body {
   gap: 0.75rem;
 }
 
+.mobile-brand {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+}
+
 .mobile-brand h1,
 .mobile-session-heading h2 {
   margin: 0;
@@ -37,9 +43,9 @@ body {
 .mobile-brand p,
 .mobile-session-heading p,
 .mobile-log {
-  margin: 0.2rem 0 0;
+  margin: 0;
   color: #9ba4b5;
-  font-size: 0.82rem;
+  font-size: 0.78rem;
 }
 
 .mobile-header-actions {
@@ -81,35 +87,12 @@ body {
   justify-content: center;
 }
 
-.mobile-category-filter,
-.mobile-category-editor {
+.mobile-category-filter {
   display: grid;
   gap: 0.35rem;
-}
-
-.mobile-category-filter {
   margin-bottom: 0.5rem;
   color: #c7cedc;
   font-size: 0.82rem;
-}
-
-.mobile-category-editor {
-  margin-top: 0.45rem;
-}
-
-.mobile-category-editor[hidden] {
-  display: none;
-}
-
-.mobile-category-editor label {
-  color: #9ba4b5;
-  font-size: 0.78rem;
-}
-
-.mobile-category-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 0.45rem;
 }
 
 .mobile-create-drawer {
@@ -426,6 +409,40 @@ body {
   padding: 0.75rem 0.9rem max(0.75rem, env(safe-area-inset-bottom));
   border-top: 1px solid #252a35;
   background: rgba(16, 19, 26, 0.95);
+}
+
+.mobile-status-bar {
+  display: flex;
+  min-width: 0;
+  gap: 0.4rem;
+  align-items: center;
+  overflow-x: auto;
+  white-space: nowrap;
+  color: #9ba4b5;
+  font-size: 0.72rem;
+  scrollbar-width: none;
+}
+
+.mobile-status-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.mobile-status-part {
+  flex: 0 0 auto;
+}
+
+.mobile-status-part.status-pi {
+  color: #7f8cff;
+  font-weight: 700;
+}
+
+.mobile-status-part.status-pi.is-running {
+  color: #f0c36a;
+}
+
+.mobile-status-part.separator,
+.mobile-status-part.muted {
+  color: #6f7a8d;
 }
 
 .mobile-image-previews {
