@@ -137,6 +137,8 @@ Environment overrides for `run-mock-rpc.sh`:
 
 ## Configuration
 
+Voice transcription uses OpenAI Realtime transcription, but it intentionally reads only `FURA_VOICE_OPENAI_API_KEY`. It does not read the global `OPENAI_API_KEY`, so voice billing must be wired to a Fura-specific key/account.
+
 All flags can also be set via environment variables:
 
 | Flag | Env var | Default | Description |

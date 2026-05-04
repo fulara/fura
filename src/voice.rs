@@ -15,6 +15,7 @@ use crate::{AppState, ServerMessage, VoiceSessionHandle};
 const OPENAI_REALTIME_TRANSCRIPTION_URL: &str =
     "wss://api.openai.com/v1/realtime?intent=transcription";
 const OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
+const VOICE_TRANSCRIPTION_API_KEY_ENV: &str = "FURA_VOICE_OPENAI_API_KEY";
 const MAX_AUDIO_CHUNK_BASE64_BYTES: usize = 1_000_000;
 
 #[derive(Debug)]
@@ -28,7 +29,7 @@ pub(crate) async fn start_voice_session(
     client_id: String,
     language: Option<String>,
 ) -> Vec<ServerMessage> {
-    let api_key = match openai_api_key() {
+    let api_key = match voice_openai_api_key() {
         Ok(api_key) => api_key,
         Err(error) => {
             return vec![ServerMessage::VoiceError {
@@ -446,8 +447,11 @@ fn install_rustls_crypto_provider() {
     });
 }
 
-fn openai_api_key() -> anyhow::Result<String> {
-    if let Some(api_key) = env::var("OPENAI_API_KEY").ok().and_then(non_empty_string) {
+fn voice_openai_api_key() -> anyhow::Result<String> {
+    if let Some(api_key) = env::var(VOICE_TRANSCRIPTION_API_KEY_ENV)
+        .ok()
+        .and_then(non_empty_string)
+    {
         return Ok(api_key);
     }
 
@@ -456,14 +460,26 @@ fn openai_api_key() -> anyhow::Result<String> {
         .join(".env");
     let env_text = fs::read_to_string(&env_path).with_context(|| {
         format!(
-            "OPENAI_API_KEY missing from environment and failed to read {}",
+            "{VOICE_TRANSCRIPTION_API_KEY_ENV} missing from environment and failed to read {}",
             env_path.display()
         )
     })?;
 
-    parse_dotenv_key(&env_text, "OPENAI_API_KEY").ok_or_else(|| {
+    resolve_voice_openai_api_key(None, &env_text, &env_path)
+}
+
+fn resolve_voice_openai_api_key(
+    env_api_key: Option<String>,
+    dotenv_text: &str,
+    env_path: &std::path::Path,
+) -> anyhow::Result<String> {
+    if let Some(api_key) = env_api_key.and_then(non_empty_string) {
+        return Ok(api_key);
+    }
+
+    parse_dotenv_key(dotenv_text, VOICE_TRANSCRIPTION_API_KEY_ENV).ok_or_else(|| {
         anyhow!(
-            "OPENAI_API_KEY missing from environment or {}",
+            "{VOICE_TRANSCRIPTION_API_KEY_ENV} missing from environment or {}",
             env_path.display()
         )
     })
@@ -475,7 +491,9 @@ fn parse_dotenv_key(text: &str, key: &str) -> Option<String> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (candidate_key, value) = line.split_once('=')?;
+        let Some((candidate_key, value)) = line.split_once('=') else {
+            continue;
+        };
         if candidate_key.trim() != key {
             continue;
         }
@@ -490,4 +508,56 @@ fn parse_dotenv_key(text: &str, key: &str) -> Option<String> {
 fn non_empty_string(value: String) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    #[test]
+    fn resolve_voice_key_uses_fura_scoped_env_var() {
+        let key = resolve_voice_openai_api_key(
+            Some("  fura-voice-key  ".to_string()),
+            "OPENAI_API_KEY=wrong-account",
+            Path::new(".env"),
+        )
+        .expect("scoped voice key should resolve");
+
+        assert_eq!(key, "fura-voice-key");
+    }
+
+    #[test]
+    fn resolve_voice_key_uses_fura_scoped_dotenv_key() {
+        let key = resolve_voice_openai_api_key(
+            None,
+            "OPENAI_API_KEY=wrong-account\nFURA_VOICE_OPENAI_API_KEY=fura-voice-key",
+            Path::new(".env"),
+        )
+        .expect("scoped dotenv voice key should resolve");
+
+        assert_eq!(key, "fura-voice-key");
+    }
+
+    #[test]
+    fn resolve_voice_key_rejects_unscoped_openai_key() {
+        let error =
+            resolve_voice_openai_api_key(None, "OPENAI_API_KEY=wrong-account", Path::new(".env"))
+                .expect_err("unscoped OpenAI key must not be used for Fura voice");
+
+        assert!(error.to_string().contains(VOICE_TRANSCRIPTION_API_KEY_ENV));
+        assert!(!error.to_string().starts_with("OPENAI_API_KEY "));
+    }
+
+    #[test]
+    fn parse_dotenv_key_skips_malformed_lines() {
+        let key = parse_dotenv_key(
+            "not a dotenv assignment\nFURA_VOICE_OPENAI_API_KEY='fura-voice-key'",
+            VOICE_TRANSCRIPTION_API_KEY_ENV,
+        )
+        .expect("key after malformed line should still be parsed");
+
+        assert_eq!(key, "fura-voice-key");
+    }
 }
