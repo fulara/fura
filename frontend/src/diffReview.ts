@@ -1,9 +1,9 @@
-import { comparisonKey, parseDiffRows, resolvedRefLabel, type ParsedDiffRow } from "./diffState";
-import type { DiffCheckoutTarget, DiffLineLocation, DiffReviewAnnotation, RepoDiffState } from "./protocol";
+import { comparisonKey, diffPayloadText, parseDiffRows, resolvedRefLabel, type ParsedDiffRow } from "./diffState";
+import type { DiffCheckoutTarget, DiffEndpoint, DiffLineLocation, DiffReviewAnnotation, DiffReviewableState } from "./protocol";
 
 export type DiffPreviewDraft = {
   sessionId: string;
-  state: RepoDiffState;
+  state: DiffReviewableState;
   comparisonKey: string;
   comments: DiffReviewAnnotation[];
 };
@@ -13,7 +13,7 @@ const DIFF_CONTEXT_RADIUS = 4;
 export function createDiffReviewAnnotation(input: {
   id: string;
   kind: "comment" | "question";
-  state: RepoDiffState;
+  state: DiffReviewableState;
   location: DiffLineLocation;
   text: string;
   status?: "draft" | "sent";
@@ -133,19 +133,19 @@ function buildDiffAnnotationContext(rows: ParsedDiffRow[], annotation: DiffRevie
   return targetRow ? [...before, diffRowText(targetRow), ...after].join("\n") : annotation.anchor.text;
 }
 
-function reviewModeLine(state: RepoDiffState): string {
-  if (state.reviewProgress.mode === "commit") {
-    const commit = state.reviewProgress.commits.find(candidate => candidate.oid === state.reviewProgress.selectedCommitOid);
-    return `Review mode: single commit ${commit?.shortOid ?? state.reviewProgress.selectedCommitOid ?? "unknown"}${commit?.subject ? ` — ${commit.subject}` : ""}.`;
+function reviewModeLine(state: DiffReviewableState): string {
+  if (state.review.currentCommitOid) {
+    const commit = state.review.commits.find(candidate => candidate.oid === state.review.currentCommitOid);
+    return `Review mode: single commit ${commit?.shortOid ?? state.review.currentCommitOid ?? "unknown"}${commit?.subject ? ` — ${commit.subject}` : ""}.`;
   }
   return "Review mode: full range.";
 }
 
-function comparisonLines(state: RepoDiffState): string[] {
+function comparisonLines(state: DiffReviewableState): string[] {
   return [
-    `Repository: ${state.repoRoot}`,
-    `Base: ${resolvedRefLabel(state.comparison.base)}`,
-    `Head: ${resolvedRefLabel(state.comparison.head)}`,
+    `Repository: ${state.range.repoRoot}`,
+    `Base: ${resolvedRefLabel(state.range.base)}`,
+    `Head: ${resolvedRefLabel(state.range.head)}`,
     reviewModeLine(state),
     `Comparison key: ${comparisonKey(state)}`,
   ];
@@ -157,10 +157,10 @@ const reviewHelperInstruction = [
   "Do not edit files, generate patches, or modify a checkout from this review prompt. If implementation changes are needed, say that they should be handled in a separate coding session/worktree.",
 ].join(" ");
 
-export function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffReviewAnnotation[]): string {
+export function buildDiffCommentPrompt(state: DiffReviewableState, comments: DiffReviewAnnotation[]): string {
   const key = comparisonKey(state);
   const selectedComments = comments.filter(annotation => annotation.kind === "comment" && annotation.comparisonKey === key);
-  const rows = parseDiffRows(state.diff);
+  const rows = parseDiffRows(diffPayloadText(state.range.payload));
   const commentSections = selectedComments
     .map((comment, index) =>
       [
@@ -192,8 +192,8 @@ export function buildDiffCommentPrompt(state: RepoDiffState, comments: DiffRevie
   ].join("\n");
 }
 
-export function buildDiffQuestionPrompt(state: RepoDiffState, question: DiffReviewAnnotation): string {
-  const rows = parseDiffRows(state.diff);
+export function buildDiffQuestionPrompt(state: DiffReviewableState, question: DiffReviewAnnotation): string {
+  const rows = parseDiffRows(diffPayloadText(state.range.payload));
   return [
     "I have a question about this exact diff line in Fura.",
     reviewHelperInstruction,
@@ -223,15 +223,22 @@ export function diffCommentPreviewStatus(count: number): string {
   return `${count} comment${count === 1 ? "" : "s"} ready to send`;
 }
 
-export function checkoutTargetForDiffLocation(state: RepoDiffState, location: DiffLineLocation): DiffCheckoutTarget {
-  if (location.side === "left") {
-    const previous = state.reviewProgress.mode === "commit" ? state.reviewProgress.previousCommitOid : null;
-    if (previous) return { kind: "commit", oid: previous };
-    return state.comparison.base.kind === "gitRef" ? { kind: "commit", oid: state.comparison.base.oid } : { kind: "workingTree" };
+function checkoutTargetForEndpoint(endpoint: DiffEndpoint): DiffCheckoutTarget {
+  if (endpoint.kind === "workingTree") return { kind: "workingTree" };
+  if (endpoint.kind === "commit") return { kind: "commit", oid: endpoint.oid };
+  if (endpoint.kind === "sessionStartSnapshot") {
+    return endpoint.snapshot.commit ? { kind: "commit", oid: endpoint.snapshot.commit } : { kind: "gitRef", value: endpoint.snapshot.refName };
   }
-  const selected = state.reviewProgress.mode === "commit" ? state.reviewProgress.selectedCommitOid : null;
-  if (selected) return { kind: "commit", oid: selected };
-  return state.comparison.head.kind === "gitRef" ? { kind: "commit", oid: state.comparison.head.oid } : { kind: "workingTree" };
+  return { kind: "commit", oid: endpoint.oid };
+}
+
+export function checkoutTargetForDiffLocation(state: DiffReviewableState, location: DiffLineLocation): DiffCheckoutTarget {
+  if (location.side === "left") {
+    if (state.review.previousCommitOid) return { kind: "commit", oid: state.review.previousCommitOid };
+    return checkoutTargetForEndpoint(state.range.base);
+  }
+  if (state.review.currentCommitOid) return { kind: "commit", oid: state.review.currentCommitOid };
+  return checkoutTargetForEndpoint(state.range.head);
 }
 
 export function pathForDiffLocation(location: DiffLineLocation): string {

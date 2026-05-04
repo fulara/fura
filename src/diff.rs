@@ -25,86 +25,100 @@ pub(crate) struct DiffReviewWorktreeRegistry {
     by_source_repo: HashMap<PathBuf, String>,
 }
 
-pub(crate) async fn handle_diff_open(
+pub(crate) async fn handle_session_changes_open(
     state: &AppState,
-    session_id: Option<String>,
-    repo_root: Option<String>,
+    session_id: String,
 ) -> Vec<ServerMessage> {
-    match resolve_repo_root(state, session_id.as_deref(), repo_root.as_deref()).await {
-        Ok(root) => {
-            let base = default_diff_base_ref(state, session_id.as_deref(), &root).await;
-            match build_diff_state(
-                state,
-                session_id.clone(),
-                root,
-                base,
-                DiffRefInput::WorkingTree,
-                DiffMode::Stat,
-                false,
-                DiffReviewMode::Range,
-                None,
-            )
-            .await
-            {
-                Ok(state_value) => vec![ServerMessage::DiffState {
-                    session_id,
-                    state: state_value,
-                }],
-                Err(error) => vec![diff_error(session_id, repo_root, error)],
-            }
-        }
-        Err(error) => vec![diff_error(session_id, repo_root, error)],
-    }
+    build_session_changes_response(state, session_id, None, DiffPayloadKind::StatOnly, None).await
 }
 
-pub(crate) async fn handle_diff_compare(
+pub(crate) async fn handle_session_changes_select_repo(
     state: &AppState,
-    session_id: Option<String>,
+    session_id: String,
+    repo_id: String,
+    payload_kind: DiffPayloadKind,
+    current_commit_oid: Option<String>,
+) -> Vec<ServerMessage> {
+    build_session_changes_response(
+        state,
+        session_id,
+        Some(repo_id),
+        payload_kind,
+        current_commit_oid,
+    )
+    .await
+}
+
+pub(crate) async fn handle_session_changes_refresh(
+    state: &AppState,
+    session_id: String,
+    repo_id: Option<String>,
+    payload_kind: Option<DiffPayloadKind>,
+    current_commit_oid: Option<String>,
+) -> Vec<ServerMessage> {
+    build_session_changes_response(
+        state,
+        session_id,
+        repo_id,
+        payload_kind.unwrap_or(DiffPayloadKind::StatOnly),
+        current_commit_oid,
+    )
+    .await
+}
+
+pub(crate) async fn handle_compare_diff_run(
+    state: &AppState,
+    request_id: Option<String>,
     repo_root: String,
     base: DiffRefInput,
     head: DiffRefInput,
-    mode: DiffMode,
+    payload_kind: DiffPayloadKind,
     merge_base: Option<bool>,
-    review_mode: Option<DiffReviewMode>,
-    commit_oid: Option<String>,
+    current_commit_oid: Option<String>,
 ) -> Vec<ServerMessage> {
-    match resolve_repo_root(state, session_id.as_deref(), Some(&repo_root)).await {
-        Ok(root) => match build_diff_state(
+    match discover_repo_root(&repo_root) {
+        Ok(root) => match build_compare_diff_state(
             state,
-            session_id.clone(),
+            request_id.clone(),
             root,
             base,
             head,
-            mode,
+            payload_kind,
             merge_base.unwrap_or(false),
-            review_mode.unwrap_or(DiffReviewMode::Range),
-            commit_oid,
+            current_commit_oid,
         )
         .await
         {
-            Ok(state_value) => vec![ServerMessage::DiffState {
-                session_id,
-                state: state_value,
-            }],
-            Err(error) => vec![diff_error(session_id, Some(repo_root), error)],
+            Ok(state_value) => vec![ServerMessage::CompareDiffState { state: state_value }],
+            Err(error) => vec![diff_error(
+                DiffErrorScope::CompareDiff,
+                None,
+                Some(repo_root),
+                error,
+            )],
         },
-        Err(error) => vec![diff_error(session_id, Some(repo_root), error)],
+        Err(error) => vec![diff_error(
+            DiffErrorScope::CompareDiff,
+            None,
+            Some(repo_root),
+            error,
+        )],
     }
 }
 
 pub(crate) async fn handle_diff_review_worktree_ensure(
     state: &AppState,
     source_repo_root: String,
-    base: Option<DiffRefInput>,
-    head: Option<DiffRefInput>,
+    target: Option<DiffCheckoutTarget>,
 ) -> Vec<ServerMessage> {
-    match ensure_review_worktree(state, &source_repo_root, base, head).await {
+    match ensure_review_worktree(state, &source_repo_root, target).await {
         Ok(worktree) => vec![ServerMessage::DiffReviewWorktreeState { worktree }],
-        Err(error) => vec![ServerMessage::DiffError {
-            session_id: None,
-            repo_root: Some(source_repo_root),
-            message: error.to_string(),
-        }],
+        Err(error) => vec![diff_error(
+            DiffErrorScope::ReviewWorktree,
+            None,
+            Some(source_repo_root),
+            error,
+        )],
     }
 }
 
@@ -115,87 +129,293 @@ pub(crate) async fn handle_diff_review_worktree_checkout(
 ) -> Vec<ServerMessage> {
     match checkout_review_worktree(state, &worktree_id, ref_target).await {
         Ok(worktree) => vec![ServerMessage::DiffReviewWorktreeState { worktree }],
-        Err(error) => vec![ServerMessage::DiffError {
-            session_id: None,
-            repo_root: None,
-            message: error.to_string(),
-        }],
+        Err(error) => vec![diff_error(
+            DiffErrorScope::ReviewWorktree,
+            None,
+            None,
+            error,
+        )],
     }
 }
 
 fn diff_error(
+    scope: DiffErrorScope,
     session_id: Option<String>,
     repo_root: Option<String>,
     error: anyhow::Error,
 ) -> ServerMessage {
     ServerMessage::DiffError {
+        scope,
         session_id,
         repo_root,
         message: error.to_string(),
     }
 }
 
-async fn resolve_repo_root(
+async fn build_session_changes_response(
     state: &AppState,
-    session_id: Option<&str>,
-    repo_root: Option<&str>,
-) -> anyhow::Result<PathBuf> {
-    if let Some(root) = repo_root.and_then(non_empty_trimmed) {
-        return discover_repo_root(root);
-    }
+    session_id: String,
+    selected_repo_id: Option<String>,
+    payload_kind: DiffPayloadKind,
+    current_commit_oid: Option<String>,
+) -> Vec<ServerMessage> {
+    let (repos, selected) = match session_repo_candidates(state, &session_id).await {
+        Ok(candidates) => {
+            if candidates.is_empty() {
+                let session_state = SessionChangesState::MissingRepo {
+                    session_id,
+                    reason: "Fura could not identify a git repository for this session."
+                        .to_string(),
+                    repos: candidates,
+                };
+                return vec![ServerMessage::SessionChangesState {
+                    state: session_state,
+                }];
+            }
+            let selected = select_session_repo(&candidates, selected_repo_id.as_deref());
+            (candidates, selected)
+        }
+        Err(error) => {
+            return vec![diff_error(
+                DiffErrorScope::SessionChanges,
+                Some(session_id),
+                None,
+                error,
+            )];
+        }
+    };
 
-    let session_id = session_id.ok_or_else(|| anyhow!("diff requires repoRoot or sessionId"))?;
-    let sessions = state.sessions.read().await;
-    let session = sessions
-        .get(session_id)
-        .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
-    let cwd = session
-        .worktree
-        .as_ref()
-        .map(|worktree| worktree.path.as_str())
-        .or(session.cwd.as_deref())
-        .ok_or_else(|| anyhow!("session has no cwd for diff"))?;
-    discover_repo_root(cwd)
+    let Some(candidate) = selected else {
+        let session_state = SessionChangesState::MissingRepo {
+            session_id,
+            reason: "Selected repository is not available for this session.".to_string(),
+            repos,
+        };
+        return vec![ServerMessage::SessionChangesState {
+            state: session_state,
+        }];
+    };
+
+    let repo_root_text = candidate.repo_root.clone();
+    let Some(snapshot) = candidate.session_start_snapshot.clone() else {
+        let session_state = SessionChangesState::MissingSnapshot {
+            session_id,
+            repo_root: repo_root_text,
+            reason: "This session has no session-start diff snapshot for the selected repository."
+                .to_string(),
+            repos,
+        };
+        return vec![ServerMessage::SessionChangesState {
+            state: session_state,
+        }];
+    };
+
+    let repo_root = match discover_repo_root(&repo_root_text) {
+        Ok(root) => root,
+        Err(error) => {
+            return vec![diff_error(
+                DiffErrorScope::SessionChanges,
+                Some(session_id),
+                Some(repo_root_text),
+                error,
+            )];
+        }
+    };
+
+    match build_session_changes_state(
+        state,
+        session_id.clone(),
+        repos,
+        candidate.id.clone(),
+        repo_root,
+        snapshot,
+        payload_kind,
+        current_commit_oid,
+    )
+    .await
+    {
+        Ok(session_state) => vec![ServerMessage::SessionChangesState {
+            state: session_state,
+        }],
+        Err(error) => vec![diff_error(
+            DiffErrorScope::SessionChanges,
+            Some(session_id),
+            Some(repo_root_text),
+            error,
+        )],
+    }
 }
 
-async fn default_diff_base_ref(
-    state: &AppState,
-    session_id: Option<&str>,
-    repo_root: &Path,
-) -> DiffRefInput {
-    let session_file = match session_id {
-        Some(id) => session_file_for_diff(state, id).await,
-        None => None,
-    };
-    if let Some(session_file) = session_file {
-        for snapshot in read_session_diff_snapshots(Path::new(&session_file), repo_root)
-            .into_iter()
-            .rev()
-        {
-            if resolve_git_ref(repo_root, &snapshot.ref_name).await.is_ok() {
-                return DiffRefInput::GitRef {
-                    value: snapshot.ref_name,
-                };
-            }
+fn select_session_repo(
+    candidates: &[SessionRepoCandidate],
+    selected_repo_id: Option<&str>,
+) -> Option<SessionRepoCandidate> {
+    if let Some(repo_id) = selected_repo_id {
+        if let Some(candidate) = candidates.iter().find(|candidate| candidate.id == repo_id) {
+            return Some(candidate.clone());
         }
     }
-
-    DiffRefInput::GitRef {
-        value: "HEAD".to_string(),
-    }
+    candidates
+        .iter()
+        .find(|candidate| candidate.has_session_start_snapshot)
+        .or_else(|| candidates.first())
+        .cloned()
 }
 
-async fn session_file_for_diff(state: &AppState, session_id: &str) -> Option<String> {
-    let sessions = state.sessions.read().await;
-    sessions.get(session_id)?.session_file.clone()
+async fn session_repo_candidates(
+    state: &AppState,
+    session_id: &str,
+) -> anyhow::Result<Vec<SessionRepoCandidate>> {
+    let (cwd, worktree, session_file) = {
+        let sessions = state.sessions.read().await;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| anyhow!("unknown session: {session_id}"))?;
+        (
+            session.cwd.clone(),
+            session
+                .worktree
+                .as_ref()
+                .map(|worktree| worktree.path.clone()),
+            session.session_file.clone(),
+        )
+    };
+
+    let snapshots = session_file
+        .as_deref()
+        .map(|path| read_session_diff_snapshots(Path::new(path)))
+        .unwrap_or_default();
+    let mut candidates = Vec::<SessionRepoCandidate>::new();
+
+    if let Some(path) = worktree.as_deref() {
+        add_path_candidate(
+            &mut candidates,
+            path,
+            SessionRepoSource::Worktree,
+            &snapshots,
+        );
+    }
+    if let Some(path) = cwd.as_deref() {
+        add_path_candidate(&mut candidates, path, SessionRepoSource::Cwd, &snapshots);
+    }
+    for snapshot in snapshots
+        .iter()
+        .filter(|snapshot| snapshot.kind == "session-start")
+    {
+        add_snapshot_candidate(&mut candidates, snapshot);
+    }
+
+    Ok(candidates)
+}
+
+fn add_path_candidate(
+    candidates: &mut Vec<SessionRepoCandidate>,
+    path: &str,
+    source: SessionRepoSource,
+    snapshots: &[SessionDiffSnapshot],
+) {
+    let Ok(root) = discover_repo_root(path) else {
+        return;
+    };
+    let repo_root = root.display().to_string();
+    let snapshot = latest_session_start_snapshot_for_repo(snapshots, &root);
+    upsert_candidate(candidates, repo_root, source, snapshot);
+}
+
+fn add_snapshot_candidate(
+    candidates: &mut Vec<SessionRepoCandidate>,
+    snapshot: &SessionDiffSnapshot,
+) {
+    let repo_root = match discover_repo_root(&snapshot.repo_root) {
+        Ok(root) => root.display().to_string(),
+        Err(_) => snapshot.repo_root.clone(),
+    };
+    upsert_candidate(
+        candidates,
+        repo_root,
+        SessionRepoSource::Snapshot,
+        Some(snapshot.summary()),
+    );
+}
+
+fn upsert_candidate(
+    candidates: &mut Vec<SessionRepoCandidate>,
+    repo_root: String,
+    source: SessionRepoSource,
+    snapshot: Option<SessionDiffSnapshotSummary>,
+) {
+    if let Some(existing) = candidates
+        .iter_mut()
+        .find(|candidate| candidate.id == repo_root)
+    {
+        if existing.session_start_snapshot.is_none() {
+            existing.session_start_snapshot = snapshot;
+            existing.has_session_start_snapshot = existing.session_start_snapshot.is_some();
+        }
+        return;
+    }
+    let label = format_diff_repo_label(&repo_root, source);
+    candidates.push(SessionRepoCandidate {
+        id: repo_root.clone(),
+        repo_root,
+        label,
+        source,
+        has_session_start_snapshot: snapshot.is_some(),
+        session_start_snapshot: snapshot,
+    });
+}
+
+fn format_diff_repo_label(repo_root: &str, source: SessionRepoSource) -> String {
+    let source_label = match source {
+        SessionRepoSource::Worktree => "worktree",
+        SessionRepoSource::Cwd => "cwd",
+        SessionRepoSource::Snapshot => "snapshot",
+    };
+    let name = Path::new(repo_root)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(repo_root);
+    format!("{name} · {source_label}")
+}
+
+fn latest_session_start_snapshot_for_repo(
+    snapshots: &[SessionDiffSnapshot],
+    repo_root: &Path,
+) -> Option<SessionDiffSnapshotSummary> {
+    snapshots
+        .iter()
+        .filter(|snapshot| snapshot.kind == "session-start")
+        .filter(|snapshot| snapshot_repo_matches(&snapshot.repo_root, repo_root))
+        .last()
+        .map(SessionDiffSnapshot::summary)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionDiffSnapshot {
+    entry_id: String,
+    kind: String,
+    label: String,
+    repo_root: String,
+    tree: String,
     ref_name: String,
+    commit: String,
+    created_at: String,
 }
 
-fn read_session_diff_snapshots(path: &Path, repo_root: &Path) -> Vec<SessionDiffSnapshot> {
+impl SessionDiffSnapshot {
+    fn summary(&self) -> SessionDiffSnapshotSummary {
+        SessionDiffSnapshotSummary {
+            entry_id: self.entry_id.clone(),
+            label: self.label.clone(),
+            created_at: self.created_at.clone(),
+            ref_name: self.ref_name.clone(),
+            tree: self.tree.clone(),
+            commit: self.commit.clone(),
+        }
+    }
+}
+
+fn read_session_diff_snapshots(path: &Path) -> Vec<SessionDiffSnapshot> {
     let Ok(file) = fs::File::open(path) else {
         return Vec::new();
     };
@@ -216,17 +436,44 @@ fn read_session_diff_snapshots(path: &Path, repo_root: &Path) -> Vec<SessionDiff
         if data.get("version").and_then(Value::as_u64) != Some(1) {
             continue;
         }
-        let Some(snapshot_repo) = data.get("repoRoot").and_then(Value::as_str) else {
+        let Some(repo_root) = data.get("repoRoot").and_then(Value::as_str) else {
             continue;
         };
-        if !snapshot_repo_matches(snapshot_repo, repo_root) {
-            continue;
-        }
         let Some(ref_name) = data.get("ref").and_then(Value::as_str) else {
             continue;
         };
+        let Some(kind) = data.get("kind").and_then(Value::as_str) else {
+            continue;
+        };
         snapshots.push(SessionDiffSnapshot {
+            entry_id: entry
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or(ref_name)
+                .to_string(),
+            kind: kind.to_string(),
+            label: data
+                .get("label")
+                .and_then(Value::as_str)
+                .unwrap_or(kind)
+                .to_string(),
+            repo_root: repo_root.to_string(),
+            tree: data
+                .get("tree")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             ref_name: ref_name.to_string(),
+            commit: data
+                .get("commit")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            created_at: data
+                .get("createdAt")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
         });
     }
     snapshots
@@ -258,137 +505,313 @@ fn discover_repo_root(path: &str) -> anyhow::Result<PathBuf> {
     Ok(workdir)
 }
 
-async fn build_diff_state(
+async fn build_session_changes_state(
     state: &AppState,
-    _session_id: Option<String>,
+    session_id: String,
+    repos: Vec<SessionRepoCandidate>,
+    selected_repo_id: String,
+    repo_root: PathBuf,
+    snapshot: SessionDiffSnapshotSummary,
+    payload_kind: DiffPayloadKind,
+    current_commit_oid: Option<String>,
+) -> anyhow::Result<SessionChangesState> {
+    let base_resolved = resolve_git_ref(&repo_root, &snapshot.ref_name).await?;
+    let head_resolved = ResolvedDiffRef::WorkingTree;
+    let base_endpoint = DiffEndpoint::SessionStartSnapshot {
+        snapshot: snapshot.clone(),
+    };
+    let head_endpoint = DiffEndpoint::WorkingTree;
+    let (range, review) = build_diff_range_state(
+        &repo_root,
+        base_endpoint,
+        head_endpoint,
+        base_resolved,
+        head_resolved,
+        payload_kind,
+        false,
+        current_commit_oid,
+    )
+    .await?;
+    let review_worktree = current_review_worktree(state, &repo_root).await;
+    Ok(SessionChangesState::Ready {
+        session_id,
+        repos,
+        selected_repo_id,
+        range,
+        review,
+        review_worktree,
+    })
+}
+
+async fn build_compare_diff_state(
+    state: &AppState,
+    request_id: Option<String>,
     repo_root: PathBuf,
     base: DiffRefInput,
     head: DiffRefInput,
-    mode: DiffMode,
+    payload_kind: DiffPayloadKind,
     merge_base: bool,
-    review_mode: DiffReviewMode,
-    commit_oid: Option<String>,
-) -> anyhow::Result<RepoDiffState> {
+    current_commit_oid: Option<String>,
+) -> anyhow::Result<CompareDiffState> {
     let refs = list_refs(&repo_root).await?;
     let base_resolved = resolve_diff_ref(&repo_root, &base).await?;
     let head_resolved = resolve_diff_ref(&repo_root, &head).await?;
-    let range_base_oid = if merge_base {
-        match (&base_resolved, &head_resolved) {
-            (
-                ResolvedDiffRef::GitRef { oid: base_oid, .. },
-                ResolvedDiffRef::GitRef { oid: head_oid, .. },
-            ) => Some(
-                git_stdout(
-                    &repo_root,
-                    &["merge-base", base_oid, head_oid],
-                    MAX_GIT_OUTPUT_BYTES,
-                )
-                .await?
-                .trim()
-                .to_string(),
-            ),
-            _ => None,
-        }
-    } else {
-        None
+    let base_endpoint = endpoint_from_resolved(&base_resolved);
+    let head_endpoint = endpoint_from_resolved(&head_resolved);
+    let (range, review) = build_diff_range_state(
+        &repo_root,
+        base_endpoint,
+        head_endpoint,
+        base_resolved,
+        head_resolved,
+        payload_kind,
+        merge_base,
+        current_commit_oid,
+    )
+    .await?;
+    let review_worktree = current_review_worktree(state, &repo_root).await;
+    Ok(CompareDiffState {
+        request_id,
+        refs,
+        range,
+        review,
+        review_worktree,
+    })
+}
+
+async fn build_diff_range_state(
+    repo_root: &Path,
+    range_base_endpoint: DiffEndpoint,
+    range_head_endpoint: DiffEndpoint,
+    base_resolved: ResolvedDiffRef,
+    head_resolved: ResolvedDiffRef,
+    payload_kind: DiffPayloadKind,
+    merge_base: bool,
+    current_commit_oid: Option<String>,
+) -> anyhow::Result<(DiffRangeState, CommitStepState)> {
+    let range_base_oid =
+        effective_merge_base_oid(repo_root, &base_resolved, &head_resolved, merge_base).await?;
+    let commits = commits_for_range(
+        repo_root,
+        &base_resolved,
+        &head_resolved,
+        range_base_oid.as_deref(),
+    )
+    .await?;
+    let commit_patch = match current_commit_oid.as_deref() {
+        Some(oid) => Some(selected_commit_patch_refs(
+            oid,
+            &commits,
+            &base_resolved,
+            range_base_oid.as_deref(),
+        )?),
+        None => None,
     };
 
-    let commits = match (&base_resolved, &head_resolved) {
+    let (
+        display_left,
+        display_right,
+        current_commit_index,
+        previous_commit_oid,
+        displayed_patch_range,
+    ) = if let Some((left, right, index, previous_oid, displayed_range)) = commit_patch {
+        (
+            left,
+            right,
+            Some(index),
+            Some(previous_oid),
+            Some(displayed_range),
+        )
+    } else {
+        (
+            base_resolved.clone(),
+            head_resolved.clone(),
+            None,
+            None,
+            None,
+        )
+    };
+    let payload = build_payload(repo_root, &display_left, &display_right, payload_kind).await?;
+    let range = DiffRangeState {
+        repo_root: repo_root.display().to_string(),
+        base: range_base_endpoint,
+        head: range_head_endpoint,
+        payload,
+        generated_at: Timestamp::now().millis().to_string(),
+        displayed_patch_range,
+    };
+    let review = CommitStepState {
+        commits,
+        current_commit_oid,
+        current_commit_index,
+        previous_commit_oid,
+    };
+    Ok((range, review))
+}
+
+async fn effective_merge_base_oid(
+    repo_root: &Path,
+    base_resolved: &ResolvedDiffRef,
+    head_resolved: &ResolvedDiffRef,
+    merge_base: bool,
+) -> anyhow::Result<Option<String>> {
+    if !merge_base {
+        return Ok(None);
+    }
+    match (base_resolved, head_resolved) {
+        (
+            ResolvedDiffRef::GitRef { oid: base_oid, .. },
+            ResolvedDiffRef::GitRef { oid: head_oid, .. },
+        ) => Ok(Some(
+            git_stdout(
+                repo_root,
+                &["merge-base", base_oid, head_oid],
+                MAX_GIT_OUTPUT_BYTES,
+            )
+            .await?
+            .trim()
+            .to_string(),
+        )),
+        _ => Ok(None),
+    }
+}
+
+async fn commits_for_range(
+    repo_root: &Path,
+    base_resolved: &ResolvedDiffRef,
+    head_resolved: &ResolvedDiffRef,
+    range_base_oid: Option<&str>,
+) -> anyhow::Result<Vec<DiffCommitSummary>> {
+    match (base_resolved, head_resolved) {
         (
             ResolvedDiffRef::GitRef { oid: base_oid, .. },
             ResolvedDiffRef::GitRef { oid: head_oid, .. },
         ) => {
-            let effective_base = range_base_oid.as_deref().unwrap_or(base_oid);
-            list_commits(&repo_root, effective_base, head_oid).await?
+            let effective_base = range_base_oid.unwrap_or(base_oid);
+            list_commits(repo_root, effective_base, head_oid).await
         }
         (ResolvedDiffRef::GitRef { oid: base_oid, .. }, ResolvedDiffRef::WorkingTree) => {
-            match resolve_git_ref(&repo_root, "HEAD").await {
+            match resolve_git_ref(repo_root, "HEAD").await {
                 Ok(ResolvedDiffRef::GitRef { oid: head_oid, .. }) => {
-                    let effective_base = range_base_oid.as_deref().unwrap_or(base_oid);
-                    list_commits(&repo_root, effective_base, &head_oid).await?
+                    let effective_base = range_base_oid.unwrap_or(base_oid);
+                    list_commits(repo_root, effective_base, &head_oid).await
                 }
-                _ => Vec::new(),
+                _ => Ok(Vec::new()),
             }
         }
-        _ => Vec::new(),
-    };
+        _ => Ok(Vec::new()),
+    }
+}
 
-    let (left, right, selected_commit_index, previous_commit_oid) = match review_mode {
-        DiffReviewMode::Range => (base_resolved.clone(), head_resolved.clone(), None, None),
-        DiffReviewMode::Commit => {
-            let commit_oid = commit_oid
-                .clone()
-                .ok_or_else(|| anyhow!("commit mode requires commitOid"))?;
-            let index = commits
-                .iter()
-                .position(|commit| commit.oid == commit_oid)
-                .ok_or_else(|| anyhow!("commit is not in the selected range: {commit_oid}"))?;
-            let selected = &commits[index];
-            let previous = if selected.is_merge {
-                selected.parent_oids.first().cloned()
-            } else if index == 0 {
-                match &base_resolved {
-                    ResolvedDiffRef::GitRef { oid, .. } => {
-                        Some(range_base_oid.clone().unwrap_or_else(|| oid.clone()))
-                    }
-                    ResolvedDiffRef::WorkingTree => None,
-                }
+fn selected_commit_patch_refs(
+    commit_oid: &str,
+    commits: &[DiffCommitSummary],
+    base_resolved: &ResolvedDiffRef,
+    range_base_oid: Option<&str>,
+) -> anyhow::Result<(
+    ResolvedDiffRef,
+    ResolvedDiffRef,
+    usize,
+    String,
+    DisplayedPatchRange,
+)> {
+    let index = commits
+        .iter()
+        .position(|commit| commit.oid == commit_oid)
+        .ok_or_else(|| anyhow!("commit is not in the selected range: {commit_oid}"))?;
+    let selected = &commits[index];
+    let previous = if selected.is_merge {
+        selected.parent_oids.first().cloned()
+    } else if index == 0 {
+        match base_resolved {
+            ResolvedDiffRef::GitRef { oid, .. } => Some(
+                range_base_oid
+                    .map(str::to_string)
+                    .unwrap_or_else(|| oid.clone()),
+            ),
+            ResolvedDiffRef::WorkingTree => None,
+        }
+    } else {
+        Some(commits[index - 1].oid.clone())
+    }
+    .ok_or_else(|| anyhow!("selected commit has no comparable parent/base"))?;
+    let left_ref = ResolvedDiffRef::GitRef {
+        input: previous.clone(),
+        ref_kind: DiffRefKind::Commit,
+        oid: previous.clone(),
+        display: format!(
+            "{}{}",
+            &previous[..previous.len().min(12)],
+            if selected.is_merge {
+                " (first parent)"
             } else {
-                Some(commits[index - 1].oid.clone())
+                ""
             }
-            .ok_or_else(|| anyhow!("selected commit has no comparable parent/base"))?;
-            let left_ref = ResolvedDiffRef::GitRef {
-                input: previous.clone(),
-                ref_kind: DiffRefKind::Commit,
-                oid: previous.clone(),
-                display: format!(
-                    "{}{}",
-                    &previous[..previous.len().min(12)],
-                    if selected.is_merge {
-                        " (first parent)"
-                    } else {
-                        ""
-                    }
-                ),
-            };
-            let right_ref = ResolvedDiffRef::GitRef {
-                input: selected.oid.clone(),
-                ref_kind: DiffRefKind::Commit,
-                oid: selected.oid.clone(),
-                display: selected.short_oid.clone(),
-            };
-            (left_ref, right_ref, Some(index), Some(previous))
-        }
+        ),
     };
+    let right_ref = ResolvedDiffRef::GitRef {
+        input: selected.oid.clone(),
+        ref_kind: DiffRefKind::Commit,
+        oid: selected.oid.clone(),
+        display: selected.short_oid.clone(),
+    };
+    let displayed_range = DisplayedPatchRange {
+        base: DiffEndpoint::Commit {
+            oid: previous.clone(),
+            short_oid: previous[..previous.len().min(12)].to_string(),
+            subject: None,
+        },
+        head: commit_endpoint(selected),
+    };
+    Ok((left_ref, right_ref, index, previous, displayed_range))
+}
 
-    let (diff, truncated) = generate_diff(&repo_root, &left, &right, mode).await?;
-    let files = summarize_files(&repo_root, &left, &right)
+fn commit_endpoint(commit: &DiffCommitSummary) -> DiffEndpoint {
+    DiffEndpoint::Commit {
+        oid: commit.oid.clone(),
+        short_oid: commit.short_oid.clone(),
+        subject: Some(commit.subject.clone()),
+    }
+}
+
+fn endpoint_from_resolved(reference: &ResolvedDiffRef) -> DiffEndpoint {
+    match reference {
+        ResolvedDiffRef::WorkingTree => DiffEndpoint::WorkingTree,
+        ResolvedDiffRef::GitRef {
+            input,
+            ref_kind,
+            oid,
+            display,
+        } => DiffEndpoint::GitRef {
+            input: input.clone(),
+            ref_kind: *ref_kind,
+            oid: oid.clone(),
+            display: display.clone(),
+        },
+    }
+}
+
+async fn build_payload(
+    repo_root: &Path,
+    left: &ResolvedDiffRef,
+    right: &ResolvedDiffRef,
+    payload_kind: DiffPayloadKind,
+) -> anyhow::Result<DiffPayload> {
+    let (text, truncated) = generate_diff(repo_root, left, right, payload_kind).await?;
+    let files = summarize_files(repo_root, left, right)
         .await
         .unwrap_or_default();
-    let review_worktree = current_review_worktree(state, &repo_root).await;
-
-    Ok(RepoDiffState {
-        repo_root: repo_root.display().to_string(),
-        refs,
-        comparison: DiffComparison {
-            repo_root: repo_root.display().to_string(),
-            base: left,
-            head: right,
-            mode,
-            merge_base: merge_base.then_some(true),
+    Ok(match payload_kind {
+        DiffPayloadKind::StatOnly => DiffPayload::StatOnly {
+            files,
+            stat: text,
+            truncated,
         },
-        diff,
-        files,
-        truncated,
-        generated_at: Timestamp::now().millis().to_string(),
-        review_progress: DiffReviewProgress {
-            mode: review_mode,
-            commits,
-            selected_commit_oid: commit_oid,
-            selected_commit_index,
-            previous_commit_oid,
+        DiffPayloadKind::FullPatch => DiffPayload::FullPatch {
+            files,
+            patch: text,
+            truncated,
         },
-        review_worktree,
     })
 }
 
@@ -664,10 +1087,10 @@ async fn generate_diff(
     repo_root: &Path,
     base: &ResolvedDiffRef,
     head: &ResolvedDiffRef,
-    mode: DiffMode,
+    payload_kind: DiffPayloadKind,
 ) -> anyhow::Result<(String, bool)> {
     let mut args = vec!["diff", "--find-renames"];
-    if mode == DiffMode::Stat {
+    if payload_kind == DiffPayloadKind::StatOnly {
         args.push("--stat");
     }
     let base_oid = oid_for_diff(base)?;
@@ -691,23 +1114,30 @@ async fn summarize_files(
     base: &ResolvedDiffRef,
     head: &ResolvedDiffRef,
 ) -> anyhow::Result<Vec<DiffFileSummary>> {
-    let mut args = vec!["diff", "--find-renames", "--numstat", "--name-status"];
     let base_oid = oid_for_diff(base)?;
-    match head {
+    let head_oid;
+    let right = match head {
         ResolvedDiffRef::WorkingTree => {
-            let worktree_tree = current_worktree_tree(repo_root).await?;
-            args.push(base_oid);
-            args.push(&worktree_tree);
-            let output = git_stdout(repo_root, &args, MAX_GIT_OUTPUT_BYTES).await?;
-            Ok(parse_numstat_name_status(&output))
+            head_oid = current_worktree_tree(repo_root).await?;
+            head_oid.as_str()
         }
-        ResolvedDiffRef::GitRef { oid: head_oid, .. } => {
-            args.push(base_oid);
-            args.push(head_oid);
-            let output = git_stdout(repo_root, &args, MAX_GIT_OUTPUT_BYTES).await?;
-            Ok(parse_numstat_name_status(&output))
-        }
-    }
+        ResolvedDiffRef::GitRef { oid, .. } => oid.as_str(),
+    };
+    let numstat = git_stdout(
+        repo_root,
+        &["diff", "--find-renames", "--numstat", base_oid, right],
+        MAX_GIT_OUTPUT_BYTES,
+    )
+    .await?;
+    let name_status = git_stdout(
+        repo_root,
+        &["diff", "--find-renames", "--name-status", base_oid, right],
+        MAX_GIT_OUTPUT_BYTES,
+    )
+    .await?;
+    Ok(parse_numstat_name_status(&format!(
+        "{numstat}\n{name_status}"
+    )))
 }
 
 fn oid_for_diff(reference: &ResolvedDiffRef) -> anyhow::Result<&str> {
@@ -768,23 +1198,20 @@ fn status_from_name_status(status: &str) -> DiffFileStatus {
 async fn ensure_review_worktree(
     state: &AppState,
     source_repo_root: &str,
-    _base: Option<DiffRefInput>,
-    head: Option<DiffRefInput>,
+    target: Option<DiffCheckoutTarget>,
 ) -> anyhow::Result<DiffReviewWorktree> {
     let source = discover_repo_root(source_repo_root)?;
     if let Some(existing) = current_review_worktree(state, &source).await {
         return Ok(refresh_worktree_dirty(existing).await);
     }
 
-    let target_ref = match head.unwrap_or(DiffRefInput::GitRef {
+    let target_ref = target.unwrap_or(DiffCheckoutTarget::GitRef {
         value: "HEAD".to_string(),
-    }) {
-        DiffRefInput::WorkingTree => DiffRefInput::GitRef {
-            value: "HEAD".to_string(),
-        },
-        input => input,
+    });
+    let resolved = match target_ref {
+        DiffCheckoutTarget::WorkingTree => resolve_git_ref(&source, "HEAD").await?,
+        target => resolve_checkout_target(&source, &target).await?,
     };
-    let resolved = resolve_diff_ref(&source, &target_ref).await?;
     let oid = match &resolved {
         ResolvedDiffRef::GitRef { oid, .. } => oid.clone(),
         ResolvedDiffRef::WorkingTree => {
@@ -1127,9 +1554,10 @@ mod tests {
                 ..
             }
         ));
-        let (patch, truncated) = generate_diff(&repo, &base_ref, &head_ref, DiffMode::Full)
-            .await
-            .unwrap();
+        let (patch, truncated) =
+            generate_diff(&repo, &base_ref, &head_ref, DiffPayloadKind::FullPatch)
+                .await
+                .unwrap();
         assert!(!truncated);
         assert!(patch.contains("+pub fn value() -> i32 { 2 }"));
         let (stat, _) = generate_diff(
@@ -1141,7 +1569,7 @@ mod tests {
                 oid: head,
                 display: "head".into(),
             },
-            DiffMode::Stat,
+            DiffPayloadKind::StatOnly,
         )
         .await
         .unwrap();
@@ -1183,7 +1611,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn opens_session_diff_from_latest_snapshot_to_full_worktree() {
+    async fn opens_session_changes_from_session_start_snapshot_to_worktree() {
         let (_temp, repo, base, _head) = test_repo();
         let snapshot_ref = "refs/omp/diff-snapshots/test-session-start";
         git(&repo, &["update-ref", snapshot_ref, &base]);
@@ -1225,20 +1653,166 @@ mod tests {
             .await
             .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
 
-        let responses = handle_diff_open(&state, Some("s1".into()), None).await;
-        let ServerMessage::DiffState { state, .. } = &responses[0] else {
-            panic!("expected diff state: {:?}", responses);
+        let responses = handle_session_changes_open(&state, "s1".into()).await;
+        let ServerMessage::SessionChangesState { state } = &responses[0] else {
+            panic!("expected session changes state: {:?}", responses);
         };
-        assert!(matches!(
-            state.comparison.head,
-            ResolvedDiffRef::WorkingTree
-        ));
+        let SessionChangesState::Ready { range, review, .. } = state else {
+            panic!("expected ready session changes state: {:?}", state);
+        };
+        assert!(matches!(range.head, DiffEndpoint::WorkingTree));
         assert!(
-            matches!(&state.comparison.base, ResolvedDiffRef::GitRef { input, .. } if input == snapshot_ref)
+            matches!(&range.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == snapshot_ref)
         );
-        assert!(state.diff.contains("src/lib.rs"), "{}", state.diff);
-        assert!(state.diff.contains("src/new.rs"), "{}", state.diff);
-        assert!(state.diff.contains("untracked.txt"), "{}", state.diff);
+        assert_eq!(review.current_commit_oid, None);
+        let DiffPayload::StatOnly { stat, files, .. } = &range.payload else {
+            panic!("expected stat payload: {:?}", range.payload);
+        };
+        assert!(stat.contains("src/lib.rs"), "{}", stat);
+        assert!(stat.contains("src/new.rs"), "{}", stat);
+        assert!(stat.contains("untracked.txt"), "{}", stat);
+        assert!(files.iter().any(|file| file.new_path == "untracked.txt"));
+    }
+
+    #[tokio::test]
+    async fn session_changes_requires_session_start_snapshot() {
+        let temp = TempDir::new().expect("temp dir");
+        let repo = temp.path().join("not-a-repo");
+        fs::create_dir_all(&repo).expect("non repo dir");
+        let session_file = temp.path().join("missing-repo-session.jsonl");
+        fs::write(&session_file, "").expect("session file");
+
+        let state = crate::tests::test_state(8, None);
+        state.sessions.write().await.insert(
+            "missing-repo".into(),
+            diff_test_record("missing-repo", &repo, &session_file),
+        );
+        let missing_repo = handle_session_changes_open(&state, "missing-repo".into()).await;
+        let ServerMessage::SessionChangesState { state } = &missing_repo[0] else {
+            panic!("expected session changes state: {:?}", missing_repo);
+        };
+        assert!(matches!(state, SessionChangesState::MissingRepo { .. }));
+
+        let (_repo_temp, repo, _base, _head) = test_repo();
+        let session_file = repo.join("no-snapshot-session.jsonl");
+        fs::write(&session_file, "").expect("session file");
+        let state = crate::tests::test_state(8, None);
+        state.sessions.write().await.insert(
+            "missing-snapshot".into(),
+            diff_test_record("missing-snapshot", &repo, &session_file),
+        );
+        let missing_snapshot = handle_session_changes_open(&state, "missing-snapshot".into()).await;
+        let ServerMessage::SessionChangesState { state } = &missing_snapshot[0] else {
+            panic!("expected session changes state: {:?}", missing_snapshot);
+        };
+        assert!(matches!(state, SessionChangesState::MissingSnapshot { .. }));
+    }
+
+    #[tokio::test]
+    async fn session_changes_does_not_use_latest_manual_snapshot() {
+        let (_temp, repo, base, head) = test_repo();
+        let session_start_ref = "refs/omp/diff-snapshots/session-start-only";
+        let manual_ref = "refs/omp/diff-snapshots/manual-later";
+        git(&repo, &["update-ref", session_start_ref, &base]);
+        git(&repo, &["update-ref", manual_ref, &head]);
+        let base_tree = git_output(&repo, &["rev-parse", &format!("{base}^{{tree}}")]);
+        let head_tree = git_output(&repo, &["rev-parse", &format!("{head}^{{tree}}")]);
+        let session_file = repo.join("manual-session.jsonl");
+        let session_start = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": base,
+                "createdAt": "2026-05-04T00:00:00.000Z",
+                "headCommit": base,
+                "kind": "session-start",
+                "label": "session-start",
+                "ref": session_start_ref,
+                "repoRoot": repo,
+                "tree": base_tree
+            },
+            "id": "session-start-entry"
+        });
+        let manual = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": head,
+                "createdAt": "2026-05-04T00:01:00.000Z",
+                "headCommit": head,
+                "kind": "manual",
+                "label": "manual",
+                "ref": manual_ref,
+                "repoRoot": repo,
+                "tree": head_tree
+            },
+            "id": "manual-entry"
+        });
+        fs::write(&session_file, format!("{}\n{}\n", session_start, manual)).expect("session file");
+
+        let state = crate::tests::test_state(8, None);
+        state.sessions.write().await.insert(
+            "manual".into(),
+            diff_test_record("manual", &repo, &session_file),
+        );
+        let responses = handle_session_changes_open(&state, "manual".into()).await;
+        let ServerMessage::SessionChangesState { state } = &responses[0] else {
+            panic!("expected session changes state: {:?}", responses);
+        };
+        let SessionChangesState::Ready { range, .. } = state else {
+            panic!("expected ready state: {:?}", state);
+        };
+        assert!(
+            matches!(&range.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == session_start_ref)
+        );
+    }
+
+    #[tokio::test]
+    async fn full_patch_payload_and_commit_stepping_preserve_requested_range() {
+        let (_temp, repo, base, second) = test_repo();
+        write_file(&repo, "src/lib.rs", "pub fn value() -> i32 { 4 }\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "second change"]);
+        let third = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let state = crate::tests::test_state(8, None);
+        let full = build_compare_diff_state(
+            &state,
+            Some("req".into()),
+            repo.clone(),
+            DiffRefInput::GitRef {
+                value: base.clone(),
+            },
+            DiffRefInput::GitRef {
+                value: third.clone(),
+            },
+            DiffPayloadKind::FullPatch,
+            false,
+            Some(third.clone()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            full.review.current_commit_oid.as_deref(),
+            Some(third.as_str())
+        );
+        assert_eq!(full.review.current_commit_index, Some(1));
+        assert!(matches!(&full.range.base, DiffEndpoint::GitRef { oid, .. } if oid == &base));
+        assert!(matches!(&full.range.head, DiffEndpoint::GitRef { oid, .. } if oid == &third));
+        let displayed = full
+            .range
+            .displayed_patch_range
+            .as_ref()
+            .expect("displayed patch range");
+        assert!(matches!(&displayed.base, DiffEndpoint::Commit { oid, .. } if oid == &second));
+        assert!(matches!(&displayed.head, DiffEndpoint::Commit { oid, .. } if oid == &third));
+        let DiffPayload::FullPatch { patch, .. } = &full.range.payload else {
+            panic!("expected full patch payload: {:?}", full.range.payload);
+        };
+        assert!(patch.contains("+pub fn value() -> i32 { 4 }"), "{}", patch);
     }
 
     #[tokio::test]
@@ -1253,10 +1827,7 @@ mod tests {
         let worktree = ensure_review_worktree(
             &state,
             repo.to_str().unwrap(),
-            None,
-            Some(DiffRefInput::GitRef {
-                value: head.clone(),
-            }),
+            Some(DiffCheckoutTarget::Commit { oid: head.clone() }),
         )
         .await
         .unwrap();

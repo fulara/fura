@@ -1,5 +1,5 @@
 import { shortPath } from "./format";
-import type { DiffRefInput, DiffReviewAnnotation, DiffLineLocation, RepoDiffState, ResolvedDiffRef } from "./protocol";
+import type { DiffEndpoint, DiffPayload, DiffRefInput, DiffReviewAnnotation, DiffReviewableState, DiffLineLocation, ResolvedDiffRef, DiffFileSummary as WireDiffFileSummary } from "./protocol";
 
 export const WORKING_TREE_DIFF_REF_TEXT = "WORKTREE";
 
@@ -49,16 +49,16 @@ export type DiffFileSummary = {
   questionCount: number;
 };
 
-export function diffRepoRoots(state: RepoDiffState | undefined): string[] {
-  return state?.repoRoot ? [state.repoRoot] : [];
+export function diffEndpointInput(ref: DiffEndpoint | undefined, fallback: DiffRefInput): DiffRefInput {
+  if (!ref) return fallback;
+  if (ref.kind === "workingTree") return { kind: "workingTree" };
+  if (ref.kind === "gitRef") return { kind: "gitRef", value: ref.input };
+  if (ref.kind === "commit") return { kind: "gitRef", value: ref.oid };
+  return { kind: "gitRef", value: ref.snapshot.refName };
 }
 
-export function inferDiffRepoRootFromCwd(cwd: string | undefined, repoRoots: string[]): string | null {
-  if (!cwd) return null;
-  const matchingRoots = repoRoots
-    .filter(repoRoot => cwd === repoRoot || cwd.startsWith(`${repoRoot}/`) || cwd.startsWith(`${repoRoot}\\`))
-    .sort((left, right) => right.length - left.length);
-  return matchingRoots[0] ?? null;
+export function diffEndpointInputText(ref: DiffEndpoint | undefined, fallback: DiffRefInput): string {
+  return diffRefInputText(diffEndpointInput(ref, fallback));
 }
 
 export function formatDiffRepoLabel(repoRoot: string): string {
@@ -67,19 +67,76 @@ export function formatDiffRepoLabel(repoRoot: string): string {
   return name === repoRoot ? repoRoot : `${name} — ${shortPath(repoRoot)}`;
 }
 
-export function resolvedRefLabel(ref: ResolvedDiffRef): string {
-  return ref.kind === "workingTree" ? "working tree" : `${ref.display} (${ref.oid.slice(0, 12)})`;
+export function resolvedRefLabel(ref: DiffEndpoint | ResolvedDiffRef): string {
+  if (ref.kind === "workingTree") return "working tree";
+  if (ref.kind === "commit") return `${ref.shortOid}${ref.subject ? ` — ${ref.subject}` : ""}`;
+  if (ref.kind === "sessionStartSnapshot") return `${ref.snapshot.label || "session-start"} (${ref.snapshot.refName})`;
+  return `${ref.display} (${ref.oid.slice(0, 12)})`;
 }
 
-export function comparisonKey(state: RepoDiffState): string {
-  const base = state.comparison.base.kind === "gitRef"
-    ? `${state.comparison.base.input}:${state.comparison.base.oid}`
-    : "workingTree";
-  const head = state.comparison.head.kind === "gitRef"
-    ? `${state.comparison.head.input}:${state.comparison.head.oid}`
-    : "workingTree";
-  const selected = state.reviewProgress.mode === "commit" ? state.reviewProgress.selectedCommitOid ?? "unknown" : "range";
-  return [state.repoRoot, base, head, state.comparison.mode, state.reviewProgress.mode, selected].join("|");
+function endpointKey(ref: DiffEndpoint): string {
+  if (ref.kind === "workingTree") return "workingTree";
+  if (ref.kind === "commit") return `commit:${ref.oid}`;
+  if (ref.kind === "sessionStartSnapshot") return `sessionStart:${ref.snapshot.entryId}:${ref.snapshot.refName}`;
+  return `gitRef:${ref.input}:${ref.oid}`;
+}
+
+export function diffPayloadKind(payload: DiffPayload): "statOnly" | "fullPatch" {
+  return payload.kind;
+}
+
+export function diffPayloadText(payload: DiffPayload): string {
+  return payload.kind === "fullPatch" ? payload.patch : payload.stat;
+}
+
+export function diffPayloadTruncated(payload: DiffPayload): boolean {
+  return payload.truncated;
+}
+
+export function diffPayloadFiles(payload: DiffPayload): WireDiffFileSummary[] {
+  return payload.files;
+}
+
+export function isFullPatchPayload(payload: DiffPayload | undefined): boolean {
+  return payload?.kind === "fullPatch";
+}
+
+export function comparisonKey(state: DiffReviewableState): string {
+  const selected = state.review.currentCommitOid ?? "range";
+  return [state.range.repoRoot, endpointKey(state.range.base), endpointKey(state.range.head), state.range.payload.kind, selected].join("|");
+}
+
+export function summarizeWireDiffFiles(
+  files: WireDiffFileSummary[],
+  annotations: DiffReviewAnnotation[] = [],
+  key: string | null = null,
+ ): DiffFileSummary[] {
+  const byPath = new Map<string, DiffFileSummary>();
+  for (const file of files) {
+    byPath.set(file.newPath, {
+      filePath: file.newPath,
+      oldPath: file.oldPath,
+      added: file.added,
+      removed: file.removed,
+      commentCount: 0,
+      questionCount: 0,
+    });
+  }
+  for (const annotation of annotations) {
+    if (key && !isSameDiffComparison(annotation, key)) continue;
+    const existing = byPath.get(annotation.anchor.newPath) ?? {
+      filePath: annotation.anchor.newPath,
+      oldPath: annotation.anchor.oldPath,
+      added: 0,
+      removed: 0,
+      commentCount: 0,
+      questionCount: 0,
+    };
+    if (annotation.kind === "comment") existing.commentCount += 1;
+    if (annotation.kind === "question") existing.questionCount += 1;
+    byPath.set(annotation.anchor.newPath, existing);
+  }
+  return [...byPath.values()];
 }
 
 export function parseDiffRows(diffText: string): ParsedDiffRow[] {

@@ -127,38 +127,64 @@ pub(crate) async fn handle_client_message(
             provider,
             model_id,
         } => handle_model_set_command(state, session_id, &provider, &model_id).await,
-        ClientMessage::DiffOpen {
+        ClientMessage::SessionChangesOpen { session_id } => {
+            handle_session_changes_open(state, session_id).await
+        }
+        ClientMessage::SessionChangesSelectRepo {
             session_id,
-            repo_root,
-        } => handle_diff_open(state, session_id, repo_root).await,
-        ClientMessage::DiffCompare {
+            repo_id,
+            payload_kind,
+            current_commit_oid,
+        } => {
+            handle_session_changes_select_repo(
+                state,
+                session_id,
+                repo_id,
+                payload_kind,
+                current_commit_oid,
+            )
+            .await
+        }
+        ClientMessage::SessionChangesRefresh {
             session_id,
+            repo_id,
+            payload_kind,
+            current_commit_oid,
+        } => {
+            handle_session_changes_refresh(
+                state,
+                session_id,
+                repo_id,
+                payload_kind,
+                current_commit_oid,
+            )
+            .await
+        }
+        ClientMessage::CompareDiffRun {
+            request_id,
             repo_root,
             base,
             head,
-            mode,
+            payload_kind,
             merge_base,
-            review_mode,
-            commit_oid,
+            current_commit_oid,
         } => {
-            handle_diff_compare(
+            handle_compare_diff_run(
                 state,
-                session_id,
+                request_id,
                 repo_root,
                 base,
                 head,
-                mode,
+                payload_kind,
                 merge_base,
-                review_mode,
-                commit_oid,
+                current_commit_oid,
             )
             .await
         }
         ClientMessage::DiffReviewWorktreeEnsure {
             source_repo_root,
-            base,
-            head,
-        } => handle_diff_review_worktree_ensure(state, source_repo_root, base, head).await,
+            target,
+        } => handle_diff_review_worktree_ensure(state, source_repo_root, target).await,
         ClientMessage::DiffReviewWorktreeCheckout {
             worktree_id,
             ref_target,

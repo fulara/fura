@@ -19,8 +19,8 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::{
-    AppState, AuthSession, ClientMessage, ServerMessage, client_config, handle_client_message,
-    refresh_session_catalog, sessions_snapshot_from_map,
+    AppState, AuthSession, ClientMessage, DiffPayload, ServerMessage, client_config,
+    handle_client_message, refresh_session_catalog, sessions_snapshot_from_map,
 };
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
@@ -335,6 +335,13 @@ pub(crate) async fn send_json(
     }
 }
 
+fn diff_payload_bytes(payload: &DiffPayload) -> usize {
+    match payload {
+        DiffPayload::StatOnly { stat, .. } => stat.len(),
+        DiffPayload::FullPatch { patch, .. } => patch.len(),
+    }
+}
+
 pub(crate) fn log_server_message(message: &ServerMessage) {
     match message {
         ServerMessage::Hello { .. } => {
@@ -427,22 +434,26 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             bytes = content.len()
         ),
-        ServerMessage::DiffState { session_id, state } => info!(
+        ServerMessage::SessionChangesState { state } => info!(
             direction = "bridge_to_client",
-            message_type = "diff.state",
-            session_id = session_id.as_deref().unwrap_or(""),
-            repo_root = %state.repo_root,
-            ref_count = state.refs.len(),
-            diff_bytes = state.diff.len(),
-            truncated = state.truncated
+            message_type = "sessionChanges.state",
+            status = ?state
+        ),
+        ServerMessage::CompareDiffState { state } => info!(
+            direction = "bridge_to_client",
+            message_type = "compareDiff.state",
+            repo_root = %state.range.repo_root,
+            diff_bytes = diff_payload_bytes(&state.range.payload)
         ),
         ServerMessage::DiffError {
+            scope,
             session_id,
             repo_root,
             message,
         } => info!(
             direction = "bridge_to_client",
             message_type = "diff.error",
+            scope = ?scope,
             session_id = session_id.as_deref().unwrap_or(""),
             repo_root = repo_root.as_deref().unwrap_or(""),
             error = %message

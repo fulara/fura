@@ -2317,23 +2317,22 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn parses_typed_diff_compare_message() {
+    fn parses_typed_compare_diff_run_message() {
         let msg: ClientMessage = serde_json::from_str(
-            r#"{"type":"diff.compare","sessionId":"abc-123","repoRoot":"/repo","base":{"kind":"gitRef","value":"main"},"head":{"kind":"gitRef","value":"feature"},"mode":"full","mergeBase":true,"reviewMode":"commit","commitOid":"abc"}"#,
+            r#"{"type":"compareDiff.run","requestId":"req-1","repoRoot":"/repo","base":{"kind":"gitRef","value":"main"},"head":{"kind":"gitRef","value":"feature"},"payloadKind":"fullPatch","mergeBase":true,"currentCommitOid":"abc"}"#,
         )
         .expect("parse failed");
         assert!(matches!(
             msg,
-            ClientMessage::DiffCompare {
-                ref session_id,
+            ClientMessage::CompareDiffRun {
+                ref request_id,
                 ref repo_root,
                 base: DiffRefInput::GitRef { ref value },
                 head: DiffRefInput::GitRef { value: ref head_value },
-                mode: DiffMode::Full,
+                payload_kind: DiffPayloadKind::FullPatch,
                 merge_base: Some(true),
-                review_mode: Some(DiffReviewMode::Commit),
-                commit_oid: Some(ref commit_oid),
-            } if session_id.as_deref() == Some("abc-123")
+                current_commit_oid: Some(ref commit_oid),
+            } if request_id.as_deref() == Some("req-1")
                 && repo_root == "/repo"
                 && value == "main"
                 && head_value == "feature"

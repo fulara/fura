@@ -921,6 +921,48 @@ h2 {
   gap: 0.75rem;
 }
 
+.diff-product-tabs,
+.diff-subview-tabs {
+  display: grid;
+  gap: 0.4rem;
+}
+.diff-product-tabs button,
+.diff-subview-tabs button {
+  text-align: left;
+  border-radius: 0.5rem;
+  border: 1px solid #252a35;
+  background: #111318;
+  color: #d7dae4;
+  padding: 0.55rem 0.65rem;
+}
+.diff-product-tabs button.active,
+.diff-subview-tabs button.active {
+  border-color: #6d7cff;
+  background: #1a1f2a;
+  color: #f4f6ff;
+}
+.diff-repo-select,
+.diff-payload-select,
+.compare-diff-controls input,
+.compare-diff-controls select {
+  width: 100%;
+}
+.diff-step-actions {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+.diff-stat-output {
+  white-space: pre-wrap;
+  overflow-x: auto;
+  border: 1px solid #252a35;
+  border-radius: 0.65rem;
+  padding: 0.75rem;
+  background: #0b0d12;
+}
+.diffs-stat-note {
+  color: #aab3c5;
+}
+
 .diffs-file-list {
   display: grid;
   gap: 0.45rem;

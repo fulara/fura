@@ -12,7 +12,7 @@ import {
   removeSelectedDiffComments,
   selectedDiffAnnotations,
 } from "./diffReview";
-import type { DiffLineLocation, RepoDiffState } from "./protocol";
+import type { DiffLineLocation, DiffReviewableState } from "./protocol";
 
 const patch = [
   "diff --git a/src/main.ts b/src/main.ts",
@@ -23,24 +23,18 @@ const patch = [
   " export { value };",
 ].join("\n");
 
-const state: RepoDiffState = {
-  repoRoot: "/repo",
-  refs: [],
-  comparison: {
+const state: DiffReviewableState = {
+  range: {
     repoRoot: "/repo",
     base: { kind: "gitRef", input: "main", refKind: "branch", oid: "a".repeat(40), display: "main" },
     head: { kind: "gitRef", input: "feature", refKind: "branch", oid: "b".repeat(40), display: "feature" },
-    mode: "full",
+    payload: { kind: "fullPatch", files: [], patch, truncated: false },
+    generatedAt: "1",
   },
-  diff: patch,
-  files: [],
-  truncated: false,
-  generatedAt: "1",
-  reviewProgress: {
-    mode: "commit",
+  review: {
     commits: [{ oid: "b".repeat(40), shortOid: "bbbbbbbbbbbb", subject: "change value", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
-    selectedCommitOid: "b".repeat(40),
-    selectedCommitIndex: 0,
+    currentCommitOid: "b".repeat(40),
+    currentCommitIndex: 0,
     previousCommitOid: "a".repeat(40),
   },
 };
