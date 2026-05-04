@@ -3,6 +3,8 @@ use std::{collections::HashMap, env, sync::Arc, time::Duration};
 use anyhow::Context;
 use axum::{
     Router,
+    http::{HeaderMap, Uri, header},
+    response::Redirect,
     routing::{get, post},
 };
 use axum_server::{Handle as AxumServerHandle, tls_rustls::RustlsConfig};
@@ -227,12 +229,73 @@ async fn main() -> anyhow::Result<()> {
 
 fn build_app(state: AppState, static_dir: std::path::PathBuf) -> Router {
     Router::new()
+        .route("/", get(root_entry_handler))
         .route("/healthz", get(healthz))
         .route("/auth/session", post(auth_session_handler))
         .route("/ws", get(ws_handler))
         .fallback_service(ServeDir::new(static_dir).append_index_html_on_directories(true))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+async fn root_entry_handler(headers: HeaderMap, uri: Uri) -> Redirect {
+    let target = if should_use_mobile_root(&headers, uri.query()) {
+        "/mobile.html"
+    } else {
+        "/index.html"
+    };
+    let mut location = String::from(target);
+    if let Some(query) = uri.query() {
+        location.push('?');
+        location.push_str(query);
+    }
+    Redirect::temporary(&location)
+}
+
+fn should_use_mobile_root(headers: &HeaderMap, query: Option<&str>) -> bool {
+    match query_view_param(query) {
+        Some("desktop") => return false,
+        Some("mobile") => return true,
+        _ => {}
+    }
+
+    if let Some(mobile_hint) = headers
+        .get("sec-ch-ua-mobile")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+    {
+        if mobile_hint == "?1" {
+            return true;
+        }
+        if mobile_hint == "?0" {
+            return false;
+        }
+    }
+
+    let user_agent = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_ascii_lowercase);
+    matches!(
+        user_agent,
+        Some(ref ua)
+            if ua.contains("android")
+                || ua.contains("iphone")
+                || ua.contains("ipad")
+                || ua.contains("ipod")
+                || ua.contains("windows phone")
+                || ua.contains("opera mini")
+                || ua.contains(" mobile")
+    )
+}
+
+fn query_view_param(query: Option<&str>) -> Option<&str> {
+    query.and_then(|query| {
+        query.split('&').find_map(|segment| {
+            let (key, value) = segment.split_once('=')?;
+            (key == "view").then_some(value)
+        })
+    })
 }
 
 async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
@@ -402,6 +465,84 @@ pub(crate) mod tests {
             tool_cards: Vec::new(),
             messages_loaded: false,
         }
+    }
+
+    #[test]
+    fn query_view_param_extracts_requested_view() {
+        assert_eq!(
+            query_view_param(Some("token=dev&view=mobile")),
+            Some("mobile")
+        );
+        assert_eq!(
+            query_view_param(Some("view=desktop&token=dev")),
+            Some("desktop")
+        );
+        assert_eq!(query_view_param(Some("token=dev")), None);
+        assert_eq!(query_view_param(None), None);
+    }
+
+    #[test]
+    fn should_use_mobile_root_honors_view_override_before_detection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) Mobile"
+                .parse()
+                .expect("valid header value"),
+        );
+        assert!(!should_use_mobile_root(&headers, Some("view=desktop")));
+        assert!(should_use_mobile_root(&headers, Some("view=mobile")));
+    }
+
+    #[test]
+    fn should_use_mobile_root_uses_client_hints_and_user_agent() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-ch-ua-mobile", "?1".parse().expect("valid header"));
+        assert!(should_use_mobile_root(&headers, None));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-ch-ua-mobile", "?0".parse().expect("valid header"));
+        headers.insert(
+            header::USER_AGENT,
+            "Mozilla/5.0 (Android 14; Mobile)"
+                .parse()
+                .expect("valid header value"),
+        );
+        assert!(!should_use_mobile_root(&headers, None));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            "Mozilla/5.0 (Android 14; Mobile)"
+                .parse()
+                .expect("valid header value"),
+        );
+        assert!(should_use_mobile_root(&headers, None));
+    }
+
+    #[tokio::test]
+    async fn root_entry_handler_redirects_and_preserves_query() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::USER_AGENT,
+            "Mozilla/5.0 (Android 14; Mobile)"
+                .parse()
+                .expect("valid header value"),
+        );
+        let uri = "/?token=dev&view=mobile".parse().expect("valid uri");
+        let response =
+            axum::response::IntoResponse::into_response(root_entry_handler(headers, uri).await);
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::TEMPORARY_REDIRECT
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/mobile.html?token=dev&view=mobile"),
+        );
     }
 
     #[test]
