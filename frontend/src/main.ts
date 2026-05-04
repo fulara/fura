@@ -344,10 +344,10 @@ app.innerHTML = `
         <button id="cwdPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
       </header>
       <div class="modal-tabs" role="tablist" aria-label="New session mode">
-        <button id="cwdPickerSessionTab" type="button" class="active" role="tab" aria-selected="true">Session</button>
-        <button id="cwdPickerDiffTab" type="button" role="tab" aria-selected="false">Diff</button>
+        <button id="cwdPickerSessionTab" type="button" class="active" role="tab" aria-selected="true" aria-controls="cwdPickerSessionBody">Session</button>
+        <button id="cwdPickerDiffTab" type="button" role="tab" aria-selected="false" aria-controls="cwdPickerDiffBody">Diff</button>
       </div>
-      <div class="cwd-picker-body">
+      <div id="cwdPickerSessionBody" class="cwd-picker-body" role="tabpanel" aria-labelledby="cwdPickerSessionTab">
         <label for="cwdPickerNameInput">Session name</label>
         <input id="cwdPickerNameInput" autocomplete="off" spellcheck="false" placeholder="my-project" />
         <label for="cwdPickerCategoryInput">Category <span class="optional-label">optional</span></label>
@@ -374,7 +374,7 @@ app.innerHTML = `
           <p id="cwdPickerWorktreeSummary" class="field-help worktree-summary"></p>
         </div>
       </div>
-      <div id="cwdPickerDiffBody" class="cwd-picker-body" hidden>
+      <div id="cwdPickerDiffBody" class="cwd-picker-body" role="tabpanel" aria-labelledby="cwdPickerDiffTab" hidden>
         <label for="cwdPickerDiffRepo">Repository root</label>
         <input id="cwdPickerDiffRepo" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
         <label for="cwdPickerDiffBase">Base ref</label>
@@ -559,6 +559,7 @@ const cwdPickerNameInput = requireElement<HTMLInputElement>("cwdPickerNameInput"
 const cwdPickerCategoryInput = requireElement<HTMLInputElement>("cwdPickerCategoryInput");
 const cwdPickerCategorySuggestions = requireElement<HTMLDivElement>("cwdPickerCategorySuggestions");
 const cwdPickerInput = requireElement<HTMLInputElement>("cwdPickerInput");
+const cwdPickerSessionBody = requireElement<HTMLDivElement>("cwdPickerSessionBody");
 const cwdPickerInputLabel = requireElement<HTMLLabelElement>("cwdPickerInputLabel");
 const cwdPickerInputHelp = requireElement<HTMLParagraphElement>("cwdPickerInputHelp");
 const cwdPickerCancel = requireElement<HTMLButtonElement>("cwdPickerCancel");
@@ -4369,8 +4370,7 @@ function setCwdPickerMode(mode: "session" | "diff"): void {
   cwdPickerDiffTab.classList.toggle("active", !sessionMode);
   cwdPickerSessionTab.setAttribute("aria-selected", String(sessionMode));
   cwdPickerDiffTab.setAttribute("aria-selected", String(!sessionMode));
-  const sessionBody = cwdPickerInput.closest<HTMLElement>(".cwd-picker-body");
-  if (sessionBody) sessionBody.hidden = !sessionMode;
+  cwdPickerSessionBody.hidden = !sessionMode;
   cwdPickerDiffBody.hidden = sessionMode;
   if (!cwdPickerCreatePending) cwdPickerCreate.textContent = mode === "diff" ? "Open diff" : "Create session";
 }

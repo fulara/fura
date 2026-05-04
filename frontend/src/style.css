@@ -2288,11 +2288,39 @@ h2 {
   width: min(560px, 100%);
 }
 
+.modal-tabs {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0 1rem;
+  border-bottom: 1px solid #252a35;
+}
+
+.modal-tabs button {
+  margin-bottom: -1px;
+  border: 1px solid transparent;
+  border-bottom-color: #252a35;
+  border-radius: 0.75rem 0.75rem 0 0;
+  background: transparent;
+  color: #9ba4b5;
+}
+
+.modal-tabs button.active,
+.modal-tabs button[aria-selected="true"] {
+  border-color: #343a46;
+  border-bottom-color: #10141d;
+  background: #10141d;
+  color: #eef1f8;
+}
+
 .cwd-picker-body {
   padding: 1rem;
   display: flex;
   flex-direction: column;
   gap: 0.5rem;
+}
+
+.cwd-picker-body[hidden] {
+  display: none;
 }
 
 .cwd-picker-body label {
