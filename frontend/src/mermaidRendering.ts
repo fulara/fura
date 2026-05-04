@@ -25,6 +25,7 @@ async function loadMermaidClient(): Promise<Mermaid> {
       startOnLoad: false,
       securityLevel: "strict",
       theme: "dark",
+      htmlLabels: false,
     });
     initialized = true;
   }

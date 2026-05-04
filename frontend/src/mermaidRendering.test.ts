@@ -16,6 +16,41 @@ async function flushMermaidRender(): Promise<void> {
     await Promise.resolve();
   }
 }
+function stubBrowserPngExport() {
+  const createObjectURL = vi.fn((blob: Blob) =>
+    blob.type.includes("svg") ? "blob:mermaid-source-svg" : "blob:mermaid-png",
+  );
+  const revokeObjectURL = vi.fn();
+  vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+
+  const originalImage = window.Image;
+  class TestImage {
+    onload: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+
+    set src(_value: string) {
+      queueMicrotask(() => this.onload?.());
+    }
+  }
+  Object.defineProperty(window, "Image", { configurable: true, value: TestImage });
+
+  const drawImage = vi.fn();
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+    { drawImage } as unknown as CanvasRenderingContext2D,
+  );
+  vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function toBlob(callback: BlobCallback, type?: string) {
+    callback(new Blob(["png"], { type: type ?? "image/png" }));
+  });
+
+  return {
+    createObjectURL,
+    revokeObjectURL,
+    drawImage,
+    TestImage,
+    restoreImage: () =>
+      Object.defineProperty(window, "Image", { configurable: true, value: originalImage }),
+  };
+}
 
 beforeEach(() => {
   mermaidMock.render.mockResolvedValue({
@@ -46,6 +81,7 @@ describe("renderMermaidBlock", () => {
       startOnLoad: false,
       securityLevel: "strict",
       theme: "dark",
+      htmlLabels: false,
     });
     expect(mermaidMock.render).toHaveBeenCalledWith(expect.stringMatching(/^fura-mermaid-/), "flowchart TD\n  A --> B", expect.any(HTMLDivElement));
     expect(node.dataset.mermaidState).toBe("rendered");
@@ -146,6 +182,35 @@ describe("renderMermaidBlock", () => {
     vi.runAllTimers();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-svg");
   });
+
+  it("downloads rendered PNG from a browser-safe SVG", async () => {
+    const pngExport = stubBrowserPngExport();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
+
+    try {
+      const node = renderMermaidBlock("flowchart TD\n  A --> B");
+      document.body.append(node);
+      await flushMermaidRender();
+      vi.useFakeTimers();
+      const savePng = Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action"))
+        .find(button => button.textContent === "Save PNG");
+
+      savePng?.click();
+      for (let i = 0; i < 5; i += 1) {
+        await Promise.resolve();
+      }
+
+      expect(pngExport.createObjectURL).toHaveBeenCalledTimes(2);
+      expect(pngExport.drawImage).toHaveBeenCalledWith(expect.any(pngExport.TestImage), 0, 0, 100, 50);
+      expect(click).toHaveBeenCalledOnce();
+      expect(savePng?.textContent).toBe("Saved");
+      vi.runAllTimers();
+      expect(pngExport.revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-source-svg");
+      expect(pngExport.revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-png");
+    } finally {
+      pngExport.restoreImage();
+    }
+  });
 });
 
 describe("Mermaid transcript hook", () => {
@@ -178,33 +243,17 @@ describe("Mermaid PNG export helpers", () => {
   });
 
   it("converts rendered SVG to a PNG blob in the local browser", async () => {
-    const createObjectURL = vi.fn((_blob: Blob) => "blob:mermaid-source-svg");
-    const revokeObjectURL = vi.fn();
-    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const pngExport = stubBrowserPngExport();
 
-    const originalImage = window.Image;
-    class TestImage {
-      onload: (() => void) | null = null;
-      onerror: (() => void) | null = null;
-      set src(_value: string) {
-        queueMicrotask(() => this.onload?.());
-      }
+    try {
+      const blob = await svgToPngBlob('<svg viewBox="0 0 32 16"></svg>');
+
+      expect(blob.type).toBe("image/png");
+      expect(pngExport.createObjectURL).toHaveBeenCalledOnce();
+      expect(pngExport.drawImage).toHaveBeenCalledWith(expect.any(pngExport.TestImage), 0, 0, 32, 16);
+      expect(pngExport.revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-source-svg");
+    } finally {
+      pngExport.restoreImage();
     }
-    Object.defineProperty(window, "Image", { configurable: true, value: TestImage });
-
-    const drawImage = vi.fn();
-    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D);
-    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(function toBlob(callback: BlobCallback, type?: string) {
-      callback(new Blob(["png"], { type: type ?? "image/png" }));
-    });
-
-    const blob = await svgToPngBlob('<svg viewBox="0 0 32 16"></svg>');
-
-    expect(blob.type).toBe("image/png");
-    expect(createObjectURL).toHaveBeenCalledOnce();
-    expect(drawImage).toHaveBeenCalledWith(expect.any(TestImage), 0, 0, 32, 16);
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-source-svg");
-
-    Object.defineProperty(window, "Image", { configurable: true, value: originalImage });
   });
 });
