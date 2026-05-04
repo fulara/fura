@@ -10,6 +10,7 @@ function baseState(overrides: Partial<CodeViewerState> = {}): CodeViewerState {
       root: "/repo",
       status: "filesOnly",
       statusMessage: "Files only.",
+      source: "session",
     },
     treePath: "",
     entries: [],

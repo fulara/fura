@@ -10,14 +10,12 @@ import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from 
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
 import {
-  deriveDiffSelection,
-  diffHeadSelectionFromEntryId,
+  comparisonKey,
   diffRepoRoots,
-  diffSnapshotsForRepo,
   formatDiffRepoLabel,
+  inferDiffRepoRootFromCwd,
   parseDiffRows,
   summarizeDiffFiles,
-  type DiffSelection,
   type ParsedDiffRow,
 } from "./diffState";
 import {
@@ -35,22 +33,23 @@ import {
   type BusyPromptDraft,
 } from "./promptBusy";
 import {
+  annotationsForDiffLocation,
   buildDiffCommentPrompt,
-  commentsForDiffLocation,
-  createDiffComment,
+  buildDiffQuestionPrompt,
+  createDiffReviewAnnotation,
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
+  formatDiffLineLocation,
   formatDiffLocation,
   removeSelectedDiffComments,
-  selectedDiffComments,
+  selectedDiffAnnotations,
   type DiffPreviewDraft,
-} from "./diffComments";
+} from "./diffReview";
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import type {
   ClientMessage,
-  DiffComment,
+  DiffReviewAnnotation,
   DiffLineLocation,
-  DiffSnapshotSummary,
   RepoDiffState,
   ServerConfig,
   ServerMessage,
@@ -75,15 +74,6 @@ import {
   type TranscriptReviewComment,
   type TranscriptReviewLine,
 } from "./transcriptReview";
-import {
-  buildPlanReviewPrompt,
-  createApprovePlanReviewMessage,
-  pendingPlanReviewFromMessage,
-  renderPlanReviewCard,
-  planReviewTranscriptMessage,
-  type PendingPlanReview,
-  type VisiblePlanReview,
-} from "./planReview";
 
 type MobileWindow = Pick<Window, "history" | "localStorage" | "sessionStorage" | "location" | "prompt" | "setTimeout">;
 type MobileSessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
@@ -421,7 +411,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const reviewPreviewSend = requireElement<HTMLButtonElement>(document, "mobileReviewPreviewSend");
 
   let connection: FuraConnection | null = null;
-  let reviewPreviewDraft: { sessionId: string; message: TranscriptMessage; comments: TranscriptReviewComment[]; promptText?: string } | null = null;
+  let reviewPreviewDraft: { sessionId: string; message: TranscriptMessage; comments: TranscriptReviewComment[] } | null = null;
   const transcriptReviewActiveMessages = new Map<string, string>();
   const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
   let serverConfig: ServerConfig | null = null;
@@ -449,21 +439,20 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const diffErrors = new Map<string, string>();
   const diffLoadingSessions = new Set<string>();
   const diffSelectedRepos = new Map<string, string>();
-  const diffSelectedSnapshots = new Map<string, string>();
-  const diffSelectedHeads = new Map<string, string | null>();
+  const diffBaseRefs = new Map<string, string>();
+  const diffHeadRefs = new Map<string, string>();
   const diffStatModes = new Map<string, boolean>();
-  const diffComments = new Map<string, DiffComment[]>();
+  const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
   let pendingDiffComment: {
     sessionId: string;
-    baseSnapshot: DiffSnapshotSummary;
-    headSnapshot: DiffSnapshotSummary | null;
+    state: RepoDiffState;
     location: DiffLineLocation;
+    kind: "comment" | "question";
   } | null = null;
   let diffPreviewDraft: DiffPreviewDraft | null = null;
   let busyPromptDraft: BusyPromptDraft | null = null;
   let activeDialog: ExtensionDialogRequest | null = null;
   const dialogQueue: ExtensionDialogRequest[] = [];
-  const visiblePlanReviews = new Map<string, VisiblePlanReview>();
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
@@ -553,7 +542,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     event.preventDefault();
     const text = promptInput.value.trim();
     if ((!text && pendingImages.length === 0) || !activeSessionId) return;
-    if (hasPendingPlanReview(activeSessionId)) return;
     const accepted = send(createPromptSendMessage(activeSessionId, text, pendingImages));
     if (accepted) clearPromptComposer();
   });
@@ -674,34 +662,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     renderSessions();
   }
 
-  function hasPendingPlanReview(sessionId: string): boolean {
-    return visiblePlanReviews.get(sessionId)?.mode === "pending";
-  }
-
-  function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
-    visiblePlanReviews.set(message.sessionId, { review: pendingPlanReviewFromMessage(message), mode: "pending" });
-    appendLog(`[${message.sessionId}] plan ready for review`);
-    if (message.sessionId === activeSessionId) {
-      renderActiveSession();
-      return;
-    }
-    unreadSessions.add(message.sessionId);
-    renderSessions();
-  }
-
-  function approvePendingPlanReview(review: PendingPlanReview): void {
-    const accepted = send(createApprovePlanReviewMessage(review));
-    if (!accepted) return;
-    visiblePlanReviews.delete(review.sessionId);
-    renderActiveSession();
-  }
-
-  function refinePendingPlanReview(review: PendingPlanReview): void {
-    visiblePlanReviews.set(review.sessionId, { review, mode: "refining" });
-    renderActiveSession();
-    if (activeSessionId === review.sessionId) promptInput.focus();
-  }
-
   function renderBusyPromptChoice(): void {
     const draft = busyPromptDraft;
     const shouldShow = Boolean(draft && draft.sessionId === activeSessionId);
@@ -760,19 +720,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function openDiffCommentEditor(
     sessionId: string,
-    baseSnapshot: DiffSnapshotSummary,
-    headSnapshot: DiffSnapshotSummary | null,
+    state: RepoDiffState,
     location: DiffLineLocation,
+    kind: "comment" | "question" = "comment",
   ): void {
-    pendingDiffComment = { sessionId, baseSnapshot, headSnapshot, location };
+    pendingDiffComment = { sessionId, state, location, kind };
     diffCommentText.value = "";
-    diffCommentStatus.textContent = formatDiffLocation(createDiffComment({
-      id: "preview",
-      baseSnapshot,
-      headSnapshot,
-      location,
-      text: "preview",
-    }));
+    diffCommentStatus.textContent = formatDiffLineLocation(location);
     diffCommentOverlay.hidden = false;
     window.setTimeout(() => diffCommentText.focus(), 0);
   }
@@ -789,35 +743,50 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (!pending) return;
     const text = diffCommentText.value.trim();
     if (!text) {
-      diffCommentStatus.textContent = "Comment text is required.";
+      diffCommentStatus.textContent = pending.kind === "question" ? "Question text is required." : "Comment text is required.";
       diffCommentText.focus();
       return;
     }
 
-    const comments = diffComments.get(pending.sessionId) ?? [];
-    comments.push(createDiffComment({
-      id: `${Date.now()}-${comments.length}`,
-      baseSnapshot: pending.baseSnapshot,
-      headSnapshot: pending.headSnapshot,
+    const annotations = diffAnnotations.get(pending.sessionId) ?? [];
+    const annotation = createDiffReviewAnnotation({
+      id: `${Date.now()}-${annotations.length}`,
+      kind: pending.kind,
+      state: pending.state,
       location: pending.location,
       text,
-    }));
-    diffComments.set(pending.sessionId, comments);
+      status: pending.kind === "question" ? "sent" : "draft",
+    });
+    annotations.push(annotation);
+    diffAnnotations.set(pending.sessionId, annotations);
     closeDiffCommentEditor();
+    if (pending.kind === "question") {
+      const promptText = buildDiffQuestionPrompt(pending.state, annotation);
+      if (projections.get(pending.sessionId)?.isBusy) {
+        busyPromptDraft = createBusyPromptDraft({
+          sessionId: pending.sessionId,
+          text: promptText,
+          editorText: `Question about ${formatDiffLineLocation(pending.location)}`,
+          images: [],
+          onSend: renderActiveSession,
+        });
+        renderBusyPromptChoice();
+      } else {
+        send(createPromptSendMessage(pending.sessionId, promptText, []));
+      }
+    }
     renderActiveSession();
   }
 
   function openDiffPreview(
     sessionId: string,
     state: RepoDiffState,
-    baseSnapshot: DiffSnapshotSummary | null,
-    headSnapshot: DiffSnapshotSummary | null,
   ): void {
-    if (!baseSnapshot) return;
-    const comments = selectedDiffComments(diffComments.get(sessionId) ?? [], baseSnapshot, headSnapshot);
+    const key = comparisonKey(state);
+    const comments = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, "comment");
     if (comments.length === 0) return;
-    diffPreviewDraft = { sessionId, state, baseSnapshot, headSnapshot, comments };
-    diffPreviewText.value = buildDiffCommentPrompt(state, comments, baseSnapshot, headSnapshot);
+    diffPreviewDraft = { sessionId, state, comparisonKey: key, comments };
+    diffPreviewText.value = buildDiffCommentPrompt(state, comments);
     diffPreviewStatus.textContent = diffCommentPreviewStatus(comments.length);
     diffPreviewOverlay.hidden = false;
     diffPreviewText.scrollTop = 0;
@@ -833,18 +802,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function clearFlushedDiffComments(
     sessionId: string,
-    baseSnapshot: DiffSnapshotSummary,
-    headSnapshot: DiffSnapshotSummary | null,
+    key: string,
   ): void {
-    diffComments.set(sessionId, removeSelectedDiffComments(diffComments.get(sessionId) ?? [], baseSnapshot, headSnapshot));
+    diffAnnotations.set(sessionId, removeSelectedDiffComments(diffAnnotations.get(sessionId) ?? [], key));
     renderActiveSession();
   }
 
   function sendDiffPreviewDraft(): void {
     const draft = diffPreviewDraft;
     if (!draft) return;
-    const text = buildDiffCommentPrompt(draft.state, draft.comments, draft.baseSnapshot, draft.headSnapshot);
-    const clearComments = () => clearFlushedDiffComments(draft.sessionId, draft.baseSnapshot, draft.headSnapshot);
+    const text = buildDiffCommentPrompt(draft.state, draft.comments);
+    const clearComments = () => clearFlushedDiffComments(draft.sessionId, draft.comparisonKey);
     if (projections.get(draft.sessionId)?.isBusy) {
       busyPromptDraft = createBusyPromptDraft({
         sessionId: draft.sessionId,
@@ -1144,10 +1112,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const projection = projections.get(activeSessionId);
     const summary = sessions.find(session => session.sessionId === activeSessionId);
     const isBusy = projection?.isBusy ?? summary?.status === "busy";
-    const hasPendingPlan = hasPendingPlanReview(activeSessionId);
-    if (hasPendingPlan) {
-      composerStatus.textContent = "Plan review waiting";
-    } else if (isBusy) {
+    if (isBusy) {
       composerStatus.textContent = "Agent busy";
     } else if (pendingImages.length > 0) {
       composerStatus.textContent = `${pendingImages.length} image${pendingImages.length === 1 ? "" : "s"} attached`;
@@ -1363,45 +1328,73 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     renderActiveSession();
   }
 
+  type MobileDiffSelection = {
+    repoRoot: string | null;
+    base: string;
+    head: string;
+    stat: boolean;
+  };
+
+  function resolveMobileDiffRepoRoot(
+    sessionId: string,
+    projection: SessionProjection | undefined,
+    state: RepoDiffState | undefined,
+  ): string | null {
+    const explicit = diffSelectedRepos.get(sessionId);
+    if (explicit) return explicit;
+    const repoRoots = diffRepoRoots(state);
+    const inferred = inferDiffRepoRootFromCwd(projection?.summary.cwd ?? undefined, repoRoots);
+    const fallback = inferred ?? state?.repoRoot ?? projection?.summary.worktree?.path ?? projection?.summary.cwd ?? serverConfig?.defaultCwd ?? null;
+    if (fallback) diffSelectedRepos.set(sessionId, fallback);
+    return fallback;
+  }
+
   function resolveMobileDiffSelection(
     sessionId: string,
     projection: SessionProjection | undefined,
     state: RepoDiffState | undefined,
-  ): DiffSelection {
-    const selection = deriveDiffSelection({
-      state,
-      cwd: projection?.summary.cwd ?? undefined,
-      explicitRepoRoot: diffSelectedRepos.get(sessionId),
-      explicitSnapshotEntryId: diffSelectedSnapshots.get(sessionId),
-      headSelection: diffHeadSelectionFromEntryId(diffSelectedHeads.get(sessionId), diffSelectedHeads.has(sessionId)),
-      stat: diffStatModes.get(sessionId),
-      defaultStat: true,
-    });
-    if (selection.repoRoot) diffSelectedRepos.set(sessionId, selection.repoRoot);
-    else diffSelectedRepos.delete(sessionId);
-    return selection;
+  ): MobileDiffSelection {
+    const repoRoot = resolveMobileDiffRepoRoot(sessionId, projection, state);
+    return {
+      repoRoot,
+      base: diffBaseRefs.get(sessionId) ?? (state?.comparison.base.kind === "gitRef" ? state.comparison.base.input : "HEAD"),
+      head: diffHeadRefs.get(sessionId) ?? (state?.comparison.head.kind === "gitRef" ? state.comparison.head.input : "HEAD"),
+      stat: diffStatModes.get(sessionId) ?? (state?.comparison.mode === "stat"),
+    };
   }
 
   function requestMobileDiffState(
     sessionId: string,
-    overrides: { selector?: string; headSelector?: string | null; stat?: boolean } = {},
+    overrides: { repoRoot?: string; base?: string; head?: string; stat?: boolean } = {},
   ): void {
     const projection = projections.get(sessionId);
     if (!projection || diffLoadingSessions.has(sessionId)) return;
     const state = diffStates.get(sessionId);
     const selection = resolveMobileDiffSelection(sessionId, projection, state);
-    const selector = overrides.selector !== undefined ? overrides.selector : selection.selectedSnapshot?.entryId;
-    const headSelector = overrides.headSelector !== undefined ? overrides.headSelector : selection.headSnapshot?.entryId ?? null;
+    const repoRoot = overrides.repoRoot?.trim() || selection.repoRoot;
+    if (!repoRoot) {
+      diffErrors.set(sessionId, "Diff requires a repository root.");
+      renderDiffView(projection);
+      return;
+    }
+    const base = overrides.base ?? selection.base;
+    const head = overrides.head ?? selection.head;
     const stat = overrides.stat ?? selection.stat;
-
-    if (selector) diffSelectedSnapshots.set(sessionId, selector);
-    diffSelectedHeads.set(sessionId, headSelector);
+    diffSelectedRepos.set(sessionId, repoRoot);
+    diffBaseRefs.set(sessionId, base);
+    diffHeadRefs.set(sessionId, head);
     diffStatModes.set(sessionId, stat);
     diffErrors.delete(sessionId);
     diffLoadingSessions.add(sessionId);
-    const message: ClientMessage = { type: "diff.refresh", sessionId, stat };
-    if (selector) message.selector = selector;
-    if (headSelector) message.headSelector = headSelector;
+    const message: ClientMessage = {
+      type: "diff.compare",
+      sessionId,
+      repoRoot,
+      base: { kind: "gitRef", value: base || "HEAD" },
+      head: { kind: "gitRef", value: head || "HEAD" },
+      mode: stat ? "stat" : "full",
+      reviewMode: "range",
+    };
     send(message);
     renderDiffView(projection);
   }
@@ -1465,19 +1458,34 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "dialog.request":
         handleDialogRequest(message);
         break;
-      case "plan.review":
-        handlePlanReview(message);
-        break;
       case "model.list":
       case "model.changed":
+      case "plan.review":
       case "raw.omp":
         break;
-      case "diff.state":
-        diffLoadingSessions.delete(message.sessionId);
-        diffErrors.delete(message.sessionId);
-        diffStates.set(message.sessionId, message.state);
-        diffStatModes.set(message.sessionId, message.state.stat);
-        if (message.sessionId === activeSessionId) renderActiveSession();
+      case "diff.state": {
+        const sessionId = message.sessionId ?? activeSessionId;
+        if (!sessionId) break;
+        diffLoadingSessions.delete(sessionId);
+        diffErrors.delete(sessionId);
+        diffStates.set(sessionId, message.state);
+        diffSelectedRepos.set(sessionId, message.state.repoRoot);
+        if (message.state.comparison.base.kind === "gitRef") diffBaseRefs.set(sessionId, message.state.comparison.base.input);
+        if (message.state.comparison.head.kind === "gitRef") diffHeadRefs.set(sessionId, message.state.comparison.head.input);
+        diffStatModes.set(sessionId, message.state.comparison.mode === "stat");
+        if (sessionId === activeSessionId) renderActiveSession();
+        break;
+      }
+      case "diff.error": {
+        const sessionId = message.sessionId ?? activeSessionId;
+        if (sessionId) {
+          diffLoadingSessions.delete(sessionId);
+          diffErrors.set(sessionId, message.message);
+          if (sessionId === activeSessionId) renderActiveSession();
+        }
+        break;
+      }
+      case "diff.reviewWorktree.state":
         break;
       case "control.reply":
       case "control.status":
@@ -1596,9 +1604,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
     const comments = reviewCommentsForMessage(sessionId, message.id);
     if (comments.length === 0) return;
-    const promptText = buildTranscriptReviewPrompt(message, comments);
-    reviewPreviewDraft = { sessionId, message, comments, promptText };
-    reviewPreviewText.value = promptText;
+    reviewPreviewDraft = { sessionId, message, comments };
+    reviewPreviewText.value = buildTranscriptReviewPrompt(message, comments);
     reviewPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
     reviewPreviewOverlay.hidden = false;
     reviewPreviewText.scrollTop = 0;
@@ -1618,7 +1625,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     closeReviewPreview();
     const accepted = send(createPromptSendMessage(
       draft.sessionId,
-      draft.promptText ?? buildTranscriptReviewPrompt(draft.message, draft.comments),
+      buildTranscriptReviewPrompt(draft.message, draft.comments),
       [],
     ));
     if (!accepted) return;
@@ -1638,31 +1645,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
       onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
       onFlush: (target: TranscriptMessage) => flushTranscriptReviewComments(sessionId, target),
-    };
-  }
-
-  function flushPlanReviewComments(sessionId: string, review: PendingPlanReview): void {
-    const message = planReviewTranscriptMessage(review);
-    const comments = reviewCommentsForMessage(sessionId, message.id);
-    if (comments.length === 0) return;
-    const promptText = buildPlanReviewPrompt(review, comments);
-    reviewPreviewDraft = { sessionId, message, comments, promptText };
-    reviewPreviewText.value = promptText;
-    reviewPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
-    reviewPreviewOverlay.hidden = false;
-    reviewPreviewText.scrollTop = 0;
-    reviewPreviewSend.focus();
-  }
-
-  function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
-    const message = planReviewTranscriptMessage(review);
-    return {
-      active: transcriptReviewActiveMessages.get(sessionId) === message.id,
-      comments: reviewCommentsForMessage(sessionId, message.id),
-      onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
-      onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
-      onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
-      onFlush: () => flushPlanReviewComments(sessionId, review),
     };
   }
 
@@ -1687,15 +1669,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     const isBusy = projection?.isBusy ?? summary.status === "busy";
-    const hasPendingPlan = hasPendingPlanReview(activeSessionId);
     sessionTitle.textContent = summary.title || `Session ${shortId(summary.sessionId)}`;
     sessionMeta.hidden = true;
     sessionMeta.textContent = "";
     updateMobileStatusBar(projection, summary);
-    promptInput.disabled = !projection || isBusy || hasPendingPlan;
-    sendButton.disabled = !projection || isBusy || hasPendingPlan;
-    imageInput.disabled = !projection || isBusy || hasPendingPlan;
-    promptInput.placeholder = hasPendingPlan ? "Choose Approve and execute or Refine plan first…" : isBusy ? "Agent is busy…" : "Send a prompt…";
+    promptInput.disabled = !projection || isBusy;
+    sendButton.disabled = !projection || isBusy;
+    imageInput.disabled = !projection || isBusy;
+    promptInput.placeholder = isBusy ? "Agent is busy…" : "Send a prompt…";
     updateComposerStatus();
     renderTranscript(projection);
     renderDiffView(projection);
@@ -1728,19 +1709,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
     for (const phaseCard of renderTodoCards(projection.todoPhases ?? [])) {
       fragment.append(phaseCard);
-    }
-
-    const visiblePlanReview = visiblePlanReviews.get(projection.summary.sessionId);
-    if (visiblePlanReview) {
-      fragment.append(renderPlanReviewCard(
-        visiblePlanReview.review,
-        {
-          onApprove: approvePendingPlanReview,
-          onRefine: refinePendingPlanReview,
-        },
-        visiblePlanReview.mode,
-        visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,
-      ));
     }
 
     if (!fragment.hasChildNodes()) {
@@ -1808,9 +1776,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function renderDiffControls(sessionId: string, projection: SessionProjection, state: RepoDiffState): void {
     const selection = resolveMobileDiffSelection(sessionId, projection, state);
-    const roots = diffRepoRoots(state);
-    const currentComments = diffComments.get(sessionId) ?? [];
-    const selectedComments = selectedDiffComments(currentComments, selection.selectedSnapshot, selection.headSnapshot);
+    const key = comparisonKey(state);
+    const currentAnnotations = diffAnnotations.get(sessionId) ?? [];
+    const selectedComments = selectedDiffAnnotations(currentAnnotations, key, "comment");
     const controls = diffView.ownerDocument.createElement("section");
     controls.className = "mobile-diff-controls";
 
@@ -1819,57 +1787,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const meta = diffView.ownerDocument.createElement("p");
     meta.className = "mobile-diff-meta";
     meta.textContent = [
-      selection.selectedSnapshot ? `Base: ${selection.selectedSnapshot.label}` : "Base: current state",
-      selection.headSnapshot ? `Compare: ${selection.headSnapshot.label}` : "Compare: working tree",
+      `Base: ${selection.base}`,
+      `Head: ${selection.head}`,
       selection.stat ? "Stat" : "Full diff",
     ].join(" · ");
     controls.append(title, meta);
 
     const fields = diffView.ownerDocument.createElement("div");
     fields.className = "mobile-diff-fields";
-    if (roots.length > 1) {
-      fields.append(renderDiffSelect(
-        "Repository",
-        roots.map(root => ({ value: root, label: formatDiffRepoLabel(root), title: root })),
-        selection.repoRoot ?? "",
-        diffLoadingSessions.has(sessionId),
-        value => {
-          diffSelectedRepos.set(sessionId, value);
-          diffSelectedSnapshots.delete(sessionId);
-          diffSelectedHeads.set(sessionId, null);
-          const nextSnapshots = diffSnapshotsForRepo(state, value);
-          requestMobileDiffState(sessionId, { selector: nextSnapshots[nextSnapshots.length - 1]?.entryId, headSelector: null });
-        },
-      ));
-    }
-
-    if (selection.snapshots.length > 0) {
-      fields.append(renderDiffSelect(
-        "Base",
-        selection.snapshots.map(snapshot => ({
-          value: snapshot.entryId,
-          label: snapshot.label,
-          title: `${snapshot.kind} · ${new Date(snapshot.createdAt).toLocaleString()}`,
-        })),
-        selection.selectedSnapshot?.entryId ?? "",
-        diffLoadingSessions.has(sessionId),
-        value => requestMobileDiffState(sessionId, { selector: value }),
-      ));
-      fields.append(renderDiffSelect(
-        "Compare",
-        [
-          { value: "", label: "Working tree", title: "Current working tree" },
-          ...selection.snapshots.map(snapshot => ({
-            value: snapshot.entryId,
-            label: snapshot.label,
-            title: `${snapshot.kind} · ${new Date(snapshot.createdAt).toLocaleString()}`,
-          })),
-        ],
-        selection.headSnapshot?.entryId ?? "",
-        diffLoadingSessions.has(sessionId),
-        value => requestMobileDiffState(sessionId, { headSelector: value || null }),
-      ));
-    }
+    fields.append(renderDiffInput("Repository", selection.repoRoot ?? "", diffLoadingSessions.has(sessionId), value => requestMobileDiffState(sessionId, { repoRoot: value })));
+    fields.append(renderDiffInput("Base", selection.base, diffLoadingSessions.has(sessionId), value => requestMobileDiffState(sessionId, { base: value })));
+    fields.append(renderDiffInput("Head", selection.head, diffLoadingSessions.has(sessionId), value => requestMobileDiffState(sessionId, { head: value })));
 
     const actions = diffView.ownerDocument.createElement("div");
     actions.className = "mobile-diff-actions";
@@ -1888,19 +1816,37 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const previewButton = renderDiffAction(
       "Preview comments",
       false,
-      diffLoadingSessions.has(sessionId) || !selection.selectedSnapshot || selectedComments.length === 0,
-      () => openDiffPreview(sessionId, state, selection.selectedSnapshot, selection.headSnapshot),
+      diffLoadingSessions.has(sessionId) || selectedComments.length === 0,
+      () => openDiffPreview(sessionId, state),
     );
     const flushButton = renderDiffAction(
       `Preview & flush (${selectedComments.length})`,
       false,
-      diffLoadingSessions.has(sessionId) || !selection.selectedSnapshot || selectedComments.length === 0,
-      () => openDiffPreview(sessionId, state, selection.selectedSnapshot, selection.headSnapshot),
+      diffLoadingSessions.has(sessionId) || selectedComments.length === 0,
+      () => openDiffPreview(sessionId, state),
     );
     actions.append(statButton, fullButton, refreshButton, previewButton, flushButton);
 
     controls.append(fields, actions);
     diffView.append(controls);
+  }
+
+  function renderDiffInput(
+    labelText: string,
+    value: string,
+    disabled: boolean,
+    onCommit: (value: string) => void,
+  ): HTMLElement {
+    const label = diffView.ownerDocument.createElement("label");
+    label.className = "mobile-diff-field";
+    const labelSpan = diffView.ownerDocument.createElement("span");
+    labelSpan.textContent = labelText;
+    const input = diffView.ownerDocument.createElement("input");
+    input.value = value;
+    input.disabled = disabled;
+    input.addEventListener("change", () => onCommit(input.value));
+    label.append(labelSpan, input);
+    return label;
   }
 
   function renderDiffSelect(
@@ -1939,30 +1885,30 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return button;
   }
 
-  function renderMobileDiffBody(state: RepoDiffState, sessionId: string, projection: SessionProjection): void {
-    const selection = resolveMobileDiffSelection(sessionId, projection, state);
-    const comments = diffComments.get(sessionId) ?? [];
-    const selectedComments = selectedDiffComments(comments, selection.selectedSnapshot, selection.headSnapshot);
+  function renderMobileDiffBody(state: RepoDiffState, sessionId: string, _projection: SessionProjection): void {
+    const key = comparisonKey(state);
+    const annotations = diffAnnotations.get(sessionId) ?? [];
+    const selectedAnnotations = selectedDiffAnnotations(annotations, key);
     const rows = parseDiffRows(state.diff);
-    const fileSummaries = summarizeDiffFiles(rows, comments, selection.selectedSnapshot, selection.headSnapshot);
+    const fileSummaries = summarizeDiffFiles(rows, annotations, key);
     if (fileSummaries.length > 0) renderMobileDiffFiles(fileSummaries);
-    if (!rows.some(row => row.type === "file" || row.type === "hunk" || (row.type === "line" && row.location.filePath))) {
+    if (!rows.some(row => row.type === "file" || row.type === "hunk" || (row.type === "line" && row.location.newPath))) {
       const pre = diffView.ownerDocument.createElement("pre");
       pre.className = "mobile-diff-pre";
       pre.textContent = state.diff;
       diffView.append(pre);
-      renderMobileDiffComments(selectedComments);
+      renderMobileDiffComments(selectedAnnotations);
       return;
     }
 
     const diff = diffView.ownerDocument.createElement("div");
     diff.className = "mobile-diff-lines";
     for (const row of rows) {
-      const line = renderMobileDiffRow(row, sessionId, selection.selectedSnapshot, selection.headSnapshot, comments);
+      const line = renderMobileDiffRow(row, sessionId, state, key, annotations);
       if (line) diff.append(line);
     }
     diffView.append(diff);
-    renderMobileDiffComments(selectedComments);
+    renderMobileDiffComments(selectedAnnotations);
   }
 
   function renderMobileDiffFiles(files: ReturnType<typeof summarizeDiffFiles>): void {
@@ -1990,9 +1936,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function renderMobileDiffRow(
     row: ParsedDiffRow,
     sessionId: string,
-    baseSnapshot: DiffSnapshotSummary | null,
-    headSnapshot: DiffSnapshotSummary | null,
-    comments: DiffComment[],
+    state: RepoDiffState,
+    key: string,
+    annotations: DiffReviewAnnotation[],
   ): HTMLElement | null {
     if (row.type === "meta" && !row.text.trim()) return null;
     if (row.type !== "line") {
@@ -2007,7 +1953,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return line;
     }
 
-    const lineComments = commentsForDiffLocation(comments, baseSnapshot, headSnapshot, row.location);
+    const lineAnnotations = annotationsForDiffLocation(annotations, key, row.location);
+    const lineComments = lineAnnotations.filter(annotation => annotation.kind === "comment");
+    const lineQuestions = lineAnnotations.filter(annotation => annotation.kind === "question");
     const wrap = diffView.ownerDocument.createElement("div");
     wrap.className = "mobile-diff-line-wrap";
     const line = diffView.ownerDocument.createElement("div");
@@ -2017,24 +1965,27 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     commentButton.className = `mobile-diff-comment-button${lineComments.length > 0 ? " has-comments" : ""}`;
     commentButton.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
     commentButton.title = "Comment on this diff line";
-    commentButton.disabled = !baseSnapshot;
-    commentButton.addEventListener("click", () => {
-      if (baseSnapshot) openDiffCommentEditor(sessionId, baseSnapshot, headSnapshot, row.location);
-    });
+    commentButton.addEventListener("click", () => openDiffCommentEditor(sessionId, state, row.location, "comment"));
     const gutter = diffView.ownerDocument.createElement("span");
     gutter.className = "mobile-diff-gutter";
     gutter.textContent = String(row.location.newLine ?? row.location.oldLine ?? "");
     const text = diffView.ownerDocument.createElement("code");
     text.textContent = row.location.text;
-    line.append(commentButton, gutter, text);
+    const questionButton = diffView.ownerDocument.createElement("button");
+    questionButton.type = "button";
+    questionButton.className = `mobile-diff-question-button${lineQuestions.length > 0 ? " has-questions" : ""}`;
+    questionButton.textContent = lineQuestions.length > 0 ? String(lineQuestions.length) : "?";
+    questionButton.title = "Ask the agent about this diff line";
+    questionButton.addEventListener("click", () => openDiffCommentEditor(sessionId, state, row.location, "question"));
+    line.append(commentButton, gutter, text, questionButton);
     wrap.append(line);
-    if (lineComments.length > 0) {
+    if (lineAnnotations.length > 0) {
       const thread = diffView.ownerDocument.createElement("div");
       thread.className = "mobile-diff-inline-comments";
-      for (const comment of lineComments) {
+      for (const annotation of lineAnnotations) {
         const item = diffView.ownerDocument.createElement("div");
-        item.className = "mobile-diff-inline-comment";
-        item.textContent = comment.text;
+        item.className = `mobile-diff-inline-comment mobile-diff-inline-${annotation.kind}`;
+        item.textContent = `${annotation.kind === "question" ? "Question" : "Comment"}: ${annotation.text}`;
         thread.append(item);
       }
       wrap.append(thread);
@@ -2042,21 +1993,21 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return wrap;
   }
 
-  function renderMobileDiffComments(comments: DiffComment[]): void {
+  function renderMobileDiffComments(comments: DiffReviewAnnotation[]): void {
     const section = diffView.ownerDocument.createElement("section");
     section.className = "mobile-diff-comments";
     const title = diffView.ownerDocument.createElement("strong");
-    title.textContent = "Comments";
+    title.textContent = "Review annotations";
     section.append(title);
     if (comments.length === 0) {
       const empty = diffView.ownerDocument.createElement("p");
       empty.className = "mobile-empty-state";
-      empty.textContent = "No comments on this diff yet.";
+      empty.textContent = "No annotations on this diff yet.";
       section.append(empty);
     } else {
       for (const comment of comments) {
         const item = diffView.ownerDocument.createElement("article");
-        item.className = "mobile-diff-comment";
+        item.className = `mobile-diff-comment mobile-diff-${comment.kind}`;
         const location = diffView.ownerDocument.createElement("code");
         location.textContent = formatDiffLocation(comment);
         const body = diffView.ownerDocument.createElement("p");

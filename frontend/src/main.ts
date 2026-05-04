@@ -46,36 +46,29 @@ import {
 } from "./sessionList";
 import { applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
-  deriveDiffSelection,
-  diffHeadSelectionFromEntryId,
+  comparisonKey,
   diffRepoRoots,
-  diffSnapshotsForRepo,
   formatDiffRepoLabel,
+  inferDiffRepoRootFromCwd,
   parseDiffRows,
+  resolvedRefLabel,
   summarizeDiffFiles,
-  type DiffSelection,
 } from "./diffState";
 import {
+  annotationsForDiffLocation,
   buildDiffCommentPrompt,
-  commentsForDiffLocation,
-  createDiffComment,
+  buildDiffQuestionPrompt,
+  checkoutTargetForDiffLocation,
+  createDiffReviewAnnotation,
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
+  formatDiffLineLocation,
   formatDiffLocation,
+  pathForDiffLocation,
   removeSelectedDiffComments,
-  selectedDiffComments,
+  selectedDiffAnnotations,
   type DiffPreviewDraft,
-} from "./diffComments";
-import {
-  buildCodeCommentPrompt,
-  codeCommentFlushEditorText,
-  codeCommentPreviewStatus,
-  createCodeFileComment,
-  removeSelectedCodeComments,
-  selectedCodeComments,
-  type CodeFileComment,
-  type CodePreviewDraft,
-} from "./codeComments";
+} from "./diffReview";
 import {
   deriveWorktreeCreateView,
   resolveSessionCreateMessage,
@@ -103,16 +96,6 @@ import {
   type TranscriptReviewLine,
 } from "./transcriptReview";
 import {
-  buildPlanReviewPrompt,
-  createApprovePlanReviewMessage,
-  pendingPlanReviewFromMessage,
-  planReviewRenderKey,
-  renderPlanReviewCard,
-  planReviewTranscriptMessage,
-  type PendingPlanReview,
-  type VisiblePlanReview,
-} from "./planReview";
-import {
   parentCodePath,
   renderCodeViewer,
   type CodeViewerState,
@@ -125,9 +108,10 @@ import type {
   ControlCandidate,
   ControlStatusProjection,
   ControlSuggestedAction,
-  DiffComment,
+  DiffCheckoutTarget,
+  DiffReviewAnnotation,
   DiffLineLocation,
-  DiffSnapshotSummary,
+  DiffReviewWorktree,
   FrontendControlAction,
   FrontendUiSnapshot,
   ModelSummary,
@@ -333,6 +317,10 @@ app.innerHTML = `
         </div>
         <button id="cwdPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
       </header>
+      <div class="modal-tabs" role="tablist" aria-label="New session mode">
+        <button id="cwdPickerSessionTab" type="button" class="active" role="tab" aria-selected="true">Session</button>
+        <button id="cwdPickerDiffTab" type="button" role="tab" aria-selected="false">Diff</button>
+      </div>
       <div class="cwd-picker-body">
         <label for="cwdPickerNameInput">Session name</label>
         <input id="cwdPickerNameInput" autocomplete="off" spellcheck="false" placeholder="my-project" />
@@ -359,6 +347,24 @@ app.innerHTML = `
           <p class="field-help">Must be a valid Git branch name. Leave blank to use the selected base ref directly.</p>
           <p id="cwdPickerWorktreeSummary" class="field-help worktree-summary"></p>
         </div>
+      </div>
+      <div id="cwdPickerDiffBody" class="cwd-picker-body" hidden>
+        <label for="cwdPickerDiffRepo">Repository root</label>
+        <input id="cwdPickerDiffRepo" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+        <label for="cwdPickerDiffBase">Base ref</label>
+        <input id="cwdPickerDiffBase" autocomplete="off" spellcheck="false" placeholder="main" />
+        <label for="cwdPickerDiffHead">Head ref</label>
+        <input id="cwdPickerDiffHead" autocomplete="off" spellcheck="false" placeholder="feature/my-branch" />
+        <label for="cwdPickerDiffMode">Diff mode</label>
+        <select id="cwdPickerDiffMode">
+          <option value="full">Full</option>
+          <option value="stat">Stat</option>
+        </select>
+        <label class="checkbox-row" for="cwdPickerDiffAgentSession">
+          <input id="cwdPickerDiffAgentSession" type="checkbox" checked />
+          <span>Create/attach agent session for questions</span>
+        </label>
+        <p class="field-help">Questions from the diff use the normal prompt channel of the backing session.</p>
       </div>
       <footer class="modal-footer">
         <span id="cwdPickerStatus" class="modal-status" aria-live="polite" aria-atomic="true"></span>
@@ -536,6 +542,14 @@ const cwdPickerWorktreeSourceRepo = requireElement<HTMLInputElement>("cwdPickerW
 const cwdPickerWorktreeBase = requireElement<HTMLInputElement>("cwdPickerWorktreeBase");
 const cwdPickerWorktreeBranch = requireElement<HTMLInputElement>("cwdPickerWorktreeBranch");
 const cwdPickerWorktreeSummary = requireElement<HTMLParagraphElement>("cwdPickerWorktreeSummary");
+const cwdPickerSessionTab = requireElement<HTMLButtonElement>("cwdPickerSessionTab");
+const cwdPickerDiffTab = requireElement<HTMLButtonElement>("cwdPickerDiffTab");
+const cwdPickerDiffBody = requireElement<HTMLDivElement>("cwdPickerDiffBody");
+const cwdPickerDiffRepo = requireElement<HTMLInputElement>("cwdPickerDiffRepo");
+const cwdPickerDiffBase = requireElement<HTMLInputElement>("cwdPickerDiffBase");
+const cwdPickerDiffHead = requireElement<HTMLInputElement>("cwdPickerDiffHead");
+const cwdPickerDiffMode = requireElement<HTMLSelectElement>("cwdPickerDiffMode");
+const cwdPickerDiffAgentSession = requireElement<HTMLInputElement>("cwdPickerDiffAgentSession");
 const deleteSessionOverlay = requireElement<HTMLDivElement>("deleteSessionOverlay");
 const deleteSessionClose = requireElement<HTMLButtonElement>("deleteSessionClose");
 const deleteSessionMessage = requireElement<HTMLParagraphElement>("deleteSessionMessage");
@@ -567,9 +581,7 @@ type TranscriptPreviewDraft = {
   sessionId: string;
   message: TranscriptMessage;
   comments: TranscriptReviewComment[];
-  promptText?: string;
 };
-type SessionCodeComments = Map<string, CodeFileComment[]>;
 type SessionNotice = { level: string; text: string };
 type ControlChatMessage = {
   role: "user" | "assistant" | "system";
@@ -594,6 +606,8 @@ let pendingCreatedSessionBaseline: Set<string> | null = null;
 let pendingSessionSelectionId: string | null = null;
 let cwdPickerCreatePending = false;
 let cwdPickerPendingRequestId: string | null = null;
+let cwdPickerMode: "session" | "diff" = "session";
+let pendingDiffCreate: { repoRoot: string; base: string; head: string; mode: "full" | "stat" } | null = null;
 let deleteSessionTarget: SessionDeleteView | null = null;
 let cwdPickerSourceRepoAutofill = true;
 let cwdPickerDirectoryAutofill = true;
@@ -626,10 +640,13 @@ let activeCategoryCombobox: CategoryCombobox;
 let projections = new Map<string, SessionProjection>();
 const diffStates = new Map<string, RepoDiffState>();
 const diffSelectedRepos = new Map<string, string>();
-const diffSelectedSnapshots = new Map<string, string>();
-const diffSelectedHeads = new Map<string, string | null>();
-const diffComments = new Map<string, DiffComment[]>();
-const codeComments = new Map<string, SessionCodeComments>();
+const diffBaseRefs = new Map<string, string>();
+const diffHeadRefs = new Map<string, string>();
+const diffModes = new Map<string, "full" | "stat">();
+const diffReviewModes = new Map<string, "range" | "commit">();
+const diffSelectedCommits = new Map<string, string>();
+const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
+const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
@@ -638,11 +655,9 @@ let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
-let codePreviewDraft: CodePreviewDraft | null = null;
 let transcriptPreviewDraft: TranscriptPreviewDraft | null = null;
 const transcriptReviewActiveMessages = new Map<string, string>();
 const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
-const visiblePlanReviews = new Map<string, VisiblePlanReview>();
 const PROMPT_HISTORY_LIMIT = 100;
 let modelPickerSessionId: string | null = null;
 let modelPickerModels: ModelSummary[] = [];
@@ -844,6 +859,8 @@ modelPickerList.addEventListener("keydown", handleModelPickerKeydown);
 cwdPickerClose.addEventListener("click", closeCwdPicker);
 cwdPickerCancel.addEventListener("click", closeCwdPicker);
 cwdPickerCreate.addEventListener("click", submitCwdPicker);
+cwdPickerSessionTab.addEventListener("click", () => setCwdPickerMode("session"));
+cwdPickerDiffTab.addEventListener("click", () => setCwdPickerMode("diff"));
 cwdPickerWorktreeEnabled.addEventListener("change", syncCwdPickerWorktreeFields);
 cwdPickerNameInput.addEventListener("input", applyCwdPickerAutofill);
 cwdPickerInput.addEventListener("input", () => {
@@ -1206,6 +1223,16 @@ function handleServerMessage(message: ServerMessage): void {
         if (createdByPendingRequest && cwdPickerCreatePending) {
           setCwdPickerCreatePending(false);
           closeCwdPicker();
+          if (pendingDiffCreate) {
+            const diff = pendingDiffCreate;
+            pendingDiffCreate = null;
+            diffSelectedRepos.set(message.sessionId, diff.repoRoot);
+            diffBaseRefs.set(message.sessionId, diff.base);
+            diffHeadRefs.set(message.sessionId, diff.head);
+            diffModes.set(message.sessionId, diff.mode);
+            desktopDockview?.activatePanel("diffs");
+            requestDiffState(message.sessionId, { repoRoot: diff.repoRoot, base: diff.base, head: diff.head, mode: diff.mode, reviewMode: "range", commitOid: null });
+          }
         }
       } else {
         unreadSessions.add(message.sessionId);
@@ -1214,32 +1241,58 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     }
     case "diff.state": {
-      diffLoadingSessions.delete(message.sessionId);
-      diffErrors.delete(message.sessionId);
-      diffStates.set(message.sessionId, message.state);
-      const projection = projections.get(message.sessionId);
-      const selection = deriveCurrentDiffSelection(message.sessionId, projection, message.state);
-      if (selection.selectedSnapshot) diffSelectedSnapshots.set(message.sessionId, selection.selectedSnapshot.entryId);
-      else diffSelectedSnapshots.delete(message.sessionId);
-      diffSelectedHeads.set(message.sessionId, selection.headSnapshot?.entryId ?? null);
-      if (
-        selection.repoRoot &&
-        selection.selectedSnapshot &&
-        message.state.selectedSnapshot?.repoRoot !== selection.repoRoot
-      ) {
-        requestDiffState(message.sessionId, selection.selectedSnapshot.entryId, selection.headSnapshot?.entryId ?? null);
-        break;
-      }
+      const sessionId = message.sessionId ?? activeSessionId;
+      if (!sessionId) break;
+      diffLoadingSessions.delete(sessionId);
+      diffErrors.delete(sessionId);
+      diffStates.set(sessionId, message.state);
+      diffSelectedRepos.set(sessionId, message.state.repoRoot);
+      if (message.state.comparison.base.kind === "gitRef") diffBaseRefs.set(sessionId, message.state.comparison.base.input);
+      if (message.state.comparison.head.kind === "gitRef") diffHeadRefs.set(sessionId, message.state.comparison.head.input);
+      diffModes.set(sessionId, message.state.comparison.mode);
+      diffReviewModes.set(sessionId, message.state.reviewProgress.mode);
+      if (message.state.reviewProgress.selectedCommitOid) diffSelectedCommits.set(sessionId, message.state.reviewProgress.selectedCommitOid);
+      if (message.state.reviewWorktree) diffReviewWorktrees.set(message.state.reviewWorktree.sourceRepoRoot, message.state.reviewWorktree);
       markDiffsViewDirty();
-      if (message.sessionId === activeSessionId && desktopDockview?.isPanelActive("diffs")) {
-        desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(message.sessionId)));
+      if (sessionId === activeSessionId && desktopDockview?.isPanelActive("diffs")) {
+        desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
+      }
+      break;
+    }
+    case "diff.error": {
+      const sessionId = message.sessionId ?? activeSessionId;
+      if (sessionId) {
+        diffLoadingSessions.delete(sessionId);
+        diffErrors.set(sessionId, message.message);
+        markDiffsViewDirty();
+        if (sessionId === activeSessionId && desktopDockview?.isPanelActive("diffs")) {
+          desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
+        }
+      } else {
+        appendLog(`diff error: ${message.message}`);
+      }
+      break;
+    }
+    case "diff.reviewWorktree.state": {
+      diffReviewWorktrees.set(message.worktree.sourceRepoRoot, message.worktree);
+      if (pendingCodeOpenPath) {
+        codeSessionId = null;
+        codeWorkspace = null;
+        codeLoadingWorkspace = true;
+        desktopDockview?.activatePanel("code");
+        send({ type: "code.workspace.openRoot", root: message.worktree.path, source: "reviewWorktree", reviewWorktreeId: message.worktree.id });
+      }
+      const sessionId = activeSessionId;
+      if (sessionId) {
+        markDiffsViewDirty();
+        renderDiffsViewIfActive(sessionId);
       }
       break;
     }
     case "code.workspace.ready":
       codeLoadingWorkspace = false;
       codeWorkspace = message.workspace;
-      codeSessionId = message.workspace.sessionId;
+      codeSessionId = message.workspace.sessionId ?? null;
       codeTreePath = "";
       codeTreeEntries = [];
       codeFile = null;
@@ -1301,9 +1354,30 @@ function handleServerMessage(message: ServerMessage): void {
         renderCodePanelIfNeeded(true);
       }
       break;
-    case "plan.review":
-      handlePlanReview(message);
+    case "plan.review": {
+      const preview = message.content.length > 6000 ? `${message.content.slice(0, 6000)}\n\n… truncated …` : message.content;
+      const approved = window.confirm(
+        `Plan ready${message.title ? `: ${message.title}` : ""}\n\n${preview}\n\nApprove and execute this plan? Press Cancel to stay in plan mode.`,
+      );
+      if (approved) {
+        send({
+          type: "raw.rpc",
+          sessionId: message.sessionId,
+          command: {
+            type: "approve_plan_mode",
+            planFilePath: message.planFilePath,
+            finalPlanFilePath: message.finalPlanFilePath,
+          },
+        });
+      } else {
+        appendSessionNotice(message.sessionId, {
+          level: "info",
+          text: "Stayed in plan mode. Type a refinement prompt to continue planning.",
+        });
+        render();
+      }
       break;
+    }
     case "session.exited":
       appendLog(`Session ${message.sessionId} exited with code ${message.code ?? "unknown"}.`);
       render();
@@ -1534,39 +1608,6 @@ function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" 
   } else {
     unreadSessions.add(message.sessionId);
     renderSessions();
-  }
-}
-
-function hasPendingPlanReview(sessionId: string): boolean {
-  return visiblePlanReviews.get(sessionId)?.mode === "pending";
-}
-
-function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
-  visiblePlanReviews.set(message.sessionId, { review: pendingPlanReviewFromMessage(message), mode: "pending" });
-  appendLog(`[${message.sessionId}] plan ready for review`);
-  if (message.sessionId === activeSessionId && workspaceMode === "session") {
-    markTranscriptViewDirty();
-    render();
-  } else {
-    unreadSessions.add(message.sessionId);
-    renderSessions();
-  }
-}
-
-function approvePendingPlanReview(review: PendingPlanReview): void {
-  const accepted = send(createApprovePlanReviewMessage(review));
-  if (!accepted) return;
-  visiblePlanReviews.delete(review.sessionId);
-  markTranscriptViewDirty();
-  render();
-}
-
-function refinePendingPlanReview(review: PendingPlanReview): void {
-  visiblePlanReviews.set(review.sessionId, { review, mode: "refining" });
-  markTranscriptViewDirty();
-  render();
-  if (workspaceMode === "session" && activeSessionId === review.sessionId) {
-    promptInput.focus();
   }
 }
 
@@ -2076,15 +2117,6 @@ function sendPromptWithBusyHandling(options: {
   const knownSlashCommand = findSlashCommand(options.editorText);
   const isSlashCommandLike = /^\/[^\s:]+/.test(options.editorText);
 
-  if (hasPendingPlanReview(options.sessionId)) {
-    appendSessionNotice(options.sessionId, {
-      level: "warning",
-      text: "Plan review is waiting. Choose Approve and execute or Refine plan before sending another prompt in this session.",
-    });
-    render();
-    return false;
-  }
-
   if (projection?.isBusy) {
     if (knownSlashCommand && options.images.length === 0) {
       sendPromptMessage(options.sessionId, options.text, options.images);
@@ -2351,14 +2383,13 @@ function renderActiveSession(): void {
 
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
   const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
-  const hasPendingPlan = activeSessionId ? hasPendingPlanReview(activeSessionId) : false;
 
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
   deleteSessionButton.disabled = !activeSessionId;
   syncActiveCategoryEditor(projection);
-  promptInput.disabled = !activeSessionId || hasBusyDraft || hasPendingPlan;
-  sendButton.disabled = !activeSessionId || hasBusyDraft || hasPendingPlan;
+  promptInput.disabled = !activeSessionId || hasBusyDraft;
+  sendButton.disabled = !activeSessionId || hasBusyDraft;
 
   if (!activeSessionId || !projection) {
     sessionTitle.textContent = "No session selected";
@@ -2369,7 +2400,7 @@ function renderActiveSession(): void {
     const category = normalizedCategory(projection.summary.category);
     const categoryPart = category ? ` · ${category}` : "";
     sessionMeta.textContent = `${sessionKindLabel(projection.summary.kind)} · ${sessionStatusLabel(projection.summary)}${categoryPart} · ${projection.summary.cwd ?? "no dir"}`;
-    promptInput.placeholder = hasPendingPlan ? "Choose Approve and execute or Refine plan first…" : "Send a prompt… (type / for commands)";
+    promptInput.placeholder = "Send a prompt… (type / for commands)";
   }
 
   renderStatusBar(projection);
@@ -2407,7 +2438,6 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeSearchResults = [];
   codeSearchLoading = false;
   codeSearchError = null;
-  codePreviewDraft = null;
   clearPendingCodeSearchRequest();
   markCodeViewDirty();
 }
@@ -2429,9 +2459,6 @@ function activeCodeViewState(): CodeViewerState {
     searchResults: codeSearchResults,
     searchLoading: codeSearchLoading,
     searchError: codeSearchError,
-    fileComments: workspaceMode === "session" && activeSessionId && codeFile
-      ? (codeComments.get(activeSessionId)?.get(codeFile.path) ?? [])
-      : [],
   };
 }
 
@@ -2526,73 +2553,6 @@ function submitCodeSearch(): void {
   });
 }
 
-function sessionCodeComments(sessionId: string): SessionCodeComments {
-  const existing = codeComments.get(sessionId);
-  if (existing) return existing;
-  const created: SessionCodeComments = new Map();
-  codeComments.set(sessionId, created);
-  return created;
-}
-
-function addCodeComment(
-  sessionId: string,
-  file: CodeFileContent,
-  lineNumber: number,
-  lineText: string,
-): void {
-  const comment = window.prompt("Comment on this code line");
-  if (!comment?.trim()) return;
-  const commentsByFile = sessionCodeComments(sessionId);
-  const existing = commentsByFile.get(file.path) ?? [];
-  existing.push(createCodeFileComment({
-    id: `${Date.now()}-${existing.length}`,
-    file,
-    lineNumber,
-    lineText,
-    text: comment,
-  }));
-  commentsByFile.set(file.path, existing);
-  markCodeViewDirty();
-  renderCodePanelIfNeeded(true);
-}
-
-function sendCodeComments(sessionId: string, file: CodeFileContent, comments: CodeFileComment[]): void {
-  if (comments.length === 0) return;
-  const clearFlushedComments = () => {
-    const commentsByFile = sessionCodeComments(sessionId);
-    commentsByFile.set(file.path, removeSelectedCodeComments(commentsByFile.get(file.path) ?? [], file.path));
-    markCodeViewDirty();
-    renderCodePanelIfNeeded(true);
-  };
-  sendPromptWithBusyHandling({
-    sessionId,
-    text: buildCodeCommentPrompt(file, comments),
-    editorText: codeCommentFlushEditorText(comments.length),
-    images: [],
-    onSend: clearFlushedComments,
-  });
-}
-
-function previewCodeComments(sessionId: string, file: CodeFileContent): void {
-  const comments = selectedCodeComments(sessionCodeComments(sessionId).get(file.path) ?? [], file.path);
-  if (comments.length === 0) return;
-  codePreviewDraft = { sessionId, file, comments };
-  diffPreviewDraft = null;
-  transcriptPreviewDraft = null;
-  diffPreviewTitle.textContent = "Preview code comments";
-  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
-  diffPreviewSend.textContent = "Send comments";
-  diffPreviewText.value = buildCodeCommentPrompt(file, comments);
-  diffPreviewStatus.textContent = codeCommentPreviewStatus(comments.length);
-  diffPreviewOverlay.hidden = false;
-  diffPreviewText.scrollTop = 0;
-  diffPreviewSend.focus();
-}
-
-function flushCodeComments(sessionId: string, file: CodeFileContent): void {
-  previewCodeComments(sessionId, file);
-}
-
 function openSearchResultInCode(path: string): void {
   closeCodeSearch();
   requestCodeTree(parentCodePath(path) ?? "");
@@ -2615,6 +2575,50 @@ function openPathInCode(path: string): void {
     ensureActiveCodeWorkspace();
     renderCodePanelIfNeeded(true);
   }
+}
+
+function ensureReviewWorktreeThenCheckout(state: RepoDiffState, target: DiffCheckoutTarget): void {
+  const worktree = diffReviewWorktrees.get(state.repoRoot) ?? state.reviewWorktree ?? null;
+  if (!worktree) {
+    send({
+      type: "diff.reviewWorktree.ensure",
+      sourceRepoRoot: state.repoRoot,
+      base: state.comparison.base.kind === "gitRef" ? { kind: "gitRef", value: state.comparison.base.input } : undefined,
+      head: state.comparison.head.kind === "gitRef" ? { kind: "gitRef", value: state.comparison.head.input } : undefined,
+    });
+    return;
+  }
+  send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: target });
+}
+
+function openDiffLocationInCode(state: RepoDiffState, location: DiffLineLocation): void {
+  const target = checkoutTargetForDiffLocation(state, location);
+  const path = pathForDiffLocation(location);
+  const worktree = diffReviewWorktrees.get(state.repoRoot) ?? state.reviewWorktree ?? null;
+  if (target.kind === "workingTree") {
+    openPathInCode(path);
+    return;
+  }
+  if (!worktree) {
+    pendingCodeOpenPath = path;
+    send({
+      type: "diff.reviewWorktree.ensure",
+      sourceRepoRoot: state.repoRoot,
+      base: state.comparison.base.kind === "gitRef" ? { kind: "gitRef", value: state.comparison.base.input } : undefined,
+      head: state.comparison.head.kind === "gitRef" ? { kind: "gitRef", value: state.comparison.head.input } : undefined,
+    });
+    return;
+  }
+  pendingCodeOpenPath = path;
+  send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: target });
+  codeSessionId = null;
+  codeWorkspace = null;
+  codeError = null;
+  codeLoadingWorkspace = true;
+  markCodeViewDirty();
+  desktopDockview?.activatePanel("code");
+  send({ type: "code.workspace.openRoot", root: worktree.path, source: "reviewWorktree", reviewWorktreeId: worktree.id });
+  renderCodePanelIfNeeded(true);
 }
 
 
@@ -2690,21 +2694,6 @@ function renderCodePanelIfNeeded(force = false): void {
       },
       searchFiles: submitCodeSearch,
       openSearchResult: openSearchResultInCode,
-      addComment: (lineNumber, lineText) => {
-        if (workspaceMode === "session" && activeSessionId && codeFile) {
-          addCodeComment(activeSessionId, codeFile, lineNumber, lineText);
-        }
-      },
-      previewComments: () => {
-        if (workspaceMode === "session" && activeSessionId && codeFile) {
-          previewCodeComments(activeSessionId, codeFile);
-        }
-      },
-      flushComments: () => {
-        if (workspaceMode === "session" && activeSessionId && codeFile) {
-          flushCodeComments(activeSessionId, codeFile);
-        }
-      },
     });
   });
   if (!rendered) return;
@@ -2911,21 +2900,6 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
       render: () => renderCurrentTodoCard(currentTodos),
     });
   }
-  const visiblePlanReview = visiblePlanReviews.get(projection.summary.sessionId);
-  if (visiblePlanReview) {
-    items.push({
-      key: `plan-review:${planReviewRenderKey(visiblePlanReview.review, visiblePlanReview.mode)}`,
-      render: () => renderPlanReviewCard(
-        visiblePlanReview.review,
-        {
-          onApprove: approvePendingPlanReview,
-          onRefine: refinePendingPlanReview,
-        },
-        visiblePlanReview.mode,
-        visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,
-      ),
-    });
-  }
   return items;
 }
 
@@ -3042,30 +3016,65 @@ function renderToolsView(
 
 
 
-function deriveCurrentDiffSelection(
+function resolveSelectedDiffRepoRoot(
   sessionId: string,
   projection: SessionProjection | undefined,
   state: RepoDiffState | undefined,
-): DiffSelection {
-  const selection = deriveDiffSelection({
-    state,
-    cwd: projection?.summary.cwd ?? undefined,
-    explicitRepoRoot: diffSelectedRepos.get(sessionId),
-    explicitSnapshotEntryId: diffSelectedSnapshots.get(sessionId),
-    headSelection: diffHeadSelectionFromEntryId(diffSelectedHeads.get(sessionId), diffSelectedHeads.has(sessionId)),
-  });
-  if (selection.repoRoot) diffSelectedRepos.set(sessionId, selection.repoRoot);
-  else diffSelectedRepos.delete(sessionId);
-  return selection;
+  explicitInput?: string,
+ ): string | null {
+  const explicit = explicitInput?.trim() || diffSelectedRepos.get(sessionId);
+  if (explicit) return explicit;
+  const repoRoots = diffRepoRoots(state);
+  const inferred = inferDiffRepoRootFromCwd(projection?.summary.cwd ?? undefined, repoRoots);
+  const fallback = inferred ?? state?.repoRoot ?? projection?.summary.worktree?.path ?? projection?.summary.cwd ?? serverConfig?.defaultCwd ?? null;
+  if (fallback) diffSelectedRepos.set(sessionId, fallback);
+  return fallback;
 }
 
+function gitRefInput(value: string | undefined, fallback: string): { kind: "gitRef"; value: string } {
+  const trimmed = value?.trim();
+  return { kind: "gitRef", value: trimmed || fallback };
+}
 
-function requestDiffState(sessionId: string, selector?: string, headSelector?: string | null): void {
+function requestDiffState(sessionId: string, overrides: { repoRoot?: string; base?: string; head?: string; mode?: "full" | "stat"; reviewMode?: "range" | "commit"; commitOid?: string | null } = {}): void {
   if (diffLoadingSessions.has(sessionId)) return;
+  const projection = projections.get(sessionId);
+  const current = diffStates.get(sessionId);
+  const repoRoot = resolveSelectedDiffRepoRoot(sessionId, projection, current, overrides.repoRoot);
+  if (!repoRoot) {
+    diffErrors.set(sessionId, "Diff requires a repository root.");
+    markDiffsViewDirty();
+    renderDiffsViewIfActive(sessionId);
+    return;
+  }
+  const base = overrides.base ?? diffBaseRefs.get(sessionId) ?? (current?.comparison.base.kind === "gitRef" ? current.comparison.base.input : "HEAD");
+  const head = overrides.head ?? diffHeadRefs.get(sessionId) ?? (current?.comparison.head.kind === "gitRef" ? current.comparison.head.input : "HEAD");
+  const mode = overrides.mode ?? diffModes.get(sessionId) ?? current?.comparison.mode ?? "full";
+  const reviewMode = overrides.reviewMode ?? diffReviewModes.get(sessionId) ?? current?.reviewProgress.mode ?? "range";
+  const commitOid = overrides.commitOid ?? diffSelectedCommits.get(sessionId) ?? current?.reviewProgress.selectedCommitOid ?? null;
+  diffSelectedRepos.set(sessionId, repoRoot);
+  diffBaseRefs.set(sessionId, base);
+  diffHeadRefs.set(sessionId, head);
+  diffModes.set(sessionId, mode);
+  diffReviewModes.set(sessionId, reviewMode);
+  if (commitOid) diffSelectedCommits.set(sessionId, commitOid);
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
-  send({ type: "diff.refresh", sessionId, selector, headSelector: headSelector ?? undefined });
+  send({
+    type: "diff.compare",
+    sessionId,
+    repoRoot,
+    base: gitRefInput(base, "HEAD"),
+    head: gitRefInput(head, "HEAD"),
+    mode,
+    reviewMode,
+    commitOid: reviewMode === "commit" ? commitOid : null,
+  });
+  renderDiffsViewIfActive(sessionId);
+}
+
+function renderDiffsViewIfActive(sessionId: string): void {
   if (desktopDockview?.isPanelActive("diffs")) {
     desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
   }
@@ -3090,33 +3099,7 @@ function isDiffsPanelActive(): boolean {
 function requestActiveDiffState(): void {
   if (!activeSessionId || !isDiffsPanelActive()) return;
   if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
-
-  const projection = projections.get(activeSessionId);
-  const state = diffStates.get(activeSessionId);
-  const selection = deriveCurrentDiffSelection(activeSessionId, projection, state);
-  if (!selection.selectedSnapshot && state && diffRepoRoots(state).length > 0) {
-    markDiffsViewDirty();
-    desktopDockview?.withPanel("diffs", container => renderDiffsView(container, projection));
-    return;
-  }
-
-  requestDiffState(
-    activeSessionId,
-    selection.selectedSnapshot?.entryId,
-    selection.headSnapshot?.entryId ?? diffSelectedHeads.get(activeSessionId),
-  );
-}
-
-function createDiffSnapshot(sessionId: string): void {
-  const label = window.prompt("Snapshot label", "manual");
-  if (label === null) return;
-  diffLoadingSessions.add(sessionId);
-  diffErrors.delete(sessionId);
-  markDiffsViewDirty();
-  send({ type: "diff.snapshot", sessionId, label: label.trim() || undefined });
-  if (desktopDockview?.isPanelActive("diffs")) {
-    desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
-  }
+  requestDiffState(activeSessionId);
 }
 
 function rerenderDiffsViewPreservingScroll(sessionId: string): void {
@@ -3184,13 +3167,11 @@ function addTranscriptReviewComment(
 function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
   const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
   if (comments.length === 0) return;
-  transcriptPreviewDraft = { sessionId, message, comments, promptText: buildTranscriptReviewPrompt(message, comments) };
+  transcriptPreviewDraft = { sessionId, message, comments };
   diffPreviewDraft = null;
-  codePreviewDraft = null;
   diffPreviewTitle.textContent = "Preview transcript comments";
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
-  const promptText = buildTranscriptReviewPrompt(message, comments);
-  diffPreviewText.value = promptText;
+  diffPreviewText.value = buildTranscriptReviewPrompt(message, comments);
   diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
   diffPreviewSend.textContent = "Send comments";
   diffPreviewOverlay.hidden = false;
@@ -3202,7 +3183,6 @@ function sendTranscriptReviewComments(
   sessionId: string,
   message: TranscriptMessage,
   comments: TranscriptReviewComment[],
-  promptText = buildTranscriptReviewPrompt(message, comments),
 ): void {
   if (comments.length === 0) return;
   const clearFlushedComments = () => {
@@ -3216,7 +3196,7 @@ function sendTranscriptReviewComments(
   };
   sendPromptWithBusyHandling({
     sessionId,
-    text: promptText,
+    text: buildTranscriptReviewPrompt(message, comments),
     editorText: `Flush ${comments.length} transcript comment${comments.length === 1 ? "" : "s"}`,
     images: [],
     onSend: clearFlushedComments,
@@ -3234,75 +3214,71 @@ function transcriptReviewOptions(sessionId: string, message: TranscriptMessage) 
   };
 }
 
-function flushPlanReviewComments(sessionId: string, review: PendingPlanReview): void {
-  const message = planReviewTranscriptMessage(review);
-  const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
-  if (comments.length === 0) return;
-  const promptText = buildPlanReviewPrompt(review, comments);
-  transcriptPreviewDraft = { sessionId, message, comments, promptText };
-  diffPreviewDraft = null;
-  codePreviewDraft = null;
-  diffPreviewTitle.textContent = "Preview plan comments";
-  diffPreviewSubtitle.textContent = "Review the refinement prompt that will be sent to OMP.";
-  diffPreviewText.value = promptText;
-  diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
-  diffPreviewSend.textContent = "Send refinement";
-  diffPreviewOverlay.hidden = false;
-  diffPreviewText.scrollTop = 0;
-  diffPreviewSend.focus();
-}
-
-function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
-  const message = planReviewTranscriptMessage(review);
-  return {
-    active: isTranscriptMessageUnderReview(sessionId, message.id),
-    comments: transcriptReviewCommentsForMessage(sessionId, message.id),
-    onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
-    onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
-    onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
-    onFlush: () => flushPlanReviewComments(sessionId, review),
-  };
-}
-
 function addDiffComment(
   sessionId: string,
-  baseSnapshot: DiffSnapshotSummary,
-  headSnapshot: DiffSnapshotSummary | null,
+  state: RepoDiffState,
   location: DiffLineLocation,
 ): void {
   const comment = window.prompt("Comment on this diff line");
   if (!comment?.trim()) return;
-  const comments = diffComments.get(sessionId) ?? [];
-  comments.push(createDiffComment({
-    id: `${Date.now()}-${comments.length}`,
-    baseSnapshot,
-    headSnapshot,
+  const annotations = diffAnnotations.get(sessionId) ?? [];
+  annotations.push(createDiffReviewAnnotation({
+    id: `${Date.now()}-${annotations.length}`,
+    kind: "comment",
+    state,
     location,
     text: comment,
   }));
-  diffComments.set(sessionId, comments);
+  diffAnnotations.set(sessionId, annotations);
   markDiffsViewDirty();
   rerenderDiffsViewPreservingScroll(sessionId);
 }
 
-
+function askDiffQuestion(
+  sessionId: string,
+  state: RepoDiffState,
+  location: DiffLineLocation,
+): void {
+  const question = window.prompt("Ask the agent about this diff line");
+  if (!question?.trim()) return;
+  const annotations = diffAnnotations.get(sessionId) ?? [];
+  const annotation = createDiffReviewAnnotation({
+    id: `${Date.now()}-${annotations.length}`,
+    kind: "question",
+    state,
+    location,
+    text: question,
+    status: "sent",
+  });
+  annotations.push(annotation);
+  diffAnnotations.set(sessionId, annotations);
+  sendPromptWithBusyHandling({
+    sessionId,
+    text: buildDiffQuestionPrompt(state, annotation),
+    editorText: `Question about ${formatDiffLineLocation(location)}`,
+    images: [],
+    onSend: () => {
+      markDiffsViewDirty();
+      rerenderDiffsViewPreservingScroll(sessionId);
+    },
+  });
+}
 
 function sendDiffComments(
   sessionId: string,
   state: RepoDiffState,
-  baseSnapshot: DiffSnapshotSummary,
-  headSnapshot: DiffSnapshotSummary | null,
-  comments: DiffComment[],
+  comments: DiffReviewAnnotation[],
 ): void {
   if (comments.length === 0) return;
+  const key = comparisonKey(state);
   const clearFlushedComments = () => {
-    diffComments.set(sessionId, removeSelectedDiffComments(diffComments.get(sessionId) ?? [], baseSnapshot, headSnapshot));
+    diffAnnotations.set(sessionId, removeSelectedDiffComments(diffAnnotations.get(sessionId) ?? [], key));
     markDiffsViewDirty();
     rerenderDiffsViewPreservingScroll(sessionId);
   };
   sendPromptWithBusyHandling({
     sessionId,
-    text: buildDiffCommentPrompt(state, comments, baseSnapshot, headSnapshot),
+    text: buildDiffCommentPrompt(state, comments),
     editorText: diffCommentFlushEditorText(comments.length),
     images: [],
     onSend: clearFlushedComments,
@@ -3312,19 +3288,16 @@ function sendDiffComments(
 function previewDiffComments(
   sessionId: string,
   state: RepoDiffState,
-  baseSnapshot: DiffSnapshotSummary | null,
-  headSnapshot: DiffSnapshotSummary | null,
 ): void {
-  if (!baseSnapshot) return;
-  const comments = selectedDiffComments(diffComments.get(sessionId) ?? [], baseSnapshot, headSnapshot);
+  const key = comparisonKey(state);
+  const comments = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, "comment");
   if (comments.length === 0) return;
-  diffPreviewDraft = { sessionId, state, baseSnapshot, headSnapshot, comments };
+  diffPreviewDraft = { sessionId, state, comparisonKey: key, comments };
   transcriptPreviewDraft = null;
-  codePreviewDraft = null;
   diffPreviewTitle.textContent = "Preview diff comments";
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewSend.textContent = "Send comments";
-  diffPreviewText.value = buildDiffCommentPrompt(state, comments, baseSnapshot, headSnapshot);
+  diffPreviewText.value = buildDiffCommentPrompt(state, comments);
   diffPreviewStatus.textContent = diffCommentPreviewStatus(comments.length);
   diffPreviewOverlay.hidden = false;
   diffPreviewText.scrollTop = 0;
@@ -3339,35 +3312,27 @@ function closeDiffPreview(): void {
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewSend.textContent = "Send comments";
   diffPreviewDraft = null;
-  codePreviewDraft = null;
   transcriptPreviewDraft = null;
 }
 
 function sendPromptPreviewDraft(): void {
   const diffDraft = diffPreviewDraft;
-  const codeDraft = codePreviewDraft;
   const transcriptDraft = transcriptPreviewDraft;
   closeDiffPreview();
   if (diffDraft) {
-    sendDiffComments(diffDraft.sessionId, diffDraft.state, diffDraft.baseSnapshot, diffDraft.headSnapshot, diffDraft.comments);
-    return;
-  }
-  if (codeDraft) {
-    sendCodeComments(codeDraft.sessionId, codeDraft.file, codeDraft.comments);
+    sendDiffComments(diffDraft.sessionId, diffDraft.state, diffDraft.comments);
     return;
   }
   if (transcriptDraft) {
-    sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments, transcriptDraft.promptText);
+    sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments);
   }
 }
 
 function flushDiffComments(
   sessionId: string,
   state: RepoDiffState,
-  baseSnapshot: DiffSnapshotSummary | null,
-  headSnapshot: DiffSnapshotSummary | null,
 ): void {
-  previewDiffComments(sessionId, state, baseSnapshot, headSnapshot);
+  previewDiffComments(sessionId, state);
 }
 
 function diffTargetOffsetTop(container: HTMLElement, target: HTMLElement): number {
@@ -3413,15 +3378,14 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
 
   const sessionId = activeSessionId;
   const state = diffStates.get(sessionId);
-  const repoRoots = diffRepoRoots(state);
-  const selection = deriveCurrentDiffSelection(sessionId, projection, state);
-  const selectedRepoRoot = selection.repoRoot;
-  const { selectedSnapshot, headSnapshot, snapshots } = selection;
+  const selectedRepoRoot = resolveSelectedDiffRepoRoot(sessionId, projection, state);
   const diffError = diffErrors.get(sessionId) ?? null;
-  const comments = diffComments.get(sessionId) ?? [];
-  const selectedComments = selectedDiffComments(comments, selectedSnapshot, headSnapshot);
+  const key = state ? comparisonKey(state) : null;
+  const annotations = diffAnnotations.get(sessionId) ?? [];
+  const selectedComments = key ? selectedDiffAnnotations(annotations, key, "comment") : [];
+  const selectedQuestions = key ? selectedDiffAnnotations(annotations, key, "question") : [];
   const parsedRows = state?.diff.trim() ? parseDiffRows(state.diff) : [];
-  const fileSummaries = summarizeDiffFiles(parsedRows, comments, selectedSnapshot, headSnapshot);
+  const fileSummaries = summarizeDiffFiles(parsedRows, annotations, key);
 
   const root = mkEl("div");
   root.className = "diffs-view";
@@ -3431,84 +3395,41 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const sideHeader = mkEl("div");
   sideHeader.className = "diffs-sidebar-header";
   const sideTitle = mkEl("strong");
-  sideTitle.textContent = "Snapshots";
-  const snapshotBtn = mkEl("button");
-  snapshotBtn.type = "button";
-  snapshotBtn.textContent = "New";
-  snapshotBtn.addEventListener("click", () => createDiffSnapshot(sessionId));
-  sideHeader.append(sideTitle, snapshotBtn);
+  sideTitle.textContent = "Diff review";
+  sideHeader.append(sideTitle);
   sidebar.append(sideHeader);
 
   const sidebarScroll = mkEl("div");
   sidebarScroll.className = "diffs-sidebar-scroll";
   sidebar.append(sidebarScroll);
 
-  if (repoRoots.length > 0) {
-    const repoSection = mkEl("section");
-    repoSection.className = "diffs-repo-selector";
-    const repoLabel = mkEl("label");
-    repoLabel.className = "diffs-repo-label";
-    repoLabel.textContent = "Repository";
-    const repoSelect = mkEl("select");
-    repoSelect.className = "diff-repo-select";
-    repoSelect.disabled = repoRoots.length === 1 || diffLoadingSessions.has(sessionId);
-    for (const repoRoot of repoRoots) {
-      const option = mkEl("option");
-      option.value = repoRoot;
-      option.textContent = formatDiffRepoLabel(repoRoot);
-      option.title = repoRoot;
-      if (repoRoot === selectedRepoRoot) option.selected = true;
-      repoSelect.append(option);
-    }
-    repoSelect.addEventListener("change", () => {
-      const nextRepoRoot = repoSelect.value;
-      diffSelectedRepos.set(sessionId, nextRepoRoot);
-      diffSelectedSnapshots.delete(sessionId);
-      diffSelectedHeads.set(sessionId, null);
-      const nextSnapshots = diffSnapshotsForRepo(state, nextRepoRoot);
-      const nextSelected = nextSnapshots[nextSnapshots.length - 1] ?? null;
-      if (nextSelected) {
-        requestDiffState(sessionId, nextSelected.entryId, null);
-      } else {
-        diffErrors.delete(sessionId);
-        markDiffsViewDirty();
-        rerenderDiffsViewPreservingScroll(sessionId);
-      }
-    });
-    repoSection.append(repoLabel, repoSelect);
-    sidebarScroll.append(repoSection);
-  }
+  const repoSection = mkEl("section");
+  repoSection.className = "diffs-repo-selector";
+  const repoLabel = mkEl("label");
+  repoLabel.className = "diffs-repo-label";
+  repoLabel.textContent = "Repository root";
+  const repoInput = mkEl("input");
+  repoInput.className = "diff-repo-input";
+  repoInput.value = selectedRepoRoot ?? "";
+  repoInput.placeholder = projection.summary.cwd ?? serverConfig?.defaultCwd ?? "/path/to/repo";
+  repoSection.append(repoLabel, repoInput);
+  sidebarScroll.append(repoSection);
 
-  const snapshotList = mkEl("div");
-  snapshotList.className = "diffs-snapshot-list";
-  if (repoRoots.length === 0) {
-    const empty = mkEl("p");
-    empty.className = "empty diffs-empty";
-    empty.textContent = diffLoadingSessions.has(sessionId) ? "Loading snapshots…" : "No snapshots yet.";
-    snapshotList.append(empty);
-  } else if (snapshots.length === 0) {
-    const empty = mkEl("p");
-    empty.className = "empty diffs-empty";
-    empty.textContent = `No snapshots for ${selectedRepoRoot ? formatDiffRepoLabel(selectedRepoRoot) : "the selected repository"}.`;
-    snapshotList.append(empty);
-  } else {
-    for (const snapshot of snapshots) {
-      const button = mkEl("button");
-      button.type = "button";
-      button.className = `diff-snapshot ${snapshot.entryId === selectedSnapshot?.entryId ? "active" : ""}`;
-      const label = mkEl("strong");
-      label.textContent = snapshot.label;
-      const meta = mkEl("span");
-      meta.textContent = `${snapshot.kind} · ${new Date(snapshot.createdAt).toLocaleString()}`;
-      button.append(label, meta);
-      button.addEventListener("click", () => {
-        diffSelectedSnapshots.set(sessionId, snapshot.entryId);
-        requestDiffState(sessionId, snapshot.entryId, headSnapshot?.entryId ?? null);
-      });
-      snapshotList.append(button);
-    }
+  if (state) {
+    const summary = mkEl("section");
+    summary.className = "diffs-summary";
+    const comparison = mkEl("p");
+    comparison.textContent = `${resolvedRefLabel(state.comparison.base)} → ${resolvedRefLabel(state.comparison.head)}`;
+    const mode = mkEl("p");
+    mode.textContent = state.reviewProgress.mode === "commit"
+      ? `Commit ${state.reviewProgress.selectedCommitIndex != null ? state.reviewProgress.selectedCommitIndex + 1 : "?"}/${state.reviewProgress.commits.length}`
+      : `Range · ${state.reviewProgress.commits.length} commit${state.reviewProgress.commits.length === 1 ? "" : "s"}`;
+    const worktree = diffReviewWorktrees.get(state.repoRoot) ?? state.reviewWorktree ?? null;
+    const worktreeStatus = mkEl("p");
+    worktreeStatus.textContent = worktree ? `Review worktree: ${worktree.status}${worktree.checkedOutOid ? ` @ ${worktree.checkedOutOid.slice(0, 12)}` : ""}${worktree.dirty ? " · dirty" : ""}` : "Review worktree: not created";
+    summary.append(comparison, mode, worktreeStatus);
+    sidebarScroll.append(summary);
   }
-  sidebarScroll.append(snapshotList);
 
   if (fileSummaries.length > 0) {
     const filesSection = mkEl("section");
@@ -3521,27 +3442,20 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     for (const file of fileSummaries) {
       const item = mkEl("div");
       item.className = "diffs-file-item";
-
       const jumpButton = mkEl("button");
       jumpButton.type = "button";
       jumpButton.className = "diffs-file-jump";
       const name = mkEl("code");
       name.textContent = file.filePath;
       const meta = mkEl("span");
-      meta.textContent = `+${file.added} -${file.removed}${file.commentCount > 0 ? ` · ${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : ""}`;
+      const notes = [
+        file.commentCount > 0 ? `${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : null,
+        file.questionCount > 0 ? `${file.questionCount} question${file.questionCount === 1 ? "" : "s"}` : null,
+      ].filter(Boolean).join(" · ");
+      meta.textContent = `+${file.added} -${file.removed}${notes ? ` · ${notes}` : ""}`;
       jumpButton.append(name, meta);
-      jumpButton.addEventListener("click", () => {
-        scrollDiffsToFile(container, file.filePath);
-      });
-
-      const codeButton = mkEl("button");
-      codeButton.type = "button";
-      codeButton.className = "diffs-file-code";
-      codeButton.textContent = "Code";
-      codeButton.title = "Open current file version in Code";
-      codeButton.addEventListener("click", () => openPathInCode(file.filePath));
-
-      item.append(jumpButton, codeButton);
+      jumpButton.addEventListener("click", () => scrollDiffsToFile(container, file.filePath));
+      item.append(jumpButton);
       filesList.append(item);
     }
     filesSection.append(filesList);
@@ -3553,58 +3467,79 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const toolbar = mkEl("div");
   toolbar.className = "diffs-toolbar";
   const title = mkEl("strong");
-  title.textContent = selectedSnapshot
-    ? headSnapshot
-      ? `Diff ${selectedSnapshot.label} → ${headSnapshot.label}`
-      : `Diff ${selectedSnapshot.label} → current`
-    : "Diff";
+  title.textContent = state ? "Git diff" : "Configure Git diff";
   const actions = mkEl("div");
   actions.className = "diffs-actions";
-  const headSelect = mkEl("select");
-  headSelect.className = "diff-compare-select";
-  const currentOption = mkEl("option");
-  currentOption.value = "";
-  currentOption.textContent = "Compare to current";
-  headSelect.append(currentOption);
-  for (const snapshot of snapshots) {
+
+  const baseInput = mkEl("input");
+  baseInput.className = "diff-ref-input";
+  baseInput.placeholder = "base ref (main)";
+  baseInput.value = diffBaseRefs.get(sessionId) ?? (state?.comparison.base.kind === "gitRef" ? state.comparison.base.input : "HEAD");
+  const headInput = mkEl("input");
+  headInput.className = "diff-ref-input";
+  headInput.placeholder = "head ref (feature)";
+  headInput.value = diffHeadRefs.get(sessionId) ?? (state?.comparison.head.kind === "gitRef" ? state.comparison.head.input : "HEAD");
+  const modeSelect = mkEl("select");
+  for (const [value, label] of [["full", "Full"], ["stat", "Stat"]] as const) {
     const option = mkEl("option");
-    option.value = snapshot.entryId;
-    option.textContent = `Compare to ${snapshot.label}`;
-    if (snapshot.entryId === (headSnapshot?.entryId ?? diffSelectedHeads.get(sessionId) ?? null)) {
-      option.selected = true;
-    }
-    headSelect.append(option);
+    option.value = value;
+    option.textContent = label;
+    if ((diffModes.get(sessionId) ?? state?.comparison.mode ?? "full") === value) option.selected = true;
+    modeSelect.append(option);
   }
-  headSelect.disabled = diffLoadingSessions.has(sessionId) || !selectedSnapshot;
-  headSelect.addEventListener("change", () => {
-    const nextHead = headSelect.value || null;
-    diffSelectedHeads.set(sessionId, nextHead);
-    requestDiffState(sessionId, selectedSnapshot?.entryId, nextHead);
+  const compareBtn = mkEl("button");
+  compareBtn.type = "button";
+  compareBtn.textContent = diffLoadingSessions.has(sessionId) ? "Comparing…" : "Compare";
+  compareBtn.disabled = diffLoadingSessions.has(sessionId);
+  compareBtn.addEventListener("click", () => requestDiffState(sessionId, { repoRoot: repoInput.value, base: baseInput.value, head: headInput.value, mode: modeSelect.value as "full" | "stat", reviewMode: "range", commitOid: null }));
+
+  const reviewModeBtn = mkEl("button");
+  reviewModeBtn.type = "button";
+  const inCommitMode = state?.reviewProgress.mode === "commit";
+  reviewModeBtn.textContent = inCommitMode ? "Show range" : "Step commits";
+  reviewModeBtn.disabled = !state || state.reviewProgress.commits.length === 0 || diffLoadingSessions.has(sessionId);
+  reviewModeBtn.addEventListener("click", () => {
+    if (!state) return;
+    if (state.reviewProgress.mode === "commit") requestDiffState(sessionId, { reviewMode: "range", commitOid: null });
+    else requestDiffState(sessionId, { reviewMode: "commit", commitOid: state.reviewProgress.commits[0]?.oid ?? null });
   });
-  const refreshBtn = mkEl("button");
-  refreshBtn.type = "button";
-  refreshBtn.textContent = diffLoadingSessions.has(sessionId) ? "Refreshing…" : "Refresh";
-  refreshBtn.disabled = diffLoadingSessions.has(sessionId);
-  refreshBtn.addEventListener("click", () => requestDiffState(
-    sessionId,
-    selectedSnapshot?.entryId,
-    headSnapshot?.entryId ?? diffSelectedHeads.get(sessionId),
-  ));
+
+  const previousBtn = mkEl("button");
+  previousBtn.type = "button";
+  previousBtn.textContent = "Previous commit";
+  const selectedIndex = state?.reviewProgress.selectedCommitIndex ?? null;
+  previousBtn.disabled = !state || state.reviewProgress.mode !== "commit" || selectedIndex === null || selectedIndex <= 0;
+  previousBtn.addEventListener("click", () => {
+    if (!state || selectedIndex === null) return;
+    requestDiffState(sessionId, { reviewMode: "commit", commitOid: state.reviewProgress.commits[selectedIndex - 1]?.oid ?? null });
+  });
+  const nextBtn = mkEl("button");
+  nextBtn.type = "button";
+  nextBtn.textContent = "Next commit";
+  nextBtn.disabled = !state || state.reviewProgress.mode !== "commit" || selectedIndex === null || selectedIndex >= state.reviewProgress.commits.length - 1;
+  nextBtn.addEventListener("click", () => {
+    if (!state || selectedIndex === null) return;
+    requestDiffState(sessionId, { reviewMode: "commit", commitOid: state.reviewProgress.commits[selectedIndex + 1]?.oid ?? null });
+  });
+  const checkoutBtn = mkEl("button");
+  checkoutBtn.type = "button";
+  checkoutBtn.textContent = "Checkout commit";
+  checkoutBtn.disabled = !state || !state.reviewProgress.selectedCommitOid;
+  checkoutBtn.addEventListener("click", () => {
+    if (!state?.reviewProgress.selectedCommitOid) return;
+    ensureReviewWorktreeThenCheckout(state, { kind: "commit", oid: state.reviewProgress.selectedCommitOid });
+  });
   const previewBtn = mkEl("button");
   previewBtn.type = "button";
   previewBtn.textContent = "Preview comments";
-  previewBtn.disabled = !state || !selectedSnapshot || selectedComments.length === 0;
-  previewBtn.addEventListener("click", () => {
-    if (state) previewDiffComments(sessionId, state, selectedSnapshot, headSnapshot);
-  });
+  previewBtn.disabled = !state || selectedComments.length === 0;
+  previewBtn.addEventListener("click", () => { if (state) previewDiffComments(sessionId, state); });
   const flushBtn = mkEl("button");
   flushBtn.type = "button";
   flushBtn.textContent = `Preview & flush (${selectedComments.length})`;
-  flushBtn.disabled = !state || !selectedSnapshot || selectedComments.length === 0;
-  flushBtn.addEventListener("click", () => {
-    if (state) flushDiffComments(sessionId, state, selectedSnapshot, headSnapshot);
-  });
-  actions.append(headSelect, refreshBtn, previewBtn, flushBtn);
+  flushBtn.disabled = !state || selectedComments.length === 0;
+  flushBtn.addEventListener("click", () => { if (state) flushDiffComments(sessionId, state); });
+  actions.append(baseInput, headInput, modeSelect, compareBtn, reviewModeBtn, previousBtn, nextBtn, checkoutBtn, previewBtn, flushBtn);
   toolbar.append(title, actions);
   main.append(toolbar);
 
@@ -3615,29 +3550,32 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   if (!state || diffLoadingSessions.has(sessionId)) {
     const loading = mkEl("p");
     loading.className = "empty diffs-empty";
-    loading.textContent = "Loading diff…";
+    loading.textContent = diffLoadingSessions.has(sessionId) ? "Loading diff…" : "Choose refs and compare.";
     mainBody.append(loading);
   } else if (diffError) {
     const error = mkEl("p");
     error.className = "empty diffs-empty diffs-error";
     error.textContent = diffError;
     mainBody.append(error);
-  } else if (!selectedSnapshot) {
-    const empty = mkEl("p");
-    empty.className = "empty diffs-empty";
-    empty.textContent = "Select or create a snapshot.";
-    mainBody.append(empty);
   } else if (!state.diff.trim()) {
     const empty = mkEl("p");
     empty.className = "empty diffs-empty";
-    empty.textContent = "No changes for this comparison.";
+    empty.textContent = state.truncated ? "Diff output was truncated before any renderable lines." : "No changes for this comparison.";
     mainBody.append(empty);
   } else {
+    if (state.truncated) {
+      const warning = mkEl("p");
+      warning.className = "diffs-warning";
+      warning.textContent = "Diff output is truncated by Fura's safety limit.";
+      mainBody.append(warning);
+    }
     const diff = mkEl("div");
     diff.className = "diff-lines";
     for (const row of parsedRows) {
       if (row.type === "line") {
-        const lineComments = commentsForDiffLocation(comments, selectedSnapshot, headSnapshot, row.location);
+        const lineAnnotations = annotationsForDiffLocation(annotations, key ?? "", row.location);
+        const lineComments = lineAnnotations.filter(annotation => annotation.kind === "comment");
+        const lineQuestions = lineAnnotations.filter(annotation => annotation.kind === "question");
         const lineWrap = mkEl("div");
         lineWrap.className = "diff-line-wrap";
         const line = mkEl("div");
@@ -3647,31 +3585,35 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
         commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
         commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
         commentBtn.title = "Comment on this diff line";
-        commentBtn.addEventListener("click", () => addDiffComment(
-          sessionId,
-          selectedSnapshot,
-          headSnapshot,
-          row.location,
-        ));
+        commentBtn.addEventListener("click", () => addDiffComment(sessionId, state, row.location));
         const gutter = mkEl("span");
         gutter.className = "diff-gutter";
-        gutter.textContent = row.location.newLine !== undefined
-          ? String(row.location.newLine)
-          : String(row.location.oldLine ?? "");
+        gutter.textContent = row.location.newLine !== undefined ? String(row.location.newLine) : String(row.location.oldLine ?? "");
         const content = mkEl("div");
         content.className = "diff-line-content";
         const text = mkEl("code");
         text.textContent = row.location.text;
+        const codeBtn = mkEl("button");
+        codeBtn.type = "button";
+        codeBtn.className = "diff-line-code-btn";
+        codeBtn.textContent = "Code";
+        codeBtn.addEventListener("click", () => openDiffLocationInCode(state, row.location));
+        const questionBtn = mkEl("button");
+        questionBtn.type = "button";
+        questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
+        questionBtn.textContent = lineQuestions.length > 0 ? String(lineQuestions.length) : "?";
+        questionBtn.title = "Ask the agent about this diff line";
+        questionBtn.addEventListener("click", () => askDiffQuestion(sessionId, state, row.location));
         content.append(text);
-        line.append(commentBtn, gutter, content);
+        line.append(commentBtn, gutter, content, codeBtn, questionBtn);
         lineWrap.append(line);
-        if (lineComments.length > 0) {
+        if (lineAnnotations.length > 0) {
           const thread = mkEl("div");
           thread.className = "diff-inline-comments";
-          for (const comment of lineComments) {
+          for (const annotation of lineAnnotations) {
             const item = mkEl("div");
-            item.className = "diff-inline-comment";
-            item.textContent = comment.text;
+            item.className = `diff-inline-comment diff-inline-${annotation.kind}`;
+            item.textContent = `${annotation.kind === "question" ? "Question" : "Comment"}: ${annotation.text}`;
             thread.append(item);
           }
           lineWrap.append(thread);
@@ -3682,9 +3624,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
 
       const line = mkEl("div");
       line.className = `diff-line diff-line-${row.type}`;
-      if (row.type === "file") {
-        line.dataset.diffFilePath = row.filePath;
-      }
+      if (row.type === "file") line.dataset.diffFilePath = row.filePath;
       const spacer = mkEl("span");
       spacer.className = "diff-comment-spacer";
       const text = mkEl("code");
@@ -3698,21 +3638,22 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const commentsPanel = mkEl("section");
   commentsPanel.className = "diff-comments";
   const commentsTitle = mkEl("strong");
-  commentsTitle.textContent = "Comments";
+  commentsTitle.textContent = `Review annotations (${selectedComments.length} comments, ${selectedQuestions.length} questions)`;
   commentsPanel.append(commentsTitle);
-  if (selectedComments.length === 0) {
+  const selectedAnnotations = key ? selectedDiffAnnotations(annotations, key) : [];
+  if (selectedAnnotations.length === 0) {
     const empty = mkEl("p");
     empty.className = "empty";
-    empty.textContent = "No comments on this diff yet.";
+    empty.textContent = "No annotations on this diff yet.";
     commentsPanel.append(empty);
   } else {
-    for (const comment of selectedComments) {
+    for (const annotation of selectedAnnotations) {
       const item = mkEl("article");
-      item.className = "diff-comment";
+      item.className = `diff-comment diff-${annotation.kind}`;
       const loc = mkEl("code");
-      loc.textContent = formatDiffLocation(comment);
+      loc.textContent = formatDiffLocation(annotation);
       const body = mkEl("p");
-      body.textContent = comment.text;
+      body.textContent = annotation.text;
       item.append(loc, body);
       commentsPanel.append(item);
     }
@@ -3937,10 +3878,10 @@ function setCwdPickerCreatePending(pending: boolean, requestId: string | null = 
   cwdPickerClose.disabled = pending;
   cwdPickerCancel.disabled = pending;
   cwdPickerCreate.disabled = pending;
-  cwdPickerCreate.textContent = pending ? "Creating…" : "Create session";
+  cwdPickerCreate.textContent = pending ? (cwdPickerMode === "diff" ? "Opening…" : "Creating…") : (cwdPickerMode === "diff" ? "Open diff" : "Create session");
   cwdPickerCreate.toggleAttribute("aria-busy", pending);
   if (pending) {
-    setCwdPickerStatus("Creating session…", "loading");
+    setCwdPickerStatus(cwdPickerMode === "diff" ? "Opening diff…" : "Creating session…", "loading");
   }
 }
 
@@ -4021,6 +3962,28 @@ function syncCwdPickerWorktreeFields(): void {
   }
 }
 
+function setCwdPickerMode(mode: "session" | "diff"): void {
+  cwdPickerMode = mode;
+  const sessionMode = mode === "session";
+  cwdPickerSessionTab.classList.toggle("active", sessionMode);
+  cwdPickerDiffTab.classList.toggle("active", !sessionMode);
+  cwdPickerSessionTab.setAttribute("aria-selected", String(sessionMode));
+  cwdPickerDiffTab.setAttribute("aria-selected", String(!sessionMode));
+  const sessionBody = cwdPickerInput.closest<HTMLElement>(".cwd-picker-body");
+  if (sessionBody) sessionBody.hidden = !sessionMode;
+  cwdPickerDiffBody.hidden = sessionMode;
+  if (!cwdPickerCreatePending) cwdPickerCreate.textContent = mode === "diff" ? "Open diff" : "Create session";
+}
+
+function syncCwdPickerDiffDefaults(): void {
+  const defaultRoot = cwdPickerInput.value.trim() || serverConfig?.defaultCwd || "";
+  cwdPickerDiffRepo.value = defaultRoot;
+  cwdPickerDiffBase.value = "HEAD";
+  cwdPickerDiffHead.value = "HEAD";
+  cwdPickerDiffMode.value = "full";
+  cwdPickerDiffAgentSession.checked = true;
+}
+
 function openCwdPicker(): void {
   const config = requireServerConfig();
   if (!config) return;
@@ -4041,6 +4004,8 @@ function openCwdPicker(): void {
   setCwdPickerCreatePending(false);
   setCwdPickerError(null);
   syncCwdPickerWorktreeFields();
+  syncCwdPickerDiffDefaults();
+  setCwdPickerMode("session");
   cwdPickerOverlay.hidden = false;
   window.setTimeout(() => cwdPickerNameInput.focus(), 0);
 }
@@ -4065,10 +4030,60 @@ function focusCwdPickerCreateTarget(target: SessionCreateValidationTarget): void
   focusTargets[target]?.focus();
 }
 
+function submitCwdPickerDiff(): void {
+  if (cwdPickerCreatePending) return;
+  const repoRoot = cwdPickerDiffRepo.value.trim();
+  const base = cwdPickerDiffBase.value.trim() || "HEAD";
+  const head = cwdPickerDiffHead.value.trim() || "HEAD";
+  const mode: "full" | "stat" = cwdPickerDiffMode.value === "stat" ? "stat" : "full";
+  if (!repoRoot) {
+    setCwdPickerError("Repository root is required for diff review.");
+    cwdPickerDiffRepo.focus();
+    return;
+  }
+  const diff = { repoRoot, base, head, mode };
+  if (!cwdPickerDiffAgentSession.checked && activeSessionId) {
+    diffSelectedRepos.set(activeSessionId, repoRoot);
+    diffBaseRefs.set(activeSessionId, base);
+    diffHeadRefs.set(activeSessionId, head);
+    diffModes.set(activeSessionId, mode);
+    closeCwdPicker();
+    desktopDockview?.activatePanel("diffs");
+    requestDiffState(activeSessionId, { repoRoot, base, head, mode, reviewMode: "range", commitOid: null });
+    return;
+  }
+  pendingDiffCreate = diff;
+  const requestId = nextClientRequestId("diff-session-create");
+  const result = resolveSessionCreateMessage({
+    requestId,
+    name: cwdPickerNameInput.value || `diff: ${repoRoot.split(/[/\\]/).filter(Boolean).at(-1) ?? "repo"} ${base}..${head}`,
+    cwd: repoRoot,
+    category: normalizedCategory(cwdPickerCategoryInput.value),
+    worktree: { enabled: false, sourceRepo: repoRoot, directory: repoRoot, baseBranch: base, branchName: undefined },
+  });
+  if (result.type === "invalid") {
+    pendingDiffCreate = null;
+    setCwdPickerError(result.message);
+    return;
+  }
+  pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
+  setCwdPickerCreatePending(true, requestId);
+  if (!send(result.message)) {
+    pendingCreatedSessionBaseline = null;
+    pendingDiffCreate = null;
+    setCwdPickerCreatePending(false);
+    setCwdPickerError("Not connected to the Fura bridge.");
+  }
+}
+
 function submitCwdPicker(): void {
   if (cwdPickerCreatePending) return;
   if (!requireServerConfig()) return;
   const requestId = nextClientRequestId("session-create");
+  if (cwdPickerMode === "diff") {
+    submitCwdPickerDiff();
+    return;
+  }
   const result = resolveSessionCreateMessage({
     requestId,
     name: cwdPickerNameInput.value,

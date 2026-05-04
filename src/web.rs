@@ -430,17 +430,29 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
         ServerMessage::DiffState { session_id, state } => info!(
             direction = "bridge_to_client",
             message_type = "diff.state",
-            session_id = %session_id,
-            snapshot_count = state
-                .get("snapshots")
-                .and_then(|value| value.as_array())
-                .map(Vec::len)
-                .unwrap_or(0),
-            diff_bytes = state
-                .get("diff")
-                .and_then(|value| value.as_str())
-                .map(str::len)
-                .unwrap_or(0)
+            session_id = session_id.as_deref().unwrap_or(""),
+            repo_root = %state.repo_root,
+            ref_count = state.refs.len(),
+            diff_bytes = state.diff.len(),
+            truncated = state.truncated
+        ),
+        ServerMessage::DiffError {
+            session_id,
+            repo_root,
+            message,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "diff.error",
+            session_id = session_id.as_deref().unwrap_or(""),
+            repo_root = repo_root.as_deref().unwrap_or(""),
+            error = %message
+        ),
+        ServerMessage::DiffReviewWorktreeState { worktree } => info!(
+            direction = "bridge_to_client",
+            message_type = "diff.reviewWorktree.state",
+            worktree_id = %worktree.id,
+            path = %worktree.path,
+            dirty = worktree.dirty
         ),
         ServerMessage::ControlReply {
             target_client_id,
@@ -475,7 +487,7 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             direction = "bridge_to_client",
             message_type = "code.workspace.ready",
             workspace_id = %workspace.workspace_id,
-            session_id = %workspace.session_id,
+            session_id = workspace.session_id.as_deref().unwrap_or(""),
             root = %workspace.root
         ),
         ServerMessage::CodeTree {

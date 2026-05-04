@@ -211,21 +211,6 @@ pub(crate) enum OmpRpcCommand {
     },
     #[serde(rename = "abort")]
     Abort { id: String },
-    #[serde(rename = "repo_diff_get")]
-    RepoDiffGet {
-        id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        selector: Option<String>,
-        #[serde(rename = "headSelector", skip_serializing_if = "Option::is_none")]
-        head_selector: Option<String>,
-        stat: bool,
-    },
-    #[serde(rename = "repo_diff_snapshot")]
-    RepoDiffSnapshot {
-        id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        label: Option<String>,
-    },
 }
 
 impl OmpRpcCommand {
@@ -276,23 +261,4 @@ pub(crate) fn prompt_command(
 
 pub(crate) fn abort_command(id: String) -> Value {
     OmpRpcCommand::Abort { id }.into_value()
-}
-
-pub(crate) fn repo_diff_get_command(
-    id: String,
-    selector: Option<String>,
-    head_selector: Option<String>,
-    stat: bool,
-) -> Value {
-    OmpRpcCommand::RepoDiffGet {
-        id,
-        selector,
-        head_selector,
-        stat,
-    }
-    .into_value()
-}
-
-pub(crate) fn repo_diff_snapshot_command(id: String, label: Option<String>) -> Value {
-    OmpRpcCommand::RepoDiffSnapshot { id, label }.into_value()
 }

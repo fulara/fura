@@ -20,6 +20,7 @@ mod code;
 mod commands;
 mod config;
 mod control;
+mod diff;
 mod omp_rpc;
 mod projection;
 mod protocol;
@@ -35,6 +36,7 @@ use code::*;
 use commands::*;
 use config::*;
 use control::*;
+use diff::*;
 use omp_rpc::*;
 use projection::*;
 use protocol::*;
@@ -133,6 +135,7 @@ async fn main() -> anyhow::Result<()> {
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
+        review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
         bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
         voice_sessions: Arc::new(RwLock::new(HashMap::new())),
         events,
@@ -322,7 +325,7 @@ async fn shutdown_signal() {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::{
         collections::HashSet,
@@ -491,7 +494,10 @@ mod tests {
         );
     }
 
-    fn test_state(channel_capacity: usize, bridge_debug_file: Option<PathBuf>) -> AppState {
+    pub(crate) fn test_state(
+        channel_capacity: usize,
+        bridge_debug_file: Option<PathBuf>,
+    ) -> AppState {
         let (events, _) = broadcast::channel(channel_capacity);
         AppState {
             token: Arc::new("test".into()),
@@ -504,6 +510,7 @@ mod tests {
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
+            review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
             bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
             voice_sessions: Arc::new(RwLock::new(HashMap::new())),
             events,
@@ -690,25 +697,6 @@ mod tests {
                 "provider": "anthropic",
                 "modelId": "claude-sonnet-4-5"
             })
-        );
-        assert_eq!(
-            repo_diff_get_command(
-                "rpc-4".to_string(),
-                Some("session-start".to_string()),
-                Some("current".to_string()),
-                true,
-            ),
-            serde_json::json!({
-                "id": "rpc-4",
-                "type": "repo_diff_get",
-                "selector": "session-start",
-                "headSelector": "current",
-                "stat": true
-            })
-        );
-        assert_eq!(
-            repo_diff_snapshot_command("rpc-5".to_string(), None),
-            serde_json::json!({ "id": "rpc-5", "type": "repo_diff_snapshot" })
         );
     }
 
@@ -2030,73 +2018,28 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn rpc_repo_diff_response_emits_diff_state() {
-        let state = test_state(8, None);
-        state
-            .sessions
-            .write()
-            .await
-            .insert("s1".to_string(), test_record());
-        let mut events = state.events.subscribe();
-
-        apply_rpc_response(
-            &state,
-            "s1",
-            &serde_json::json!({
-                "type": "response",
-                "command": "repo_diff_get",
-                "success": true,
-                "data": {
-                    "snapshots": [{
-                        "entryId": "entry-1",
-                        "label": "session-start",
-                        "kind": "session-start",
-                        "createdAt": "2026-04-29T00:00:00.000Z",
-                        "repoRoot": "/repo"
-                    }],
-                    "selectedSnapshot": {
-                        "entryId": "entry-1",
-                        "label": "session-start",
-                        "kind": "session-start",
-                        "createdAt": "2026-04-29T00:00:00.000Z",
-                        "repoRoot": "/repo"
-                    },
-                    "headSnapshot": null,
-                    "diff": "diff --git a/a b/a\n",
-                    "stat": false
-                }
-            }),
-        )
-        .await;
-
-        match events.recv().await.expect("diff state event") {
-            ServerMessage::DiffState { session_id, state } => {
-                assert_eq!(session_id, "s1");
-                assert_eq!(state["selectedSnapshot"]["entryId"], "entry-1");
-                assert_eq!(state["headSnapshot"], Value::Null);
-                assert_eq!(state["diff"], "diff --git a/a b/a\n");
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
-    }
-
     #[test]
-    fn parses_diff_refresh_message() {
+    fn parses_typed_diff_compare_message() {
         let msg: ClientMessage = serde_json::from_str(
-            r#"{"type":"diff.refresh","sessionId":"abc-123","selector":"session-start","headSelector":"manual-2","stat":true}"#,
+            r#"{"type":"diff.compare","sessionId":"abc-123","repoRoot":"/repo","base":{"kind":"gitRef","value":"main"},"head":{"kind":"gitRef","value":"feature"},"mode":"full","mergeBase":true,"reviewMode":"commit","commitOid":"abc"}"#,
         )
         .expect("parse failed");
         assert!(matches!(
             msg,
-            ClientMessage::DiffRefresh {
+            ClientMessage::DiffCompare {
                 ref session_id,
-                ref selector,
-                ref head_selector,
-                stat: Some(true)
-            } if session_id == "abc-123"
-                && selector.as_deref() == Some("session-start")
-                && head_selector.as_deref() == Some("manual-2")
+                ref repo_root,
+                base: DiffRefInput::GitRef { ref value },
+                head: DiffRefInput::GitRef { value: ref head_value },
+                mode: DiffMode::Full,
+                merge_base: Some(true),
+                review_mode: Some(DiffReviewMode::Commit),
+                commit_oid: Some(ref commit_oid),
+            } if session_id.as_deref() == Some("abc-123")
+                && repo_root == "/repo"
+                && value == "main"
+                && head_value == "feature"
+                && commit_oid == "abc"
         ));
     }
 

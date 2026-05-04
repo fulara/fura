@@ -1,68 +1,26 @@
 import { shortPath } from "./format";
-import type { DiffComment, DiffLineLocation, DiffSnapshotSummary, RepoDiffState } from "./protocol";
+import type { DiffReviewAnnotation, DiffLineLocation, RepoDiffState, ResolvedDiffRef } from "./protocol";
 
 export type ParsedDiffRow =
   | { type: "meta"; text: string }
-  | { type: "file"; text: string; filePath: string }
-  | { type: "hunk"; text: string; filePath: string; hunk: string }
+  | { type: "file"; text: string; oldPath?: string | null; newPath: string; filePath: string }
+  | { type: "hunk"; text: string; oldPath?: string | null; newPath: string; filePath: string; hunk: string }
   | { type: "line"; prefix: string; location: DiffLineLocation };
 
 export type DiffFileSummary = {
   filePath: string;
+  oldPath?: string | null;
   added: number;
   removed: number;
   commentCount: number;
-};
-
-export type DiffSelection = {
-  repoRoot: string | null;
-  snapshots: DiffSnapshotSummary[];
-  selectedSnapshot: DiffSnapshotSummary | null;
-  headSnapshot: DiffSnapshotSummary | null;
-  stat: boolean;
-};
-
-export type DiffHeadSelection =
-  | { kind: "unset" }
-  | { kind: "working-tree" }
-  | { kind: "snapshot"; entryId: string };
-
-export function diffHeadSelectionFromEntryId(
-  entryId: string | null | undefined,
-  isExplicit: boolean,
-): DiffHeadSelection {
-  if (!isExplicit) return { kind: "unset" };
-  if (entryId === null) return { kind: "working-tree" };
-  if (entryId === undefined) return { kind: "unset" };
-  return { kind: "snapshot", entryId };
-}
-
-export type DiffSelectionInput = {
-  state: RepoDiffState | undefined;
-  cwd?: string;
-  explicitRepoRoot?: string;
-  explicitSnapshotEntryId?: string;
-  headSelection?: DiffHeadSelection;
-  stat?: boolean;
-  defaultStat?: boolean;
+  questionCount: number;
 };
 
 export function diffRepoRoots(state: RepoDiffState | undefined): string[] {
-  if (!state) return [];
-  const roots: string[] = [];
-  for (const snapshot of state.snapshots) {
-    if (!roots.includes(snapshot.repoRoot)) roots.push(snapshot.repoRoot);
-  }
-  return roots;
+  return state?.repoRoot ? [state.repoRoot] : [];
 }
 
-export function diffSnapshotsForRepo(state: RepoDiffState | undefined, repoRoot: string | null): DiffSnapshotSummary[] {
-  if (!state) return [];
-  if (!repoRoot) return state.snapshots;
-  return state.snapshots.filter(snapshot => snapshot.repoRoot === repoRoot);
-}
-
-function inferDiffRepoRootFromCwd(cwd: string | undefined, repoRoots: string[]): string | null {
+export function inferDiffRepoRootFromCwd(cwd: string | undefined, repoRoots: string[]): string | null {
   if (!cwd) return null;
   const matchingRoots = repoRoots
     .filter(repoRoot => cwd === repoRoot || cwd.startsWith(`${repoRoot}/`) || cwd.startsWith(`${repoRoot}\\`))
@@ -76,65 +34,81 @@ export function formatDiffRepoLabel(repoRoot: string): string {
   return name === repoRoot ? repoRoot : `${name} — ${shortPath(repoRoot)}`;
 }
 
-export function deriveDiffSelection(input: DiffSelectionInput): DiffSelection {
-  const repoRoots = diffRepoRoots(input.state);
-  const repoRoot = resolveDiffRepoRoot(input, repoRoots);
-  const snapshots = diffSnapshotsForRepo(input.state, repoRoot);
-  const selectedSnapshot = snapshots.find(snapshot => snapshot.entryId === input.explicitSnapshotEntryId)
-    ?? (input.state?.selectedSnapshot?.repoRoot === repoRoot ? input.state.selectedSnapshot : null)
-    ?? snapshots[snapshots.length - 1]
-    ?? null;
-  const headSnapshot = resolveDiffHeadSnapshot(input, snapshots, repoRoot);
-
-  return {
-    repoRoot,
-    snapshots,
-    selectedSnapshot,
-    headSnapshot,
-    stat: input.stat ?? input.state?.stat ?? input.defaultStat ?? false,
-  };
+export function resolvedRefLabel(ref: ResolvedDiffRef): string {
+  return ref.kind === "workingTree" ? "working tree" : `${ref.display} (${ref.oid.slice(0, 12)})`;
 }
 
-function resolveDiffRepoRoot(input: DiffSelectionInput, repoRoots: string[]): string | null {
-  const explicit = input.explicitRepoRoot;
-  if (explicit && repoRoots.includes(explicit)) return explicit;
-
-  const inferred = inferDiffRepoRootFromCwd(input.cwd, repoRoots);
-  if (inferred) return inferred;
-
-  const selectedRepoRoot = input.state?.selectedSnapshot?.repoRoot;
-  if (selectedRepoRoot && repoRoots.includes(selectedRepoRoot)) return selectedRepoRoot;
-
-  return repoRoots[0] ?? null;
-}
-
-function resolveDiffHeadSnapshot(
-  input: DiffSelectionInput,
-  snapshots: DiffSnapshotSummary[],
-  repoRoot: string | null,
-): DiffSnapshotSummary | null {
-  const headSelection = input.headSelection ?? { kind: "unset" };
-  if (headSelection.kind === "working-tree") return null;
-  if (headSelection.kind === "snapshot") {
-    return snapshots.find(snapshot => snapshot.entryId === headSelection.entryId) ?? null;
-  }
-
-  return input.state?.headSnapshot?.repoRoot === repoRoot ? input.state.headSnapshot : null;
+export function comparisonKey(state: RepoDiffState): string {
+  const base = state.comparison.base.kind === "gitRef"
+    ? `${state.comparison.base.input}:${state.comparison.base.oid}`
+    : "workingTree";
+  const head = state.comparison.head.kind === "gitRef"
+    ? `${state.comparison.head.input}:${state.comparison.head.oid}`
+    : "workingTree";
+  const selected = state.reviewProgress.mode === "commit" ? state.reviewProgress.selectedCommitOid ?? "unknown" : "range";
+  return [state.repoRoot, base, head, state.comparison.mode, state.reviewProgress.mode, selected].join("|");
 }
 
 export function parseDiffRows(diffText: string): ParsedDiffRow[] {
   const rows: ParsedDiffRow[] = [];
-  let filePath = "";
+  let oldPath: string | null = null;
+  let newPath = "";
   let hunk: string | null = null;
   let oldLine = 0;
   let newLine = 0;
+  let pendingRenameFrom: string | null = null;
+  let pendingRenameTo: string | null = null;
 
   for (const text of diffText.split("\n")) {
     const fileMatch = /^diff --git a\/(.+?) b\/(.+)$/u.exec(text);
     if (fileMatch) {
-      filePath = fileMatch[2] ?? fileMatch[1] ?? "";
+      oldPath = fileMatch[1] ?? null;
+      newPath = fileMatch[2] ?? fileMatch[1] ?? "";
+      pendingRenameFrom = null;
+      pendingRenameTo = null;
       hunk = null;
-      rows.push({ type: "file", text, filePath });
+      rows.push({ type: "file", text, oldPath, newPath, filePath: newPath });
+      continue;
+    }
+
+    const renameFrom = /^rename from (.+)$/u.exec(text);
+    if (renameFrom) {
+      pendingRenameFrom = renameFrom[1] ?? null;
+      if (rows[rows.length - 1]?.type === "file") {
+        const row = rows[rows.length - 1] as Extract<ParsedDiffRow, { type: "file" }>;
+        row.oldPath = pendingRenameFrom;
+      }
+      rows.push({ type: "meta", text });
+      continue;
+    }
+    const renameTo = /^rename to (.+)$/u.exec(text);
+    if (renameTo) {
+      pendingRenameTo = renameTo[1] ?? null;
+      newPath = pendingRenameTo;
+      if (rows[rows.length - 1]?.type === "file") {
+        const row = rows[rows.length - 1] as Extract<ParsedDiffRow, { type: "file" }>;
+        row.newPath = pendingRenameTo;
+        row.filePath = pendingRenameTo;
+      }
+      rows.push({ type: "meta", text });
+      continue;
+    }
+
+    if (text.startsWith("Binary files ")) {
+      rows.push({ type: "meta", text });
+      continue;
+    }
+
+    const oldHeader = /^--- (?:a\/(.+)|\/dev\/null)$/u.exec(text);
+    if (oldHeader) {
+      oldPath = oldHeader[1] ?? null;
+      rows.push({ type: "meta", text });
+      continue;
+    }
+    const newHeader = /^\+\+\+ (?:b\/(.+)|\/dev\/null)$/u.exec(text);
+    if (newHeader) {
+      newPath = newHeader[1] ?? newPath;
+      rows.push({ type: "meta", text });
       continue;
     }
 
@@ -143,18 +117,18 @@ export function parseDiffRows(diffText: string): ParsedDiffRow[] {
       oldLine = Number(hunkMatch[1]);
       newLine = Number(hunkMatch[2]);
       hunk = text;
-      rows.push({ type: "hunk", text, filePath, hunk });
+      rows.push({ type: "hunk", text, oldPath, newPath, filePath: newPath, hunk });
       continue;
     }
 
     if (text.startsWith("+") && !text.startsWith("+++")) {
-      rows.push({ type: "line", prefix: "+", location: { filePath, hunk, kind: "add", newLine, text } });
+      rows.push({ type: "line", prefix: "+", location: { oldPath, newPath, hunk, side: "right", kind: "add", newLine, text } });
       newLine += 1;
       continue;
     }
 
     if (text.startsWith("-") && !text.startsWith("---")) {
-      rows.push({ type: "line", prefix: "-", location: { filePath, hunk, kind: "remove", oldLine, text } });
+      rows.push({ type: "line", prefix: "-", location: { oldPath, newPath, hunk, side: "left", kind: "remove", oldLine, text } });
       oldLine += 1;
       continue;
     }
@@ -163,7 +137,7 @@ export function parseDiffRows(diffText: string): ParsedDiffRow[] {
       rows.push({
         type: "line",
         prefix: " ",
-        location: { filePath, hunk, kind: "context", oldLine, newLine, text },
+        location: { oldPath, newPath, hunk, side: "right", kind: "context", oldLine, newLine, text },
       });
       oldLine += 1;
       newLine += 1;
@@ -176,50 +150,47 @@ export function parseDiffRows(diffText: string): ParsedDiffRow[] {
   return rows;
 }
 
-export function isSameDiffComparison(
-  comment: DiffComment,
-  baseSnapshot: DiffSnapshotSummary | null,
-  headSnapshot: DiffSnapshotSummary | null,
-): boolean {
-  if (!baseSnapshot) return false;
-  return (
-    comment.baseSnapshotEntryId === baseSnapshot.entryId &&
-    comment.headSnapshotEntryId === (headSnapshot?.entryId ?? null)
-  );
+export function isSameDiffComparison(annotation: DiffReviewAnnotation, key: string): boolean {
+  return annotation.comparisonKey === key;
 }
 
 export function summarizeDiffFiles(
   rows: ParsedDiffRow[],
-  comments: DiffComment[] = [],
-  baseSnapshot: DiffSnapshotSummary | null = null,
-  headSnapshot: DiffSnapshotSummary | null = null,
+  annotations: DiffReviewAnnotation[] = [],
+  key: string | null = null,
 ): DiffFileSummary[] {
   const byPath = new Map<string, DiffFileSummary>();
 
   for (const row of rows) {
     if (row.type !== "line") continue;
-    if (!row.location.filePath) continue;
-    const existing = byPath.get(row.location.filePath) ?? {
-      filePath: row.location.filePath,
+    if (!row.location.newPath) continue;
+    const existing = byPath.get(row.location.newPath) ?? {
+      filePath: row.location.newPath,
+      oldPath: row.location.oldPath,
       added: 0,
       removed: 0,
       commentCount: 0,
+      questionCount: 0,
     };
     if (row.location.kind === "add") existing.added += 1;
     if (row.location.kind === "remove") existing.removed += 1;
-    byPath.set(row.location.filePath, existing);
+    byPath.set(row.location.newPath, existing);
   }
 
-  for (const comment of comments) {
-    if (!isSameDiffComparison(comment, baseSnapshot, headSnapshot)) continue;
-    const existing = byPath.get(comment.filePath) ?? {
-      filePath: comment.filePath,
+  for (const annotation of annotations) {
+    if (key && !isSameDiffComparison(annotation, key)) continue;
+    const filePath = annotation.anchor.newPath;
+    const existing = byPath.get(filePath) ?? {
+      filePath,
+      oldPath: annotation.anchor.oldPath,
       added: 0,
       removed: 0,
       commentCount: 0,
+      questionCount: 0,
     };
-    existing.commentCount += 1;
-    byPath.set(comment.filePath, existing);
+    if (annotation.kind === "comment") existing.commentCount += 1;
+    if (annotation.kind === "question") existing.questionCount += 1;
+    byPath.set(filePath, existing);
   }
 
   return [...byPath.values()];

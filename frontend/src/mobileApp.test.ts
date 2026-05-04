@@ -124,19 +124,20 @@ function diffState(
   diff = "src/main.ts | 2 ++",
   overrides: Partial<import("./protocol").RepoDiffState> = {},
 ): import("./protocol").RepoDiffState {
-  const base = {
-    entryId: "base-1",
-    label: "session start",
-    kind: "session-start" as const,
-    createdAt: "2026-05-02T00:00:00Z",
-    repoRoot: "/repo",
-  };
   return {
-    snapshots: [base],
-    selectedSnapshot: base,
-    headSnapshot: null,
+    repoRoot: "/repo",
+    refs: [],
+    comparison: {
+      repoRoot: "/repo",
+      base: { kind: "gitRef", input: "HEAD", refKind: "commit", oid: "a".repeat(40), display: "HEAD" },
+      head: { kind: "gitRef", input: "HEAD", refKind: "commit", oid: "b".repeat(40), display: "HEAD" },
+      mode: "stat",
+    },
     diff,
-    stat: true,
+    files: [],
+    truncated: false,
+    generatedAt: "1",
+    reviewProgress: { mode: "range", commits: [] },
     ...overrides,
   };
 }
@@ -583,55 +584,18 @@ describe("mountMobileApp", () => {
       content: "Plan body",
     });
 
-    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Plan ready: Review me");
-    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
-    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(true);
-    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Plan review waiting");
+    expect(document.querySelector(".plan-review-card")).toBeNull();
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
+    expect(document.querySelector("#mobileSendButton")?.getAttribute("type")).toBe("submit");
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("");
 
     const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
     const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
     if (!input || !form) throw new Error("prompt form missing");
-    input.value = "should not send";
+    input.value = "should send";
     form.requestSubmit();
-    expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "should not send")).toBe(false);
-
-    document.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
-    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Refining plan: Review me");
-    expect(document.querySelector(".message-review-toggle")?.textContent).toBe("Review");
-    expect(input.disabled).toBe(false);
-    vi.spyOn(window, "prompt").mockReturnValue("Fix the second step");
-    document.querySelector<HTMLButtonElement>(".plan-review-card .message-review-toggle")?.click();
-    document.querySelector<HTMLButtonElement>(".plan-review-card .transcript-review-comment-btn")?.click();
-    document.querySelector<HTMLButtonElement>(".plan-review-card .transcript-review-actions button:last-child")?.click();
-    expect(document.querySelector<HTMLTextAreaElement>("#mobileReviewPreviewText")?.value).toContain("I reviewed a finalized plan");
-    document.querySelector<HTMLButtonElement>("#mobileReviewPreviewSend")?.click();
-    expect(connection.sent.some(message =>
-      message.type === "prompt.send" &&
-      message.sessionId === "live" &&
-      message.text.includes("Please refine the plan to address these comments"),
-    )).toBe(true);
-
-    connection.emit({
-      type: "plan.review",
-      sessionId: "live",
-      planFilePath: "local://PLAN.md",
-      finalPlanFilePath: "local://FINAL.md",
-      title: "Review me",
-      content: "Plan body",
-    });
-    document.querySelector<HTMLButtonElement>(".plan-review-approve")?.click();
-
-    expect(connection.sent).toContainEqual({
-      type: "raw.rpc",
-      sessionId: "live",
-      command: {
-        type: "approve_plan_mode",
-        planFilePath: "local://PLAN.md",
-        finalPlanFilePath: "local://FINAL.md",
-      },
-    });
+    expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "should send")).toBe(true);
   });
-
   it("renders prompt busy choices and sends steer behavior", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
@@ -817,23 +781,21 @@ describe("mountMobileApp", () => {
     clickSession();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
 
-    expect(connection.sent).not.toContainEqual({ type: "diff.refresh", sessionId: "live", stat: true });
+    expect(connection.sent).not.toContainEqual(expect.objectContaining({ type: "diff.compare", sessionId: "live" }));
 
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
-    expect(connection.sent).toContainEqual({ type: "diff.refresh", sessionId: "live", stat: true });
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.compare", sessionId: "live", repoRoot: "/repo" }));
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Loading diff");
 
     connection.emit({ type: "diff.state", sessionId: "live", state: diffState() });
 
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("src/main.ts | 2 ++");
-    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Base: session start");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Base: HEAD");
     expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
   });
 
   it("renders structured mobile diff rows and requests selected comparisons", () => {
     const { connection } = createHarness();
-    const base = { entryId: "base-1", label: "session start", kind: "session-start" as const, createdAt: "2026-05-02T00:00:00Z", repoRoot: "/repo" };
-    const manual = { entryId: "manual-1", label: "manual", kind: "manual" as const, createdAt: "2026-05-02T01:00:00Z", repoRoot: "/repo" };
     const patch = [
       "diff --git a/src/main.ts b/src/main.ts",
       "@@ -1 +1 @@",
@@ -847,7 +809,7 @@ describe("mountMobileApp", () => {
     connection.emit({
       type: "diff.state",
       sessionId: "live",
-      state: diffState(patch, { snapshots: [base, manual], selectedSnapshot: base, stat: false }),
+      state: diffState(patch, { comparison: { ...diffState().comparison, mode: "full" } }),
     });
 
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Modified files (1)");
@@ -856,11 +818,11 @@ describe("mountMobileApp", () => {
     expect(document.querySelector(".mobile-diff-line-remove")?.textContent).toContain("old");
     expect(document.querySelector(".mobile-diff-line-add")?.textContent).toContain("new");
 
-    const selects = document.querySelectorAll<HTMLSelectElement>(".mobile-diff-field select");
-    selects[0]!.value = "manual-1";
-    selects[0]!.dispatchEvent(new Event("change", { bubbles: true }));
+    const inputs = document.querySelectorAll<HTMLInputElement>(".mobile-diff-field input");
+    inputs[1]!.value = "main";
+    inputs[1]!.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect(connection.sent).toContainEqual({ type: "diff.refresh", sessionId: "live", selector: "manual-1", stat: false });
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.compare", sessionId: "live", base: { kind: "gitRef", value: "main" } }));
   });
 
   it("switches mobile diff between stat and full diff", () => {
@@ -875,7 +837,7 @@ describe("mountMobileApp", () => {
       .find(button => button.textContent === "Full");
     fullButton?.click();
 
-    expect(connection.sent).toContainEqual({ type: "diff.refresh", sessionId: "live", selector: "base-1", stat: false });
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.compare", sessionId: "live", mode: "full" }));
   });
 
   it("shows diff errors without leaving the diff tab", () => {
@@ -904,7 +866,7 @@ describe("mountMobileApp", () => {
     clickSession();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
-    connection.emit({ type: "diff.state", sessionId: "live", state: diffState(patch, { stat: false }) });
+    connection.emit({ type: "diff.state", sessionId: "live", state: diffState(patch, { comparison: { ...diffState().comparison, mode: "full" } }) });
 
     document.querySelector<HTMLButtonElement>(".mobile-diff-line-add .mobile-diff-comment-button")?.click();
     const commentText = document.querySelector<HTMLTextAreaElement>("#mobileDiffCommentText");
@@ -929,7 +891,7 @@ describe("mountMobileApp", () => {
     const promptMessage = connection.sent.filter(message => message.type === "prompt.send").at(-1);
     expect(promptMessage).toMatchObject({ type: "prompt.send", sessionId: "live" });
     expect(promptMessage && "text" in promptMessage ? promptMessage.text : "").toContain("Please avoid console logging.");
-    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No comments on this diff yet.");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No annotations on this diff yet.");
   });
 
   it("keeps mobile diff comments queued until busy prompt follow-up is sent", () => {
@@ -944,7 +906,7 @@ describe("mountMobileApp", () => {
     clickSession();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { isBusy: true }) });
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
-    connection.emit({ type: "diff.state", sessionId: "live", state: diffState(patch, { stat: false }) });
+    connection.emit({ type: "diff.state", sessionId: "live", state: diffState(patch, { comparison: { ...diffState().comparison, mode: "full" } }) });
 
     document.querySelector<HTMLButtonElement>(".mobile-diff-line-add .mobile-diff-comment-button")?.click();
     const commentText = document.querySelector<HTMLTextAreaElement>("#mobileDiffCommentText");
@@ -964,6 +926,6 @@ describe("mountMobileApp", () => {
 
     const promptMessage = connection.sent.filter(message => message.type === "prompt.send").at(-1);
     expect(promptMessage).toMatchObject({ type: "prompt.send", sessionId: "live", behavior: "followUp" });
-    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No comments on this diff yet.");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No annotations on this diff yet.");
   });
 });

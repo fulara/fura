@@ -723,17 +723,6 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
     }
 
     match command {
-        Some("repo_diff_get") | Some("repo_diff_snapshot") => {
-            let state_value = frame
-                .get("data")
-                .or_else(|| frame.get("result"))
-                .cloned()
-                .unwrap_or(Value::Null);
-            let _ = state.events.send(ServerMessage::DiffState {
-                session_id: current_session_id.clone(),
-                state: state_value,
-            });
-        }
         Some("get_available_models") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
             let models = data

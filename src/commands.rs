@@ -123,27 +123,50 @@ pub(crate) async fn handle_client_message(
             provider,
             model_id,
         } => handle_model_set_command(state, session_id, &provider, &model_id).await,
-        ClientMessage::DiffRefresh {
+        ClientMessage::DiffOpen {
             session_id,
-            selector,
-            head_selector,
-            stat,
+            repo_root,
+        } => handle_diff_open(state, session_id, repo_root).await,
+        ClientMessage::DiffCompare {
+            session_id,
+            repo_root,
+            base,
+            head,
+            mode,
+            merge_base,
+            review_mode,
+            commit_oid,
         } => {
-            handle_diff_refresh(
+            handle_diff_compare(
                 state,
                 session_id,
-                selector,
-                head_selector,
-                stat.unwrap_or(false),
+                repo_root,
+                base,
+                head,
+                mode,
+                merge_base,
+                review_mode,
+                commit_oid,
             )
             .await
         }
-        ClientMessage::DiffSnapshot { session_id, label } => {
-            handle_diff_snapshot(state, session_id, label).await
-        }
+        ClientMessage::DiffReviewWorktreeEnsure {
+            source_repo_root,
+            base,
+            head,
+        } => handle_diff_review_worktree_ensure(state, source_repo_root, base, head).await,
+        ClientMessage::DiffReviewWorktreeCheckout {
+            worktree_id,
+            ref_target,
+        } => handle_diff_review_worktree_checkout(state, worktree_id, ref_target).await,
         ClientMessage::CodeWorkspaceOpen { session_id } => {
             handle_code_workspace_open(state, session_id).await
         }
+        ClientMessage::CodeWorkspaceOpenRoot {
+            root,
+            source,
+            review_worktree_id,
+        } => handle_code_workspace_open_root(state, root, source, review_worktree_id).await,
         ClientMessage::CodeTreeList { workspace_id, path } => {
             handle_code_tree_list(state, workspace_id, path).await
         }
@@ -1215,32 +1238,6 @@ pub(crate) async fn handle_model_slash_command(
             }
             handle_model_set_command(state, session_id, provider, model_id).await
         }
-    }
-}
-
-pub(crate) async fn handle_diff_refresh(
-    state: &AppState,
-    session_id: String,
-    selector: Option<String>,
-    head_selector: Option<String>,
-    stat: bool,
-) -> Vec<ServerMessage> {
-    let command = repo_diff_get_command(next_rpc_id(), selector, head_selector, stat);
-    match send_rpc_command(state, &session_id, command).await {
-        Ok(()) => Vec::new(),
-        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
-    }
-}
-
-pub(crate) async fn handle_diff_snapshot(
-    state: &AppState,
-    session_id: String,
-    label: Option<String>,
-) -> Vec<ServerMessage> {
-    let command = repo_diff_snapshot_command(next_rpc_id(), label);
-    match send_rpc_command(state, &session_id, command).await {
-        Ok(()) => Vec::new(),
-        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
     }
 }
 

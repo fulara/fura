@@ -53,6 +53,7 @@ describe("protocol type fixtures", () => {
         sessionId: "session-1",
         root: "/repo",
         status: "filesOnly",
+        source: "session",
       },
     } satisfies ServerMessage;
 

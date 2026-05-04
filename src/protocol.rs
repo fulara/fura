@@ -31,6 +31,184 @@ pub(crate) struct WorktreeCreateRequest {
     pub(crate) base_branch: String,
     pub(crate) branch_name: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DiffMode {
+    Full,
+    Stat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiffReviewMode {
+    Range,
+    Commit,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiffSide {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiffRefKind {
+    Branch,
+    Tag,
+    Commit,
+    Remote,
+    Other,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum DiffRefInput {
+    WorkingTree,
+    GitRef { value: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum DiffCheckoutTarget {
+    WorkingTree,
+    GitRef { value: String },
+    Commit { oid: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum ResolvedDiffRef {
+    WorkingTree,
+    GitRef {
+        input: String,
+        ref_kind: DiffRefKind,
+        oid: String,
+        display: String,
+    },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitRefSummary {
+    pub(crate) name: String,
+    pub(crate) short_name: String,
+    pub(crate) ref_kind: DiffRefKind,
+    pub(crate) oid: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiffFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    Binary,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffFileSummary {
+    pub(crate) old_path: Option<String>,
+    pub(crate) new_path: String,
+    pub(crate) status: DiffFileStatus,
+    pub(crate) added: u64,
+    pub(crate) removed: u64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffCommitSummary {
+    pub(crate) oid: String,
+    pub(crate) short_oid: String,
+    pub(crate) subject: String,
+    pub(crate) author_name: Option<String>,
+    pub(crate) author_email: Option<String>,
+    pub(crate) committed_at: String,
+    pub(crate) parent_oids: Vec<String>,
+    pub(crate) is_merge: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffReviewProgress {
+    pub(crate) mode: DiffReviewMode,
+    pub(crate) commits: Vec<DiffCommitSummary>,
+    pub(crate) selected_commit_oid: Option<String>,
+    pub(crate) selected_commit_index: Option<usize>,
+    pub(crate) previous_commit_oid: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffComparison {
+    pub(crate) repo_root: String,
+    pub(crate) base: ResolvedDiffRef,
+    pub(crate) head: ResolvedDiffRef,
+    pub(crate) mode: DiffMode,
+    pub(crate) merge_base: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RepoDiffState {
+    pub(crate) repo_root: String,
+    pub(crate) refs: Vec<GitRefSummary>,
+    pub(crate) comparison: DiffComparison,
+    pub(crate) diff: String,
+    pub(crate) files: Vec<DiffFileSummary>,
+    pub(crate) truncated: bool,
+    pub(crate) generated_at: String,
+    pub(crate) review_progress: DiffReviewProgress,
+    pub(crate) review_worktree: Option<DiffReviewWorktree>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DiffReviewWorktreeStatus {
+    Missing,
+    Ready,
+    CheckingOut,
+    Error,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffReviewWorktree {
+    pub(crate) id: String,
+    pub(crate) source_repo_root: String,
+    pub(crate) path: String,
+    pub(crate) checked_out_ref: Option<ResolvedDiffRef>,
+    pub(crate) checked_out_oid: Option<String>,
+    pub(crate) dirty: bool,
+    pub(crate) status: DiffReviewWorktreeStatus,
+    pub(crate) status_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CodeWorkspaceSource {
+    Session,
+    ReviewWorktree,
+}
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FrontendUiSnapshot {
@@ -203,17 +381,33 @@ pub(crate) enum ClientMessage {
         provider: String,
         model_id: String,
     },
-    #[serde(rename = "diff.refresh")]
-    DiffRefresh {
-        session_id: String,
-        selector: Option<String>,
-        head_selector: Option<String>,
-        stat: Option<bool>,
+    #[serde(rename = "diff.open")]
+    DiffOpen {
+        session_id: Option<String>,
+        repo_root: Option<String>,
     },
-    #[serde(rename = "diff.snapshot")]
-    DiffSnapshot {
-        session_id: String,
-        label: Option<String>,
+    #[serde(rename = "diff.compare")]
+    DiffCompare {
+        session_id: Option<String>,
+        repo_root: String,
+        base: DiffRefInput,
+        head: DiffRefInput,
+        mode: DiffMode,
+        merge_base: Option<bool>,
+        review_mode: Option<DiffReviewMode>,
+        commit_oid: Option<String>,
+    },
+    #[serde(rename = "diff.reviewWorktree.ensure")]
+    DiffReviewWorktreeEnsure {
+        source_repo_root: String,
+        base: Option<DiffRefInput>,
+        head: Option<DiffRefInput>,
+    },
+    #[serde(rename = "diff.reviewWorktree.checkout")]
+    DiffReviewWorktreeCheckout {
+        worktree_id: String,
+        #[serde(rename = "ref")]
+        ref_target: DiffCheckoutTarget,
     },
     #[serde(rename = "session.fork")]
     SessionFork { session_id: String, name: String },
@@ -225,6 +419,12 @@ pub(crate) enum ClientMessage {
     },
     #[serde(rename = "code.workspace.open")]
     CodeWorkspaceOpen { session_id: String },
+    #[serde(rename = "code.workspace.openRoot")]
+    CodeWorkspaceOpenRoot {
+        root: String,
+        source: CodeWorkspaceSource,
+        review_worktree_id: Option<String>,
+    },
     #[serde(rename = "code.tree.list")]
     CodeTreeList {
         workspace_id: String,
@@ -326,7 +526,18 @@ pub(crate) enum ServerMessage {
         content: String,
     },
     #[serde(rename = "diff.state")]
-    DiffState { session_id: String, state: Value },
+    DiffState {
+        session_id: Option<String>,
+        state: RepoDiffState,
+    },
+    #[serde(rename = "diff.error")]
+    DiffError {
+        session_id: Option<String>,
+        repo_root: Option<String>,
+        message: String,
+    },
+    #[serde(rename = "diff.reviewWorktree.state")]
+    DiffReviewWorktreeState { worktree: DiffReviewWorktree },
     #[serde(rename = "control.reply")]
     ControlReply {
         target_client_id: String,

@@ -13,7 +13,7 @@ use serde::Serialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::{AppState, ServerMessage};
+use crate::{AppState, CodeWorkspaceSource, ServerMessage};
 
 const MAX_CODE_FILE_BYTES: u64 = 1_000_000;
 const MAX_TREE_ENTRIES: usize = 500;
@@ -32,7 +32,7 @@ const IGNORED_DIRS: &[&str] = &[
 #[derive(Debug, Default)]
 pub(crate) struct CodeWorkspaceRegistry {
     by_id: HashMap<String, CodeWorkspace>,
-    by_root: HashMap<PathBuf, String>,
+    by_key: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,17 +40,22 @@ struct CodeWorkspace {
     workspace_id: String,
     root: PathBuf,
     rust_root: Option<PathBuf>,
+    source: CodeWorkspaceSource,
+    session_id: Option<String>,
+    review_worktree_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CodeWorkspaceSummary {
     pub(crate) workspace_id: String,
-    pub(crate) session_id: String,
+    pub(crate) session_id: Option<String>,
     pub(crate) root: String,
     pub(crate) rust_root: Option<String>,
     pub(crate) status: CodeStatus,
     pub(crate) status_message: Option<String>,
+    pub(crate) source: CodeWorkspaceSource,
+    pub(crate) review_worktree_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -90,6 +95,22 @@ pub(crate) async fn handle_code_workspace_open(
     session_id: String,
 ) -> Vec<ServerMessage> {
     match open_workspace_for_session(state, &session_id).await {
+        Ok(summary) => vec![ServerMessage::CodeWorkspaceReady { workspace: summary }],
+        Err(message) => vec![ServerMessage::CodeError {
+            workspace_id: None,
+            path: None,
+            message,
+        }],
+    }
+}
+
+pub(crate) async fn handle_code_workspace_open_root(
+    state: &AppState,
+    root: String,
+    source: CodeWorkspaceSource,
+    review_worktree_id: Option<String>,
+) -> Vec<ServerMessage> {
+    match open_workspace_for_root(state, &root, source, None, review_worktree_id).await {
         Ok(summary) => vec![ServerMessage::CodeWorkspaceReady { workspace: summary }],
         Err(message) => vec![ServerMessage::CodeError {
             workspace_id: None,
@@ -190,8 +211,26 @@ async fn open_workspace_for_session(
     };
 
     let mut registry = state.code_workspaces.write().await;
-    let workspace = registry.workspace_for_root(root);
-    Ok(workspace.summary(session_id))
+    let workspace = registry.workspace_for_root(
+        root,
+        CodeWorkspaceSource::Session,
+        Some(session_id.to_string()),
+        None,
+    );
+    Ok(workspace.summary())
+}
+
+async fn open_workspace_for_root(
+    state: &AppState,
+    root: &str,
+    source: CodeWorkspaceSource,
+    session_id: Option<String>,
+    review_worktree_id: Option<String>,
+) -> Result<CodeWorkspaceSummary, String> {
+    let root = canonical_workspace_root(root).map_err(|err| err.to_string())?;
+    let mut registry = state.code_workspaces.write().await;
+    let workspace = registry.workspace_for_root(root, source, session_id, review_worktree_id);
+    Ok(workspace.summary())
 }
 
 async fn list_workspace_tree(
@@ -236,8 +275,20 @@ async fn workspace_by_id(
 }
 
 impl CodeWorkspaceRegistry {
-    fn workspace_for_root(&mut self, root: PathBuf) -> CodeWorkspace {
-        if let Some(workspace_id) = self.by_root.get(&root) {
+    fn workspace_for_root(
+        &mut self,
+        root: PathBuf,
+        source: CodeWorkspaceSource,
+        session_id: Option<String>,
+        review_worktree_id: Option<String>,
+    ) -> CodeWorkspace {
+        let key = workspace_key(
+            &root,
+            source,
+            session_id.as_deref(),
+            review_worktree_id.as_deref(),
+        );
+        if let Some(workspace_id) = self.by_key.get(&key) {
             if let Some(workspace) = self.by_id.get(workspace_id) {
                 return workspace.clone();
             }
@@ -249,22 +300,40 @@ impl CodeWorkspaceRegistry {
             workspace_id: workspace_id.clone(),
             root: root.clone(),
             rust_root,
+            source,
+            session_id,
+            review_worktree_id,
         };
-        self.by_root.insert(root, workspace_id.clone());
+        self.by_key.insert(key, workspace_id.clone());
         self.by_id.insert(workspace_id, workspace.clone());
         workspace
     }
 }
 
+fn workspace_key(
+    root: &Path,
+    source: CodeWorkspaceSource,
+    session_id: Option<&str>,
+    review_worktree_id: Option<&str>,
+) -> String {
+    format!(
+        "{}|{:?}|{}|{}",
+        root.display(),
+        source,
+        session_id.unwrap_or(""),
+        review_worktree_id.unwrap_or("")
+    )
+}
+
 impl CodeWorkspace {
-    fn summary(&self, session_id: &str) -> CodeWorkspaceSummary {
+    fn summary(&self) -> CodeWorkspaceSummary {
         let status_message = match self.rust_root {
             Some(_) => "Files only. Rust analysis starts in a later milestone.",
             None => "Files only. Cargo.toml was not found.",
         };
         CodeWorkspaceSummary {
             workspace_id: self.workspace_id.clone(),
-            session_id: session_id.to_string(),
+            session_id: self.session_id.clone(),
             root: self.root.display().to_string(),
             rust_root: self
                 .rust_root
@@ -272,6 +341,8 @@ impl CodeWorkspace {
                 .map(|path| path.display().to_string()),
             status: CodeStatus::FilesOnly,
             status_message: Some(status_message.to_string()),
+            source: self.source,
+            review_worktree_id: self.review_worktree_id.clone(),
         }
     }
 }

@@ -92,7 +92,7 @@ function renderCodeWorkspaceHeader(state: CodeViewerState, actions: CodeViewerAc
   const refresh = mkEl("button");
   refresh.type = "button";
   refresh.textContent = state.workspace ? "Refresh" : "Open";
-  refresh.disabled = state.loadingWorkspace || !state.activeSessionId;
+  refresh.disabled = state.loadingWorkspace || (!state.activeSessionId && state.workspace?.source !== "reviewWorktree");
   refresh.addEventListener("click", actions.openWorkspace);
 
   header.append(title, refresh);
@@ -113,10 +113,13 @@ function renderCodeWorkspaceHeader(state: CodeViewerState, actions: CodeViewerAc
 }
 
 function workspaceMeta(state: CodeViewerState): string {
-  if (!state.activeSessionId) return "Select a session to browse files.";
   if (state.loadingWorkspace) return "Opening workspace…";
-  if (!state.workspace) return "Open the active session workspace.";
-  return state.workspace.statusMessage || state.workspace.root;
+  if (!state.workspace) {
+    return state.activeSessionId ? "Open the active session workspace." : "Select a session or open a review worktree.";
+  }
+  const source = state.workspace.source === "reviewWorktree" ? "review worktree" : "session";
+  const suffix = state.workspace.reviewWorktreeId ? ` · ${state.workspace.reviewWorktreeId.slice(0, 8)}` : "";
+  return `${source}${suffix} · ${state.workspace.statusMessage || state.workspace.root}`;
 }
 
 function renderCodeTree(state: CodeViewerState, actions: CodeViewerActions): HTMLElement {
