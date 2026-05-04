@@ -2102,6 +2102,7 @@ h2 {
   gap: 1rem;
   padding: 1rem;
   border-bottom: 1px solid #252a35;
+  flex-shrink: 0;
 }
 
 .modal-footer {
@@ -2293,6 +2294,7 @@ h2 {
   gap: 0.35rem;
   padding: 0 1rem;
   border-bottom: 1px solid #252a35;
+  flex-shrink: 0;
 }
 
 .modal-tabs button {
@@ -2313,10 +2315,13 @@ h2 {
 }
 
 .cwd-picker-body {
+  min-height: 0;
   padding: 1rem;
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 0.5rem;
+  overflow-y: auto;
 }
 
 .cwd-picker-body[hidden] {
