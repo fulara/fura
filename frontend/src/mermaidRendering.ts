@@ -4,6 +4,7 @@ import { mkEl } from "./dom";
 export type MermaidRenderState = {
   source: string;
   svg: string | null;
+  pngUrl: string | null;
   error: string | null;
 };
 
@@ -67,6 +68,28 @@ function downloadBlob(blob: Blob, fileName: string, owner: Document): void {
   link.remove();
   owner.defaultView?.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
+function downloadObjectUrl(url: string, fileName: string, owner: Document): void {
+  const link = owner.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.rel = "noopener noreferrer";
+  link.style.display = "none";
+  owner.body.append(link);
+  link.click();
+  link.remove();
+}
+
+function revokeObjectUrlWhenDisconnected(url: string, element: HTMLElement, owner: Document): void {
+  const win = owner.defaultView;
+  if (!win || !owner.body) return;
+  const observer = new win.MutationObserver(() => {
+    if (element.isConnected) return;
+    URL.revokeObjectURL(url);
+    observer.disconnect();
+  });
+  observer.observe(owner.body, { childList: true, subtree: true });
+}
+
 
 export async function renderMermaidSvg(source: string, owner: Document = document): Promise<string> {
   const mermaid = await loadMermaidClient();
@@ -97,7 +120,7 @@ export function renderMermaidBlock(source: string): HTMLElement {
   wrapper.className = "mermaid-block";
   wrapper.dataset.mermaidState = "pending";
 
-  const state: MermaidRenderState = { source, svg: null, error: null };
+  const state: MermaidRenderState = { source, svg: null, pngUrl: null, error: null };
 
   const header = mkEl("div");
   header.className = "mermaid-header";
@@ -144,12 +167,11 @@ export function renderMermaidBlock(source: string): HTMLElement {
   savePng.className = "mermaid-action";
   savePng.textContent = "Save PNG";
   savePng.disabled = true;
-  savePng.addEventListener("click", async () => {
-    if (!state.svg) return;
+  savePng.addEventListener("click", () => {
+    if (!state.pngUrl) return;
     savePng.disabled = true;
     try {
-      const blob = await svgToPngBlob(state.svg, wrapper.ownerDocument);
-      downloadBlob(blob, mermaidDownloadName("png"), wrapper.ownerDocument);
+      downloadObjectUrl(state.pngUrl, mermaidDownloadName("png"), wrapper.ownerDocument);
       setButtonStatus(savePng, "Saved", wrapper.ownerDocument, "Save PNG");
     } catch {
       setButtonStatus(savePng, "Save failed", wrapper.ownerDocument, "Save PNG");
@@ -189,7 +211,21 @@ export function renderMermaidBlock(source: string): HTMLElement {
         preview.replaceChildren();
         preview.innerHTML = svg;
         saveSvg.disabled = false;
-        savePng.disabled = false;
+        savePng.textContent = "Preparing PNG";
+        void svgToPngBlob(svg, wrapper.ownerDocument)
+          .then(blob => {
+            if (!wrapper.isConnected) return;
+            const pngUrl = URL.createObjectURL(blob);
+            state.pngUrl = pngUrl;
+            revokeObjectUrlWhenDisconnected(pngUrl, wrapper, wrapper.ownerDocument);
+            savePng.textContent = "Save PNG";
+            savePng.disabled = false;
+          })
+          .catch(() => {
+            if (!wrapper.isConnected) return;
+            savePng.textContent = "PNG unavailable";
+            savePng.disabled = true;
+          });
       })
       .catch(error => {
         if (!wrapper.isConnected) return;

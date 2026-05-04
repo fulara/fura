@@ -67,31 +67,37 @@ afterEach(() => {
 
 describe("renderMermaidBlock", () => {
   it("renders Mermaid source locally into an SVG preview", async () => {
-    const node = renderMermaidBlock("flowchart TD\n  A --> B");
-    document.body.append(node);
+    const pngExport = stubBrowserPngExport();
 
-    expect(node.className).toBe("mermaid-block");
-    expect(node.dataset.mermaidState).toBe("pending");
-    expect(node.querySelector(".mermaid-preview")?.textContent).toBe("Rendering Mermaid diagram…");
-    expect(node.querySelector(".mermaid-source")?.textContent).toContain("flowchart TD");
+    try {
+      const node = renderMermaidBlock("flowchart TD\n  A --> B");
+      document.body.append(node);
 
-    await flushMermaidRender();
+      expect(node.className).toBe("mermaid-block");
+      expect(node.dataset.mermaidState).toBe("pending");
+      expect(node.querySelector(".mermaid-preview")?.textContent).toBe("Rendering Mermaid diagram…");
+      expect(node.querySelector(".mermaid-source")?.textContent).toContain("flowchart TD");
 
-    expect(mermaidMock.initialize).toHaveBeenCalledWith({
-      startOnLoad: false,
-      securityLevel: "strict",
-      theme: "dark",
-      htmlLabels: false,
-    });
-    expect(mermaidMock.render).toHaveBeenCalledWith(expect.stringMatching(/^fura-mermaid-/), "flowchart TD\n  A --> B", expect.any(HTMLDivElement));
-    expect(node.dataset.mermaidState).toBe("rendered");
-    expect(node.querySelector(".mermaid-preview svg")?.getAttribute("viewBox")).toBe("0 0 100 50");
-    expect(Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action")).map(button => button.textContent)).toEqual([
-      "Copy source",
-      "Save SVG",
-      "Save PNG",
-    ]);
-    expect(Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action")).slice(1).every(button => !button.disabled)).toBe(true);
+      await flushMermaidRender();
+
+      expect(mermaidMock.initialize).toHaveBeenCalledWith({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: "dark",
+        htmlLabels: false,
+      });
+      expect(mermaidMock.render).toHaveBeenCalledWith(expect.stringMatching(/^fura-mermaid-/), "flowchart TD\n  A --> B", expect.any(HTMLDivElement));
+      expect(node.dataset.mermaidState).toBe("rendered");
+      expect(node.querySelector(".mermaid-preview svg")?.getAttribute("viewBox")).toBe("0 0 100 50");
+      expect(Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action")).map(button => button.textContent)).toEqual([
+        "Copy source",
+        "Save SVG",
+        "Save PNG",
+      ]);
+      expect(Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action")).slice(1).every(button => !button.disabled)).toBe(true);
+    } finally {
+      pngExport.restoreImage();
+    }
   });
 
   it("renders in a measurable offscreen sandbox and removes it after success", async () => {
@@ -161,29 +167,33 @@ describe("renderMermaidBlock", () => {
   });
 
   it("downloads rendered SVG without using hosted services", async () => {
-    const createObjectURL = vi.fn((_blob: Blob) => "blob:mermaid-svg");
-    const revokeObjectURL = vi.fn();
-    vi.stubGlobal("URL", { createObjectURL, revokeObjectURL });
+    const pngExport = stubBrowserPngExport();
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
 
-    const node = renderMermaidBlock("flowchart TD\n  A --> B");
-    document.body.append(node);
-    await flushMermaidRender();
-    const saveSvg = Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action"))
-      .find(button => button.textContent === "Save SVG");
-    vi.useFakeTimers();
+    try {
+      const node = renderMermaidBlock("flowchart TD\n  A --> B");
+      document.body.append(node);
+      await flushMermaidRender();
+      const saveSvg = Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action"))
+        .find(button => button.textContent === "Save SVG");
+      vi.useFakeTimers();
+      pngExport.createObjectURL.mockClear();
+      pngExport.revokeObjectURL.mockClear();
 
-    saveSvg?.click();
+      saveSvg?.click();
 
-    expect(createObjectURL).toHaveBeenCalledOnce();
-    expect(createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob);
-    expect(click).toHaveBeenCalledOnce();
-    expect(saveSvg?.textContent).toBe("Saved");
-    vi.runAllTimers();
-    expect(revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-svg");
+      expect(pngExport.createObjectURL).toHaveBeenCalledOnce();
+      expect(pngExport.createObjectURL.mock.calls[0][0]).toBeInstanceOf(Blob);
+      expect(click).toHaveBeenCalledOnce();
+      expect(saveSvg?.textContent).toBe("Saved");
+      vi.runAllTimers();
+      expect(pngExport.revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-source-svg");
+    } finally {
+      pngExport.restoreImage();
+    }
   });
 
-  it("downloads rendered PNG from a browser-safe SVG", async () => {
+  it("downloads a prepared rendered PNG synchronously from the click handler", async () => {
     const pngExport = stubBrowserPngExport();
     const click = vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(() => undefined);
 
@@ -195,10 +205,10 @@ describe("renderMermaidBlock", () => {
       const savePng = Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action"))
         .find(button => button.textContent === "Save PNG");
 
+      expect(savePng?.disabled).toBe(false);
+      expect(pngExport.createObjectURL).toHaveBeenCalledTimes(2);
+
       savePng?.click();
-      for (let i = 0; i < 5; i += 1) {
-        await Promise.resolve();
-      }
 
       expect(pngExport.createObjectURL).toHaveBeenCalledTimes(2);
       expect(pngExport.drawImage).toHaveBeenCalledWith(expect.any(pngExport.TestImage), 0, 0, 100, 50);
@@ -206,6 +216,10 @@ describe("renderMermaidBlock", () => {
       expect(savePng?.textContent).toBe("Saved");
       vi.runAllTimers();
       expect(pngExport.revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-source-svg");
+      expect(pngExport.revokeObjectURL).not.toHaveBeenCalledWith("blob:mermaid-png");
+
+      node.remove();
+      await Promise.resolve();
       expect(pngExport.revokeObjectURL).toHaveBeenCalledWith("blob:mermaid-png");
     } finally {
       pngExport.restoreImage();
