@@ -241,9 +241,13 @@ export type ModelSummary = {
   thinking: boolean;
 };
 
+export type ThinkingVisibilityMode = "auto" | "shown" | "hidden";
+
 export type ServerConfig = {
   defaultCwd: string;
   voiceLanguage: string;
+  showTools: boolean;
+  thinkingVisibility: ThinkingVisibilityMode;
 };
 
 export type FrontendUiSnapshot = {
@@ -354,6 +358,7 @@ export type WorktreeCreateOptions = {
 export type ClientMessage =
   | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; args?: string[]; worktree?: WorktreeCreateOptions }
   | { type: "session.setCategory"; sessionId: string; category?: string }
+  | { type: "config.set"; showTools?: boolean; thinkingVisibility?: ThinkingVisibilityMode }
   | { type: "session.open"; sessionFile: string }
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }

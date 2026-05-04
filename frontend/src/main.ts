@@ -3,7 +3,7 @@ import "highlight.js/styles/github-dark.css";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
-import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, type ThinkingVisibilityMode } from "./uiPreferences";
+import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
 import { mkEl, mkFrag, requireElement, setRenderDocument } from "./dom";
 import {
@@ -203,8 +203,13 @@ app.innerHTML = `
         <div class="workspace-actions">
           <!-- Ask Fura is intentionally a desktop-only workspace affordance for now; future mobile UI should omit it unless the product direction changes. -->
           <button id="askFuraButton" class="ask-fura-toggle" type="button" aria-pressed="false">Ask Fura</button>
-          <button id="toolVisibilityToggle" class="tool-visibility-toggle" type="button" aria-pressed="true">Tools: on</button>
-          <button id="thinkingVisibilityToggle" class="thinking-visibility-toggle" type="button" data-state="auto">Thinking: auto</button>
+          <div class="workspace-options">
+            <button id="workspaceOptionsToggle" class="workspace-options-toggle" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="workspaceOptionsMenu" title="Display options">⚙</button>
+            <div id="workspaceOptionsMenu" class="workspace-options-menu" role="menu" hidden>
+              <button id="toolVisibilityToggle" class="workspace-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
+              <button id="thinkingVisibilityToggle" class="workspace-option-item" type="button" role="menuitem">Thinking: auto</button>
+            </div>
+          </div>
           <button id="abortButton" type="button">Abort</button>
           <button id="stopButton" type="button">Stop</button>
           <div class="category-editor">
@@ -503,6 +508,8 @@ const createSessionButton = requireElement<HTMLButtonElement>("createSessionButt
 const sessionsList = requireElement<HTMLElement>("sessionsList");
 const sessionCategoryFilter = requireElement<HTMLSelectElement>("sessionCategoryFilter");
 const askFuraButton = requireElement<HTMLButtonElement>("askFuraButton");
+const workspaceOptionsToggle = requireElement<HTMLButtonElement>("workspaceOptionsToggle");
+const workspaceOptionsMenu = requireElement<HTMLDivElement>("workspaceOptionsMenu");
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
 const sessionMeta = requireElement<HTMLParagraphElement>("sessionMeta");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
@@ -702,8 +709,6 @@ let voiceHotkeyActive = false;
 let voiceTarget: HTMLInputElement | HTMLTextAreaElement | null = null;
 const voiceSegments = new Map<string, VoiceSegmentDraft>();
 
-const TOOL_VISIBILITY_STORAGE_KEY = "fura.showTools";
-const THINKING_VISIBILITY_STORAGE_KEY = "fura.showThinking";
 const CONTROL_CLIENT_ID_STORAGE_KEY = "fura.controlClientId";
 const controlClientId = getOrCreateControlClientId();
 let controlConversationId: string | null = null;
@@ -714,11 +719,13 @@ const initialToken = consumeBootstrapToken(
   window.sessionStorage,
   url => window.history.replaceState(null, "", url),
 );
-let showToolBubbles = window.localStorage.getItem(TOOL_VISIBILITY_STORAGE_KEY) !== "false";
-let thinkingVisibilityMode = parseThinkingVisibilityMode(window.localStorage.getItem(THINKING_VISIBILITY_STORAGE_KEY));
+let showToolBubbles = true;
+let thinkingVisibilityMode: ThinkingVisibilityMode = "auto";
 let skipThinkingOpenRestoreOnce = false;
+let workspaceOptionsOpen = false;
 syncToolVisibilityToggle();
 syncThinkingVisibilityToggle();
+syncWorkspaceOptionsMenu();
 
 // --- Desktop workspace state ---
 
@@ -783,20 +790,29 @@ sessionCategoryFilter.addEventListener("change", () => {
   selectedCategoryFilter = sessionCategoryFilter.value;
   renderSessions();
 });
+workspaceOptionsToggle.addEventListener("click", event => {
+  event.stopPropagation();
+  setWorkspaceOptionsOpen(!workspaceOptionsOpen);
+});
+workspaceOptionsMenu.addEventListener("click", event => event.stopPropagation());
 toolVisibilityToggle.addEventListener("click", () => {
-  showToolBubbles = !showToolBubbles;
-  window.localStorage.setItem(TOOL_VISIBILITY_STORAGE_KEY, String(showToolBubbles));
-  syncToolVisibilityToggle();
-  markTranscriptViewDirty();
-  renderActiveSession();
+  const nextShowTools = !showToolBubbles;
+  if (!send({ type: "config.set", showTools: nextShowTools })) return;
+  applyVisibilityPreferences(nextShowTools, thinkingVisibilityMode);
+  setWorkspaceOptionsOpen(false);
 });
 thinkingVisibilityToggle.addEventListener("click", () => {
-  thinkingVisibilityMode = nextThinkingVisibilityMode(thinkingVisibilityMode);
-  skipThinkingOpenRestoreOnce = true;
-  window.localStorage.setItem(THINKING_VISIBILITY_STORAGE_KEY, thinkingVisibilityMode);
-  syncThinkingVisibilityToggle();
-  markTranscriptViewDirty({ resetCache: true });
-  renderActiveSession();
+  const nextMode = nextThinkingVisibilityMode(thinkingVisibilityMode);
+  if (!send({ type: "config.set", thinkingVisibility: nextMode })) return;
+  applyVisibilityPreferences(showToolBubbles, nextMode);
+  setWorkspaceOptionsOpen(false);
+});
+document.addEventListener("click", event => {
+  if (!workspaceOptionsOpen) return;
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (workspaceOptionsToggle.contains(target) || workspaceOptionsMenu.contains(target)) return;
+  setWorkspaceOptionsOpen(false);
 });
 abortButton.addEventListener("click", () => {
   if (activeSessionId) {
@@ -826,6 +842,9 @@ window.addEventListener("keydown", event => {
     event.preventDefault();
     openCodeSearch();
     return;
+  }
+  if (workspaceOptionsOpen && event.key === "Escape") {
+    setWorkspaceOptionsOpen(false);
   }
   if (event.altKey && event.key.toLowerCase() === "m" && !event.repeat && !voiceHotkeyActive) {
     event.preventDefault();
@@ -1217,9 +1236,17 @@ function handleServerMessage(message: ServerMessage): void {
     case "hello":
       appendLog(`Connected to fura ${message.serverVersion} protocol ${message.protocolVersion}`);
       serverConfig = message.config;
+      applyVisibilityPreferences(
+        parseToolVisibility(message.config.showTools),
+        parseThinkingVisibilityMode(message.config.thinkingVisibility),
+      );
       break;
     case "config.updated":
       serverConfig = message.config;
+      applyVisibilityPreferences(
+        parseToolVisibility(message.config.showTools),
+        parseThinkingVisibilityMode(message.config.thinkingVisibility),
+      );
       break;
     case "sessions.snapshot":
       {
@@ -2411,10 +2438,9 @@ function renderSessions(): void {
 
 function syncToolVisibilityToggle(): void {
   toolVisibilityToggle.textContent = showToolBubbles ? "Tools: on" : "Tools: off";
-  toolVisibilityToggle.setAttribute("aria-pressed", String(showToolBubbles));
+  toolVisibilityToggle.setAttribute("aria-checked", String(showToolBubbles));
   toolVisibilityToggle.title = showToolBubbles ? "Hide tool bubbles in the transcript" : "Show tool bubbles in the transcript";
 }
-
 
 function syncThinkingVisibilityToggle(): void {
   const labels: Record<ThinkingVisibilityMode, string> = {
@@ -2431,6 +2457,37 @@ function syncThinkingVisibilityToggle(): void {
   thinkingVisibilityToggle.dataset.state = thinkingVisibilityMode;
   thinkingVisibilityToggle.setAttribute("aria-label", `Thinking display: ${thinkingVisibilityMode}`);
   thinkingVisibilityToggle.title = titles[thinkingVisibilityMode];
+}
+
+function syncWorkspaceOptionsMenu(): void {
+  workspaceOptionsToggle.setAttribute("aria-expanded", String(workspaceOptionsOpen));
+  workspaceOptionsMenu.hidden = !workspaceOptionsOpen;
+}
+
+function setWorkspaceOptionsOpen(open: boolean): void {
+  workspaceOptionsOpen = open;
+  syncWorkspaceOptionsMenu();
+}
+
+function applyVisibilityPreferences(
+  showTools: boolean,
+  thinkingMode: ThinkingVisibilityMode,
+): void {
+  const toolsChanged = showToolBubbles !== showTools;
+  const thinkingChanged = thinkingVisibilityMode !== thinkingMode;
+  showToolBubbles = showTools;
+  thinkingVisibilityMode = thinkingMode;
+  syncToolVisibilityToggle();
+  syncThinkingVisibilityToggle();
+  if (thinkingChanged) {
+    skipThinkingOpenRestoreOnce = true;
+    markTranscriptViewDirty({ resetCache: true });
+  } else if (toolsChanged) {
+    markTranscriptViewDirty();
+  }
+  if (toolsChanged || thinkingChanged) {
+    renderActiveSession();
+  }
 }
 
 function markActiveCategoryDirty(): void {

@@ -5,7 +5,7 @@ use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
 use crate::{
     CodeWorkspaceRegistry, ControlCandidate, DiffReviewWorktreeRegistry, FrontendUiSnapshot,
-    ServerMessage, SessionRecord, Timestamp, VoiceCommand,
+    ServerMessage, SessionRecord, ThinkingVisibilityPreference, Timestamp, VoiceCommand,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -37,6 +37,8 @@ pub(crate) struct AppState {
     pub(crate) default_cwd: Arc<RwLock<String>>,
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) voice_language: Arc<RwLock<String>>,
+    pub(crate) show_tools: Arc<RwLock<bool>>,
+    pub(crate) thinking_visibility: Arc<RwLock<ThinkingVisibilityPreference>>,
     pub(crate) allowed_origins: Option<Arc<Vec<String>>>,
     pub(crate) secure_auth_cookie: bool,
 }

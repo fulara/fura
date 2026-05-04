@@ -113,6 +113,8 @@ async fn main() -> anyhow::Result<()> {
     let fura_config = load_fura_config(config_path.as_deref());
     let default_cwd = default_cwd_from_config(&fura_config, &startup_cwd);
     let voice_language = fura_config.voice_language.clone();
+    let show_tools = fura_config.show_tools;
+    let thinking_visibility = fura_config.thinking_visibility;
     let session_categories = fura_config
         .session_categories
         .into_iter()
@@ -151,6 +153,8 @@ async fn main() -> anyhow::Result<()> {
         default_cwd: Arc::new(RwLock::new(default_cwd)),
         config_path,
         voice_language: Arc::new(RwLock::new(voice_language)),
+        show_tools: Arc::new(RwLock::new(show_tools)),
+        thinking_visibility: Arc::new(RwLock::new(thinking_visibility)),
         allowed_origins: None,
         secure_auth_cookie: false,
     };
@@ -528,6 +532,8 @@ pub(crate) mod tests {
             default_cwd: Arc::new(RwLock::new(env::temp_dir().to_string_lossy().into_owned())),
             config_path: None,
             voice_language: Arc::new(RwLock::new(default_voice_language())),
+            show_tools: Arc::new(RwLock::new(default_show_tools())),
+            thinking_visibility: Arc::new(RwLock::new(default_thinking_visibility())),
             allowed_origins: None,
             secure_auth_cookie: false,
         }
@@ -2445,6 +2451,8 @@ pub(crate) mod tests {
             serde_yaml::to_string(&FuraConfig {
                 last_cwd: Some(last_cwd.to_string_lossy().into_owned()),
                 voice_language: default_voice_language(),
+                show_tools: default_show_tools(),
+                thinking_visibility: default_thinking_visibility(),
                 session_categories: HashMap::new(),
             })
             .expect("config should serialize"),
@@ -2468,6 +2476,8 @@ pub(crate) mod tests {
             serde_yaml::to_string(&FuraConfig {
                 last_cwd: Some(root.join("missing").to_string_lossy().into_owned()),
                 voice_language: default_voice_language(),
+                show_tools: default_show_tools(),
+                thinking_visibility: default_thinking_visibility(),
                 session_categories: HashMap::new(),
             })
             .expect("config should serialize"),
@@ -2496,8 +2506,64 @@ pub(crate) mod tests {
             ServerMessage::ConfigUpdated { config } => {
                 assert_eq!(config.default_cwd, "/workspace/next");
                 assert_eq!(config.voice_language, "pl-PL");
+                assert!(config.show_tools);
+                assert_eq!(
+                    config.thinking_visibility,
+                    ThinkingVisibilityPreference::Auto
+                );
             }
             other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_set_updates_visibility_preferences_and_broadcasts() {
+        let state = test_state(8, None);
+        let mut events = state.events.subscribe();
+
+        let responses = set_client_config(
+            &state,
+            Some(false),
+            Some(ThinkingVisibilityPreference::Hidden),
+        )
+        .await;
+
+        assert!(
+            responses.is_empty(),
+            "config.set should not emit direct responses"
+        );
+        assert_eq!(*state.show_tools.read().await, false);
+        assert_eq!(
+            *state.thinking_visibility.read().await,
+            ThinkingVisibilityPreference::Hidden
+        );
+        match events.recv().await.expect("config update event") {
+            ServerMessage::ConfigUpdated { config } => {
+                assert!(!config.show_tools);
+                assert_eq!(
+                    config.thinking_visibility,
+                    ThinkingVisibilityPreference::Hidden
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn config_set_rejects_empty_payload() {
+        let state = test_state(8, None);
+
+        let responses = set_client_config(&state, None, None).await;
+
+        assert_eq!(responses.len(), 1);
+        match &responses[0] {
+            ServerMessage::Error { message, .. } => {
+                assert_eq!(
+                    message,
+                    "config.set requires showTools or thinkingVisibility"
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
         }
     }
 
@@ -2509,6 +2575,8 @@ pub(crate) mod tests {
             config: ClientConfig {
                 default_cwd: "/workspace".to_string(),
                 voice_language: "pl-PL".to_string(),
+                show_tools: true,
+                thinking_visibility: ThinkingVisibilityPreference::Auto,
             },
         })
         .expect("hello should serialize");
@@ -2518,6 +2586,8 @@ pub(crate) mod tests {
         assert_eq!(json["protocolVersion"], 1);
         assert_eq!(json["config"]["defaultCwd"], "/workspace");
         assert_eq!(json["config"]["voiceLanguage"], "pl-PL");
+        assert_eq!(json["config"]["showTools"], true);
+        assert_eq!(json["config"]["thinkingVisibility"], "auto");
     }
 
     #[test]

@@ -1,5 +1,23 @@
 import { describe, expect, it } from "vitest";
-import { nextThinkingVisibilityMode, parseThinkingVisibilityMode } from "./uiPreferences";
+import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility } from "./uiPreferences";
+
+describe("parseToolVisibility", () => {
+  it("defaults to true", () => {
+    expect(parseToolVisibility(undefined)).toBe(true);
+    expect(parseToolVisibility(null)).toBe(true);
+    expect(parseToolVisibility("unexpected")).toBe(true);
+  });
+
+  it("parses false values", () => {
+    expect(parseToolVisibility(false)).toBe(false);
+    expect(parseToolVisibility("false")).toBe(false);
+  });
+
+  it("parses true values", () => {
+    expect(parseToolVisibility(true)).toBe(true);
+    expect(parseToolVisibility("true")).toBe(true);
+  });
+});
 
 describe("parseThinkingVisibilityMode", () => {
   it("preserves supported values", () => {

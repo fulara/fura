@@ -3,7 +3,7 @@ use serde_json::Value;
 
 use crate::{
     ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, SessionProjection,
-    SessionSummary,
+    SessionSummary, ThinkingVisibilityPreference,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -318,6 +318,11 @@ pub(crate) enum ClientMessage {
     SessionSetCategory {
         session_id: String,
         category: Option<String>,
+    },
+    #[serde(rename = "config.set")]
+    ConfigSet {
+        show_tools: Option<bool>,
+        thinking_visibility: Option<ThinkingVisibilityPreference>,
     },
     #[serde(rename = "session.attach")]
     SessionAttach { session_id: String },

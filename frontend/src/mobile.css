@@ -59,6 +59,58 @@ body {
   flex: 0 0 auto;
 }
 
+.mobile-options {
+  position: relative;
+}
+
+.mobile-options-toggle {
+  min-width: 2.35rem;
+  padding: 0.35rem 0.45rem;
+  font-size: 1rem;
+}
+
+.mobile-options-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 12;
+  display: grid;
+  min-width: 11.5rem;
+  gap: 0.3rem;
+  padding: 0.4rem;
+  border: 1px solid #303646;
+  border-radius: 0.75rem;
+  background: #151922;
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.36);
+}
+
+.mobile-options-menu[hidden] {
+  display: none;
+}
+
+.mobile-option-item {
+  width: 100%;
+  text-align: left;
+}
+
+.mobile-option-item[aria-checked="true"],
+.mobile-option-item[data-state="shown"] {
+  border-color: rgba(21, 183, 255, 0.5);
+  background: rgba(21, 183, 255, 0.12);
+}
+
+.mobile-option-item[aria-checked="false"],
+.mobile-option-item[data-state="auto"] {
+  background: #171b24;
+  color: #9ba4b5;
+}
+
+.mobile-option-item[data-state="hidden"] {
+  border-color: rgba(255, 107, 107, 0.24);
+  background: rgba(255, 107, 107, 0.12);
+  color: #ffaaa6;
+}
+
 .mobile-session-drawer {
   max-height: 38dvh;
   overflow: auto;

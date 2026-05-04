@@ -88,12 +88,30 @@ pub(crate) struct RemoteListenerConfig {
     pub(crate) allowed_origins: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum ThinkingVisibilityPreference {
+    Auto,
+    Shown,
+    Hidden,
+}
+
+impl Default for ThinkingVisibilityPreference {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct FuraConfig {
     pub(crate) last_cwd: Option<String>,
     #[serde(default = "default_voice_language")]
     pub(crate) voice_language: String,
+    #[serde(default = "default_show_tools")]
+    pub(crate) show_tools: bool,
+    #[serde(default = "default_thinking_visibility")]
+    pub(crate) thinking_visibility: ThinkingVisibilityPreference,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) session_categories: HashMap<String, String>,
 }
@@ -103,6 +121,8 @@ impl Default for FuraConfig {
         Self {
             last_cwd: None,
             voice_language: default_voice_language(),
+            show_tools: default_show_tools(),
+            thinking_visibility: default_thinking_visibility(),
             session_categories: HashMap::new(),
         }
     }
@@ -113,10 +133,20 @@ impl Default for FuraConfig {
 pub(crate) struct ClientConfig {
     pub(crate) default_cwd: String,
     pub(crate) voice_language: String,
+    pub(crate) show_tools: bool,
+    pub(crate) thinking_visibility: ThinkingVisibilityPreference,
 }
 
 pub(crate) fn default_voice_language() -> String {
     "pl-PL".to_string()
+}
+
+pub(crate) fn default_show_tools() -> bool {
+    true
+}
+
+pub(crate) fn default_thinking_visibility() -> ThinkingVisibilityPreference {
+    ThinkingVisibilityPreference::Auto
 }
 
 const MIN_REMOTE_CERT_VALIDITY: Duration = Duration::from_secs(5 * 24 * 60 * 60);
@@ -312,6 +342,8 @@ pub(crate) async fn client_config(state: &AppState) -> ClientConfig {
     ClientConfig {
         default_cwd: state.default_cwd.read().await.clone(),
         voice_language: state.voice_language.read().await.clone(),
+        show_tools: *state.show_tools.read().await,
+        thinking_visibility: *state.thinking_visibility.read().await,
     }
 }
 
@@ -335,6 +367,8 @@ pub(crate) async fn save_fura_config(state: &AppState) {
     let config = FuraConfig {
         last_cwd: Some(state.default_cwd.read().await.clone()),
         voice_language: state.voice_language.read().await.clone(),
+        show_tools: *state.show_tools.read().await,
+        thinking_visibility: *state.thinking_visibility.read().await,
         session_categories: state.session_categories.read().await.clone(),
     };
     match serde_yaml::to_string(&config) {

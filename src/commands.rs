@@ -28,6 +28,10 @@ pub(crate) async fn handle_client_message(
             session_id,
             category,
         } => set_session_category(state, session_id, category).await,
+        ClientMessage::ConfigSet {
+            show_tools,
+            thinking_visibility,
+        } => set_client_config(state, show_tools, thinking_visibility).await,
         ClientMessage::SessionOpen { session_file } => open_session(state, session_file).await,
         ClientMessage::SessionList => {
             info!(action = "session.list");
@@ -792,6 +796,35 @@ pub(crate) async fn set_session_category(
     save_fura_config(state).await;
 
     vec![snapshot, sessions_snapshot]
+}
+
+pub(crate) async fn set_client_config(
+    state: &AppState,
+    show_tools: Option<bool>,
+    thinking_visibility: Option<ThinkingVisibilityPreference>,
+) -> Vec<ServerMessage> {
+    if show_tools.is_none() && thinking_visibility.is_none() {
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: "config.set requires showTools or thinkingVisibility".to_string(),
+        }];
+    }
+
+    if let Some(value) = show_tools {
+        *state.show_tools.write().await = value;
+    }
+    if let Some(value) = thinking_visibility {
+        *state.thinking_visibility.write().await = value;
+    }
+
+    info!(
+        action = "config.set",
+        show_tools = show_tools.is_some(),
+        thinking_visibility = thinking_visibility.is_some()
+    );
+    save_fura_config(state).await;
+    broadcast_config(state).await;
+    Vec::new()
 }
 
 pub(crate) fn opened_session_record(

@@ -6,6 +6,7 @@ import {
   type PendingImage,
 } from "./composerAttachments";
 import { createPromptSendMessage, type PromptBehavior } from "./composer";
+import { findSlashCommand } from "./slashCommands";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { setRenderDocument } from "./dom";
@@ -55,9 +56,11 @@ import type {
   ServerMessage,
   SessionProjection,
   SessionSummary,
+  ThinkingVisibilityMode,
   TodoPhase,
   TranscriptMessage,
 } from "./protocol";
+import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility } from "./uiPreferences";
 import { sessionCategories, visibleSessions } from "./sessionList";
 import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
@@ -138,6 +141,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           <div class="mobile-header-actions">
             <button id="mobileCreateToggle" class="mobile-create-toggle" type="button" aria-expanded="false" aria-controls="mobileCreateDrawer">New</button>
             <button id="mobileSessionsToggle" class="mobile-sessions-toggle" type="button" aria-expanded="false" aria-controls="mobileSessionsDrawer">Sessions</button>
+            <div class="mobile-options">
+              <button id="mobileOptionsToggle" class="mobile-options-toggle" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="mobileOptionsMenu" title="Display options">⚙</button>
+              <div id="mobileOptionsMenu" class="mobile-options-menu" role="menu" hidden>
+                <button id="mobileToolVisibilityToggle" class="mobile-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
+                <button id="mobileThinkingVisibilityToggle" class="mobile-option-item" type="button" role="menuitem">Thinking: auto</button>
+              </div>
+            </div>
           </div>
         </div>
         <p id="mobileLog" class="mobile-log" aria-live="polite"></p>
@@ -354,6 +364,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const sessionMeta = requireElement<HTMLParagraphElement>(document, "mobileSessionMeta");
   const createToggle = requireElement<HTMLButtonElement>(document, "mobileCreateToggle");
   const sessionsToggle = requireElement<HTMLButtonElement>(document, "mobileSessionsToggle");
+  const optionsToggle = requireElement<HTMLButtonElement>(document, "mobileOptionsToggle");
+  const optionsMenu = requireElement<HTMLDivElement>(document, "mobileOptionsMenu");
+  const toolVisibilityToggle = requireElement<HTMLButtonElement>(document, "mobileToolVisibilityToggle");
+  const thinkingVisibilityToggle = requireElement<HTMLButtonElement>(document, "mobileThinkingVisibilityToggle");
   const sessionsDrawer = requireElement<HTMLElement>(document, "mobileSessionsDrawer");
   const sessionsList = requireElement<HTMLElement>(document, "mobileSessionsList");
   const createDrawer = requireElement<HTMLElement>(document, "mobileCreateDrawer");
@@ -426,6 +440,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const visiblePlanReviews = new Map<string, VisiblePlanReview>();
   const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
   let serverConfig: ServerConfig | null = null;
+  let showToolBubbles = true;
+  let thinkingVisibilityMode: ThinkingVisibilityMode = "auto";
+  let optionsMenuOpen = false;
   let sessions: SessionSummary[] = [];
   let activeSessionId: string | null = readStoredActiveSessionId(window.sessionStorage);
   let projections = new Map<string, SessionProjection>();
@@ -476,6 +493,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   createToggle.addEventListener("click", () => {
     const open = createDrawer.hidden;
     setCreateDrawerOpen(open);
+    setOptionsMenuOpen(false);
     if (open) {
       sessionsDrawer.hidden = true;
       sessionsToggle.setAttribute("aria-expanded", "false");
@@ -487,7 +505,37 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const open = sessionsDrawer.hidden;
     sessionsDrawer.hidden = !open;
     sessionsToggle.setAttribute("aria-expanded", String(open));
+    setOptionsMenuOpen(false);
     if (open) setCreateDrawerOpen(false);
+  });
+
+  optionsToggle.addEventListener("click", event => {
+    event.stopPropagation();
+    setOptionsMenuOpen(!optionsMenuOpen);
+  });
+  optionsMenu.addEventListener("click", event => event.stopPropagation());
+  toolVisibilityToggle.addEventListener("click", () => {
+    const nextShowTools = !showToolBubbles;
+    if (!send({ type: "config.set", showTools: nextShowTools })) return;
+    applyVisibilityPreferences(nextShowTools, thinkingVisibilityMode);
+    setOptionsMenuOpen(false);
+  });
+  thinkingVisibilityToggle.addEventListener("click", () => {
+    const nextMode = nextThinkingVisibilityMode(thinkingVisibilityMode);
+    if (!send({ type: "config.set", thinkingVisibility: nextMode })) return;
+    applyVisibilityPreferences(showToolBubbles, nextMode);
+    setOptionsMenuOpen(false);
+  });
+
+  document.addEventListener("click", event => {
+    if (!optionsMenuOpen) return;
+    const target = event.target;
+    if (!(target instanceof Node)) return;
+    if (optionsToggle.contains(target) || optionsMenu.contains(target)) return;
+    setOptionsMenuOpen(false);
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape" && optionsMenuOpen) setOptionsMenuOpen(false);
   });
 
   createClose.addEventListener("click", () => setCreateDrawerOpen(false));
@@ -551,11 +599,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   promptForm.addEventListener("submit", event => {
     event.preventDefault();
-    const text = promptInput.value.trim();
+    const editorText = promptInput.value;
+    const text = editorText.trim();
     if ((!text && pendingImages.length === 0) || !activeSessionId) return;
     if (hasPendingPlanReview(activeSessionId)) return;
-    const accepted = send(createPromptSendMessage(activeSessionId, text, pendingImages));
-    if (accepted) clearPromptComposer();
+    sendPromptWithBusyHandling({
+      sessionId: activeSessionId,
+      text,
+      editorText,
+      images: pendingImages,
+      onSend: clearPromptComposer,
+    });
   });
 
   dialogForm.addEventListener("submit", event => {
@@ -590,6 +644,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     window.sessionStorage,
     url => window.history.replaceState(null, "", url),
   );
+  syncToolVisibilityToggle();
+  syncThinkingVisibilityToggle();
+  syncOptionsMenu();
   render();
   if (initialToken) connect(initialToken);
   else showAuthGate("Enter the bridge token to connect.");
@@ -649,6 +706,45 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     console.debug(`[fura-mobile] ${message}`);
   }
 
+  function syncToolVisibilityToggle(): void {
+    toolVisibilityToggle.textContent = showToolBubbles ? "Tools: on" : "Tools: off";
+    toolVisibilityToggle.setAttribute("aria-checked", String(showToolBubbles));
+    toolVisibilityToggle.title = showToolBubbles ? "Hide tool cards in transcript" : "Show tool cards in transcript";
+  }
+
+  function syncThinkingVisibilityToggle(): void {
+    const labels: Record<ThinkingVisibilityMode, string> = {
+      auto: "Thinking: auto",
+      shown: "Thinking: shown",
+      hidden: "Thinking: hidden",
+    };
+    thinkingVisibilityToggle.textContent = labels[thinkingVisibilityMode];
+    thinkingVisibilityToggle.dataset.state = thinkingVisibilityMode;
+  }
+
+  function syncOptionsMenu(): void {
+    optionsToggle.setAttribute("aria-expanded", String(optionsMenuOpen));
+    optionsMenu.hidden = !optionsMenuOpen;
+  }
+
+  function setOptionsMenuOpen(open: boolean): void {
+    optionsMenuOpen = open;
+    syncOptionsMenu();
+  }
+
+  function applyVisibilityPreferences(
+    showTools: boolean,
+    thinkingMode: ThinkingVisibilityMode,
+): void {
+    const toolsChanged = showToolBubbles !== showTools;
+    const thinkingChanged = thinkingVisibilityMode !== thinkingMode;
+    showToolBubbles = showTools;
+    thinkingVisibilityMode = thinkingMode;
+    syncToolVisibilityToggle();
+    syncThinkingVisibilityToggle();
+    if (toolsChanged || thinkingChanged) renderActiveSession();
+  }
+
   function send(message: ClientMessage): boolean {
     if (!connection) {
       appendLog("Not connected.");
@@ -657,12 +753,49 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return connection.send(message);
   }
 
+  function sendPromptWithBusyHandling(options: {
+    sessionId: string;
+    text: string;
+    editorText: string;
+    images: PendingImage[];
+    onSend?: () => void;
+  }): boolean {
+    const projection = projections.get(options.sessionId);
+    const knownSlashCommand = findSlashCommand(options.editorText);
+    const isSlashCommandLike = /^\/[^\s:]+/.test(options.editorText);
+
+    if (projection?.isBusy) {
+      if (knownSlashCommand && options.images.length === 0) {
+        const accepted = send(createPromptSendMessage(options.sessionId, options.text, options.images));
+        if (accepted) options.onSend?.();
+        return accepted;
+      }
+      if (isSlashCommandLike) {
+        appendLog(`[${options.sessionId}] warning: Slash commands cannot be sent as steer or follow-up prompts while the agent is busy.`);
+        return false;
+      }
+      busyPromptDraft = createBusyPromptDraft({
+        sessionId: options.sessionId,
+        text: options.text,
+        editorText: options.editorText,
+        images: options.images,
+        onSend: options.onSend,
+      });
+      renderBusyPromptChoice();
+      renderActiveSession();
+      return true;
+    }
+
+    const accepted = send(createPromptSendMessage(options.sessionId, options.text, options.images));
+    if (accepted) options.onSend?.();
+    return accepted;
+  }
+
   function forceReconnectNow(): void {
     if (!connection || connection.isOpen()) return;
     appendLog("Reconnecting now.");
     connection.connect();
   }
-
   function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" }>): void {
     appendLog(`[${message.sessionId}] prompt needs steer or follow-up choice`);
     busyPromptDraft = createBusyPromptDraftFromServer(message, createPendingImageMarker);
@@ -1494,11 +1627,19 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     switch (message.type) {
       case "hello":
         serverConfig = message.config;
+        applyVisibilityPreferences(
+          parseToolVisibility(message.config.showTools),
+          parseThinkingVisibilityMode(message.config.thinkingVisibility),
+        );
         syncCreateCwdDefault();
         console.debug(`[fura-mobile] Connected to fura ${message.serverVersion}.`);
         break;
       case "config.updated":
         serverConfig = message.config;
+        applyVisibilityPreferences(
+          parseToolVisibility(message.config.showTools),
+          parseThinkingVisibilityMode(message.config.thinkingVisibility),
+        );
         syncCreateCwdDefault();
         break;
       case "sessions.snapshot":
@@ -1821,10 +1962,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     sessionMeta.hidden = true;
     sessionMeta.textContent = "";
     updateMobileStatusBar(projection, summary);
-    promptInput.disabled = !projection || isBusy || hasPendingPlan;
-    sendButton.disabled = !projection || isBusy || hasPendingPlan;
-    imageInput.disabled = !projection || isBusy || hasPendingPlan;
-    promptInput.placeholder = hasPendingPlan ? "Choose Approve and execute, Refine plan, or Discuss plan first…" : isBusy ? "Agent is busy…" : "Send a prompt…";
+    promptInput.disabled = !projection || hasPendingPlan;
+    sendButton.disabled = !projection || hasPendingPlan;
+    imageInput.disabled = !projection || hasPendingPlan;
+    promptInput.placeholder = hasPendingPlan ? "Choose Approve and execute, Refine plan, or Discuss plan first…" : "Send a prompt…";
     updateComposerStatus();
     renderTranscript(projection);
     renderDiffView(projection);
@@ -1847,10 +1988,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     for (const entry of projection.transcript) {
       if (entry.kind === "message") {
         fragment.append(renderMessage(entry, {
-          thinkingVisibilityMode: "auto",
+          thinkingVisibilityMode,
           review: activeSessionId ? transcriptReviewOptions(activeSessionId, entry) : undefined,
         }));
-      } else {
+      } else if (showToolBubbles) {
         fragment.append(renderToolCard(entry));
       }
     }

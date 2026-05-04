@@ -424,24 +424,53 @@ h2 {
   color: #ffaaa6;
 }
 
-.tool-visibility-toggle,
-.thinking-visibility-toggle {
-  min-width: 6.5rem;
+.workspace-options {
+  position: relative;
 }
 
-.tool-visibility-toggle[aria-pressed="true"],
-.thinking-visibility-toggle[data-state="shown"] {
+.workspace-options-toggle {
+  min-width: 2.5rem;
+  font-size: 1.1rem;
+  padding: 0.45rem 0.55rem;
+}
+
+.workspace-options-menu {
+  position: absolute;
+  top: calc(100% + 0.35rem);
+  right: 0;
+  z-index: 8;
+  display: grid;
+  min-width: 13.5rem;
+  gap: 0.25rem;
+  padding: 0.4rem;
+  border: 1px solid #343a46;
+  border-radius: 0.7rem;
+  background: #151922;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+}
+
+.workspace-options-menu[hidden] {
+  display: none;
+}
+
+.workspace-option-item {
+  width: 100%;
+  text-align: left;
+}
+
+.workspace-option-item[aria-checked="true"],
+.workspace-option-item[data-state="shown"] {
   border-color: rgba(21, 183, 255, 0.5);
   background: rgba(21, 183, 255, 0.12);
 }
 
-.tool-visibility-toggle[aria-pressed="false"],
-.thinking-visibility-toggle[data-state="auto"] {
+.workspace-option-item[aria-checked="false"],
+.workspace-option-item[data-state="auto"] {
   background: #171b24;
   color: #9ba4b5;
 }
 
-.thinking-visibility-toggle[data-state="hidden"] {
+.workspace-option-item[data-state="hidden"] {
   border-color: rgba(255, 107, 107, 0.24);
   background: rgba(255, 107, 107, 0.12);
   color: #ffaaa6;

@@ -1,6 +1,13 @@
-export type ThinkingVisibilityMode = "auto" | "shown" | "hidden";
+import type { ThinkingVisibilityMode } from "./protocol";
 
-export function parseThinkingVisibilityMode(value: string | null): ThinkingVisibilityMode {
+export type { ThinkingVisibilityMode };
+
+export function parseToolVisibility(value: unknown): boolean {
+  if (value === false || value === "false") return false;
+  return true;
+}
+
+export function parseThinkingVisibilityMode(value: unknown): ThinkingVisibilityMode {
   if (value === "shown" || value === "true") return "shown";
   if (value === "hidden") return "hidden";
   return "auto";

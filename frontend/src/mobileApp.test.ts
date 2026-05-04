@@ -43,7 +43,7 @@ class FakeConnection implements FuraConnection {
   }
 }
 
-const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en" };
+const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en", showTools: true, thinkingVisibility: "auto" };
 
 function createHarness(path = "/mobile.html", storedToken = "dev") {
   document.body.innerHTML = `<div id="app"></div>`;
@@ -287,6 +287,68 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileSessionMeta")?.hasAttribute("hidden")).toBe(true);
     expect(document.querySelector("#mobileStatusBar")?.textContent).toContain("/repo");
     expect(connection.sent).toContainEqual({ type: "session.attach", sessionId: "live" });
+  });
+
+  it("sends config.set when mobile visibility toggles are changed", () => {
+    const { connection } = createHarness();
+
+    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    document.querySelector<HTMLButtonElement>("#mobileToolVisibilityToggle")?.click();
+
+    expect(connection.sent).toContainEqual({ type: "config.set", showTools: false });
+
+    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    document.querySelector<HTMLButtonElement>("#mobileThinkingVisibilityToggle")?.click();
+
+    expect(connection.sent).toContainEqual({ type: "config.set", thinkingVisibility: "shown" });
+  });
+
+  it("applies config visibility updates to the mobile transcript", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [
+          {
+            kind: "message",
+            id: "message-live",
+            role: "assistant",
+            blocks: [
+              { kind: "text", text: "Answer" },
+              { kind: "thinking", thinking: "private" },
+            ],
+            timestamp: null,
+            isNew: false,
+          },
+          {
+            kind: "tool",
+            toolCallId: "tool-1",
+            toolName: "bash",
+            args: {},
+            isActive: false,
+            isError: false,
+          },
+        ],
+      }),
+    });
+
+    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(1);
+    expect(document.querySelectorAll("#mobileTranscript .thinking-block").length).toBe(1);
+
+    connection.emit({
+      type: "config.updated",
+      config: {
+        ...config,
+        showTools: false,
+        thinkingVisibility: "hidden",
+      },
+    });
+
+    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(0);
+    expect(document.querySelectorAll("#mobileTranscript .thinking-block").length).toBe(0);
   });
 
   it("forces an immediate reconnect when the disconnected status is clicked", () => {
@@ -608,7 +670,7 @@ describe("mountMobileApp", () => {
     expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
   });
 
-  it("disables the composer while the active session is busy", () => {
+  it("keeps the composer enabled while the active session is busy", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
     clickSession();
@@ -618,10 +680,42 @@ describe("mountMobileApp", () => {
       state: projection("busy", { isBusy: true, summary: summary("busy", { status: "busy", title: "Busy session" }) }),
     });
 
-    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
-    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(true);
-    expect(document.querySelector<HTMLInputElement>("#mobileImageInput")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(false);
+    expect(document.querySelector<HTMLInputElement>("#mobileImageInput")?.disabled).toBe(false);
     expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Agent busy");
+  });
+
+  it("captures busy prompt drafts from submit and sends follow-up on demand", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", { isBusy: true, summary: summary("busy", { status: "busy", title: "Busy session" }) }),
+    });
+
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
+    const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
+    if (!input || !form) throw new Error("prompt form missing");
+    input.value = "queue this after";
+    form.requestSubmit();
+
+    expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "queue this after")).toBe(false);
+    expect(document.querySelector<HTMLElement>("#mobileBusyPromptOverlay")?.hidden).toBe(false);
+    expect(document.querySelector<HTMLTextAreaElement>("#mobileBusyPromptText")?.value).toBe("queue this after");
+
+    document.querySelector<HTMLButtonElement>("#mobileBusyPromptFollowUp")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "prompt.send",
+      sessionId: "busy",
+      text: "queue this after",
+      behavior: "followUp",
+    });
+    expect(document.querySelector<HTMLElement>("#mobileBusyPromptOverlay")?.hidden).toBe(true);
+    expect(input.value).toBe("");
   });
 
   it("renders session-scoped plan review and blocks prompts until refine or approve", () => {
