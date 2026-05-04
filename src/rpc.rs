@@ -615,6 +615,10 @@ pub(crate) fn map_plan_mode_projection(value: &Value) -> Option<PlanModeProjecti
             .unwrap_or("local://PLAN.md")
             .to_string(),
         workflow: value_str(value, "workflow").map(str::to_string),
+        discussion: value
+            .get("discussion")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -654,6 +658,51 @@ pub(crate) fn apply_rpc_state_to_record(
     if let Some(todo_phases) = todo_phases {
         record.todo_phases = Some(todo_phases);
     }
+}
+
+async fn prepend_plan_execution_carryover(
+    state: &AppState,
+    session_id: &str,
+    messages: &mut Vec<TranscriptMessage>,
+) {
+    let Some(carryover) = state
+        .plan_execution_carryovers
+        .read()
+        .await
+        .get(session_id)
+        .cloned()
+    else {
+        return;
+    };
+    let id = format!(
+        "approved-plan:{}:{}",
+        session_id, carryover.final_plan_file_path
+    );
+    if messages.iter().any(|message| message.id == id) {
+        return;
+    }
+    let title = carryover
+        .plan_title
+        .as_deref()
+        .map(|title| format!("Approved plan: {title}"))
+        .unwrap_or_else(|| "Approved plan".to_string());
+    let text = format!(
+        "# {title}\n\nSource plan: `{}`\nApproved artifact: `{}`\nExecution session: `{}`\n\n{}",
+        carryover.plan_file_path,
+        carryover.final_plan_file_path,
+        carryover.execution_title,
+        carryover.content,
+    );
+    messages.insert(
+        0,
+        TranscriptMessage {
+            id,
+            role: MessageRole::System,
+            blocks: vec![ContentBlock::Text { text }],
+            timestamp: None,
+            is_new: false,
+        },
+    );
 }
 
 pub(crate) async fn apply_model_change_response(
@@ -736,10 +785,48 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             });
         }
         Some("approve_plan_mode") => {
+            let pending_name = state
+                .pending_new_session_names
+                .read()
+                .await
+                .get(&current_session_id)
+                .cloned();
+            if let Some(ref name) = pending_name {
+                let cmd = serde_json::json!({
+                    "id": next_rpc_id(),
+                    "type": "set_session_name",
+                    "name": name,
+                });
+                if let Err(e) = send_rpc_command(state, session_id, cmd).await {
+                    warn!(session_id = %session_id, error = %e, "failed to queue set_session_name after plan approval");
+                }
+            }
             if let Err(message) = refresh_rpc_state(state, session_id).await {
                 warn!(session_id = %session_id, %message, "post-plan-approval refresh failed");
             }
         }
+        Some("discuss_plan_mode") => {
+            let plan_mode = frame
+                .get("data")
+                .or_else(|| frame.get("result"))
+                .and_then(|data| data.get("planMode"))
+                .map(map_plan_mode_projection)
+                .unwrap_or(None);
+            let snapshot = {
+                let mut sessions = state.sessions.write().await;
+                sessions.get_mut(&current_session_id).map(|record| {
+                    record.plan_mode = plan_mode;
+                    ServerMessage::SessionSnapshot {
+                        session_id: current_session_id.clone(),
+                        state: record.projection(),
+                    }
+                })
+            };
+            if let Some(snapshot) = snapshot {
+                let _ = state.events.send(snapshot);
+            }
+        }
+
         Some("set_plan_mode") => {
             let plan_mode = frame
                 .get("data")
@@ -781,7 +868,8 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 .and_then(|data| data.get("messages"))
                 .and_then(|messages| messages.as_array())
                 .map(|messages| project_omp_transcript(messages));
-            if let Some((messages, tool_cards)) = projection {
+            if let Some((mut messages, tool_cards)) = projection {
+                prepend_plan_execution_carryover(state, &current_session_id, &mut messages).await;
                 replace_messages_and_broadcast(
                     state,
                     &current_session_id,
@@ -851,6 +939,15 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let pending_switch_name = if target_changed {
                 state
                     .pending_new_session_names
+                    .write()
+                    .await
+                    .remove(&current_session_id)
+            } else {
+                None
+            };
+            let pending_plan_execution = if target_changed {
+                state
+                    .plan_execution_carryovers
                     .write()
                     .await
                     .remove(&current_session_id)
@@ -1013,6 +1110,13 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             } else {
                 None
             };
+            if let Some(plan_execution) = pending_plan_execution {
+                state
+                    .plan_execution_carryovers
+                    .write()
+                    .await
+                    .insert(target_session_id.clone(), plan_execution);
+            }
             if target_changed {
                 state
                     .rpc_session_targets

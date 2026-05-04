@@ -35,6 +35,8 @@ type RenderMessageReviewOptions = {
   comments: TranscriptReviewComment[];
   onStart?(message: TranscriptMessage): void;
   onAddComment?(message: TranscriptMessage, line: TranscriptReviewLine): void;
+  onEditComment?(message: TranscriptMessage, comment: TranscriptReviewComment): void;
+  onDeleteComment?(message: TranscriptMessage, comment: TranscriptReviewComment): void;
   onCancel?(message: TranscriptMessage): void;
   onFlush?(message: TranscriptMessage): void;
 };
@@ -102,6 +104,11 @@ function renderTranscriptReviewBody(message: TranscriptMessage, review: RenderMe
   wrapper.className = "transcript-review-body";
   wrapper.setAttribute("aria-label", "Transcript review lines");
 
+  const reviewText = messageText(message);
+  if (shouldShowMarkdownReviewPreview(reviewText)) {
+    wrapper.append(renderMarkdownReviewPreview(message, reviewText, review));
+  }
+
   const lines = transcriptReviewLines(message);
   const list = mkEl("div");
   list.className = "transcript-review-lines";
@@ -134,6 +141,71 @@ function renderTranscriptReviewBody(message: TranscriptMessage, review: RenderMe
   return wrapper;
 }
 
+function shouldShowMarkdownReviewPreview(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  return /(^|\n)#{1,6}\s+\S/.test(trimmed)
+    || /(^|\n)\s*[-*+]\s+\S/.test(trimmed)
+    || /(^|\n)\s*\d+\.\s+\S/.test(trimmed)
+    || /(^|\n)```/.test(trimmed)
+    || /(^|\n)>\s+\S/.test(trimmed)
+    || /\|[^\n]+\|/.test(trimmed);
+}
+
+function renderMarkdownReviewPreview(
+  message: TranscriptMessage,
+  text: string,
+  review: RenderMessageReviewOptions,
+  ): HTMLElement {
+  const section = mkEl("section");
+  section.className = "transcript-review-markdown-preview";
+  const title = mkEl("h4");
+  title.textContent = "Rendered Markdown review";
+  const note = mkEl("p");
+  note.textContent = "Use the + buttons here for rendered blocks, or the source lines below for exact line-level comments.";
+  section.append(title, note);
+
+  const blocks = mkEl("div");
+  blocks.className = "transcript-review-markdown-blocks";
+  for (const block of markdownReviewBlocks(text)) {
+    const comments = commentsForTranscriptLine(review.comments, block.line);
+    const row = mkEl("div");
+    row.className = "transcript-review-markdown-block";
+    const button = mkEl("button");
+    button.type = "button";
+    button.className = `transcript-review-comment-btn ${comments.length > 0 ? "has-comments" : ""}`;
+    button.textContent = comments.length > 0 ? String(comments.length) : "+";
+    button.title = `Comment on rendered Markdown block starting at source line ${block.line.lineNumber}`;
+    button.addEventListener("click", () => review.onAddComment?.(message, block.line));
+    const content = renderMarkdown(block.markdown);
+    content.classList.add("transcript-review-markdown-block-content");
+    row.append(button, content);
+    if (comments.length > 0) row.append(renderReviewCommentThread(message, comments, review));
+    blocks.append(row);
+  }
+  section.append(blocks);
+  return section;
+}
+
+function markdownReviewBlocks(text: string): Array<{ line: TranscriptReviewLine; markdown: string }> {
+  const lines = transcriptReviewLines({ id: "markdown-preview", role: "assistant", blocks: [{ kind: "text", text }], timestamp: null, isNew: false });
+  const tokens = marked.lexer(text.trim());
+  const blocks: Array<{ line: TranscriptReviewLine; markdown: string }> = [];
+  let searchFrom = 0;
+  for (const token of tokens) {
+    if (token.type === "space") continue;
+    const raw = token.raw?.trimEnd() ?? tokenText(token).trim();
+    if (!raw.trim()) continue;
+    const index = text.indexOf(raw, searchFrom);
+    const before = index >= 0 ? text.slice(0, index) : text.slice(0, searchFrom);
+    const lineNumber = before.split(/\r?\n/).length;
+    const line = lines[Math.max(0, Math.min(lines.length - 1, lineNumber - 1))] ?? { lineNumber: 1, text: raw.split(/\r?\n/)[0] ?? "" };
+    blocks.push({ line, markdown: raw });
+    searchFrom = index >= 0 ? index + raw.length : searchFrom;
+  }
+  return blocks;
+}
+
 function renderTranscriptReviewLine(
   message: TranscriptMessage,
   line: TranscriptReviewLine,
@@ -162,19 +234,38 @@ function renderTranscriptReviewLine(
   lineEl.append(commentBtn, gutter, content);
   row.append(lineEl);
 
-  if (lineComments.length > 0) {
-    const thread = mkEl("div");
-    thread.className = "transcript-review-inline-comments";
-    for (const comment of lineComments) {
-      const item = mkEl("div");
-      item.className = "transcript-review-inline-comment";
-      item.textContent = comment.text;
-      thread.append(item);
-    }
-    row.append(thread);
-  }
+  if (lineComments.length > 0) row.append(renderReviewCommentThread(message, lineComments, review));
 
   return row;
+}
+
+function renderReviewCommentThread(
+  message: TranscriptMessage,
+  comments: TranscriptReviewComment[],
+  review: RenderMessageReviewOptions,
+  ): HTMLElement {
+  const thread = mkEl("div");
+  thread.className = "transcript-review-inline-comments";
+  for (const comment of comments) {
+    const item = mkEl("div");
+    item.className = "transcript-review-inline-comment";
+    const body = mkEl("span");
+    body.textContent = comment.text;
+    const actions = mkEl("span");
+    actions.className = "review-comment-actions";
+    const edit = mkEl("button");
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => review.onEditComment?.(message, comment));
+    const remove = mkEl("button");
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => review.onDeleteComment?.(message, comment));
+    actions.append(edit, remove);
+    item.append(body, actions);
+    thread.append(item);
+  }
+  return thread;
 }
 
 export function renderMarkdown(text: string): HTMLElement {

@@ -106,6 +106,7 @@ export type PlanModeProjection = {
   enabled: boolean;
   planFilePath: string;
   workflow?: string | null;
+  discussion?: boolean;
 };
 
 export type SessionProjection = {
@@ -374,6 +375,15 @@ export type ClientMessage =
   | { type: "code.file.open"; workspaceId: string; path: string }
   | { type: "code.file.close"; workspaceId: string; path: string }
   | { type: "code.file.search"; workspaceId: string; basePath: string; query: string; limit?: number }
+  | {
+      type: "plan.approve";
+      sessionId: string;
+      planFilePath: string;
+      finalPlanFilePath: string;
+      title?: string | null;
+      content: string;
+    }
+  | { type: "plan.discuss"; sessionId: string }
   | { type: "raw.rpc"; sessionId: string; command: unknown }
   | { type: "session.fork"; sessionId: string; name: string }
   | { type: "control.prompt"; clientId: string; conversationId?: string; text: string; uiSnapshot: FrontendUiSnapshot }

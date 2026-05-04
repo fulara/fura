@@ -407,7 +407,7 @@ describe("mountMobileApp", () => {
     reviewButton?.click();
     document.querySelectorAll<HTMLButtonElement>(".transcript-review-comment-btn")[1]?.click();
     expect(prompt).toHaveBeenCalledWith("Comment on this transcript line");
-    expect(document.querySelector(".transcript-review-inline-comment")?.textContent).toBe("Please clarify line two");
+    expect(document.querySelector(".transcript-review-inline-comment")?.textContent).toContain("Please clarify line two");
 
     document.querySelector<HTMLButtonElement>(".transcript-review-actions button:last-child")?.click();
     expect(document.querySelector<HTMLElement>("#mobileReviewPreviewOverlay")?.hidden).toBe(false);
@@ -584,17 +584,66 @@ describe("mountMobileApp", () => {
       content: "Plan body",
     });
 
-    expect(document.querySelector(".plan-review-card")).toBeNull();
-    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
-    expect(document.querySelector("#mobileSendButton")?.getAttribute("type")).toBe("submit");
-    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("");
+    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Plan ready: Review me");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(true);
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Plan review waiting");
 
     const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
     const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
     if (!input || !form) throw new Error("prompt form missing");
-    input.value = "should send";
+    input.value = "should not send";
     form.requestSubmit();
-    expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "should send")).toBe(true);
+    expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "should not send")).toBe(false);
+
+    document.querySelector<HTMLButtonElement>(".plan-review-discuss")?.click();
+    expect(connection.sent).toContainEqual({ type: "plan.discuss", sessionId: "live" });
+    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Discussing plan: Review me");
+    expect(input.disabled).toBe(false);
+
+    connection.emit({
+      type: "plan.review",
+      sessionId: "live",
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Review me",
+      content: "Plan body",
+    });
+
+    document.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
+    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Refining plan: Review me");
+    expect(document.querySelector(".message-review-toggle")?.textContent).toBe("Review");
+    expect(input.disabled).toBe(false);
+    vi.spyOn(window, "prompt").mockReturnValue("Fix the second step");
+    document.querySelector<HTMLButtonElement>(".plan-review-card .message-review-toggle")?.click();
+    document.querySelector<HTMLButtonElement>(".plan-review-card .transcript-review-comment-btn")?.click();
+    document.querySelector<HTMLButtonElement>(".plan-review-card .transcript-review-actions button:last-child")?.click();
+    expect(document.querySelector<HTMLTextAreaElement>("#mobileReviewPreviewText")?.value).toContain("I reviewed a finalized plan");
+    document.querySelector<HTMLButtonElement>("#mobileReviewPreviewSend")?.click();
+    expect(connection.sent.some(message =>
+      message.type === "prompt.send" &&
+      message.sessionId === "live" &&
+      message.text.includes("Please refine the plan to address these comments"),
+    )).toBe(true);
+
+    connection.emit({
+      type: "plan.review",
+      sessionId: "live",
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Review me",
+      content: "Plan body",
+    });
+    document.querySelector<HTMLButtonElement>(".plan-review-approve")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "plan.approve",
+      sessionId: "live",
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Review me",
+      content: "Plan body",
+    });
   });
   it("renders prompt busy choices and sends steer behavior", () => {
     const { connection } = createHarness();

@@ -182,6 +182,24 @@ pub(crate) async fn handle_client_message(
             query,
             limit,
         } => handle_code_file_search(state, workspace_id, base_path, query, limit).await,
+        ClientMessage::PlanApprove {
+            session_id,
+            plan_file_path,
+            final_plan_file_path,
+            title,
+            content,
+        } => {
+            handle_plan_approve(
+                state,
+                session_id,
+                plan_file_path,
+                final_plan_file_path,
+                title,
+                content,
+            )
+            .await
+        }
+        ClientMessage::PlanDiscuss { session_id } => handle_plan_discuss(state, session_id).await,
         ClientMessage::RawRpc {
             session_id,
             mut command,
@@ -647,6 +665,73 @@ pub(crate) async fn create_session(
     }
 
     Vec::new()
+}
+
+async fn handle_plan_approve(
+    state: &AppState,
+    session_id: String,
+    plan_file_path: String,
+    final_plan_file_path: String,
+    title: Option<String>,
+    content: String,
+) -> Vec<ServerMessage> {
+    info!(action = "plan.approve", session_id = %session_id, bytes = content.len());
+    let source_title = {
+        let sessions = state.sessions.read().await;
+        sessions
+            .get(&session_id)
+            .and_then(|record| record.title.clone())
+            .or_else(|| title.clone())
+            .unwrap_or_else(|| format!("Session {}", short_session_id(&session_id)))
+    };
+    let execution_title = format!("Execution - {source_title}");
+    state.plan_execution_carryovers.write().await.insert(
+        session_id.clone(),
+        PlanExecutionCarryover {
+            execution_title: execution_title.clone(),
+            plan_title: title,
+            plan_file_path: plan_file_path.clone(),
+            final_plan_file_path: final_plan_file_path.clone(),
+            content,
+        },
+    );
+    state
+        .pending_new_session_names
+        .write()
+        .await
+        .insert(session_id.clone(), execution_title);
+    let command = serde_json::json!({
+        "id": next_rpc_id(),
+        "type": "approve_plan_mode",
+        "planFilePath": plan_file_path,
+        "finalPlanFilePath": final_plan_file_path,
+    });
+    match send_rpc_command(state, &session_id, command).await {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![ServerMessage::Error {
+            request_id: None,
+            message,
+        }],
+    }
+}
+
+fn short_session_id(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
+}
+
+async fn handle_plan_discuss(state: &AppState, session_id: String) -> Vec<ServerMessage> {
+    info!(action = "plan.discuss", session_id = %session_id);
+    let command = serde_json::json!({
+        "id": next_rpc_id(),
+        "type": "discuss_plan_mode",
+    });
+    match send_rpc_command(state, &session_id, command).await {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![ServerMessage::Error {
+            request_id: None,
+            message,
+        }],
+    }
 }
 
 pub(crate) async fn set_session_category(

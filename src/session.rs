@@ -204,6 +204,7 @@ pub(crate) struct PlanModeProjection {
     pub(crate) enabled: bool,
     pub(crate) plan_file_path: String,
     pub(crate) workflow: Option<String>,
+    pub(crate) discussion: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

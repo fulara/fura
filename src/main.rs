@@ -134,6 +134,7 @@ async fn main() -> anyhow::Result<()> {
         pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
+        plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
         bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
@@ -509,6 +510,7 @@ pub(crate) mod tests {
             pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
+            plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
             bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
@@ -1026,6 +1028,7 @@ pub(crate) mod tests {
             enabled: true,
             plan_file_path: "local://PLAN.md".to_string(),
             workflow: Some("parallel".to_string()),
+            discussion: false,
         });
         state
             .sessions
@@ -1109,6 +1112,139 @@ pub(crate) mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn plan_approval_names_execution_session_and_carries_plan_message() {
+        let state = test_state(16, None);
+        let mut record = test_record();
+        record.id = "s1".to_string();
+        record.title = Some("Planning Session".to_string());
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        let (stdin, mut commands) = mpsc::channel(16);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("transport-1".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("transport-1".to_string(), "s1".to_string());
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::PlanApprove {
+                session_id: "s1".to_string(),
+                plan_file_path: "local://PLAN.md".to_string(),
+                final_plan_file_path: "local://APPROVED.md".to_string(),
+                title: Some("APPROVED".to_string()),
+                content: "# Approved plan\n\n- Do the work".to_string(),
+            },
+        )
+        .await;
+        assert!(responses.is_empty());
+        let approve = commands.recv().await.expect("approve command");
+        assert_eq!(
+            approve.get("type").and_then(|value| value.as_str()),
+            Some("approve_plan_mode")
+        );
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "approve_plan_mode",
+                "success": true,
+                "data": { "finalPlanFilePath": "local://APPROVED.md" }
+            }),
+        )
+        .await;
+        let rename = commands.recv().await.expect("rename command");
+        assert_eq!(
+            rename.get("type").and_then(|value| value.as_str()),
+            Some("set_session_name")
+        );
+        assert_eq!(
+            rename.get("name").and_then(|value| value.as_str()),
+            Some("Execution - Planning Session"),
+        );
+        assert_eq!(
+            commands
+                .recv()
+                .await
+                .expect("get_state command")
+                .get("type")
+                .and_then(|value| value.as_str()),
+            Some("get_state"),
+        );
+        assert_eq!(
+            commands
+                .recv()
+                .await
+                .expect("get_messages command")
+                .get("type")
+                .and_then(|value| value.as_str()),
+            Some("get_messages"),
+        );
+        assert_eq!(
+            commands
+                .recv()
+                .await
+                .expect("stats command")
+                .get("type")
+                .and_then(|value| value.as_str()),
+            Some("get_session_stats"),
+        );
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "exec-s1",
+                    "sessionName": "Execution - Planning Session",
+                    "sessionFile": "/tmp/exec-s1.jsonl"
+                }
+            }),
+        )
+        .await;
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_messages",
+                "success": true,
+                "data": { "messages": [] }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let execution = sessions.get("exec-s1").expect("execution session");
+        assert_eq!(
+            execution.title.as_deref(),
+            Some("Execution - Planning Session")
+        );
+        assert_eq!(execution.messages.len(), 1);
+        assert!(matches!(execution.messages[0].role, MessageRole::System));
+        let ContentBlock::Text { text } = &execution.messages[0].blocks[0] else {
+            panic!("approved plan should be a text block");
+        };
+        assert!(text.contains("# Approved plan: APPROVED"));
+        assert!(text.contains("# Approved plan"));
+        assert!(text.contains("Approved artifact: `local://APPROVED.md`"));
     }
 
     #[tokio::test]

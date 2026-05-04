@@ -441,6 +441,16 @@ pub(crate) enum ClientMessage {
         query: String,
         limit: Option<usize>,
     },
+    #[serde(rename = "plan.approve")]
+    PlanApprove {
+        session_id: String,
+        plan_file_path: String,
+        final_plan_file_path: String,
+        title: Option<String>,
+        content: String,
+    },
+    #[serde(rename = "plan.discuss")]
+    PlanDiscuss { session_id: String },
     #[serde(rename = "raw.rpc")]
     RawRpc { session_id: String, command: Value },
 }

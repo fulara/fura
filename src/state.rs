@@ -22,6 +22,8 @@ pub(crate) struct AppState {
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
+    /// Approved plan metadata waiting for / attached to the execution session spawned by OMP.
+    pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,
     pub(crate) code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>,
     pub(crate) review_worktrees: Arc<RwLock<DiffReviewWorktreeRegistry>>,
     pub(crate) bridge_controller: Arc<RwLock<BridgeControllerState>>,
@@ -70,6 +72,15 @@ pub(crate) struct PendingPromptDraft {
     pub(crate) session_id: String,
     pub(crate) text: String,
     pub(crate) images: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlanExecutionCarryover {
+    pub(crate) execution_title: String,
+    pub(crate) plan_title: Option<String>,
+    pub(crate) plan_file_path: String,
+    pub(crate) final_plan_file_path: String,
+    pub(crate) content: String,
 }
 
 #[derive(Debug, Default)]

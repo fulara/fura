@@ -70,6 +70,16 @@ import {
   type DiffPreviewDraft,
 } from "./diffReview";
 import {
+  buildCodeCommentPrompt,
+  codeCommentFlushEditorText,
+  codeCommentPreviewStatus,
+  createCodeFileComment,
+  removeSelectedCodeComments,
+  selectedCodeComments,
+  type CodeFileComment,
+  type CodePreviewDraft,
+} from "./codeComments";
+import {
   deriveWorktreeCreateView,
   resolveSessionCreateMessage,
   type SessionCreateValidationTarget,
@@ -95,6 +105,17 @@ import {
   type TranscriptReviewComment,
   type TranscriptReviewLine,
 } from "./transcriptReview";
+import {
+  buildPlanReviewPrompt,
+  createApprovePlanReviewMessage,
+  createDiscussPlanReviewMessage,
+  pendingPlanReviewFromMessage,
+  planReviewRenderKey,
+  renderPlanReviewCard,
+  planReviewTranscriptMessage,
+  type PendingPlanReview,
+  type VisiblePlanReview,
+} from "./planReview";
 import {
   parentCodePath,
   renderCodeViewer,
@@ -581,7 +602,9 @@ type TranscriptPreviewDraft = {
   sessionId: string;
   message: TranscriptMessage;
   comments: TranscriptReviewComment[];
+  promptText?: string;
 };
+type SessionCodeComments = Map<string, CodeFileComment[]>;
 type SessionNotice = { level: string; text: string };
 type ControlChatMessage = {
   role: "user" | "assistant" | "system";
@@ -632,6 +655,7 @@ let lastTranscriptRenderedSessionId: string | null = null;
 let lastToolsRenderedSessionId: string | null = null;
 let transcriptRenderRevision = 0;
 const transcriptRenderCaches = new WeakMap<HTMLElement, CachedPanelRenderState>();
+const visiblePlanReviews = new Map<string, VisiblePlanReview>();
 const toolsRenderCaches = new WeakMap<HTMLElement, CachedPanelRenderState>();
 let paletteCommands: SlashCommandSpec[] = [];
 let paletteSelectedIndex = -1;
@@ -655,6 +679,8 @@ let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
+const codeComments = new Map<string, SessionCodeComments>();
+let codePreviewDraft: CodePreviewDraft | null = null;
 let transcriptPreviewDraft: TranscriptPreviewDraft | null = null;
 const transcriptReviewActiveMessages = new Map<string, string>();
 const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
@@ -1611,6 +1637,49 @@ function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" 
   }
 }
 
+function hasPendingPlanReview(sessionId: string): boolean {
+  return visiblePlanReviews.get(sessionId)?.mode === "pending";
+}
+
+function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
+  visiblePlanReviews.set(message.sessionId, { review: pendingPlanReviewFromMessage(message), mode: "pending" });
+  appendLog(`[${message.sessionId}] plan ready for review`);
+  if (message.sessionId === activeSessionId && workspaceMode === "session") {
+    markTranscriptViewDirty();
+    render();
+  } else {
+    unreadSessions.add(message.sessionId);
+    renderSessions();
+  }
+}
+
+function approvePendingPlanReview(review: PendingPlanReview): void {
+  const accepted = send(createApprovePlanReviewMessage(review));
+  if (!accepted) return;
+  visiblePlanReviews.delete(review.sessionId);
+  markTranscriptViewDirty();
+  render();
+}
+
+function refinePendingPlanReview(review: PendingPlanReview): void {
+  visiblePlanReviews.set(review.sessionId, { review, mode: "refining" });
+  markTranscriptViewDirty();
+  render();
+  if (workspaceMode === "session" && activeSessionId === review.sessionId) {
+    promptInput.focus();
+  }
+}
+
+function discussPendingPlanReview(review: PendingPlanReview): void {
+  const accepted = send(createDiscussPlanReviewMessage(review));
+  if (!accepted) return;
+  visiblePlanReviews.set(review.sessionId, { review, mode: "discussing" });
+  markTranscriptViewDirty();
+  render();
+  if (workspaceMode === "session" && activeSessionId === review.sessionId) {
+    promptInput.focus();
+  }
+}
 function persistPromptDraftForWorkspace(): void {
   if (workspaceMode === "controller") controllerPromptDraft = promptInput.value;
   else sessionPromptDraft = promptInput.value;
@@ -2443,6 +2512,10 @@ function resetCodeViewForSession(sessionId: string | null): void {
 }
 
 function activeCodeViewState(): CodeViewerState {
+  const activeCodeComments =
+    workspaceMode === "session" && activeSessionId && codeFile
+      ? selectedCodeComments(sessionCodeComments(activeSessionId).get(codeFile.path) ?? [], codeFile.path)
+      : [];
   return {
     activeSessionId: workspaceMode === "session" ? activeSessionId : null,
     workspace: codeWorkspace,
@@ -2459,6 +2532,7 @@ function activeCodeViewState(): CodeViewerState {
     searchResults: codeSearchResults,
     searchLoading: codeSearchLoading,
     searchError: codeSearchError,
+    fileComments: activeCodeComments,
   };
 }
 
@@ -2553,6 +2627,98 @@ function submitCodeSearch(): void {
   });
 }
 
+function sessionCodeComments(sessionId: string): SessionCodeComments {
+  const existing = codeComments.get(sessionId);
+  if (existing) return existing;
+  const created: SessionCodeComments = new Map();
+  codeComments.set(sessionId, created);
+  return created;
+}
+
+function addCodeComment(
+  sessionId: string,
+  file: CodeFileContent,
+  lineNumber: number,
+  lineText: string,
+): void {
+  const comment = window.prompt("Comment on this code line");
+  if (!comment?.trim()) return;
+  const commentsByFile = sessionCodeComments(sessionId);
+  const existing = commentsByFile.get(file.path) ?? [];
+  existing.push(createCodeFileComment({
+    id: `${Date.now()}-${existing.length}`,
+    file,
+    lineNumber,
+    lineText,
+    text: comment,
+  }));
+  commentsByFile.set(file.path, existing);
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function editCodeComment(sessionId: string, comment: CodeFileComment): void {
+  const next = window.prompt("Edit comment", comment.text);
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed) return;
+  const commentsByFile = sessionCodeComments(sessionId);
+  commentsByFile.set(
+    comment.path,
+    (commentsByFile.get(comment.path) ?? []).map(existing =>
+      existing.id === comment.id ? { ...existing, text: trimmed } : existing,
+    ),
+  );
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function deleteCodeComment(sessionId: string, comment: CodeFileComment): void {
+  const commentsByFile = sessionCodeComments(sessionId);
+  commentsByFile.set(
+    comment.path,
+    (commentsByFile.get(comment.path) ?? []).filter(existing => existing.id !== comment.id),
+  );
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function sendCodeComments(sessionId: string, file: CodeFileContent, comments: CodeFileComment[]): void {
+  if (comments.length === 0) return;
+  const clearFlushedComments = () => {
+    const commentsByFile = sessionCodeComments(sessionId);
+    commentsByFile.set(file.path, removeSelectedCodeComments(commentsByFile.get(file.path) ?? [], file.path));
+    markCodeViewDirty();
+    renderCodePanelIfNeeded(true);
+  };
+  sendPromptWithBusyHandling({
+    sessionId,
+    text: buildCodeCommentPrompt(file, comments),
+    editorText: codeCommentFlushEditorText(comments.length),
+    images: [],
+    onSend: clearFlushedComments,
+  });
+}
+
+function previewCodeComments(sessionId: string, file: CodeFileContent): void {
+  const comments = selectedCodeComments(sessionCodeComments(sessionId).get(file.path) ?? [], file.path);
+  if (comments.length === 0) return;
+  codePreviewDraft = { sessionId, file, comments };
+  diffPreviewDraft = null;
+  transcriptPreviewDraft = null;
+  diffPreviewTitle.textContent = "Preview code comments";
+  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewSend.textContent = "Send comments";
+  diffPreviewText.value = buildCodeCommentPrompt(file, comments);
+  diffPreviewStatus.textContent = codeCommentPreviewStatus(comments.length);
+  diffPreviewOverlay.hidden = false;
+  diffPreviewText.scrollTop = 0;
+  diffPreviewSend.focus();
+}
+
+function flushCodeComments(sessionId: string, file: CodeFileContent): void {
+  previewCodeComments(sessionId, file);
+}
 function openSearchResultInCode(path: string): void {
   closeCodeSearch();
   requestCodeTree(parentCodePath(path) ?? "");
@@ -2694,6 +2860,27 @@ function renderCodePanelIfNeeded(force = false): void {
       },
       searchFiles: submitCodeSearch,
       openSearchResult: openSearchResultInCode,
+      addComment: (lineNumber, lineText) => {
+        if (workspaceMode === "session" && activeSessionId && codeFile) {
+          addCodeComment(activeSessionId, codeFile, lineNumber, lineText);
+        }
+      },
+      editComment: comment => {
+        if (workspaceMode === "session" && activeSessionId) editCodeComment(activeSessionId, comment);
+      },
+      deleteComment: comment => {
+        if (workspaceMode === "session" && activeSessionId) deleteCodeComment(activeSessionId, comment);
+      },
+      previewComments: () => {
+        if (workspaceMode === "session" && activeSessionId && codeFile) {
+          previewCodeComments(activeSessionId, codeFile);
+        }
+      },
+      flushComments: () => {
+        if (workspaceMode === "session" && activeSessionId && codeFile) {
+          flushCodeComments(activeSessionId, codeFile);
+        }
+      },
     });
   });
   if (!rendered) return;
@@ -2898,6 +3085,22 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
     items.push({
       key: `current-todos:${todoPhasesRenderKey(currentTodos)}`,
       render: () => renderCurrentTodoCard(currentTodos),
+    });
+  }
+  const visiblePlanReview = visiblePlanReviews.get(projection.summary.sessionId);
+  if (visiblePlanReview) {
+    items.push({
+      key: `plan-review:${planReviewRenderKey(visiblePlanReview.review, visiblePlanReview.mode)}`,
+      render: () => renderPlanReviewCard(
+        visiblePlanReview.review,
+        {
+          onApprove: approvePendingPlanReview,
+          onRefine: refinePendingPlanReview,
+          onDiscuss: discussPendingPlanReview,
+        },
+        visiblePlanReview.mode,
+        visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,
+      ),
     });
   }
   return items;
@@ -3164,6 +3367,30 @@ function addTranscriptReviewComment(
   render();
 }
 
+function editTranscriptReviewComment(sessionId: string, comment: TranscriptReviewComment): void {
+  const next = window.prompt("Edit comment", comment.text);
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed) return;
+  transcriptReviewComments.set(
+    sessionId,
+    (transcriptReviewComments.get(sessionId) ?? []).map(existing =>
+      existing.id === comment.id ? { ...existing, text: trimmed } : existing,
+    ),
+  );
+  markTranscriptViewDirty({ resetCache: true });
+  render();
+}
+
+function deleteTranscriptReviewComment(sessionId: string, comment: TranscriptReviewComment): void {
+  transcriptReviewComments.set(
+    sessionId,
+    (transcriptReviewComments.get(sessionId) ?? []).filter(existing => existing.id !== comment.id),
+  );
+  markTranscriptViewDirty({ resetCache: true });
+  render();
+}
+
 function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
   const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
   if (comments.length === 0) return;
@@ -3209,11 +3436,88 @@ function transcriptReviewOptions(sessionId: string, message: TranscriptMessage) 
     comments: transcriptReviewCommentsForMessage(sessionId, message.id),
     onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
     onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
+    onEditComment: (_target: TranscriptMessage, comment: TranscriptReviewComment) => editTranscriptReviewComment(sessionId, comment),
+    onDeleteComment: (_target: TranscriptMessage, comment: TranscriptReviewComment) => deleteTranscriptReviewComment(sessionId, comment),
     onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
     onFlush: (target: TranscriptMessage) => flushTranscriptReviewComments(sessionId, target),
   };
 }
 
+function flushPlanReviewComments(sessionId: string, review: PendingPlanReview): void {
+  const message = planReviewTranscriptMessage(review);
+  const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
+  if (comments.length === 0) return;
+  const promptText = buildPlanReviewPrompt(review, comments);
+  transcriptPreviewDraft = { sessionId, message, comments, promptText };
+  diffPreviewDraft = null;
+  codePreviewDraft = null;
+  diffPreviewTitle.textContent = "Preview plan comments";
+  diffPreviewSubtitle.textContent = "Review the refinement prompt that will be sent to OMP.";
+  diffPreviewText.value = promptText;
+  diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
+  diffPreviewSend.textContent = "Send refinement";
+  diffPreviewOverlay.hidden = false;
+  diffPreviewText.scrollTop = 0;
+  diffPreviewSend.focus();
+}
+
+function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
+  const message = planReviewTranscriptMessage(review);
+  return {
+    active: isTranscriptMessageUnderReview(sessionId, message.id),
+    comments: transcriptReviewCommentsForMessage(sessionId, message.id),
+    onStart: (target: TranscriptMessage) => startTranscriptReview(sessionId, target),
+    onAddComment: (target: TranscriptMessage, line: TranscriptReviewLine) => addTranscriptReviewComment(sessionId, target, line),
+    onEditComment: (_target: TranscriptMessage, comment: TranscriptReviewComment) => editTranscriptReviewComment(sessionId, comment),
+    onDeleteComment: (_target: TranscriptMessage, comment: TranscriptReviewComment) => deleteTranscriptReviewComment(sessionId, comment),
+    onCancel: (target: TranscriptMessage) => cancelTranscriptReview(sessionId, target),
+    onFlush: () => flushPlanReviewComments(sessionId, review),
+  };
+}
+
+function editDiffAnnotation(sessionId: string, annotation: DiffReviewAnnotation): void {
+  const next = window.prompt(annotation.kind === "question" ? "Edit question" : "Edit comment", annotation.text);
+  if (next === null) return;
+  const trimmed = next.trim();
+  if (!trimmed) return;
+  diffAnnotations.set(
+    sessionId,
+    (diffAnnotations.get(sessionId) ?? []).map(existing =>
+      existing.id === annotation.id ? { ...existing, text: trimmed } : existing,
+    ),
+  );
+  markDiffsViewDirty();
+  rerenderDiffsViewPreservingScroll(sessionId);
+}
+
+function deleteDiffAnnotation(sessionId: string, annotation: DiffReviewAnnotation): void {
+  diffAnnotations.set(
+    sessionId,
+    (diffAnnotations.get(sessionId) ?? []).filter(existing => existing.id !== annotation.id),
+  );
+  markDiffsViewDirty();
+  rerenderDiffsViewPreservingScroll(sessionId);
+}
+
+function renderDiffAnnotationItem(sessionId: string, annotation: DiffReviewAnnotation): HTMLElement {
+  const item = mkEl("div");
+  item.className = `diff-inline-comment diff-inline-${annotation.kind} review-comment-item`;
+  const body = mkEl("span");
+  body.textContent = `${annotation.kind === "question" ? "Question" : "Comment"}: ${annotation.text}`;
+  const controls = mkEl("span");
+  controls.className = "review-comment-actions";
+  const edit = mkEl("button");
+  edit.type = "button";
+  edit.textContent = "Edit";
+  edit.addEventListener("click", () => editDiffAnnotation(sessionId, annotation));
+  const remove = mkEl("button");
+  remove.type = "button";
+  remove.textContent = "Remove";
+  remove.addEventListener("click", () => deleteDiffAnnotation(sessionId, annotation));
+  controls.append(edit, remove);
+  item.append(body, controls);
+  return item;
+}
 function addDiffComment(
   sessionId: string,
   state: RepoDiffState,
@@ -3611,10 +3915,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
           const thread = mkEl("div");
           thread.className = "diff-inline-comments";
           for (const annotation of lineAnnotations) {
-            const item = mkEl("div");
-            item.className = `diff-inline-comment diff-inline-${annotation.kind}`;
-            item.textContent = `${annotation.kind === "question" ? "Question" : "Comment"}: ${annotation.text}`;
-            thread.append(item);
+            thread.append(renderDiffAnnotationItem(sessionId, annotation));
           }
           lineWrap.append(thread);
         }
@@ -3652,9 +3953,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
       item.className = `diff-comment diff-${annotation.kind}`;
       const loc = mkEl("code");
       loc.textContent = formatDiffLocation(annotation);
-      const body = mkEl("p");
-      body.textContent = annotation.text;
-      item.append(loc, body);
+      item.append(loc, renderDiffAnnotationItem(sessionId, annotation));
       commentsPanel.append(item);
     }
   }

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createApprovePlanReviewMessage,
+  createDiscussPlanReviewMessage,
   pendingPlanReviewFromMessage,
   renderPlanReviewCard,
   type PendingPlanReview,
@@ -18,13 +19,28 @@ describe("plan review helpers", () => {
     });
 
     expect(createApprovePlanReviewMessage(review)).toEqual({
-      type: "raw.rpc",
+      type: "plan.approve",
       sessionId: "session-1",
-      command: {
-        type: "approve_plan_mode",
-        planFilePath: "local://PLAN.md",
-        finalPlanFilePath: "local://FINAL.md",
-      },
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Migration",
+      content: "Plan body",
+    });
+  });
+
+  it("builds the discuss-plan command for the originating session", () => {
+    const review = pendingPlanReviewFromMessage({
+      type: "plan.review",
+      sessionId: "session-1",
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Migration",
+      content: "Plan body",
+    });
+
+    expect(createDiscussPlanReviewMessage(review)).toEqual({
+      type: "plan.discuss",
+      sessionId: "session-1",
     });
   });
 
@@ -38,8 +54,9 @@ describe("plan review helpers", () => {
     };
     const onApprove = vi.fn();
     const onRefine = vi.fn();
+    const onDiscuss = vi.fn();
 
-    const card = renderPlanReviewCard(review, { onApprove, onRefine });
+    const card = renderPlanReviewCard(review, { onApprove, onRefine, onDiscuss });
 
     expect(card.textContent).toContain("Plan ready: Migration");
     expect(card.querySelector(".plan-review-markdown h1")?.textContent).toBe("Plan body");
@@ -50,9 +67,11 @@ describe("plan review helpers", () => {
     expect(card.querySelector(".plan-review-markdown pre")).toBeNull();
     card.querySelector<HTMLButtonElement>(".plan-review-approve")?.click();
     card.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
+    card.querySelector<HTMLButtonElement>(".plan-review-discuss")?.click();
 
     expect(onApprove).toHaveBeenCalledWith(review);
     expect(onRefine).toHaveBeenCalledWith(review);
+    expect(onDiscuss).toHaveBeenCalledWith(review);
   });
 
   it("keeps the plan visible with review controls while refining", () => {
@@ -67,7 +86,7 @@ describe("plan review helpers", () => {
 
     const card = renderPlanReviewCard(
       review,
-      { onApprove: vi.fn(), onRefine: vi.fn() },
+      { onApprove: vi.fn(), onRefine: vi.fn(), onDiscuss: vi.fn() },
       "refining",
       { active: false, comments: [], onStart },
     );

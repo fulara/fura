@@ -5,13 +5,15 @@ import type { ClientMessage, ServerMessage, TranscriptMessage } from "./protocol
 
 export type PlanReviewMessage = Extract<ServerMessage, { type: "plan.review" }>;
 export type PendingPlanReview = Omit<PlanReviewMessage, "type">;
-export type PlanReviewMode = "pending" | "refining";
+export type PlanReviewMode = "pending" | "refining" | "discussing";
 export type VisiblePlanReview = { review: PendingPlanReview; mode: PlanReviewMode };
 type PlanReviewLineReviewOptions = {
   active: boolean;
   comments: TranscriptReviewComment[];
   onStart?(message: TranscriptMessage): void;
   onAddComment?(message: TranscriptMessage, line: TranscriptReviewLine): void;
+  onEditComment?(message: TranscriptMessage, comment: TranscriptReviewComment): void;
+  onDeleteComment?(message: TranscriptMessage, comment: TranscriptReviewComment): void;
   onCancel?(message: TranscriptMessage): void;
   onFlush?(message: TranscriptMessage): void;
 };
@@ -30,13 +32,19 @@ export function pendingPlanReviewFromMessage(message: PlanReviewMessage): Pendin
 
 export function createApprovePlanReviewMessage(review: PendingPlanReview): ClientMessage {
   return {
-    type: "raw.rpc",
+    type: "plan.approve",
     sessionId: review.sessionId,
-    command: {
-      type: "approve_plan_mode",
-      planFilePath: review.planFilePath,
-      finalPlanFilePath: review.finalPlanFilePath,
-    },
+    planFilePath: review.planFilePath,
+    finalPlanFilePath: review.finalPlanFilePath,
+    title: review.title,
+    content: review.content,
+  };
+}
+
+export function createDiscussPlanReviewMessage(review: PendingPlanReview): ClientMessage {
+  return {
+    type: "plan.discuss",
+    sessionId: review.sessionId,
   };
 }
 
@@ -67,6 +75,7 @@ export function renderPlanReviewCard(
   actions: {
     onApprove: (review: PendingPlanReview) => void;
     onRefine: (review: PendingPlanReview) => void;
+    onDiscuss: (review: PendingPlanReview) => void;
   },
   mode: PlanReviewMode = "pending",
   lineReview?: PlanReviewLineReviewOptions,
@@ -74,7 +83,7 @@ export function renderPlanReviewCard(
   const card = mkEl("section");
   card.className = `plan-review-card plan-review-${mode}`;
   card.setAttribute("role", "region");
-  card.setAttribute("aria-label", mode === "pending" ? "Plan ready for review" : "Plan available while refining");
+  card.setAttribute("aria-label", mode === "pending" ? "Plan ready for review" : mode === "refining" ? "Plan available while refining" : "Plan available while discussing");
 
   const header = mkEl("header");
   const headingGroup = mkEl("div");
@@ -84,7 +93,9 @@ export function renderPlanReviewCard(
   const title = mkEl("h3");
   title.textContent = mode === "pending"
     ? review.title ? `Plan ready: ${review.title}` : "Plan ready"
-    : review.title ? `Refining plan: ${review.title}` : "Refining plan";
+    : mode === "refining"
+      ? review.title ? `Refining plan: ${review.title}` : "Refining plan"
+      : review.title ? `Discussing plan: ${review.title}` : "Discussing plan";
   headingGroup.append(kicker, title);
 
   const meta = mkEl("p");
@@ -96,8 +107,10 @@ export function renderPlanReviewCard(
   body.className = "plan-review-body";
   const explanation = mkEl("p");
   explanation.textContent = mode === "pending"
-    ? "This session is waiting for your plan decision. Prompts stay disabled until you approve execution or choose to refine the plan."
-    : "Use the composer below to tell the agent what to change. This plan stays visible as reference while you refine it.";
+    ? "This session is waiting for your plan decision. Prompts stay disabled until you approve execution, refine the plan, or switch into discussion."
+    : mode === "refining"
+      ? "Use the composer below to tell the agent what to change. This plan stays visible as reference while you refine it."
+      : "Use the composer below to ask questions about the plan. The agent should discuss it without rewriting the plan unless you ask for changes.";
 
   const details = mkEl("details");
   details.open = true;
@@ -134,11 +147,19 @@ export function renderPlanReviewCard(
     refine.className = "plan-review-refine";
     refine.textContent = "Refine plan";
     refine.addEventListener("click", () => actions.onRefine(review));
-    footer.append(approve, refine);
+
+    const discuss = mkEl("button");
+    discuss.type = "button";
+    discuss.className = "plan-review-discuss";
+    discuss.textContent = "Discuss plan";
+    discuss.addEventListener("click", () => actions.onDiscuss(review));
+    footer.append(approve, refine, discuss);
   } else {
     const status = mkEl("p");
     status.className = "plan-review-refining-status";
-    status.textContent = "Refinement mode: write the changes you want in the prompt composer.";
+    status.textContent = mode === "refining"
+      ? "Refinement mode: write the changes you want in the prompt composer."
+      : "Discussion mode: ask questions about the plan in the prompt composer.";
     footer.append(status);
   }
 

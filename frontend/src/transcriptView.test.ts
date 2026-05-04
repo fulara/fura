@@ -105,6 +105,8 @@ describe("renderMessage", () => {
     const onAddComment = vi.fn();
     const onCancel = vi.fn();
     const onFlush = vi.fn();
+    const onEditComment = vi.fn();
+    const onDeleteComment = vi.fn();
     const message: TranscriptMessage = {
       id: "m-review",
       role: "assistant",
@@ -126,6 +128,8 @@ describe("renderMessage", () => {
         }],
         onStart,
         onAddComment,
+        onEditComment,
+        onDeleteComment,
         onCancel,
         onFlush,
       },
@@ -134,15 +138,43 @@ describe("renderMessage", () => {
     expect(node.className).toContain("message-reviewing");
     expect(node.querySelector(".text-block")).toBeNull();
     expect(Array.from(node.querySelectorAll(".transcript-review-gutter")).map(el => el.textContent)).toEqual(["1", "2"]);
-    expect(node.querySelector(".transcript-review-inline-comment")?.textContent).toBe("Explain this.");
+    expect(node.querySelector(".transcript-review-inline-comment")?.textContent).toContain("Explain this.");
 
     node.querySelector<HTMLButtonElement>(".transcript-review-comment-btn")?.click();
     expect(onAddComment).toHaveBeenCalledWith(message, { lineNumber: 1, text: "line one" });
+    node.querySelector<HTMLButtonElement>(".review-comment-actions button:first-child")?.click();
+    expect(onEditComment).toHaveBeenCalledWith(message, expect.objectContaining({ id: "c1" }));
+    node.querySelector<HTMLButtonElement>(".review-comment-actions button:last-child")?.click();
+    expect(onDeleteComment).toHaveBeenCalledWith(message, expect.objectContaining({ id: "c1" }));
 
     node.querySelectorAll<HTMLButtonElement>(".transcript-review-actions button")[0]?.click();
     expect(onCancel).toHaveBeenCalledWith(message);
     node.querySelectorAll<HTMLButtonElement>(".transcript-review-actions button")[1]?.click();
     expect(onFlush).toHaveBeenCalledWith(message);
+  });
+
+  it("renders Markdown review blocks with comment buttons mapped to source lines", () => {
+    const onAddComment = vi.fn();
+    const message: TranscriptMessage = {
+      id: "m-markdown-review",
+      role: "assistant",
+      isNew: false,
+      blocks: [{ kind: "text", text: "# Heading\n\n- first\n- second" }],
+    };
+
+    const node = renderMessage(message, {
+      thinkingVisibilityMode: "auto",
+      review: {
+        active: true,
+        comments: [],
+        onAddComment,
+      },
+    });
+
+    expect(node.querySelector(".transcript-review-markdown-preview")?.textContent).toContain("Rendered Markdown review");
+    expect(node.querySelector(".transcript-review-markdown-preview h1")?.textContent).toBe("Heading");
+    node.querySelector<HTMLButtonElement>(".transcript-review-markdown-block .transcript-review-comment-btn")?.click();
+    expect(onAddComment).toHaveBeenCalledWith(message, { lineNumber: 1, text: "# Heading" });
   });
 });
 

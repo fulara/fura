@@ -47,6 +47,7 @@ let currentSessionId = `mock-session-${processSeed}`;
 let currentSessionFile = `${currentSessionId}.jsonl`;
 let currentSessionName = "Mock RPC Session";
 let forkCount = 0;
+let planExecutionCount = 0;
 let planMode = null;
 let hostTools = [];
 let activeTools = [];
@@ -124,6 +125,9 @@ for await (const line of rl) {
     }
     case "approve_plan_mode": {
       planMode = null;
+      planExecutionCount += 1;
+      currentSessionId = `mock-session-plan-execution-${planExecutionCount}-${processSeed}`;
+      currentSessionFile = `${currentSessionId}.jsonl`;
       success(command, { finalPlanFilePath: command.finalPlanFilePath });
       break;
     }

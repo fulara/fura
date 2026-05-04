@@ -34,6 +34,8 @@ export type CodeViewerActions = {
   searchFiles(): void;
   openSearchResult(path: string): void;
   addComment(lineNumber: number, lineText: string): void;
+  editComment(comment: CodeFileComment): void;
+  deleteComment(comment: CodeFileComment): void;
   previewComments(): void;
   flushComments(): void;
 };
@@ -412,10 +414,7 @@ function renderCodeLines(state: CodeViewerState, actions: CodeViewerActions): HT
       const thread = mkEl("div");
       thread.className = "diff-inline-comments code-inline-comments";
       for (const comment of lineComments) {
-        const item = mkEl("div");
-        item.className = "diff-inline-comment";
-        item.textContent = comment.text;
-        thread.append(item);
+        thread.append(renderCodeCommentItem(comment, actions));
       }
       lineWrap.append(thread);
     }
@@ -434,15 +433,33 @@ function renderCodeLines(state: CodeViewerState, actions: CodeViewerActions): HT
       item.className = "diff-comment";
       const loc = mkEl("code");
       loc.textContent = `${comment.path}:${comment.lineNumber}`;
-      const body = mkEl("p");
-      body.textContent = comment.text;
-      item.append(loc, body);
+      item.append(loc, renderCodeCommentItem(comment, actions));
       commentsPanel.append(item);
     }
     container.append(commentsPanel);
   }
 
   return container;
+}
+
+function renderCodeCommentItem(comment: CodeFileComment, actions: CodeViewerActions): HTMLElement {
+  const item = mkEl("div");
+  item.className = "diff-inline-comment review-comment-item";
+  const body = mkEl("span");
+  body.textContent = comment.text;
+  const controls = mkEl("span");
+  controls.className = "review-comment-actions";
+  const edit = mkEl("button");
+  edit.type = "button";
+  edit.textContent = "Edit";
+  edit.addEventListener("click", () => actions.editComment(comment));
+  const remove = mkEl("button");
+  remove.type = "button";
+  remove.textContent = "Remove";
+  remove.addEventListener("click", () => actions.deleteComment(comment));
+  controls.append(edit, remove);
+  item.append(body, controls);
+  return item;
 }
 
 function renderEmptyMain(text: string): HTMLElement {

@@ -43,6 +43,8 @@ function baseActions(overrides = {}) {
     searchFiles: vi.fn(),
     openSearchResult: vi.fn(),
     addComment: vi.fn(),
+    editComment: vi.fn(),
+    deleteComment: vi.fn(),
     previewComments: vi.fn(),
     flushComments: vi.fn(),
     ...overrides,
@@ -116,6 +118,8 @@ describe("code viewer", () => {
     const addComment = vi.fn();
     const previewComments = vi.fn();
     const flushComments = vi.fn();
+    const editComment = vi.fn();
+    const deleteComment = vi.fn();
 
     renderCodeViewer(
       container,
@@ -129,7 +133,7 @@ describe("code viewer", () => {
         },
         fileComments: [{ id: "c1", path: "src/main.rs", lineNumber: 1, lineText: "fn main() {}", text: "comment" }],
       }),
-      baseActions({ addComment, previewComments, flushComments }),
+      baseActions({ addComment, editComment, deleteComment, previewComments, flushComments }),
     );
 
     expect(container.querySelector(".code-file-header code")?.textContent).toBe("src/main.rs");
@@ -139,10 +143,14 @@ describe("code viewer", () => {
     container.querySelector<HTMLButtonElement>(".diff-comment-btn")?.click();
     container.querySelectorAll<HTMLButtonElement>(".code-file-actions button")[0]?.click();
     container.querySelectorAll<HTMLButtonElement>(".code-file-actions button")[1]?.click();
+    container.querySelector<HTMLButtonElement>(".review-comment-actions button:first-child")?.click();
+    container.querySelector<HTMLButtonElement>(".review-comment-actions button:last-child")?.click();
 
     expect(addComment).toHaveBeenCalledWith(1, "fn main() {}");
     expect(previewComments).toHaveBeenCalledOnce();
     expect(flushComments).toHaveBeenCalledOnce();
+    expect(editComment).toHaveBeenCalledWith(expect.objectContaining({ id: "c1" }));
+    expect(deleteComment).toHaveBeenCalledWith(expect.objectContaining({ id: "c1" }));
   });
 
   it("renders file search dialog and routes search actions", () => {
