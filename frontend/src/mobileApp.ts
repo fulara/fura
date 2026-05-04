@@ -12,15 +12,15 @@ import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connecti
 import { setRenderDocument } from "./dom";
 import {
   comparisonKey,
-  diffRefInputFromText,
-  diffRefInputText,
-  diffRepoRoots,
+  diffPayloadFiles,
+  diffPayloadText,
+  diffPayloadTruncated,
+  isFullPatchPayload,
   formatDiffRepoLabel,
-  inferDiffRepoRootFromCwd,
   parseDiffRows,
-  resolvedDiffRefInput,
-  resolvedDiffRefInputText,
+  resolvedRefLabel,
   summarizeDiffFiles,
+  summarizeWireDiffFiles,
   type ParsedDiffRow,
 } from "./diffState";
 import {
@@ -58,10 +58,11 @@ import type {
   ControlSuggestedAction,
   FrontendControlAction,
   FrontendUiSnapshot,
+  DiffPayloadKind,
   DiffReviewAnnotation,
-  DiffRefInput,
+  DiffReviewableState,
   DiffLineLocation,
-  RepoDiffState,
+  SessionChangesState,
   ServerConfig,
   ServerMessage,
   SessionProjection,
@@ -495,17 +496,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let sessionPromptDraft = "";
   let controllerPromptDraft = "";
   let lastSessionMobileView: Exclude<MobileWorkspaceView, "controller"> = "transcript";
-  const diffStates = new Map<string, RepoDiffState>();
+  const sessionChangesStates = new Map<string, SessionChangesState>();
   const diffErrors = new Map<string, string>();
   const diffLoadingSessions = new Set<string>();
-  const diffSelectedRepos = new Map<string, string>();
-  const diffBaseRefs = new Map<string, string>();
-  const diffHeadRefs = new Map<string, string>();
-  const diffStatModes = new Map<string, boolean>();
+  const diffPayloadKinds = new Map<string, DiffPayloadKind>();
   const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
   let pendingDiffComment: {
     sessionId: string;
-    state: RepoDiffState;
+    state: DiffReviewableState;
     location: DiffLineLocation;
     kind: "comment" | "question";
   } | null = null;
@@ -986,7 +984,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function openDiffCommentEditor(
     sessionId: string,
-    state: RepoDiffState,
+    state: DiffReviewableState,
     location: DiffLineLocation,
     kind: "comment" | "question" = "comment",
   ): void {
@@ -1046,7 +1044,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function openDiffPreview(
     sessionId: string,
-    state: RepoDiffState,
+    state: DiffReviewableState,
   ): void {
     const key = comparisonKey(state);
     const comments = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, "comment");
@@ -1624,12 +1622,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     askFuraButton.setAttribute("aria-pressed", String(willBeController));
     syncMobileWorkspaceTab(transcriptTab, view === "transcript");
     syncMobileWorkspaceTab(diffTab, view === "diff");
-    if (view === "diff" && activeSessionId) {
-      if (!diffStates.has(activeSessionId) && !diffBaseRefs.has(activeSessionId) && !diffHeadRefs.has(activeSessionId)) {
-        requestMobileDefaultDiffState(activeSessionId);
-      } else {
-        requestMobileDiffState(activeSessionId);
-      }
+    if (view === "diff" && activeSessionId && !sessionChangesStates.has(activeSessionId)) {
+      requestMobileSessionChanges(activeSessionId);
     }
     renderActiveSession();
   }
@@ -1639,91 +1633,40 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     tab.setAttribute("aria-selected", String(active));
   }
 
-  type MobileDiffSelection = {
-    repoRoot: string | null;
-    base: DiffRefInput;
-    head: DiffRefInput;
-    stat: boolean;
-  };
-
-  function resolveMobileDiffRepoRoot(
-    sessionId: string,
-    projection: SessionProjection | undefined,
-    state: RepoDiffState | undefined,
-  ): string | null {
-    const explicit = diffSelectedRepos.get(sessionId);
-    if (explicit) return explicit;
-    const repoRoots = diffRepoRoots(state);
-    const inferred = inferDiffRepoRootFromCwd(projection?.summary.cwd ?? undefined, repoRoots);
-    const fallback = inferred ?? state?.repoRoot ?? projection?.summary.worktree?.path ?? projection?.summary.cwd ?? serverConfig?.defaultCwd ?? null;
-    if (fallback) diffSelectedRepos.set(sessionId, fallback);
-    return fallback;
-  }
-
-  function resolveMobileDiffSelection(
-    sessionId: string,
-    projection: SessionProjection | undefined,
-    state: RepoDiffState | undefined,
-  ): MobileDiffSelection {
-    const repoRoot = resolveMobileDiffRepoRoot(sessionId, projection, state);
-    return {
-      repoRoot,
-      base: diffRefInputFromText(
-        diffBaseRefs.get(sessionId),
-        resolvedDiffRefInput(state?.comparison.base, { kind: "gitRef", value: "HEAD" }),
-      ),
-      head: diffRefInputFromText(
-        diffHeadRefs.get(sessionId),
-        resolvedDiffRefInput(state?.comparison.head, { kind: "workingTree" }),
-      ),
-      stat: diffStatModes.get(sessionId) ?? (state?.comparison.mode === "stat"),
-    };
-  }
-
-  function requestMobileDefaultDiffState(sessionId: string): void {
+  function requestMobileSessionChanges(sessionId: string): void {
     const projection = projections.get(sessionId);
     if (!projection || diffLoadingSessions.has(sessionId)) return;
-    const state = diffStates.get(sessionId);
-    const repoRoot = resolveMobileDiffRepoRoot(sessionId, projection, state);
     diffErrors.delete(sessionId);
     diffLoadingSessions.add(sessionId);
-    send({ type: "diff.open", sessionId, repoRoot });
+    send({ type: "sessionChanges.open", sessionId });
     renderDiffView(projection);
   }
 
-  function requestMobileDiffState(
+  function requestMobileSessionChangesRefresh(
     sessionId: string,
-    overrides: { repoRoot?: string; base?: string; head?: string; stat?: boolean } = {},
+    options: { repoId?: string | null; payloadKind?: DiffPayloadKind | null; currentCommitOid?: string | null } = {},
   ): void {
     const projection = projections.get(sessionId);
     if (!projection || diffLoadingSessions.has(sessionId)) return;
-    const state = diffStates.get(sessionId);
-    const selection = resolveMobileDiffSelection(sessionId, projection, state);
-    const repoRoot = overrides.repoRoot?.trim() || selection.repoRoot;
-    if (!repoRoot) {
-      diffErrors.set(sessionId, "Diff requires a repository root.");
-      renderDiffView(projection);
-      return;
-    }
-    const base = diffRefInputFromText(overrides.base, selection.base);
-    const head = diffRefInputFromText(overrides.head, selection.head);
-    const stat = overrides.stat ?? selection.stat;
-    diffSelectedRepos.set(sessionId, repoRoot);
-    diffBaseRefs.set(sessionId, diffRefInputText(base));
-    diffHeadRefs.set(sessionId, diffRefInputText(head));
-    diffStatModes.set(sessionId, stat);
     diffErrors.delete(sessionId);
     diffLoadingSessions.add(sessionId);
-    const message: ClientMessage = {
-      type: "diff.compare",
+    send({
+      type: "sessionChanges.refresh",
       sessionId,
-      repoRoot,
-      base,
-      head,
-      mode: stat ? "stat" : "full",
-      reviewMode: "range",
-    };
-    send(message);
+      repoId: options.repoId ?? null,
+      payloadKind: options.payloadKind ?? diffPayloadKinds.get(sessionId) ?? "statOnly",
+      currentCommitOid: options.currentCommitOid ?? null,
+    });
+    renderDiffView(projection);
+  }
+
+  function requestMobileSessionChangesRepo(sessionId: string, repoId: string, payloadKind: DiffPayloadKind): void {
+    const projection = projections.get(sessionId);
+    if (!projection || diffLoadingSessions.has(sessionId)) return;
+    diffPayloadKinds.set(sessionId, payloadKind);
+    diffErrors.delete(sessionId);
+    diffLoadingSessions.add(sessionId);
+    send({ type: "sessionChanges.selectRepo", sessionId, repoId, payloadKind, currentCommitOid: null });
     renderDiffView(projection);
   }
 
@@ -1804,22 +1747,18 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       case "raw.omp":
         break;
-      case "diff.state": {
-        const sessionId = message.sessionId ?? activeSessionId;
-        if (!sessionId) break;
-        diffLoadingSessions.delete(sessionId);
-        diffErrors.delete(sessionId);
-        diffStates.set(sessionId, message.state);
-        diffSelectedRepos.set(sessionId, message.state.repoRoot);
-        diffBaseRefs.set(sessionId, resolvedDiffRefInputText(message.state.comparison.base, { kind: "gitRef", value: "HEAD" }));
-        diffHeadRefs.set(sessionId, resolvedDiffRefInputText(message.state.comparison.head, { kind: "workingTree" }));
-        diffStatModes.set(sessionId, message.state.comparison.mode === "stat");
-        if (sessionId === activeSessionId) renderActiveSession();
+      case "sessionChanges.state": {
+        const state = message.state;
+        diffLoadingSessions.delete(state.sessionId);
+        diffErrors.delete(state.sessionId);
+        sessionChangesStates.set(state.sessionId, state);
+        if (state.status === "ready") diffPayloadKinds.set(state.sessionId, state.range.payload.kind);
+        if (state.sessionId === activeSessionId) renderActiveSession();
         break;
       }
       case "diff.error": {
         const sessionId = message.sessionId ?? activeSessionId;
-        if (sessionId) {
+        if (sessionId && message.scope === "sessionChanges") {
           diffLoadingSessions.delete(sessionId);
           diffErrors.set(sessionId, message.message);
           if (sessionId === activeSessionId) renderActiveSession();
@@ -2027,7 +1966,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     activeSessionId = activateSessionState(unreadSessions, sessionId);
     rememberTrackedSessionId(sessionId);
     writeStoredActiveSessionId(window.sessionStorage, sessionId);
-    if (activeMobileView === "diff" && projections.has(sessionId)) requestMobileDiffState(sessionId);
+    if (activeMobileView === "diff" && projections.has(sessionId) && !sessionChangesStates.has(sessionId)) requestMobileSessionChanges(sessionId);
   }
 
   function syncTrackedSessionsWithSnapshot(): void {
@@ -2325,126 +2264,92 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     diffView.replaceChildren();
 
     if (!activeSessionId || !projection) {
-      const empty = diffView.ownerDocument.createElement("p");
-      empty.className = "mobile-empty-state";
-      empty.textContent = "Select a session to load its diff.";
-      diffView.append(empty);
+      renderMobileDiffMessage("Select a session to load its diff.");
       return;
     }
 
     const sessionId = activeSessionId;
-    const state = diffStates.get(sessionId);
+    const state = sessionChangesStates.get(sessionId);
     const error = diffErrors.get(sessionId);
-    if (state) renderDiffControls(sessionId, projection, state);
-
     if (error) {
-      const message = diffView.ownerDocument.createElement("p");
-      message.className = "mobile-empty-state";
-      message.textContent = error;
-      diffView.append(message);
+      renderMobileDiffMessage(error);
       return;
     }
-
-    if (diffLoadingSessions.has(sessionId) && !state) {
-      const loading = diffView.ownerDocument.createElement("p");
-      loading.className = "mobile-empty-state";
-      loading.textContent = "Loading diff…";
-      diffView.append(loading);
-      return;
-    }
-
     if (!state) {
-      const empty = diffView.ownerDocument.createElement("p");
-      empty.className = "mobile-empty-state";
-      empty.textContent = "No diff loaded yet.";
-      diffView.append(empty);
+      renderMobileDiffMessage(diffLoadingSessions.has(sessionId) ? "Loading session changes…" : "No session changes loaded yet.");
+      if (!diffLoadingSessions.has(sessionId)) requestMobileSessionChanges(sessionId);
       return;
     }
-
-    if (!state.diff.trim()) {
-      const empty = diffView.ownerDocument.createElement("p");
-      empty.className = "mobile-empty-state";
-      empty.textContent = diffLoadingSessions.has(sessionId) ? "Loading diff…" : "No diff changes.";
-      diffView.append(empty);
+    renderMobileSessionChangesControls(sessionId, state);
+    if (state.status === "missingRepo") {
+      renderMobileDiffMessage(state.reason);
       return;
     }
-
-    renderMobileDiffBody(state, sessionId, projection);
+    if (state.status === "missingSnapshot") {
+      renderMobileDiffMessage(state.reason);
+      return;
+    }
+    renderMobileDiffBody(state, sessionId);
   }
 
-  function renderDiffControls(sessionId: string, projection: SessionProjection, state: RepoDiffState): void {
-    const selection = resolveMobileDiffSelection(sessionId, projection, state);
-    const key = comparisonKey(state);
-    const currentAnnotations = diffAnnotations.get(sessionId) ?? [];
-    const selectedComments = selectedDiffAnnotations(currentAnnotations, key, "comment");
+  function renderMobileDiffMessage(text: string): void {
+    const message = diffView.ownerDocument.createElement("p");
+    message.className = "mobile-empty-state";
+    message.textContent = text;
+    diffView.append(message);
+  }
+
+  function renderMobileSessionChangesControls(sessionId: string, state: SessionChangesState): void {
     const controls = diffView.ownerDocument.createElement("section");
     controls.className = "mobile-diff-controls";
-
     const title = diffView.ownerDocument.createElement("h3");
-    title.textContent = selection.repoRoot ? formatDiffRepoLabel(selection.repoRoot) : "Diff";
+    title.textContent = "Session changes";
     const meta = diffView.ownerDocument.createElement("p");
     meta.className = "mobile-diff-meta";
-    meta.textContent = [
-      `Base: ${diffRefInputText(selection.base)}`,
-      `Head: ${diffRefInputText(selection.head)}`,
-      selection.stat ? "Stat" : "Full diff",
-    ].join(" · ");
+    meta.textContent = state.status === "ready"
+      ? `${resolvedRefLabel(state.range.base)} → ${resolvedRefLabel(state.range.head)}`
+      : "Backend-derived repositories only";
     controls.append(title, meta);
 
     const fields = diffView.ownerDocument.createElement("div");
     fields.className = "mobile-diff-fields";
-    fields.append(renderDiffInput("Repository", selection.repoRoot ?? "", diffLoadingSessions.has(sessionId), value => requestMobileDiffState(sessionId, { repoRoot: value })));
-    fields.append(renderDiffInput("Base", diffRefInputText(selection.base), diffLoadingSessions.has(sessionId), value => requestMobileDiffState(sessionId, { base: value })));
-    fields.append(renderDiffInput("Head", diffRefInputText(selection.head), diffLoadingSessions.has(sessionId), value => requestMobileDiffState(sessionId, { head: value })));
+    const selectedRepo = state.status === "ready" ? state.selectedRepoId : state.repos[0]?.id ?? "";
+    fields.append(renderDiffSelect(
+      "Repository",
+      state.repos.map(repo => ({ value: repo.id, label: repo.label || formatDiffRepoLabel(repo.repoRoot), title: repo.repoRoot })),
+      selectedRepo,
+      diffLoadingSessions.has(sessionId),
+      repoId => requestMobileSessionChangesRepo(sessionId, repoId, diffPayloadKinds.get(sessionId) ?? "statOnly"),
+    ));
+    const payloadKind = state.status === "ready" ? state.range.payload.kind : diffPayloadKinds.get(sessionId) ?? "statOnly";
+    fields.append(renderDiffSelect(
+      "Payload",
+      [{ value: "statOnly", label: "Stat" }, { value: "fullPatch", label: "Full patch" }],
+      payloadKind,
+      diffLoadingSessions.has(sessionId),
+      value => requestMobileSessionChangesRepo(sessionId, selectedRepo, value as DiffPayloadKind),
+    ));
 
     const actions = diffView.ownerDocument.createElement("div");
     actions.className = "mobile-diff-actions";
-    const statButton = renderDiffAction("Stat", selection.stat, diffLoadingSessions.has(sessionId), () => {
-      requestMobileDiffState(sessionId, { stat: true });
-    });
-    const fullButton = renderDiffAction("Full", !selection.stat, diffLoadingSessions.has(sessionId), () => {
-      requestMobileDiffState(sessionId, { stat: false });
-    });
     const refreshButton = renderDiffAction(
       diffLoadingSessions.has(sessionId) ? "Refreshing…" : "Refresh",
       false,
       diffLoadingSessions.has(sessionId),
-      () => requestMobileDiffState(sessionId),
+      () => requestMobileSessionChangesRefresh(sessionId),
     );
-    const previewButton = renderDiffAction(
-      "Preview comments",
-      false,
-      diffLoadingSessions.has(sessionId) || selectedComments.length === 0,
-      () => openDiffPreview(sessionId, state),
-    );
+    const selectedComments = state.status === "ready"
+      ? selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], comparisonKey(state), "comment")
+      : [];
     const flushButton = renderDiffAction(
       `Preview & flush (${selectedComments.length})`,
       false,
       diffLoadingSessions.has(sessionId) || selectedComments.length === 0,
-      () => openDiffPreview(sessionId, state),
+      () => { if (state.status === "ready") openDiffPreview(sessionId, state); },
     );
-    actions.append(statButton, fullButton, refreshButton, previewButton, flushButton);
-
+    actions.append(refreshButton, flushButton);
     controls.append(fields, actions);
     diffView.append(controls);
-  }
-
-  function renderDiffInput(
-    labelText: string,
-    value: string,
-    disabled: boolean,
-    onCommit: (value: string) => void,
-  ): HTMLElement {
-    const label = diffView.ownerDocument.createElement("label");
-    label.className = "mobile-diff-field";
-    const labelSpan = diffView.ownerDocument.createElement("span");
-    labelSpan.textContent = labelText;
-    const input = diffView.ownerDocument.createElement("input");
-    input.value = value;
-    input.disabled = disabled;
-    input.addEventListener("change", () => onCommit(input.value));
-    label.append(labelSpan, input);
-    return label;
   }
 
   function renderDiffSelect(
@@ -2483,19 +2388,29 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return button;
   }
 
-  function renderMobileDiffBody(state: RepoDiffState, sessionId: string, _projection: SessionProjection): void {
+  function renderMobileDiffBody(state: DiffReviewableState, sessionId: string): void {
     const key = comparisonKey(state);
     const annotations = diffAnnotations.get(sessionId) ?? [];
     const selectedAnnotations = selectedDiffAnnotations(annotations, key);
-    const rows = parseDiffRows(state.diff);
-    const fileSummaries = summarizeDiffFiles(rows, annotations, key);
+    const payload = state.range.payload;
+    const rows = payload.kind === "fullPatch" ? parseDiffRows(payload.patch) : [];
+    const fileSummaries = payload.kind === "fullPatch"
+      ? summarizeDiffFiles(rows, annotations, key)
+      : summarizeWireDiffFiles(diffPayloadFiles(payload), annotations, key);
+    if (diffPayloadTruncated(payload)) renderMobileDiffMessage("Diff output is truncated by Fura's safety limit.");
     if (fileSummaries.length > 0) renderMobileDiffFiles(fileSummaries);
-    if (!rows.some(row => row.type === "file" || row.type === "hunk" || (row.type === "line" && row.location.newPath))) {
+    if (!diffPayloadText(payload).trim()) {
+      renderMobileDiffMessage("No diff changes.");
+      return;
+    }
+    if (!isFullPatchPayload(payload)) {
+      const note = diffView.ownerDocument.createElement("p");
+      note.className = "mobile-empty-state";
+      note.textContent = "Stat-only payload: line comments and questions require full patch.";
       const pre = diffView.ownerDocument.createElement("pre");
       pre.className = "mobile-diff-pre";
-      pre.textContent = state.diff;
-      diffView.append(pre);
-      renderMobileDiffComments(selectedAnnotations);
+      pre.textContent = diffPayloadText(payload);
+      diffView.append(note, pre);
       return;
     }
 
@@ -2534,7 +2449,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function renderMobileDiffRow(
     row: ParsedDiffRow,
     sessionId: string,
-    state: RepoDiffState,
+    state: DiffReviewableState,
     key: string,
     annotations: DiffReviewAnnotation[],
   ): HTMLElement | null {

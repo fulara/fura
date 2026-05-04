@@ -47,16 +47,18 @@ import {
 import { applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   comparisonKey,
+  diffEndpointInputText,
+  diffPayloadFiles,
+  diffPayloadText,
+  diffPayloadTruncated,
   diffRefInputFromText,
   diffRefInputText,
-  diffRepoRoots,
   formatDiffRepoLabel,
-  inferDiffRepoRootFromCwd,
+  isFullPatchPayload,
   parseDiffRows,
   resolvedRefLabel,
-  resolvedDiffRefInput,
-  resolvedDiffRefInputText,
   summarizeDiffFiles,
+  summarizeWireDiffFiles,
 } from "./diffState";
 import {
   annotationsForDiffLocation,
@@ -133,16 +135,19 @@ import type {
   ControlCandidate,
   ControlStatusProjection,
   ControlSuggestedAction,
+  CompareDiffState,
   DiffCheckoutTarget,
+  DiffPayloadKind,
   DiffReviewAnnotation,
   DiffLineLocation,
   DiffReviewWorktree,
+  DiffReviewableState,
   FrontendControlAction,
   FrontendUiSnapshot,
   ModelSummary,
-  RepoDiffState,
   ServerConfig,
   ServerMessage,
+  SessionChangesState,
   SessionProjection,
   SessionStatus,
   SessionSummary,
@@ -642,7 +647,7 @@ let pendingSessionSelectionId: string | null = null;
 let cwdPickerCreatePending = false;
 let cwdPickerPendingRequestId: string | null = null;
 let cwdPickerMode: "session" | "diff" = "session";
-let pendingDiffCreate: { repoRoot: string; base: string; head: string; mode: "full" | "stat" } | null = null;
+let pendingDiffCreate: { repoRoot: string; base: string; head: string; payloadKind: DiffPayloadKind } | null = null;
 let deleteSessionTarget: SessionDeleteView | null = null;
 let cwdPickerSourceRepoAutofill = true;
 let cwdPickerDirectoryAutofill = true;
@@ -674,13 +679,15 @@ let paletteSelectedIndex = -1;
 let cwdCategoryCombobox: CategoryCombobox;
 let activeCategoryCombobox: CategoryCombobox;
 let projections = new Map<string, SessionProjection>();
-const diffStates = new Map<string, RepoDiffState>();
-const diffSelectedRepos = new Map<string, string>();
-const diffBaseRefs = new Map<string, string>();
-const diffHeadRefs = new Map<string, string>();
-const diffModes = new Map<string, "full" | "stat">();
-const diffReviewModes = new Map<string, "range" | "commit">();
-const diffSelectedCommits = new Map<string, string>();
+const sessionChangesStates = new Map<string, SessionChangesState>();
+const sessionChangesPayloadKinds = new Map<string, DiffPayloadKind>();
+let compareDiffState: CompareDiffState | null = null;
+let compareRepoRoot = "";
+let compareBaseRef = "HEAD";
+let compareHeadRef = "WORKTREE";
+let comparePayloadKind: DiffPayloadKind = "fullPatch";
+let diffProductView: "sessionChanges" | "compare" = "sessionChanges";
+let sessionChangesSubview: "diff" | "transcript" = "diff";
 const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
 const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
@@ -732,6 +739,10 @@ syncToolVisibilityToggle();
 syncThinkingVisibilityToggle();
 syncWorkspaceOptionsMenu();
 
+type CodeOpenRequest =
+  | { source: "sessionWorktree"; sessionId: string; path: string }
+  | { source: "reviewCommit"; repoRoot: string; reviewWorktreeId?: string | null; target: DiffCheckoutTarget; path: string };
+
 // --- Desktop workspace state ---
 
 let desktopDockview: DesktopDockview | null = null;
@@ -745,7 +756,7 @@ let codeLoadingWorkspace = false;
 let codeLoadingTree = false;
 let codeLoadingFile = false;
 let codeError: string | null = null;
-let pendingCodeOpenPath: string | null = null;
+let pendingCodeOpenRequest: CodeOpenRequest | null = null;
 let codeSearchOpen = false;
 let codeSearchBasePath = "";
 let codeSearchQuery = "";
@@ -1286,12 +1297,12 @@ function handleServerMessage(message: ServerMessage): void {
           if (pendingDiffCreate) {
             const diff = pendingDiffCreate;
             pendingDiffCreate = null;
-            diffSelectedRepos.set(message.sessionId, diff.repoRoot);
-            diffBaseRefs.set(message.sessionId, diff.base);
-            diffHeadRefs.set(message.sessionId, diff.head);
-            diffModes.set(message.sessionId, diff.mode);
+            compareRepoRoot = diff.repoRoot;
+            compareBaseRef = diff.base;
+            compareHeadRef = diff.head;
+            comparePayloadKind = diff.payloadKind;
             desktopDockview?.activatePanel("diffs");
-            requestDiffState(message.sessionId, { repoRoot: diff.repoRoot, base: diff.base, head: diff.head, mode: diff.mode, reviewMode: "range", commitOid: null });
+            requestCompareDiff({ repoRoot: diff.repoRoot, base: diff.base, head: diff.head, payloadKind: diff.payloadKind, currentCommitOid: null });
           }
         }
       } else {
@@ -1300,34 +1311,36 @@ function handleServerMessage(message: ServerMessage): void {
       }
       break;
     }
-    case "diff.state": {
-      const sessionId = message.sessionId ?? activeSessionId;
-      if (!sessionId) break;
-      diffLoadingSessions.delete(sessionId);
-      diffErrors.delete(sessionId);
-      diffStates.set(sessionId, message.state);
-      diffSelectedRepos.set(sessionId, message.state.repoRoot);
-      diffBaseRefs.set(sessionId, resolvedDiffRefInputText(message.state.comparison.base, { kind: "gitRef", value: "HEAD" }));
-      diffHeadRefs.set(sessionId, resolvedDiffRefInputText(message.state.comparison.head, { kind: "workingTree" }));
-      diffModes.set(sessionId, message.state.comparison.mode);
-      diffReviewModes.set(sessionId, message.state.reviewProgress.mode);
-      if (message.state.reviewProgress.selectedCommitOid) diffSelectedCommits.set(sessionId, message.state.reviewProgress.selectedCommitOid);
-      if (message.state.reviewWorktree) diffReviewWorktrees.set(message.state.reviewWorktree.sourceRepoRoot, message.state.reviewWorktree);
+    case "sessionChanges.state": {
+      const state = message.state;
+      diffLoadingSessions.delete(state.sessionId);
+      diffErrors.delete(state.sessionId);
+      sessionChangesStates.set(state.sessionId, state);
+      if (state.status === "ready") {
+        sessionChangesPayloadKinds.set(state.sessionId, state.range.payload.kind);
+        if (state.reviewWorktree) diffReviewWorktrees.set(state.reviewWorktree.sourceRepoRoot, state.reviewWorktree);
+      }
       markDiffsViewDirty();
-      if (sessionId === activeSessionId && desktopDockview?.isPanelActive("diffs")) {
-        desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
+      if (state.sessionId === activeSessionId && desktopDockview?.isPanelActive("diffs")) {
+        desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(state.sessionId)));
       }
       break;
     }
+    case "compareDiff.state": {
+      compareDiffState = message.state;
+      diffErrors.delete("compareDiff");
+      if (message.state.reviewWorktree) diffReviewWorktrees.set(message.state.reviewWorktree.sourceRepoRoot, message.state.reviewWorktree);
+      markDiffsViewDirty();
+      renderDiffsViewIfActive(activeSessionId ?? "");
+      break;
+    }
     case "diff.error": {
-      const sessionId = message.sessionId ?? activeSessionId;
-      if (sessionId) {
-        diffLoadingSessions.delete(sessionId);
-        diffErrors.set(sessionId, message.message);
+      const errorKey = message.scope === "compareDiff" ? "compareDiff" : message.sessionId ?? activeSessionId;
+      if (message.sessionId) diffLoadingSessions.delete(message.sessionId);
+      if (errorKey) {
+        diffErrors.set(errorKey, message.message);
         markDiffsViewDirty();
-        if (sessionId === activeSessionId && desktopDockview?.isPanelActive("diffs")) {
-          desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
-        }
+        if (message.scope === "compareDiff" || message.sessionId === activeSessionId) renderDiffsViewIfActive(activeSessionId ?? "");
       } else {
         appendLog(`diff error: ${message.message}`);
       }
@@ -1335,7 +1348,8 @@ function handleServerMessage(message: ServerMessage): void {
     }
     case "diff.reviewWorktree.state": {
       diffReviewWorktrees.set(message.worktree.sourceRepoRoot, message.worktree);
-      if (pendingCodeOpenPath) {
+      if (pendingCodeOpenRequest?.source === "reviewCommit" && pendingCodeOpenRequest.repoRoot === message.worktree.sourceRepoRoot) {
+        pendingCodeOpenRequest = { ...pendingCodeOpenRequest, reviewWorktreeId: message.worktree.id };
         codeSessionId = null;
         codeWorkspace = null;
         codeLoadingWorkspace = true;
@@ -1361,11 +1375,11 @@ function handleServerMessage(message: ServerMessage): void {
       markCodeViewDirty();
       if (desktopDockview?.isPanelActive("code")) {
         renderCodePanelIfNeeded(true);
-        const pendingPath = pendingCodeOpenPath;
-        if (pendingPath) {
-          pendingCodeOpenPath = null;
-          requestCodeTree(parentCodePath(pendingPath) ?? "");
-          requestCodeFile(pendingPath);
+        const pending = pendingCodeOpenRequest;
+        if (pending) {
+          pendingCodeOpenRequest = null;
+          requestCodeTree(parentCodePath(pending.path) ?? "");
+          requestCodeFile(pending.path);
         } else {
           requestCodeTree("");
         }
@@ -2606,7 +2620,7 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeLoadingTree = false;
   codeLoadingFile = false;
   codeError = null;
-  pendingCodeOpenPath = null;
+  pendingCodeOpenRequest = null;
   codeSearchOpen = false;
   codeSearchBasePath = "";
   codeSearchQuery = "";
@@ -2834,63 +2848,59 @@ function openSearchResultInCode(path: string): void {
 function openPathInCode(path: string): void {
   const sessionId = workspaceMode === "session" ? activeSessionId : null;
   if (!sessionId) return;
-  if (codeSessionId !== sessionId) resetCodeViewForSession(sessionId);
-  pendingCodeOpenPath = path;
+  openCodeRequest({ source: "sessionWorktree", sessionId, path });
+}
+
+function openCodeRequest(request: CodeOpenRequest): void {
+  pendingCodeOpenRequest = request;
   codeError = null;
   markCodeViewDirty();
   desktopDockview?.activatePanel("code");
-  if (codeWorkspace) {
-    pendingCodeOpenPath = null;
-    requestCodeTree(parentCodePath(path) ?? "");
-    requestCodeFile(path);
-  } else {
-    ensureActiveCodeWorkspace();
-    renderCodePanelIfNeeded(true);
+  if (request.source === "sessionWorktree") {
+    if (codeSessionId !== request.sessionId) resetCodeViewForSession(request.sessionId);
+    if (codeWorkspace && codeSessionId === request.sessionId) {
+      pendingCodeOpenRequest = null;
+      requestCodeTree(parentCodePath(request.path) ?? "");
+      requestCodeFile(request.path);
+    } else {
+      ensureActiveCodeWorkspace();
+      renderCodePanelIfNeeded(true);
+    }
+    return;
   }
-}
 
-function ensureReviewWorktreeThenCheckout(state: RepoDiffState, target: DiffCheckoutTarget): void {
-  const worktree = diffReviewWorktrees.get(state.repoRoot) ?? state.reviewWorktree ?? null;
+  const worktree = diffReviewWorktrees.get(request.repoRoot) ?? null;
   if (!worktree) {
-    send({
-      type: "diff.reviewWorktree.ensure",
-      sourceRepoRoot: state.repoRoot,
-      base: state.comparison.base.kind === "gitRef" ? { kind: "gitRef", value: state.comparison.base.input } : undefined,
-      head: state.comparison.head.kind === "gitRef" ? { kind: "gitRef", value: state.comparison.head.input } : undefined,
-    });
+    send({ type: "diff.reviewWorktree.ensure", sourceRepoRoot: request.repoRoot, target: request.target });
     return;
   }
-  send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: target });
-}
-
-function openDiffLocationInCode(state: RepoDiffState, location: DiffLineLocation): void {
-  const target = checkoutTargetForDiffLocation(state, location);
-  const path = pathForDiffLocation(location);
-  const worktree = diffReviewWorktrees.get(state.repoRoot) ?? state.reviewWorktree ?? null;
-  if (target.kind === "workingTree") {
-    openPathInCode(path);
-    return;
-  }
-  if (!worktree) {
-    pendingCodeOpenPath = path;
-    send({
-      type: "diff.reviewWorktree.ensure",
-      sourceRepoRoot: state.repoRoot,
-      base: state.comparison.base.kind === "gitRef" ? { kind: "gitRef", value: state.comparison.base.input } : undefined,
-      head: state.comparison.head.kind === "gitRef" ? { kind: "gitRef", value: state.comparison.head.input } : undefined,
-    });
-    return;
-  }
-  pendingCodeOpenPath = path;
-  send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: target });
+  send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: request.target });
   codeSessionId = null;
   codeWorkspace = null;
-  codeError = null;
   codeLoadingWorkspace = true;
-  markCodeViewDirty();
-  desktopDockview?.activatePanel("code");
   send({ type: "code.workspace.openRoot", root: worktree.path, source: "reviewWorktree", reviewWorktreeId: worktree.id });
   renderCodePanelIfNeeded(true);
+}
+
+function ensureReviewWorktreeThenCheckout(state: DiffReviewableState, target: DiffCheckoutTarget): void {
+  const worktree = diffReviewWorktrees.get(state.range.repoRoot) ?? state.reviewWorktree ?? null;
+  if (!worktree) {
+    send({ type: "diff.reviewWorktree.ensure", sourceRepoRoot: state.range.repoRoot, target });
+    return;
+  }
+  send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: target });
+}
+
+function openDiffLocationInCode(state: DiffReviewableState, location: DiffLineLocation): void {
+  const target = checkoutTargetForDiffLocation(state, location);
+  const path = pathForDiffLocation(location);
+  if (target.kind === "workingTree") {
+    const sessionId = workspaceMode === "session" ? activeSessionId : null;
+    if (!sessionId) return;
+    openCodeRequest({ source: "sessionWorktree", sessionId, path });
+    return;
+  }
+  openCodeRequest({ source: "reviewCommit", repoRoot: state.range.repoRoot, target, path });
 }
 
 
@@ -3325,85 +3335,74 @@ function renderToolsView(
 
 
 
-function resolveSelectedDiffRepoRoot(
-  sessionId: string,
-  projection: SessionProjection | undefined,
-  state: RepoDiffState | undefined,
-  explicitInput?: string,
- ): string | null {
-  const explicit = explicitInput?.trim() || diffSelectedRepos.get(sessionId);
-  if (explicit) return explicit;
-  const repoRoots = diffRepoRoots(state);
-  const inferred = inferDiffRepoRootFromCwd(projection?.summary.cwd ?? undefined, repoRoots);
-  const fallback = inferred ?? state?.repoRoot ?? projection?.summary.worktree?.path ?? projection?.summary.cwd ?? serverConfig?.defaultCwd ?? null;
-  if (fallback) diffSelectedRepos.set(sessionId, fallback);
-  return fallback;
+function requestSessionChanges(sessionId: string): void {
+  if (diffLoadingSessions.has(sessionId)) return;
+  diffErrors.delete(sessionId);
+  diffLoadingSessions.add(sessionId);
+  markDiffsViewDirty();
+  send({ type: "sessionChanges.open", sessionId });
+  renderDiffsViewIfActive(sessionId);
 }
 
-function requestDefaultDiffState(sessionId: string): void {
+function requestSessionChangesRefresh(
+  sessionId: string,
+  options: { repoId?: string | null; payloadKind?: DiffPayloadKind | null; currentCommitOid?: string | null } = {},
+): void {
   if (diffLoadingSessions.has(sessionId)) return;
-  const projection = projections.get(sessionId);
-  const current = diffStates.get(sessionId);
-  const repoRoot = resolveSelectedDiffRepoRoot(sessionId, projection, current);
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
   send({
-    type: "diff.open",
+    type: "sessionChanges.refresh",
     sessionId,
-    repoRoot,
+    repoId: options.repoId ?? null,
+    payloadKind: options.payloadKind ?? sessionChangesPayloadKinds.get(sessionId) ?? "statOnly",
+    currentCommitOid: options.currentCommitOid ?? null,
   });
   renderDiffsViewIfActive(sessionId);
 }
 
-function requestDiffState(sessionId: string, overrides: { repoRoot?: string; base?: string; head?: string; mode?: "full" | "stat"; reviewMode?: "range" | "commit"; commitOid?: string | null } = {}): void {
+function requestSessionChangesRepo(sessionId: string, repoId: string, payloadKind: DiffPayloadKind, currentCommitOid: string | null = null): void {
   if (diffLoadingSessions.has(sessionId)) return;
-  const projection = projections.get(sessionId);
-  const current = diffStates.get(sessionId);
-  const repoRoot = resolveSelectedDiffRepoRoot(sessionId, projection, current, overrides.repoRoot);
-  if (!repoRoot) {
-    diffErrors.set(sessionId, "Diff requires a repository root.");
-    markDiffsViewDirty();
-    renderDiffsViewIfActive(sessionId);
-    return;
-  }
-  const base = diffRefInputFromText(
-    overrides.base ?? diffBaseRefs.get(sessionId),
-    resolvedDiffRefInput(current?.comparison.base, { kind: "gitRef", value: "HEAD" }),
-  );
-  const head = diffRefInputFromText(
-    overrides.head ?? diffHeadRefs.get(sessionId),
-    resolvedDiffRefInput(current?.comparison.head, { kind: "workingTree" }),
-  );
-  const mode = overrides.mode ?? diffModes.get(sessionId) ?? current?.comparison.mode ?? "full";
-  const reviewMode = overrides.reviewMode ?? diffReviewModes.get(sessionId) ?? current?.reviewProgress.mode ?? "range";
-  const commitOid = overrides.commitOid ?? diffSelectedCommits.get(sessionId) ?? current?.reviewProgress.selectedCommitOid ?? null;
-  diffSelectedRepos.set(sessionId, repoRoot);
-  diffBaseRefs.set(sessionId, diffRefInputText(base));
-  diffHeadRefs.set(sessionId, diffRefInputText(head));
-  diffModes.set(sessionId, mode);
-  diffReviewModes.set(sessionId, reviewMode);
-  if (commitOid) diffSelectedCommits.set(sessionId, commitOid);
-  else diffSelectedCommits.delete(sessionId);
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
+  sessionChangesPayloadKinds.set(sessionId, payloadKind);
+  markDiffsViewDirty();
+  send({ type: "sessionChanges.selectRepo", sessionId, repoId, payloadKind, currentCommitOid });
+  renderDiffsViewIfActive(sessionId);
+}
+
+function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?: string; payloadKind?: DiffPayloadKind; currentCommitOid?: string | null } = {}): void {
+  const repoRoot = overrides.repoRoot?.trim() || compareRepoRoot.trim();
+  if (!repoRoot) {
+    diffErrors.set("compareDiff", "Compare diff requires a repository root.");
+    markDiffsViewDirty();
+    renderDiffsViewIfActive(activeSessionId ?? "");
+    return;
+  }
+  compareRepoRoot = repoRoot;
+  compareBaseRef = overrides.base ?? compareBaseRef;
+  compareHeadRef = overrides.head ?? compareHeadRef;
+  comparePayloadKind = overrides.payloadKind ?? comparePayloadKind;
+  const base = diffRefInputFromText(compareBaseRef, { kind: "gitRef", value: "HEAD" });
+  const head = diffRefInputFromText(compareHeadRef, { kind: "workingTree" });
+  diffErrors.delete("compareDiff");
   markDiffsViewDirty();
   send({
-    type: "diff.compare",
-    sessionId,
+    type: "compareDiff.run",
+    requestId: `compare-${Date.now()}`,
     repoRoot,
     base,
     head,
-    mode,
-    reviewMode,
-    commitOid: reviewMode === "commit" ? commitOid : null,
+    payloadKind: comparePayloadKind,
+    currentCommitOid: overrides.currentCommitOid ?? null,
   });
-  renderDiffsViewIfActive(sessionId);
+  renderDiffsViewIfActive(activeSessionId ?? "");
 }
 
 function renderDiffsViewIfActive(sessionId: string): void {
   if (desktopDockview?.isPanelActive("diffs")) {
-    desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(sessionId)));
+    desktopDockview.withPanel("diffs", container => renderDiffsView(container, sessionId ? projections.get(sessionId) : undefined));
   }
 }
 
@@ -3426,11 +3425,7 @@ function isDiffsPanelActive(): boolean {
 function requestActiveDiffState(): void {
   if (!activeSessionId || !isDiffsPanelActive()) return;
   if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
-  if (!diffStates.has(activeSessionId) && !diffBaseRefs.has(activeSessionId) && !diffHeadRefs.has(activeSessionId)) {
-    requestDefaultDiffState(activeSessionId);
-    return;
-  }
-  requestDiffState(activeSessionId);
+  if (!sessionChangesStates.has(activeSessionId)) requestSessionChanges(activeSessionId);
 }
 
 function rerenderDiffsViewPreservingScroll(sessionId: string): void {
@@ -3648,7 +3643,7 @@ function renderDiffAnnotationItem(sessionId: string, annotation: DiffReviewAnnot
 }
 function addDiffComment(
   sessionId: string,
-  state: RepoDiffState,
+  state: DiffReviewableState,
   location: DiffLineLocation,
 ): void {
   const comment = window.prompt("Comment on this diff line");
@@ -3668,7 +3663,7 @@ function addDiffComment(
 
 function askDiffQuestion(
   sessionId: string,
-  state: RepoDiffState,
+  state: DiffReviewableState,
   location: DiffLineLocation,
 ): void {
   const question = window.prompt("Ask the agent about this diff line");
@@ -3698,7 +3693,7 @@ function askDiffQuestion(
 
 function sendDiffComments(
   sessionId: string,
-  state: RepoDiffState,
+  state: DiffReviewableState,
   comments: DiffReviewAnnotation[],
 ): void {
   if (comments.length === 0) return;
@@ -3719,7 +3714,7 @@ function sendDiffComments(
 
 function previewDiffComments(
   sessionId: string,
-  state: RepoDiffState,
+  state: DiffReviewableState,
 ): void {
   const key = comparisonKey(state);
   const comments = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, "comment");
@@ -3762,7 +3757,7 @@ function sendPromptPreviewDraft(): void {
 
 function flushDiffComments(
   sessionId: string,
-  state: RepoDiffState,
+  state: DiffReviewableState,
 ): void {
   previewDiffComments(sessionId, state);
 }
@@ -3800,295 +3795,392 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   diffPanelDirty = false;
   container.replaceChildren();
 
-  if (!activeSessionId || !projection) {
-    const empty = mkEl("p");
-    empty.className = "empty diffs-empty";
-    empty.textContent = "No session selected.";
-    container.append(empty);
-    return;
-  }
-
-  const sessionId = activeSessionId;
-  const state = diffStates.get(sessionId);
-  const selectedRepoRoot = resolveSelectedDiffRepoRoot(sessionId, projection, state);
-  const diffError = diffErrors.get(sessionId) ?? null;
-  const key = state ? comparisonKey(state) : null;
-  const annotations = diffAnnotations.get(sessionId) ?? [];
-  const selectedComments = key ? selectedDiffAnnotations(annotations, key, "comment") : [];
-  const selectedQuestions = key ? selectedDiffAnnotations(annotations, key, "question") : [];
-  const parsedRows = state?.diff.trim() ? parseDiffRows(state.diff) : [];
-  const fileSummaries = summarizeDiffFiles(parsedRows, annotations, key);
-
   const root = mkEl("div");
-  root.className = "diffs-view";
-
+  root.className = "diffs-view diff-products-view";
   const sidebar = mkEl("aside");
   sidebar.className = "diffs-sidebar";
-  const sideHeader = mkEl("div");
-  sideHeader.className = "diffs-sidebar-header";
-  const sideTitle = mkEl("strong");
-  sideTitle.textContent = "Diff review";
-  sideHeader.append(sideTitle);
-  sidebar.append(sideHeader);
-
   const sidebarScroll = mkEl("div");
   sidebarScroll.className = "diffs-sidebar-scroll";
+  const productTabs = mkEl("div");
+  productTabs.className = "diff-product-tabs";
+  for (const [product, label] of [["sessionChanges", "Session changes"], ["compare", "Compare"]] as const) {
+    const button = mkEl("button");
+    button.type = "button";
+    button.className = product === diffProductView ? "active" : "";
+    button.textContent = label;
+    button.addEventListener("click", () => {
+      diffProductView = product;
+      markDiffsViewDirty();
+      renderDiffsView(container, projection);
+      if (product === "sessionChanges" && activeSessionId && !sessionChangesStates.has(activeSessionId)) requestSessionChanges(activeSessionId);
+    });
+    productTabs.append(button);
+  }
+  sidebarScroll.append(productTabs);
   sidebar.append(sidebarScroll);
-
-  const repoSection = mkEl("section");
-  repoSection.className = "diffs-repo-selector";
-  const repoLabel = mkEl("label");
-  repoLabel.className = "diffs-repo-label";
-  repoLabel.textContent = "Repository root";
-  const repoInput = mkEl("input");
-  repoInput.className = "diff-repo-input";
-  repoInput.value = selectedRepoRoot ?? "";
-  repoInput.placeholder = projection.summary.cwd ?? serverConfig?.defaultCwd ?? "/path/to/repo";
-  repoSection.append(repoLabel, repoInput);
-  sidebarScroll.append(repoSection);
-
-  if (state) {
-    const summary = mkEl("section");
-    summary.className = "diffs-summary";
-    const comparison = mkEl("p");
-    comparison.textContent = `${resolvedRefLabel(state.comparison.base)} → ${resolvedRefLabel(state.comparison.head)}`;
-    const mode = mkEl("p");
-    mode.textContent = state.reviewProgress.mode === "commit"
-      ? `Commit ${state.reviewProgress.selectedCommitIndex != null ? state.reviewProgress.selectedCommitIndex + 1 : "?"}/${state.reviewProgress.commits.length}`
-      : `Range · ${state.reviewProgress.commits.length} commit${state.reviewProgress.commits.length === 1 ? "" : "s"}`;
-    const worktree = diffReviewWorktrees.get(state.repoRoot) ?? state.reviewWorktree ?? null;
-    const worktreeStatus = mkEl("p");
-    worktreeStatus.textContent = worktree ? `Review worktree: ${worktree.status}${worktree.checkedOutOid ? ` @ ${worktree.checkedOutOid.slice(0, 12)}` : ""}${worktree.dirty ? " · dirty" : ""}` : "Review worktree: not created";
-    summary.append(comparison, mode, worktreeStatus);
-    sidebarScroll.append(summary);
-  }
-
-  if (fileSummaries.length > 0) {
-    const filesSection = mkEl("section");
-    filesSection.className = "diffs-files";
-    const filesTitle = mkEl("strong");
-    filesTitle.textContent = `Modified files (${fileSummaries.length})`;
-    filesSection.append(filesTitle);
-    const filesList = mkEl("div");
-    filesList.className = "diffs-file-list";
-    for (const file of fileSummaries) {
-      const item = mkEl("div");
-      item.className = "diffs-file-item";
-      const jumpButton = mkEl("button");
-      jumpButton.type = "button";
-      jumpButton.className = "diffs-file-jump";
-      const name = mkEl("code");
-      name.textContent = file.filePath;
-      const meta = mkEl("span");
-      const notes = [
-        file.commentCount > 0 ? `${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : null,
-        file.questionCount > 0 ? `${file.questionCount} question${file.questionCount === 1 ? "" : "s"}` : null,
-      ].filter(Boolean).join(" · ");
-      meta.textContent = `+${file.added} -${file.removed}${notes ? ` · ${notes}` : ""}`;
-      jumpButton.append(name, meta);
-      jumpButton.addEventListener("click", () => scrollDiffsToFile(container, file.filePath));
-      item.append(jumpButton);
-      filesList.append(item);
-    }
-    filesSection.append(filesList);
-    sidebarScroll.append(filesSection);
-  }
 
   const main = mkEl("section");
   main.className = "diffs-main";
-  const toolbar = mkEl("div");
-  toolbar.className = "diffs-toolbar";
-  const title = mkEl("strong");
-  title.textContent = state ? "Git diff" : "Configure Git diff";
-  const actions = mkEl("div");
-  actions.className = "diffs-actions";
-
-  const baseInput = mkEl("input");
-  baseInput.className = "diff-ref-input";
-  baseInput.placeholder = "base ref (main)";
-  baseInput.value = diffBaseRefs.get(sessionId) ?? resolvedDiffRefInputText(state?.comparison.base, { kind: "gitRef", value: "HEAD" });
-  const headInput = mkEl("input");
-  headInput.className = "diff-ref-input";
-  headInput.placeholder = "head ref (feature or WORKTREE)";
-  headInput.value = diffHeadRefs.get(sessionId) ?? resolvedDiffRefInputText(state?.comparison.head, { kind: "workingTree" });
-  const modeSelect = mkEl("select");
-  for (const [value, label] of [["full", "Full"], ["stat", "Stat"]] as const) {
-    const option = mkEl("option");
-    option.value = value;
-    option.textContent = label;
-    if ((diffModes.get(sessionId) ?? state?.comparison.mode ?? "full") === value) option.selected = true;
-    modeSelect.append(option);
-  }
-  const compareBtn = mkEl("button");
-  compareBtn.type = "button";
-  compareBtn.textContent = diffLoadingSessions.has(sessionId) ? "Comparing…" : "Compare";
-  compareBtn.disabled = diffLoadingSessions.has(sessionId);
-  compareBtn.addEventListener("click", () => requestDiffState(sessionId, { repoRoot: repoInput.value, base: baseInput.value, head: headInput.value, mode: modeSelect.value as "full" | "stat", reviewMode: "range", commitOid: null }));
-
-  const reviewModeBtn = mkEl("button");
-  reviewModeBtn.type = "button";
-  const inCommitMode = state?.reviewProgress.mode === "commit";
-  reviewModeBtn.textContent = inCommitMode ? "Show range" : "Step commits";
-  reviewModeBtn.disabled = !state || state.reviewProgress.commits.length === 0 || diffLoadingSessions.has(sessionId);
-  reviewModeBtn.addEventListener("click", () => {
-    if (!state) return;
-    if (state.reviewProgress.mode === "commit") requestDiffState(sessionId, { reviewMode: "range", commitOid: null });
-    else requestDiffState(sessionId, { reviewMode: "commit", commitOid: state.reviewProgress.commits[0]?.oid ?? null });
-  });
-
-  const previousBtn = mkEl("button");
-  previousBtn.type = "button";
-  previousBtn.textContent = "Previous commit";
-  const selectedIndex = state?.reviewProgress.selectedCommitIndex ?? null;
-  previousBtn.disabled = !state || state.reviewProgress.mode !== "commit" || selectedIndex === null || selectedIndex <= 0;
-  previousBtn.addEventListener("click", () => {
-    if (!state || selectedIndex === null) return;
-    requestDiffState(sessionId, { reviewMode: "commit", commitOid: state.reviewProgress.commits[selectedIndex - 1]?.oid ?? null });
-  });
-  const nextBtn = mkEl("button");
-  nextBtn.type = "button";
-  nextBtn.textContent = "Next commit";
-  nextBtn.disabled = !state || state.reviewProgress.mode !== "commit" || selectedIndex === null || selectedIndex >= state.reviewProgress.commits.length - 1;
-  nextBtn.addEventListener("click", () => {
-    if (!state || selectedIndex === null) return;
-    requestDiffState(sessionId, { reviewMode: "commit", commitOid: state.reviewProgress.commits[selectedIndex + 1]?.oid ?? null });
-  });
-  const checkoutBtn = mkEl("button");
-  checkoutBtn.type = "button";
-  checkoutBtn.textContent = "Checkout commit";
-  checkoutBtn.disabled = !state || !state.reviewProgress.selectedCommitOid;
-  checkoutBtn.addEventListener("click", () => {
-    if (!state?.reviewProgress.selectedCommitOid) return;
-    ensureReviewWorktreeThenCheckout(state, { kind: "commit", oid: state.reviewProgress.selectedCommitOid });
-  });
-  const previewBtn = mkEl("button");
-  previewBtn.type = "button";
-  previewBtn.textContent = "Preview comments";
-  previewBtn.disabled = !state || selectedComments.length === 0;
-  previewBtn.addEventListener("click", () => { if (state) previewDiffComments(sessionId, state); });
-  const flushBtn = mkEl("button");
-  flushBtn.type = "button";
-  flushBtn.textContent = `Preview & flush (${selectedComments.length})`;
-  flushBtn.disabled = !state || selectedComments.length === 0;
-  flushBtn.addEventListener("click", () => { if (state) flushDiffComments(sessionId, state); });
-  actions.append(baseInput, headInput, modeSelect, compareBtn, reviewModeBtn, previousBtn, nextBtn, checkoutBtn, previewBtn, flushBtn);
-  toolbar.append(title, actions);
-  main.append(toolbar);
-
-  const mainBody = mkEl("div");
-  mainBody.className = "diffs-main-body";
-  main.append(mainBody);
-
-  if (!state || diffLoadingSessions.has(sessionId)) {
-    const loading = mkEl("p");
-    loading.className = "empty diffs-empty";
-    loading.textContent = diffLoadingSessions.has(sessionId) ? "Loading diff…" : "Choose refs and compare.";
-    mainBody.append(loading);
-  } else if (diffError) {
-    const error = mkEl("p");
-    error.className = "empty diffs-empty diffs-error";
-    error.textContent = diffError;
-    mainBody.append(error);
-  } else if (!state.diff.trim()) {
-    const empty = mkEl("p");
-    empty.className = "empty diffs-empty";
-    empty.textContent = state.truncated ? "Diff output was truncated before any renderable lines." : "No changes for this comparison.";
-    mainBody.append(empty);
-  } else {
-    if (state.truncated) {
-      const warning = mkEl("p");
-      warning.className = "diffs-warning";
-      warning.textContent = "Diff output is truncated by Fura's safety limit.";
-      mainBody.append(warning);
-    }
-    const diff = mkEl("div");
-    diff.className = "diff-lines";
-    for (const row of parsedRows) {
-      if (row.type === "line") {
-        const lineAnnotations = annotationsForDiffLocation(annotations, key ?? "", row.location);
-        const lineComments = lineAnnotations.filter(annotation => annotation.kind === "comment");
-        const lineQuestions = lineAnnotations.filter(annotation => annotation.kind === "question");
-        const lineWrap = mkEl("div");
-        lineWrap.className = "diff-line-wrap";
-        const line = mkEl("div");
-        line.className = `diff-line diff-line-${row.location.kind}`;
-        const commentBtn = mkEl("button");
-        commentBtn.type = "button";
-        commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
-        commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
-        commentBtn.title = "Comment on this diff line";
-        commentBtn.addEventListener("click", () => addDiffComment(sessionId, state, row.location));
-        const gutter = mkEl("span");
-        gutter.className = "diff-gutter";
-        gutter.textContent = row.location.newLine !== undefined ? String(row.location.newLine) : String(row.location.oldLine ?? "");
-        const content = mkEl("div");
-        content.className = "diff-line-content";
-        const text = mkEl("code");
-        text.textContent = row.location.text;
-        const codeBtn = mkEl("button");
-        codeBtn.type = "button";
-        codeBtn.className = "diff-line-code-btn";
-        codeBtn.textContent = "Code";
-        codeBtn.addEventListener("click", () => openDiffLocationInCode(state, row.location));
-        const questionBtn = mkEl("button");
-        questionBtn.type = "button";
-        questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
-        questionBtn.textContent = lineQuestions.length > 0 ? String(lineQuestions.length) : "?";
-        questionBtn.title = "Ask the agent about this diff line";
-        questionBtn.addEventListener("click", () => askDiffQuestion(sessionId, state, row.location));
-        content.append(text);
-        line.append(commentBtn, gutter, content, codeBtn, questionBtn);
-        lineWrap.append(line);
-        if (lineAnnotations.length > 0) {
-          const thread = mkEl("div");
-          thread.className = "diff-inline-comments";
-          for (const annotation of lineAnnotations) {
-            thread.append(renderDiffAnnotationItem(sessionId, annotation));
-          }
-          lineWrap.append(thread);
-        }
-        diff.append(lineWrap);
-        continue;
-      }
-
-      const line = mkEl("div");
-      line.className = `diff-line diff-line-${row.type}`;
-      if (row.type === "file") line.dataset.diffFilePath = row.filePath;
-      const spacer = mkEl("span");
-      spacer.className = "diff-comment-spacer";
-      const text = mkEl("code");
-      text.textContent = row.text;
-      line.append(spacer, text);
-      diff.append(line);
-    }
-    mainBody.append(diff);
-  }
-
-  const commentsPanel = mkEl("section");
-  commentsPanel.className = "diff-comments";
-  const commentsTitle = mkEl("strong");
-  commentsTitle.textContent = `Review annotations (${selectedComments.length} comments, ${selectedQuestions.length} questions)`;
-  commentsPanel.append(commentsTitle);
-  const selectedAnnotations = key ? selectedDiffAnnotations(annotations, key) : [];
-  if (selectedAnnotations.length === 0) {
-    const empty = mkEl("p");
-    empty.className = "empty";
-    empty.textContent = "No annotations on this diff yet.";
-    commentsPanel.append(empty);
-  } else {
-    for (const annotation of selectedAnnotations) {
-      const item = mkEl("article");
-      item.className = `diff-comment diff-${annotation.kind}`;
-      const loc = mkEl("code");
-      loc.textContent = formatDiffLocation(annotation);
-      item.append(loc, renderDiffAnnotationItem(sessionId, annotation));
-      commentsPanel.append(item);
-    }
-  }
-  mainBody.append(commentsPanel);
-
   root.append(sidebar, main);
   container.append(root);
+
+  if (diffProductView === "compare") {
+    renderCompareDiffView(sidebarScroll, main);
+    return;
+  }
+  if (!activeSessionId || !projection) {
+    renderDiffMessage(main, "No session selected.", false);
+    return;
+  }
+  renderSessionChangesView(activeSessionId, projection, sidebarScroll, main);
+}
+
+function renderSessionChangesView(sessionId: string, projection: SessionProjection, sidebar: HTMLElement, main: HTMLElement): void {
+  const state = sessionChangesStates.get(sessionId);
+  const error = diffErrors.get(sessionId);
+  const subviews = mkEl("div");
+  subviews.className = "diff-subview-tabs";
+  for (const [view, label] of [["diff", "Diff"], ["transcript", "Transcript"]] as const) {
+    const button = mkEl("button");
+    button.type = "button";
+    button.className = view === sessionChangesSubview ? "active" : "";
+    button.textContent = label;
+    button.addEventListener("click", () => {
+      sessionChangesSubview = view;
+      markDiffsViewDirty();
+      renderDiffsViewIfActive(sessionId);
+    });
+    subviews.append(button);
+  }
+  sidebar.append(subviews);
+
+  const header = mkEl("div");
+  header.className = "diffs-toolbar";
+  const title = mkEl("strong");
+  title.textContent = "Session changes";
+  const actions = mkEl("div");
+  actions.className = "diffs-actions";
+  const refresh = mkEl("button");
+  refresh.type = "button";
+  refresh.textContent = diffLoadingSessions.has(sessionId) ? "Loading…" : "Refresh";
+  refresh.disabled = diffLoadingSessions.has(sessionId);
+  refresh.addEventListener("click", () => requestSessionChangesRefresh(sessionId));
+  actions.append(refresh);
+  header.append(title, actions);
+  main.append(header);
+
+  if (sessionChangesSubview === "transcript") {
+    const transcript = mkEl("div");
+    transcript.className = "diffs-main-body session-changes-transcript";
+    const items = buildTranscriptRenderItems(projection);
+    if (items.length === 0) {
+      const empty = mkEl("p");
+      empty.className = "empty";
+      empty.textContent = "Transcript is empty.";
+      transcript.append(empty);
+    } else {
+      for (const item of items) transcript.append(item.render());
+    }
+    main.append(transcript);
+    return;
+  }
+
+  if (!state) {
+    renderDiffMessage(main, diffLoadingSessions.has(sessionId) ? "Loading session changes…" : "Session changes have not been loaded.", false);
+    if (!diffLoadingSessions.has(sessionId)) requestSessionChanges(sessionId);
+    return;
+  }
+  renderSessionRepoControls(sessionId, state, sidebar);
+  if (error) {
+    renderDiffMessage(main, error, true);
+    return;
+  }
+  if (state.status === "missingRepo") {
+    renderDiffMessage(main, state.reason, true);
+    return;
+  }
+  if (state.status === "missingSnapshot") {
+    renderDiffMessage(main, state.reason, true);
+    return;
+  }
+  renderReviewableDiff(sessionId, state, main, true);
+}
+
+function renderSessionRepoControls(sessionId: string, state: SessionChangesState, sidebar: HTMLElement): void {
+  const section = mkEl("section");
+  section.className = "diffs-repo-selector";
+  const label = mkEl("label");
+  label.className = "diffs-repo-label";
+  label.textContent = "Repository";
+  const select = mkEl("select");
+  select.className = "diff-repo-select";
+  for (const repo of state.repos) {
+    const option = mkEl("option");
+    option.value = repo.id;
+    option.textContent = repo.label || formatDiffRepoLabel(repo.repoRoot);
+    option.selected = state.status === "ready" ? repo.id === state.selectedRepoId : repo.repoRoot === (state.status === "missingSnapshot" ? state.repoRoot : "");
+    select.append(option);
+  }
+  const payload = mkEl("select");
+  payload.className = "diff-payload-select";
+  const currentPayload = state.status === "ready" ? state.range.payload.kind : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
+  for (const [value, text] of [["statOnly", "Stat"], ["fullPatch", "Full patch"]] as const) {
+    const option = mkEl("option");
+    option.value = value;
+    option.textContent = text;
+    option.selected = currentPayload === value;
+    payload.append(option);
+  }
+  select.addEventListener("change", () => requestSessionChangesRepo(sessionId, select.value, payload.value as DiffPayloadKind));
+  payload.addEventListener("change", () => {
+    sessionChangesPayloadKinds.set(sessionId, payload.value as DiffPayloadKind);
+    if (select.value) requestSessionChangesRepo(sessionId, select.value, payload.value as DiffPayloadKind);
+  });
+  section.append(label, select, payload);
+  sidebar.append(section);
+}
+
+function renderCompareDiffView(sidebar: HTMLElement, main: HTMLElement): void {
+  const form = mkEl("section");
+  form.className = "diffs-repo-selector compare-diff-controls";
+  const repoInput = mkEl("input");
+  repoInput.className = "diff-repo-input";
+  repoInput.placeholder = "/path/to/repo";
+  repoInput.value = compareRepoRoot;
+  const baseInput = mkEl("input");
+  baseInput.className = "diff-ref-input";
+  baseInput.placeholder = "base ref";
+  baseInput.value = compareBaseRef;
+  const headInput = mkEl("input");
+  headInput.className = "diff-ref-input";
+  headInput.placeholder = "head ref or WORKTREE";
+  headInput.value = compareHeadRef;
+  const payload = mkEl("select");
+  for (const [value, text] of [["fullPatch", "Full patch"], ["statOnly", "Stat"]] as const) {
+    const option = mkEl("option");
+    option.value = value;
+    option.textContent = text;
+    option.selected = comparePayloadKind === value;
+    payload.append(option);
+  }
+  const run = mkEl("button");
+  run.type = "button";
+  run.textContent = "Compare";
+  run.addEventListener("click", () => requestCompareDiff({ repoRoot: repoInput.value, base: baseInput.value, head: headInput.value, payloadKind: payload.value as DiffPayloadKind }));
+  form.append(repoInput, baseInput, headInput, payload, run);
+  sidebar.append(form);
+
+  const header = mkEl("div");
+  header.className = "diffs-toolbar";
+  const title = mkEl("strong");
+  title.textContent = "Compare diff";
+  header.append(title);
+  main.append(header);
+  const error = diffErrors.get("compareDiff");
+  if (error) {
+    renderDiffMessage(main, error, true);
+    return;
+  }
+  if (!compareDiffState) {
+    renderDiffMessage(main, "Run an explicit repository/ref comparison.", false);
+    return;
+  }
+  renderReviewableDiff("compareDiff", compareDiffState, main, false);
+}
+
+function renderDiffMessage(main: HTMLElement, message: string, error: boolean): void {
+  const body = mkEl("div");
+  body.className = "diffs-main-body";
+  const text = mkEl("p");
+  text.className = `empty diffs-empty ${error ? "diffs-error" : ""}`;
+  text.textContent = message;
+  body.append(text);
+  main.append(body);
+}
+
+function renderReviewableDiff(annotationKey: string, state: DiffReviewableState, main: HTMLElement, allowPromptActions: boolean): void {
+  const key = comparisonKey(state);
+  const annotations = diffAnnotations.get(annotationKey) ?? [];
+  const payload = state.range.payload;
+  const parsedRows = payload.kind === "fullPatch" ? parseDiffRows(payload.patch) : [];
+  const fileSummaries = payload.kind === "fullPatch" ? summarizeDiffFiles(parsedRows, annotations, key) : summarizeWireDiffFiles(diffPayloadFiles(payload), annotations, key);
+  const summary = mkEl("section");
+  summary.className = "diffs-summary";
+  const comparison = mkEl("p");
+  comparison.textContent = `${resolvedRefLabel(state.range.base)} → ${resolvedRefLabel(state.range.head)}`;
+  const commits = mkEl("p");
+  commits.textContent = state.review.currentCommitOid ? `Commit ${(state.review.currentCommitIndex ?? 0) + 1}/${state.review.commits.length}` : `Range · ${state.review.commits.length} commit${state.review.commits.length === 1 ? "" : "s"}`;
+  summary.append(comparison, commits);
+  main.append(summary);
+
+  const toolbar = mkEl("div");
+  toolbar.className = "diffs-actions diff-step-actions";
+  const payloadToggle = mkEl("button");
+  payloadToggle.type = "button";
+  payloadToggle.textContent = payload.kind === "fullPatch" ? "Show stat" : "Show full patch";
+  payloadToggle.addEventListener("click", () => {
+    const nextPayload: DiffPayloadKind = payload.kind === "fullPatch" ? "statOnly" : "fullPatch";
+    if (annotationKey === "compareDiff") requestCompareDiff({ payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
+    else requestSessionChangesRefresh(annotationKey, { payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
+  });
+  toolbar.append(payloadToggle);
+  const firstCommit = state.review.commits[0]?.oid ?? null;
+  const stepBtn = mkEl("button");
+  stepBtn.type = "button";
+  stepBtn.textContent = state.review.currentCommitOid ? "Show range" : "Step commits";
+  stepBtn.disabled = state.review.commits.length === 0;
+  stepBtn.addEventListener("click", () => {
+    const selected = state.review.currentCommitOid ? null : firstCommit;
+    if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: selected });
+    else requestSessionChangesRefresh(annotationKey, { currentCommitOid: selected });
+  });
+  const index = state.review.currentCommitIndex ?? null;
+  const prev = mkEl("button");
+  prev.type = "button";
+  prev.textContent = "Previous commit";
+  prev.disabled = index === null || index <= 0;
+  prev.addEventListener("click", () => {
+    if (index === null) return;
+    const oid = state.review.commits[index - 1]?.oid ?? null;
+    if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: oid });
+    else requestSessionChangesRefresh(annotationKey, { currentCommitOid: oid });
+  });
+  const next = mkEl("button");
+  next.type = "button";
+  next.textContent = "Next commit";
+  next.disabled = index === null || index >= state.review.commits.length - 1;
+  next.addEventListener("click", () => {
+    if (index === null) return;
+    const oid = state.review.commits[index + 1]?.oid ?? null;
+    if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: oid });
+    else requestSessionChangesRefresh(annotationKey, { currentCommitOid: oid });
+  });
+  toolbar.append(stepBtn, prev, next);
+  if (state.review.currentCommitOid) {
+    const checkout = mkEl("button");
+    checkout.type = "button";
+    checkout.textContent = "Checkout commit";
+    checkout.addEventListener("click", () => ensureReviewWorktreeThenCheckout(state, { kind: "commit", oid: state.review.currentCommitOid! }));
+    toolbar.append(checkout);
+  }
+  main.append(toolbar);
+
+  const body = mkEl("div");
+  body.className = "diffs-main-body";
+  if (diffPayloadTruncated(payload)) {
+    const warning = mkEl("p");
+    warning.className = "diffs-warning";
+    warning.textContent = "Diff output is truncated by Fura's safety limit.";
+    body.append(warning);
+  }
+  renderDiffFileList(body, fileSummaries);
+  if (!diffPayloadText(payload).trim()) {
+    const empty = mkEl("p");
+    empty.className = "empty diffs-empty";
+    empty.textContent = "No changes for this comparison.";
+    body.append(empty);
+  } else if (!isFullPatchPayload(payload)) {
+    const note = mkEl("p");
+    note.className = "diffs-stat-note";
+    note.textContent = "Stat-only payload: line comments, questions, and Code actions require full patch.";
+    const pre = mkEl("pre");
+    pre.className = "diff-stat-output";
+    pre.textContent = diffPayloadText(payload);
+    body.append(note, pre);
+  } else {
+    renderDiffRows(body, annotationKey, state, parsedRows, annotations, key, allowPromptActions);
+  }
+  main.append(body);
+}
+
+function renderDiffFileList(container: HTMLElement, files: ReturnType<typeof summarizeDiffFiles>): void {
+  if (files.length === 0) return;
+  const filesSection = mkEl("section");
+  filesSection.className = "diffs-files";
+  const filesTitle = mkEl("strong");
+  filesTitle.textContent = `Modified files (${files.length})`;
+  filesSection.append(filesTitle);
+  const filesList = mkEl("div");
+  filesList.className = "diffs-file-list";
+  for (const file of files) {
+    const item = mkEl("div");
+    item.className = "diffs-file-item";
+    const name = mkEl("code");
+    name.textContent = file.filePath;
+    const meta = mkEl("span");
+    const notes = [
+      file.commentCount > 0 ? `${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : null,
+      file.questionCount > 0 ? `${file.questionCount} question${file.questionCount === 1 ? "" : "s"}` : null,
+    ].filter(Boolean).join(" · ");
+    meta.textContent = `+${file.added} -${file.removed}${notes ? ` · ${notes}` : ""}`;
+    item.append(name, meta);
+    filesList.append(item);
+  }
+  filesSection.append(filesList);
+  container.append(filesSection);
+}
+
+function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: ReturnType<typeof parseDiffRows>, annotations: DiffReviewAnnotation[], key: string, allowPromptActions: boolean): void {
+  const diff = mkEl("div");
+  diff.className = "diff-lines";
+  for (const row of rows) {
+    if (row.type === "line") {
+      const lineAnnotations = annotationsForDiffLocation(annotations, key, row.location);
+      const lineComments = lineAnnotations.filter(annotation => annotation.kind === "comment");
+      const lineQuestions = lineAnnotations.filter(annotation => annotation.kind === "question");
+      const lineWrap = mkEl("div");
+      lineWrap.className = "diff-line-wrap";
+      const line = mkEl("div");
+      line.className = `diff-line diff-line-${row.location.kind}`;
+      const commentBtn = mkEl("button");
+      commentBtn.type = "button";
+      commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
+      commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
+      commentBtn.disabled = !allowPromptActions;
+      commentBtn.title = allowPromptActions ? "Comment on this diff line" : "Comments require a session changes review";
+      commentBtn.addEventListener("click", () => addDiffComment(annotationKey, state, row.location));
+      const gutter = mkEl("span");
+      gutter.className = "diff-gutter";
+      gutter.textContent = row.location.newLine !== undefined ? String(row.location.newLine) : String(row.location.oldLine ?? "");
+      const content = mkEl("div");
+      content.className = "diff-line-content";
+      const text = mkEl("code");
+      text.textContent = row.location.text;
+      content.append(text);
+      const codeBtn = mkEl("button");
+      codeBtn.type = "button";
+      codeBtn.className = "diff-line-code-btn";
+      codeBtn.textContent = "Code";
+      codeBtn.addEventListener("click", () => openDiffLocationInCode(state, row.location));
+      const questionBtn = mkEl("button");
+      questionBtn.type = "button";
+      questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
+      questionBtn.textContent = lineQuestions.length > 0 ? String(lineQuestions.length) : "?";
+      questionBtn.disabled = !allowPromptActions;
+      questionBtn.title = allowPromptActions ? "Ask the agent about this diff line" : "Questions require a session changes review";
+      questionBtn.addEventListener("click", () => askDiffQuestion(annotationKey, state, row.location));
+      line.append(commentBtn, gutter, content, codeBtn, questionBtn);
+      lineWrap.append(line);
+      if (lineAnnotations.length > 0) {
+        const thread = mkEl("div");
+        thread.className = "diff-inline-comments";
+        for (const annotation of lineAnnotations) thread.append(renderDiffAnnotationItem(annotationKey, annotation));
+        lineWrap.append(thread);
+      }
+      diff.append(lineWrap);
+      continue;
+    }
+    const line = mkEl("div");
+    line.className = `diff-line diff-line-${row.type}`;
+    if (row.type === "file") line.dataset.diffFilePath = row.filePath;
+    const spacer = mkEl("span");
+    spacer.className = "diff-comment-spacer";
+    const text = mkEl("code");
+    text.textContent = row.text;
+    line.append(spacer, text);
+    diff.append(line);
+  }
+  container.append(diff);
 }
 
 // --- Desktop workspace initialization ---
@@ -4461,21 +4553,22 @@ function submitCwdPickerDiff(): void {
   const repoRoot = cwdPickerDiffRepo.value.trim();
   const base = cwdPickerDiffBase.value.trim() || "HEAD";
   const head = cwdPickerDiffHead.value.trim() || "HEAD";
-  const mode: "full" | "stat" = cwdPickerDiffMode.value === "stat" ? "stat" : "full";
+  const payloadKind: DiffPayloadKind = cwdPickerDiffMode.value === "stat" ? "statOnly" : "fullPatch";
   if (!repoRoot) {
     setCwdPickerError("Repository root is required for diff review.");
     cwdPickerDiffRepo.focus();
     return;
   }
-  const diff = { repoRoot, base, head, mode };
-  if (!cwdPickerDiffAgentSession.checked && activeSessionId) {
-    diffSelectedRepos.set(activeSessionId, repoRoot);
-    diffBaseRefs.set(activeSessionId, base);
-    diffHeadRefs.set(activeSessionId, head);
-    diffModes.set(activeSessionId, mode);
+  const diff = { repoRoot, base, head, payloadKind };
+  if (!cwdPickerDiffAgentSession.checked) {
     closeCwdPicker();
+    diffProductView = "compare";
+    compareRepoRoot = repoRoot;
+    compareBaseRef = base;
+    compareHeadRef = head;
+    comparePayloadKind = payloadKind;
     desktopDockview?.activatePanel("diffs");
-    requestDiffState(activeSessionId, { repoRoot, base, head, mode, reviewMode: "range", commitOid: null });
+    requestCompareDiff({ repoRoot, base, head, payloadKind });
     return;
   }
   pendingDiffCreate = diff;

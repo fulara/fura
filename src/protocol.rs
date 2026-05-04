@@ -34,11 +34,20 @@ pub(crate) struct WorktreeCreateRequest {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) enum DiffPayloadKind {
+    FullPatch,
+    StatOnly,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) enum DiffMode {
     Full,
     Stat,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DiffReviewMode {
@@ -103,6 +112,60 @@ pub(crate) enum ResolvedDiffRef {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SessionRepoSource {
+    Worktree,
+    Cwd,
+    Snapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionDiffSnapshotSummary {
+    pub(crate) entry_id: String,
+    pub(crate) label: String,
+    pub(crate) created_at: String,
+    pub(crate) ref_name: String,
+    pub(crate) tree: String,
+    pub(crate) commit: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionRepoCandidate {
+    pub(crate) id: String,
+    pub(crate) repo_root: String,
+    pub(crate) label: String,
+    pub(crate) source: SessionRepoSource,
+    pub(crate) has_session_start_snapshot: bool,
+    pub(crate) session_start_snapshot: Option<SessionDiffSnapshotSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum DiffEndpoint {
+    SessionStartSnapshot {
+        snapshot: SessionDiffSnapshotSummary,
+    },
+    WorkingTree,
+    GitRef {
+        input: String,
+        ref_kind: DiffRefKind,
+        oid: String,
+        display: String,
+    },
+    Commit {
+        oid: String,
+        short_oid: String,
+        subject: Option<String>,
+    },
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GitRefSummary {
@@ -147,37 +210,87 @@ pub(crate) struct DiffCommitSummary {
     pub(crate) is_merge: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum DiffPayload {
+    StatOnly {
+        files: Vec<DiffFileSummary>,
+        stat: String,
+        truncated: bool,
+    },
+    FullPatch {
+        files: Vec<DiffFileSummary>,
+        patch: String,
+        truncated: bool,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct DiffReviewProgress {
-    pub(crate) mode: DiffReviewMode,
+pub(crate) struct DisplayedPatchRange {
+    pub(crate) base: DiffEndpoint,
+    pub(crate) head: DiffEndpoint,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffRangeState {
+    pub(crate) repo_root: String,
+    pub(crate) base: DiffEndpoint,
+    pub(crate) head: DiffEndpoint,
+    pub(crate) payload: DiffPayload,
+    pub(crate) generated_at: String,
+    pub(crate) displayed_patch_range: Option<DisplayedPatchRange>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CommitStepState {
     pub(crate) commits: Vec<DiffCommitSummary>,
-    pub(crate) selected_commit_oid: Option<String>,
-    pub(crate) selected_commit_index: Option<usize>,
+    pub(crate) current_commit_oid: Option<String>,
+    pub(crate) current_commit_index: Option<usize>,
     pub(crate) previous_commit_oid: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DiffComparison {
-    pub(crate) repo_root: String,
-    pub(crate) base: ResolvedDiffRef,
-    pub(crate) head: ResolvedDiffRef,
-    pub(crate) mode: DiffMode,
-    pub(crate) merge_base: Option<bool>,
+#[derive(Debug, Clone, Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum SessionChangesState {
+    Ready {
+        session_id: String,
+        repos: Vec<SessionRepoCandidate>,
+        selected_repo_id: String,
+        range: DiffRangeState,
+        review: CommitStepState,
+        review_worktree: Option<DiffReviewWorktree>,
+    },
+    MissingRepo {
+        session_id: String,
+        reason: String,
+        repos: Vec<SessionRepoCandidate>,
+    },
+    MissingSnapshot {
+        session_id: String,
+        repo_root: String,
+        reason: String,
+        repos: Vec<SessionRepoCandidate>,
+    },
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct RepoDiffState {
-    pub(crate) repo_root: String,
+pub(crate) struct CompareDiffState {
+    pub(crate) request_id: Option<String>,
     pub(crate) refs: Vec<GitRefSummary>,
-    pub(crate) comparison: DiffComparison,
-    pub(crate) diff: String,
-    pub(crate) files: Vec<DiffFileSummary>,
-    pub(crate) truncated: bool,
-    pub(crate) generated_at: String,
-    pub(crate) review_progress: DiffReviewProgress,
+    pub(crate) range: DiffRangeState,
+    pub(crate) review: CommitStepState,
     pub(crate) review_worktree: Option<DiffReviewWorktree>,
 }
 
@@ -386,27 +499,36 @@ pub(crate) enum ClientMessage {
         provider: String,
         model_id: String,
     },
-    #[serde(rename = "diff.open")]
-    DiffOpen {
-        session_id: Option<String>,
-        repo_root: Option<String>,
+    #[serde(rename = "sessionChanges.open")]
+    SessionChangesOpen { session_id: String },
+    #[serde(rename = "sessionChanges.selectRepo")]
+    SessionChangesSelectRepo {
+        session_id: String,
+        repo_id: String,
+        payload_kind: DiffPayloadKind,
+        current_commit_oid: Option<String>,
     },
-    #[serde(rename = "diff.compare")]
-    DiffCompare {
-        session_id: Option<String>,
+    #[serde(rename = "sessionChanges.refresh")]
+    SessionChangesRefresh {
+        session_id: String,
+        repo_id: Option<String>,
+        payload_kind: Option<DiffPayloadKind>,
+        current_commit_oid: Option<String>,
+    },
+    #[serde(rename = "compareDiff.run")]
+    CompareDiffRun {
+        request_id: Option<String>,
         repo_root: String,
         base: DiffRefInput,
         head: DiffRefInput,
-        mode: DiffMode,
+        payload_kind: DiffPayloadKind,
         merge_base: Option<bool>,
-        review_mode: Option<DiffReviewMode>,
-        commit_oid: Option<String>,
+        current_commit_oid: Option<String>,
     },
     #[serde(rename = "diff.reviewWorktree.ensure")]
     DiffReviewWorktreeEnsure {
         source_repo_root: String,
-        base: Option<DiffRefInput>,
-        head: Option<DiffRefInput>,
+        target: Option<DiffCheckoutTarget>,
     },
     #[serde(rename = "diff.reviewWorktree.checkout")]
     DiffReviewWorktreeCheckout {
@@ -460,6 +582,13 @@ pub(crate) enum ClientMessage {
     RawRpc { session_id: String, command: Value },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DiffErrorScope {
+    SessionChanges,
+    CompareDiff,
+    ReviewWorktree,
+}
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum NoticeLevel {
@@ -540,13 +669,13 @@ pub(crate) enum ServerMessage {
         title: Option<String>,
         content: String,
     },
-    #[serde(rename = "diff.state")]
-    DiffState {
-        session_id: Option<String>,
-        state: RepoDiffState,
-    },
+    #[serde(rename = "sessionChanges.state")]
+    SessionChangesState { state: SessionChangesState },
+    #[serde(rename = "compareDiff.state")]
+    CompareDiffState { state: CompareDiffState },
     #[serde(rename = "diff.error")]
     DiffError {
+        scope: DiffErrorScope,
         session_id: Option<String>,
         repo_root: Option<String>,
         message: String,

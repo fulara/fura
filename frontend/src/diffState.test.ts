@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { comparisonKey, diffRefInputFromText, diffRefInputText, parseDiffRows, resolvedDiffRefInputText, summarizeDiffFiles } from "./diffState";
-import type { RepoDiffState } from "./protocol";
+import type { DiffReviewableState } from "./protocol";
 
 const patch = [
   "diff --git a/src/old.ts b/src/new.ts",
@@ -17,20 +17,15 @@ const patch = [
   "+const another = true;",
 ].join("\n");
 
-const state = (selectedCommitOid: string | null = null): RepoDiffState => ({
-  repoRoot: "/repo",
-  refs: [],
-  comparison: {
+const state = (selectedCommitOid: string | null = null): DiffReviewableState => ({
+  range: {
     repoRoot: "/repo",
     base: { kind: "gitRef", input: "main", refKind: "branch", oid: "a".repeat(40), display: "main" },
     head: { kind: "gitRef", input: "feature", refKind: "branch", oid: "b".repeat(40), display: "feature" },
-    mode: "full",
+    payload: { kind: "fullPatch", files: [], patch, truncated: false },
+    generatedAt: "1",
   },
-  diff: patch,
-  files: [],
-  truncated: false,
-  generatedAt: "1",
-  reviewProgress: { mode: selectedCommitOid ? "commit" : "range", commits: [], selectedCommitOid },
+  review: { commits: [], currentCommitOid: selectedCommitOid },
 });
 
 describe("diffState", () => {
