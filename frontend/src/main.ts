@@ -47,11 +47,15 @@ import {
 import { applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   comparisonKey,
+  diffRefInputFromText,
+  diffRefInputText,
   diffRepoRoots,
   formatDiffRepoLabel,
   inferDiffRepoRootFromCwd,
   parseDiffRows,
   resolvedRefLabel,
+  resolvedDiffRefInput,
+  resolvedDiffRefInputText,
   summarizeDiffFiles,
 } from "./diffState";
 import {
@@ -1303,8 +1307,8 @@ function handleServerMessage(message: ServerMessage): void {
       diffErrors.delete(sessionId);
       diffStates.set(sessionId, message.state);
       diffSelectedRepos.set(sessionId, message.state.repoRoot);
-      if (message.state.comparison.base.kind === "gitRef") diffBaseRefs.set(sessionId, message.state.comparison.base.input);
-      if (message.state.comparison.head.kind === "gitRef") diffHeadRefs.set(sessionId, message.state.comparison.head.input);
+      diffBaseRefs.set(sessionId, resolvedDiffRefInputText(message.state.comparison.base, { kind: "gitRef", value: "HEAD" }));
+      diffHeadRefs.set(sessionId, resolvedDiffRefInputText(message.state.comparison.head, { kind: "workingTree" }));
       diffModes.set(sessionId, message.state.comparison.mode);
       diffReviewModes.set(sessionId, message.state.reviewProgress.mode);
       if (message.state.reviewProgress.selectedCommitOid) diffSelectedCommits.set(sessionId, message.state.reviewProgress.selectedCommitOid);
@@ -3336,9 +3340,20 @@ function resolveSelectedDiffRepoRoot(
   return fallback;
 }
 
-function gitRefInput(value: string | undefined, fallback: string): { kind: "gitRef"; value: string } {
-  const trimmed = value?.trim();
-  return { kind: "gitRef", value: trimmed || fallback };
+function requestDefaultDiffState(sessionId: string): void {
+  if (diffLoadingSessions.has(sessionId)) return;
+  const projection = projections.get(sessionId);
+  const current = diffStates.get(sessionId);
+  const repoRoot = resolveSelectedDiffRepoRoot(sessionId, projection, current);
+  diffErrors.delete(sessionId);
+  diffLoadingSessions.add(sessionId);
+  markDiffsViewDirty();
+  send({
+    type: "diff.open",
+    sessionId,
+    repoRoot,
+  });
+  renderDiffsViewIfActive(sessionId);
 }
 
 function requestDiffState(sessionId: string, overrides: { repoRoot?: string; base?: string; head?: string; mode?: "full" | "stat"; reviewMode?: "range" | "commit"; commitOid?: string | null } = {}): void {
@@ -3352,17 +3367,24 @@ function requestDiffState(sessionId: string, overrides: { repoRoot?: string; bas
     renderDiffsViewIfActive(sessionId);
     return;
   }
-  const base = overrides.base ?? diffBaseRefs.get(sessionId) ?? (current?.comparison.base.kind === "gitRef" ? current.comparison.base.input : "HEAD");
-  const head = overrides.head ?? diffHeadRefs.get(sessionId) ?? (current?.comparison.head.kind === "gitRef" ? current.comparison.head.input : "HEAD");
+  const base = diffRefInputFromText(
+    overrides.base ?? diffBaseRefs.get(sessionId),
+    resolvedDiffRefInput(current?.comparison.base, { kind: "gitRef", value: "HEAD" }),
+  );
+  const head = diffRefInputFromText(
+    overrides.head ?? diffHeadRefs.get(sessionId),
+    resolvedDiffRefInput(current?.comparison.head, { kind: "workingTree" }),
+  );
   const mode = overrides.mode ?? diffModes.get(sessionId) ?? current?.comparison.mode ?? "full";
   const reviewMode = overrides.reviewMode ?? diffReviewModes.get(sessionId) ?? current?.reviewProgress.mode ?? "range";
   const commitOid = overrides.commitOid ?? diffSelectedCommits.get(sessionId) ?? current?.reviewProgress.selectedCommitOid ?? null;
   diffSelectedRepos.set(sessionId, repoRoot);
-  diffBaseRefs.set(sessionId, base);
-  diffHeadRefs.set(sessionId, head);
+  diffBaseRefs.set(sessionId, diffRefInputText(base));
+  diffHeadRefs.set(sessionId, diffRefInputText(head));
   diffModes.set(sessionId, mode);
   diffReviewModes.set(sessionId, reviewMode);
   if (commitOid) diffSelectedCommits.set(sessionId, commitOid);
+  else diffSelectedCommits.delete(sessionId);
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
@@ -3370,8 +3392,8 @@ function requestDiffState(sessionId: string, overrides: { repoRoot?: string; bas
     type: "diff.compare",
     sessionId,
     repoRoot,
-    base: gitRefInput(base, "HEAD"),
-    head: gitRefInput(head, "HEAD"),
+    base,
+    head,
     mode,
     reviewMode,
     commitOid: reviewMode === "commit" ? commitOid : null,
@@ -3404,6 +3426,10 @@ function isDiffsPanelActive(): boolean {
 function requestActiveDiffState(): void {
   if (!activeSessionId || !isDiffsPanelActive()) return;
   if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
+  if (!diffStates.has(activeSessionId) && !diffBaseRefs.has(activeSessionId) && !diffHeadRefs.has(activeSessionId)) {
+    requestDefaultDiffState(activeSessionId);
+    return;
+  }
   requestDiffState(activeSessionId);
 }
 
@@ -3880,11 +3906,11 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const baseInput = mkEl("input");
   baseInput.className = "diff-ref-input";
   baseInput.placeholder = "base ref (main)";
-  baseInput.value = diffBaseRefs.get(sessionId) ?? (state?.comparison.base.kind === "gitRef" ? state.comparison.base.input : "HEAD");
+  baseInput.value = diffBaseRefs.get(sessionId) ?? resolvedDiffRefInputText(state?.comparison.base, { kind: "gitRef", value: "HEAD" });
   const headInput = mkEl("input");
   headInput.className = "diff-ref-input";
-  headInput.placeholder = "head ref (feature)";
-  headInput.value = diffHeadRefs.get(sessionId) ?? (state?.comparison.head.kind === "gitRef" ? state.comparison.head.input : "HEAD");
+  headInput.placeholder = "head ref (feature or WORKTREE)";
+  headInput.value = diffHeadRefs.get(sessionId) ?? resolvedDiffRefInputText(state?.comparison.head, { kind: "workingTree" });
   const modeSelect = mkEl("select");
   for (const [value, label] of [["full", "Full"], ["stat", "Stat"]] as const) {
     const option = mkEl("option");

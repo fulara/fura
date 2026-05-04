@@ -1,5 +1,38 @@
 import { shortPath } from "./format";
-import type { DiffReviewAnnotation, DiffLineLocation, RepoDiffState, ResolvedDiffRef } from "./protocol";
+import type { DiffRefInput, DiffReviewAnnotation, DiffLineLocation, RepoDiffState, ResolvedDiffRef } from "./protocol";
+
+export const WORKING_TREE_DIFF_REF_TEXT = "WORKTREE";
+
+const WORKING_TREE_REF_ALIASES = new Set([
+  "workingtree",
+  "working tree",
+  "working-tree",
+  "worktree",
+  "work tree",
+  "work-tree",
+  "wt",
+]);
+
+export function diffRefInputFromText(value: string | undefined, fallback: DiffRefInput): DiffRefInput {
+  const trimmed = value?.trim();
+  if (!trimmed) return fallback;
+  return WORKING_TREE_REF_ALIASES.has(trimmed.toLowerCase())
+    ? { kind: "workingTree" }
+    : { kind: "gitRef", value: trimmed };
+}
+
+export function diffRefInputText(input: DiffRefInput): string {
+  return input.kind === "workingTree" ? WORKING_TREE_DIFF_REF_TEXT : input.value;
+}
+
+export function resolvedDiffRefInput(ref: ResolvedDiffRef | undefined, fallback: DiffRefInput): DiffRefInput {
+  if (!ref) return fallback;
+  return ref.kind === "workingTree" ? { kind: "workingTree" } : { kind: "gitRef", value: ref.input };
+}
+
+export function resolvedDiffRefInputText(ref: ResolvedDiffRef | undefined, fallback: DiffRefInput): string {
+  return diffRefInputText(resolvedDiffRefInput(ref, fallback));
+}
 
 export type ParsedDiffRow =
   | { type: "meta"; text: string }

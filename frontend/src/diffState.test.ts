@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { comparisonKey, parseDiffRows, summarizeDiffFiles } from "./diffState";
+import { comparisonKey, diffRefInputFromText, diffRefInputText, parseDiffRows, resolvedDiffRefInputText, summarizeDiffFiles } from "./diffState";
 import type { RepoDiffState } from "./protocol";
 
 const patch = [
@@ -85,5 +85,12 @@ describe("diffState", () => {
     const rows = parseDiffRows("diff --git a/a.png b/a.png\nBinary files a/a.png and b/a.png differ");
     expect(rows).toContainEqual({ type: "file", text: "diff --git a/a.png b/a.png", oldPath: "a.png", newPath: "a.png", filePath: "a.png" });
     expect(rows).toContainEqual({ type: "meta", text: "Binary files a/a.png and b/a.png differ" });
+  });
+
+  it("round-trips the working tree pseudo-ref for diff controls", () => {
+    expect(diffRefInputFromText("WORKTREE", { kind: "gitRef", value: "HEAD" })).toEqual({ kind: "workingTree" });
+    expect(diffRefInputText({ kind: "workingTree" })).toBe("WORKTREE");
+    expect(resolvedDiffRefInputText({ kind: "workingTree" }, { kind: "gitRef", value: "HEAD" })).toBe("WORKTREE");
+    expect(diffRefInputFromText("feature", { kind: "workingTree" })).toEqual({ kind: "gitRef", value: "feature" });
   });
 });

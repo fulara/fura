@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    fs,
+    io::{BufRead, BufReader as StdBufReader},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -7,6 +9,7 @@ use std::{
 
 use anyhow::{Context, anyhow, bail};
 use git2::Repository;
+use serde_json::Value;
 use tokio::{io::AsyncReadExt, process::Command, time};
 use uuid::Uuid;
 
@@ -28,27 +31,28 @@ pub(crate) async fn handle_diff_open(
     repo_root: Option<String>,
 ) -> Vec<ServerMessage> {
     match resolve_repo_root(state, session_id.as_deref(), repo_root.as_deref()).await {
-        Ok(root) => match build_diff_state(
-            state,
-            session_id.clone(),
-            root,
-            DiffRefInput::GitRef {
-                value: "HEAD".to_string(),
-            },
-            DiffRefInput::WorkingTree,
-            DiffMode::Stat,
-            false,
-            DiffReviewMode::Range,
-            None,
-        )
-        .await
-        {
-            Ok(state_value) => vec![ServerMessage::DiffState {
-                session_id,
-                state: state_value,
-            }],
-            Err(error) => vec![diff_error(session_id, repo_root, error)],
-        },
+        Ok(root) => {
+            let base = default_diff_base_ref(state, session_id.as_deref(), &root).await;
+            match build_diff_state(
+                state,
+                session_id.clone(),
+                root,
+                base,
+                DiffRefInput::WorkingTree,
+                DiffMode::Stat,
+                false,
+                DiffReviewMode::Range,
+                None,
+            )
+            .await
+            {
+                Ok(state_value) => vec![ServerMessage::DiffState {
+                    session_id,
+                    state: state_value,
+                }],
+                Err(error) => vec![diff_error(session_id, repo_root, error)],
+            }
+        }
         Err(error) => vec![diff_error(session_id, repo_root, error)],
     }
 }
@@ -154,6 +158,87 @@ async fn resolve_repo_root(
     discover_repo_root(cwd)
 }
 
+async fn default_diff_base_ref(
+    state: &AppState,
+    session_id: Option<&str>,
+    repo_root: &Path,
+) -> DiffRefInput {
+    let session_file = match session_id {
+        Some(id) => session_file_for_diff(state, id).await,
+        None => None,
+    };
+    if let Some(session_file) = session_file {
+        for snapshot in read_session_diff_snapshots(Path::new(&session_file), repo_root)
+            .into_iter()
+            .rev()
+        {
+            if resolve_git_ref(repo_root, &snapshot.ref_name).await.is_ok() {
+                return DiffRefInput::GitRef {
+                    value: snapshot.ref_name,
+                };
+            }
+        }
+    }
+
+    DiffRefInput::GitRef {
+        value: "HEAD".to_string(),
+    }
+}
+
+async fn session_file_for_diff(state: &AppState, session_id: &str) -> Option<String> {
+    let sessions = state.sessions.read().await;
+    sessions.get(session_id)?.session_file.clone()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SessionDiffSnapshot {
+    ref_name: String,
+}
+
+fn read_session_diff_snapshots(path: &Path, repo_root: &Path) -> Vec<SessionDiffSnapshot> {
+    let Ok(file) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let reader = StdBufReader::new(file);
+    let mut snapshots = Vec::new();
+    for line in reader.lines().map_while(Result::ok) {
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("custom")
+            || entry.get("customType").and_then(Value::as_str) != Some("repo-diff-snapshot")
+        {
+            continue;
+        }
+        let Some(data) = entry.get("data") else {
+            continue;
+        };
+        if data.get("version").and_then(Value::as_u64) != Some(1) {
+            continue;
+        }
+        let Some(snapshot_repo) = data.get("repoRoot").and_then(Value::as_str) else {
+            continue;
+        };
+        if !snapshot_repo_matches(snapshot_repo, repo_root) {
+            continue;
+        }
+        let Some(ref_name) = data.get("ref").and_then(Value::as_str) else {
+            continue;
+        };
+        snapshots.push(SessionDiffSnapshot {
+            ref_name: ref_name.to_string(),
+        });
+    }
+    snapshots
+}
+
+fn snapshot_repo_matches(snapshot_repo: &str, repo_root: &Path) -> bool {
+    match PathBuf::from(snapshot_repo).canonicalize() {
+        Ok(canonical) => canonical == repo_root,
+        Err(_) => Path::new(snapshot_repo) == repo_root,
+    }
+}
+
 fn non_empty_trimmed(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then_some(trimmed)
@@ -215,6 +300,15 @@ async fn build_diff_state(
         ) => {
             let effective_base = range_base_oid.as_deref().unwrap_or(base_oid);
             list_commits(&repo_root, effective_base, head_oid).await?
+        }
+        (ResolvedDiffRef::GitRef { oid: base_oid, .. }, ResolvedDiffRef::WorkingTree) => {
+            match resolve_git_ref(&repo_root, "HEAD").await {
+                Ok(ResolvedDiffRef::GitRef { oid: head_oid, .. }) => {
+                    let effective_base = range_base_oid.as_deref().unwrap_or(base_oid);
+                    list_commits(&repo_root, effective_base, &head_oid).await?
+                }
+                _ => Vec::new(),
+            }
         }
         _ => Vec::new(),
     };
@@ -313,6 +407,7 @@ async fn list_refs(repo_root: &Path) -> anyhow::Result<Vec<GitRefSummary>> {
             "refs/heads",
             "refs/remotes",
             "refs/tags",
+            "refs/omp/diff-snapshots",
         ],
         MAX_GIT_OUTPUT_BYTES,
     )
@@ -431,11 +526,19 @@ fn ref_kind_for_name(name: &str) -> DiffRefKind {
 }
 
 fn short_ref_name(name: &str) -> String {
-    name.strip_prefix("refs/heads/")
-        .or_else(|| name.strip_prefix("refs/remotes/"))
-        .or_else(|| name.strip_prefix("refs/tags/"))
-        .unwrap_or(name)
-        .to_string()
+    if let Some(short) = name.strip_prefix("refs/heads/") {
+        return short.to_string();
+    }
+    if let Some(short) = name.strip_prefix("refs/remotes/") {
+        return short.to_string();
+    }
+    if let Some(short) = name.strip_prefix("refs/tags/") {
+        return short.to_string();
+    }
+    if let Some(id) = name.strip_prefix("refs/omp/diff-snapshots/") {
+        return format!("snapshot/{id}");
+    }
+    name.to_string()
 }
 
 fn display_ref(input: &str) -> String {
@@ -496,6 +599,67 @@ async fn list_commits(
     Ok(commits)
 }
 
+struct TempGitIndex {
+    dir: PathBuf,
+    index_path: PathBuf,
+}
+
+impl TempGitIndex {
+    fn new() -> anyhow::Result<Self> {
+        let dir = std::env::temp_dir().join(format!("fura-git-index-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("failed to create temp git index dir: {}", dir.display()))?;
+        let index_path = dir.join("index");
+        Ok(Self { dir, index_path })
+    }
+}
+
+impl Drop for TempGitIndex {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+async fn current_worktree_tree(repo_root: &Path) -> anyhow::Result<String> {
+    let temp_index = TempGitIndex::new()?;
+    let index_path = temp_index.index_path.to_string_lossy().to_string();
+    let env = [("GIT_INDEX_FILE", index_path.as_str())];
+    let head = git_stdout_with_env(
+        repo_root,
+        &["rev-parse", "--verify", "HEAD"],
+        MAX_GIT_OUTPUT_BYTES,
+        &[],
+    )
+    .await
+    .ok()
+    .map(|value| value.trim().to_string())
+    .filter(|value| !value.is_empty());
+    match head.as_deref() {
+        Some(head) => {
+            git_stdout_with_env(repo_root, &["read-tree", head], MAX_GIT_OUTPUT_BYTES, &env)
+                .await?;
+        }
+        None => {
+            git_stdout_with_env(
+                repo_root,
+                &["read-tree", "--empty"],
+                MAX_GIT_OUTPUT_BYTES,
+                &env,
+            )
+            .await?;
+        }
+    }
+    git_stdout_with_env(
+        repo_root,
+        &["add", "-A", "--", "."],
+        MAX_GIT_OUTPUT_BYTES,
+        &env,
+    )
+    .await?;
+    let tree = git_stdout_with_env(repo_root, &["write-tree"], MAX_GIT_OUTPUT_BYTES, &env).await?;
+    Ok(tree.trim().to_string())
+}
+
 async fn generate_diff(
     repo_root: &Path,
     base: &ResolvedDiffRef,
@@ -508,13 +672,18 @@ async fn generate_diff(
     }
     let base_oid = oid_for_diff(base)?;
     match head {
-        ResolvedDiffRef::WorkingTree => args.push(base_oid),
+        ResolvedDiffRef::WorkingTree => {
+            let worktree_tree = current_worktree_tree(repo_root).await?;
+            args.push(base_oid);
+            args.push(&worktree_tree);
+            git_stdout_limited(repo_root, &args, MAX_DIFF_BYTES).await
+        }
         ResolvedDiffRef::GitRef { oid: head_oid, .. } => {
             args.push(base_oid);
             args.push(head_oid);
+            git_stdout_limited(repo_root, &args, MAX_DIFF_BYTES).await
         }
     }
-    git_stdout_limited(repo_root, &args, MAX_DIFF_BYTES).await
 }
 
 async fn summarize_files(
@@ -525,14 +694,20 @@ async fn summarize_files(
     let mut args = vec!["diff", "--find-renames", "--numstat", "--name-status"];
     let base_oid = oid_for_diff(base)?;
     match head {
-        ResolvedDiffRef::WorkingTree => args.push(base_oid),
+        ResolvedDiffRef::WorkingTree => {
+            let worktree_tree = current_worktree_tree(repo_root).await?;
+            args.push(base_oid);
+            args.push(&worktree_tree);
+            let output = git_stdout(repo_root, &args, MAX_GIT_OUTPUT_BYTES).await?;
+            Ok(parse_numstat_name_status(&output))
+        }
         ResolvedDiffRef::GitRef { oid: head_oid, .. } => {
             args.push(base_oid);
             args.push(head_oid);
+            let output = git_stdout(repo_root, &args, MAX_GIT_OUTPUT_BYTES).await?;
+            Ok(parse_numstat_name_status(&output))
         }
     }
-    let output = git_stdout(repo_root, &args, MAX_GIT_OUTPUT_BYTES).await?;
-    Ok(parse_numstat_name_status(&output))
 }
 
 fn oid_for_diff(reference: &ResolvedDiffRef) -> anyhow::Result<&str> {
@@ -723,16 +898,39 @@ async fn git_stdout(repo_root: &Path, args: &[&str], limit: usize) -> anyhow::Re
     Ok(output)
 }
 
+async fn git_stdout_with_env(
+    repo_root: &Path,
+    args: &[&str],
+    limit: usize,
+    env: &[(&str, &str)],
+) -> anyhow::Result<String> {
+    let (output, truncated) = git_stdout_limited_with_env(repo_root, args, limit, env).await?;
+    if truncated {
+        bail!("git output exceeded {limit} bytes");
+    }
+    Ok(output)
+}
+
 async fn git_stdout_limited(
     repo_root: &Path,
     args: &[&str],
     limit: usize,
+) -> anyhow::Result<(String, bool)> {
+    git_stdout_limited_with_env(repo_root, args, limit, &[]).await
+}
+
+async fn git_stdout_limited_with_env(
+    repo_root: &Path,
+    args: &[&str],
+    limit: usize,
+    env: &[(&str, &str)],
 ) -> anyhow::Result<(String, bool)> {
     let mut command = Command::new("git");
     command
         .current_dir(repo_root)
         .arg("--no-optional-locks")
         .args(args)
+        .envs(env.iter().copied())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = command
@@ -802,7 +1000,7 @@ async fn git_stdout_limited(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, process::Command as StdCommand};
+    use std::{collections::HashSet, fs, process::Command as StdCommand};
     use tempfile::TempDir;
 
     fn git(repo: &Path, args: &[&str]) {
@@ -817,6 +1015,53 @@ mod tests {
             args,
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    fn git_output(repo: &Path, args: &[&str]) -> String {
+        let output = StdCommand::new("git")
+            .current_dir(repo)
+            .args(args)
+            .output()
+            .expect("git should run");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn diff_test_record(id: &str, repo: &Path, session_file: &Path) -> SessionRecord {
+        SessionRecord {
+            id: id.into(),
+            cwd: Some(repo.to_string_lossy().into_owned()),
+            args: Vec::new(),
+            status: SessionStatus::Idle,
+            created_at: Timestamp::from_rpc(&serde_json::json!(0)).expect("valid timestamp"),
+            updated_at: Timestamp::from_rpc(&serde_json::json!(0)).expect("valid timestamp"),
+            messages: Vec::new(),
+            live_message_ids: HashSet::new(),
+            streaming_message: None,
+            tool_cards: Vec::new(),
+            active_tool_calls: Vec::new(),
+            todo_phases: None,
+            kind: SessionKind::Managed,
+            session_file: Some(session_file.to_string_lossy().into_owned()),
+            title: Some(id.into()),
+            timestamp: None,
+            category: None,
+            worktree: None,
+            model: None,
+            thinking_level: None,
+            tokens_total: 0,
+            cost_usd: 0.0,
+            context_tokens: None,
+            context_window: None,
+            context_percent: None,
+            plan_mode: None,
+            pending_plan_review: None,
+        }
     }
 
     fn write_file(repo: &Path, path: &str, text: &str) {
@@ -935,6 +1180,65 @@ mod tests {
         ];
         let (_text, truncated) = git_stdout_limited(&repo, &args, 20).await.unwrap();
         assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn opens_session_diff_from_latest_snapshot_to_full_worktree() {
+        let (_temp, repo, base, _head) = test_repo();
+        let snapshot_ref = "refs/omp/diff-snapshots/test-session-start";
+        git(&repo, &["update-ref", snapshot_ref, &base]);
+        write_file(&repo, "untracked.txt", "new file\n");
+
+        let session_file = repo.join("session.jsonl");
+        let tree = git_output(&repo, &["rev-parse", &format!("{base}^{{tree}}")]);
+        let header = serde_json::json!({
+            "type": "session",
+            "id": "s1",
+            "cwd": repo,
+            "timestamp": "2026-05-04T00:00:00.000Z",
+            "title": "diff test"
+        });
+        let snapshot = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": base,
+                "createdAt": "2026-05-04T00:00:00.000Z",
+                "headCommit": base,
+                "kind": "session-start",
+                "label": "session-start",
+                "ref": snapshot_ref,
+                "repoRoot": repo,
+                "tree": tree
+            },
+            "id": "snapshot-entry",
+            "parentId": null,
+            "timestamp": "2026-05-04T00:00:00.000Z"
+        });
+        fs::write(&session_file, format!("{}\n{}\n", header, snapshot)).expect("session file");
+
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
+
+        let responses = handle_diff_open(&state, Some("s1".into()), None).await;
+        let ServerMessage::DiffState { state, .. } = &responses[0] else {
+            panic!("expected diff state: {:?}", responses);
+        };
+        assert!(matches!(
+            state.comparison.head,
+            ResolvedDiffRef::WorkingTree
+        ));
+        assert!(
+            matches!(&state.comparison.base, ResolvedDiffRef::GitRef { input, .. } if input == snapshot_ref)
+        );
+        assert!(state.diff.contains("src/lib.rs"), "{}", state.diff);
+        assert!(state.diff.contains("src/new.rs"), "{}", state.diff);
+        assert!(state.diff.contains("untracked.txt"), "{}", state.diff);
     }
 
     #[tokio::test]

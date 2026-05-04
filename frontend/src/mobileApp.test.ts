@@ -130,7 +130,7 @@ function diffState(
     comparison: {
       repoRoot: "/repo",
       base: { kind: "gitRef", input: "HEAD", refKind: "commit", oid: "a".repeat(40), display: "HEAD" },
-      head: { kind: "gitRef", input: "HEAD", refKind: "commit", oid: "b".repeat(40), display: "HEAD" },
+      head: { kind: "workingTree" },
       mode: "stat",
     },
     diff,
@@ -1046,16 +1046,17 @@ describe("mountMobileApp", () => {
     clickSession();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
 
-    expect(connection.sent).not.toContainEqual(expect.objectContaining({ type: "diff.compare", sessionId: "live" }));
+    expect(connection.sent).not.toContainEqual(expect.objectContaining({ type: "diff.open", sessionId: "live" }));
 
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
-    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.compare", sessionId: "live", repoRoot: "/repo" }));
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.open", sessionId: "live", repoRoot: "/repo" }));
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Loading diff");
 
     connection.emit({ type: "diff.state", sessionId: "live", state: diffState() });
 
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("src/main.ts | 2 ++");
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Base: HEAD");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Head: WORKTREE");
     expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
   });
 
@@ -1087,7 +1088,7 @@ describe("mountMobileApp", () => {
     inputs[1]!.value = "main";
     inputs[1]!.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.compare", sessionId: "live", base: { kind: "gitRef", value: "main" } }));
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.compare", sessionId: "live", base: { kind: "gitRef", value: "main" }, head: { kind: "workingTree" } }));
   });
 
   it("switches mobile diff between stat and full diff", () => {
