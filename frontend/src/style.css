@@ -1078,7 +1078,7 @@ h2 {
 
 .diff-line {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
   align-items: start;
   gap: 0.5rem;
   padding: 0.2rem 0.4rem;
@@ -1142,6 +1142,25 @@ h2 {
 }
 
 .diff-comment-btn.has-comments {
+  border-color: #6d7cff;
+  background: rgba(109, 124, 255, 0.16);
+  color: #eef1f8;
+}
+
+.diff-line-code-btn,
+.diff-question-btn {
+  align-self: start;
+  padding: 0.1rem 0.45rem;
+  min-width: 2rem;
+  line-height: 1.2;
+  font-size: 0.74rem;
+  border-radius: 0.45rem;
+  border: 1px solid #343a46;
+  background: #171b24;
+  color: #c7cedc;
+  white-space: nowrap;
+}
+.diff-question-btn.has-questions {
   border-color: #6d7cff;
   background: rgba(109, 124, 255, 0.16);
   color: #eef1f8;

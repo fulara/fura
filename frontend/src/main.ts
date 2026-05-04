@@ -3832,10 +3832,10 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     renderDiffMessage(main, "No session selected.", false);
     return;
   }
-  renderSessionChangesView(activeSessionId, projection, sidebarScroll, main);
+  renderSessionChangesView(activeSessionId, projection, sidebarScroll, main, container);
 }
 
-function renderSessionChangesView(sessionId: string, projection: SessionProjection, sidebar: HTMLElement, main: HTMLElement): void {
+function renderSessionChangesView(sessionId: string, projection: SessionProjection, sidebar: HTMLElement, main: HTMLElement, container: HTMLElement): void {
   const state = sessionChangesStates.get(sessionId);
   const error = diffErrors.get(sessionId);
   const subviews = mkEl("div");
@@ -3903,7 +3903,7 @@ function renderSessionChangesView(sessionId: string, projection: SessionProjecti
     renderDiffMessage(main, state.reason, true);
     return;
   }
-  renderReviewableDiff(sessionId, state, main, true);
+  renderReviewableDiff(sessionId, state, sidebar, main, container, true);
 }
 
 function renderSessionRepoControls(sessionId: string, state: SessionChangesState, sidebar: HTMLElement): void {
@@ -3985,7 +3985,7 @@ function renderCompareDiffView(sidebar: HTMLElement, main: HTMLElement): void {
     renderDiffMessage(main, "Run an explicit repository/ref comparison.", false);
     return;
   }
-  renderReviewableDiff("compareDiff", compareDiffState, main, false);
+  renderReviewableDiff("compareDiff", compareDiffState, sidebar, main, null, false);
 }
 
 function renderDiffMessage(main: HTMLElement, message: string, error: boolean): void {
@@ -3998,12 +3998,20 @@ function renderDiffMessage(main: HTMLElement, message: string, error: boolean): 
   main.append(body);
 }
 
-function renderReviewableDiff(annotationKey: string, state: DiffReviewableState, main: HTMLElement, allowPromptActions: boolean): void {
+function renderReviewableDiff(
+  annotationKey: string,
+  state: DiffReviewableState,
+  sidebar: HTMLElement,
+  main: HTMLElement,
+  jumpContainer: HTMLElement | null,
+  allowPromptActions: boolean,
+): void {
   const key = comparisonKey(state);
   const annotations = diffAnnotations.get(annotationKey) ?? [];
   const payload = state.range.payload;
   const parsedRows = payload.kind === "fullPatch" ? parseDiffRows(payload.patch) : [];
   const fileSummaries = payload.kind === "fullPatch" ? summarizeDiffFiles(parsedRows, annotations, key) : summarizeWireDiffFiles(diffPayloadFiles(payload), annotations, key);
+  renderDesktopModifiedFiles(sidebar, fileSummaries, jumpContainer);
   const summary = mkEl("section");
   summary.className = "diffs-summary";
   const comparison = mkEl("p");
@@ -4073,7 +4081,6 @@ function renderReviewableDiff(annotationKey: string, state: DiffReviewableState,
     warning.textContent = "Diff output is truncated by Fura's safety limit.";
     body.append(warning);
   }
-  renderDiffFileList(body, fileSummaries);
   if (!diffPayloadText(payload).trim()) {
     const empty = mkEl("p");
     empty.className = "empty diffs-empty";
@@ -4091,6 +4098,46 @@ function renderReviewableDiff(annotationKey: string, state: DiffReviewableState,
     renderDiffRows(body, annotationKey, state, parsedRows, annotations, key, allowPromptActions);
   }
   main.append(body);
+}
+
+function renderDesktopModifiedFiles(
+  sidebar: HTMLElement,
+  files: ReturnType<typeof summarizeDiffFiles>,
+  jumpContainer: HTMLElement | null,
+): void {
+  if (files.length === 0) return;
+  const filesSection = mkEl("section");
+  filesSection.className = "diffs-files";
+  const filesTitle = mkEl("strong");
+  filesTitle.textContent = `Modified files (${files.length})`;
+  filesSection.append(filesTitle);
+  const filesList = mkEl("div");
+  filesList.className = "diffs-file-list";
+  for (const file of files) {
+    const item = mkEl("div");
+    item.className = "diffs-file-item";
+    const name = mkEl("code");
+    name.textContent = file.filePath;
+    const meta = mkEl("span");
+    const notes = [
+      file.commentCount > 0 ? `${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : null,
+      file.questionCount > 0 ? `${file.questionCount} question${file.questionCount === 1 ? "" : "s"}` : null,
+    ].filter(Boolean).join(" · ");
+    meta.textContent = `+${file.added} -${file.removed}${notes ? ` · ${notes}` : ""}`;
+    if (jumpContainer) {
+      const jump = mkEl("button");
+      jump.type = "button";
+      jump.className = "diffs-file-jump";
+      jump.append(name, meta);
+      jump.addEventListener("click", () => scrollDiffsToFile(jumpContainer, file.filePath));
+      item.append(jump);
+    } else {
+      item.append(name, meta);
+    }
+    filesList.append(item);
+  }
+  filesSection.append(filesList);
+  sidebar.append(filesSection);
 }
 
 function renderDiffFileList(container: HTMLElement, files: ReturnType<typeof summarizeDiffFiles>): void {
