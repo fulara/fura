@@ -100,6 +100,9 @@ body {
   border-radius: 0.9rem;
   background: rgba(16, 19, 26, 0.82);
   padding: 0.75rem;
+  max-height: min(62dvh, 34rem);
+  overflow: auto;
+  overscroll-behavior: contain;
 }
 
 .mobile-create-drawer[hidden] {
@@ -159,9 +162,14 @@ body {
 }
 
 .mobile-create-actions {
+  position: sticky;
+  bottom: 0;
   display: flex;
   justify-content: flex-end;
   gap: 0.5rem;
+  margin-top: 0.2rem;
+  padding-top: 0.55rem;
+  background: linear-gradient(180deg, rgba(16, 19, 26, 0), rgba(16, 19, 26, 0.9) 35%, rgba(16, 19, 26, 0.98));
 }
 
 .mobile-main {
