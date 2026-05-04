@@ -1588,7 +1588,7 @@ function captureFrontendUiSnapshot(): FrontendUiSnapshot {
   return {
     activeSessionId,
     focusedArea: focusedArea(),
-    visibleSessionIds: visibleSessions().map(session => session.sessionId),
+    sessionIds: sessions.map(session => session.sessionId),
     promptDraft: {
       sessionId: activeSessionId,
       hasText: promptInput.value.trim().length > 0,

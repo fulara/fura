@@ -55,8 +55,14 @@ body {
 }
 
 .mobile-sessions-toggle,
-.mobile-create-toggle {
+.mobile-create-toggle,
+.mobile-ask-fura-button {
   flex: 0 0 auto;
+}
+
+.mobile-ask-fura-button.active {
+  border-color: #7f8cff;
+  background: rgba(127, 140, 255, 0.18);
 }
 
 .mobile-options {
@@ -238,6 +244,10 @@ body {
   padding: 0.6rem 0.9rem 0;
 }
 
+.mobile-workspace-tabs[hidden] {
+  display: none;
+}
+
 .mobile-workspace-tab.active {
   border-color: #7f8cff;
   background: rgba(127, 140, 255, 0.18);
@@ -251,6 +261,21 @@ body {
 
 .mobile-transcript .message {
   max-width: none;
+}
+
+.mobile-controller {
+  display: grid;
+  align-content: start;
+  gap: 0.75rem;
+}
+
+.mobile-controller[hidden] {
+  display: none;
+}
+
+.mobile-control-candidate,
+.mobile-control-suggestion {
+  margin-top: 0.6rem;
 }
 
 .mobile-transcript .plan-review-card {

@@ -253,7 +253,7 @@ export type ServerConfig = {
 export type FrontendUiSnapshot = {
   activeSessionId?: string | null;
   focusedArea?: "controller" | "sessionList" | "prompt" | "transcript" | "tools" | "unknown";
-  visibleSessionIds: string[];
+  sessionIds: string[];
   promptDraft?: { sessionId?: string | null; hasText: boolean; textLength: number };
   panels?: { transcriptVisible: boolean; toolsVisible: boolean };
   blockingUi?: { modalOpen: boolean; dialogOpen: boolean };

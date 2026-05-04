@@ -49,6 +49,11 @@ import {
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import type {
   ClientMessage,
+  ControlCandidate,
+  ControlStatusProjection,
+  ControlSuggestedAction,
+  FrontendControlAction,
+  FrontendUiSnapshot,
   DiffReviewAnnotation,
   DiffLineLocation,
   RepoDiffState,
@@ -94,6 +99,16 @@ type MobileSessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 const MOBILE_ACTIVE_SESSION_STORAGE_KEY = "fura.mobile.activeSessionId";
 const MOBILE_ATTACHED_SESSIONS_STORAGE_KEY = "fura.mobile.attachedSessionIds";
 const MAX_TRACKED_MOBILE_SESSION_IDS = 20;
+const CONTROL_CLIENT_ID_STORAGE_KEY = "fura.controlClientId";
+
+type MobileWorkspaceView = "controller" | "transcript" | "diff";
+
+type ControlChatMessage = {
+  role: "user" | "assistant" | "system";
+  text: string;
+  candidates?: ControlCandidate[];
+  suggestedActions?: ControlSuggestedAction[];
+};
 
 export type MobileConnectionOptions = {
   auth: WebSocketAuth;
@@ -141,6 +156,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           <div class="mobile-header-actions">
             <button id="mobileCreateToggle" class="mobile-create-toggle" type="button" aria-expanded="false" aria-controls="mobileCreateDrawer">New</button>
             <button id="mobileSessionsToggle" class="mobile-sessions-toggle" type="button" aria-expanded="false" aria-controls="mobileSessionsDrawer">Sessions</button>
+            <button id="mobileAskFuraButton" class="mobile-ask-fura-button" type="button" aria-pressed="false" aria-controls="mobileController">Ask</button>
             <div class="mobile-options">
               <button id="mobileOptionsToggle" class="mobile-options-toggle" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="mobileOptionsMenu" title="Display options">⚙</button>
               <div id="mobileOptionsMenu" class="mobile-options-menu" role="menu" hidden>
@@ -189,13 +205,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         </section>
       </header>
 
-      <section class="mobile-main" aria-label="Active session workspace">
-        <nav class="mobile-workspace-tabs" aria-label="Mobile workspace views">
-          <button id="mobileTranscriptTab" type="button" class="mobile-workspace-tab active" aria-pressed="true">Transcript</button>
-          <button id="mobileDiffTab" type="button" class="mobile-workspace-tab" aria-pressed="false">Diff</button>
+      <section class="mobile-main" aria-label="Mobile workspace">
+        <nav id="mobileSessionWorkspaceTabs" class="mobile-workspace-tabs" role="tablist" aria-label="Session workspace views">
+          <button id="mobileTranscriptTab" type="button" class="mobile-workspace-tab active" role="tab" aria-selected="true" aria-controls="mobileTranscript">Transcript</button>
+          <button id="mobileDiffTab" type="button" class="mobile-workspace-tab" role="tab" aria-selected="false" aria-controls="mobileDiff">Diff</button>
         </nav>
-        <div id="mobileTranscript" class="mobile-transcript"></div>
-        <div id="mobileDiff" class="mobile-diff" hidden></div>
+        <div id="mobileController" class="mobile-transcript mobile-controller" role="region" aria-label="Ask Fura" hidden></div>
+        <div id="mobileTranscript" class="mobile-transcript" role="tabpanel" aria-labelledby="mobileTranscriptTab"></div>
+        <div id="mobileDiff" class="mobile-diff" role="tabpanel" aria-labelledby="mobileDiffTab" hidden></div>
       </section>
 
       <form id="mobilePromptForm" class="mobile-composer">
@@ -384,8 +401,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const createStatus = requireElement<HTMLParagraphElement>(document, "mobileCreateStatus");
   const createClose = requireElement<HTMLButtonElement>(document, "mobileCreateClose");
   const createSubmit = requireElement<HTMLButtonElement>(document, "mobileCreateSubmit");
+  const askFuraButton = requireElement<HTMLButtonElement>(document, "mobileAskFuraButton");
+  const sessionWorkspaceTabs = requireElement<HTMLElement>(document, "mobileSessionWorkspaceTabs");
   const transcriptTab = requireElement<HTMLButtonElement>(document, "mobileTranscriptTab");
   const diffTab = requireElement<HTMLButtonElement>(document, "mobileDiffTab");
+  const controllerView = requireElement<HTMLDivElement>(document, "mobileController");
   const transcript = requireElement<HTMLDivElement>(document, "mobileTranscript");
   const diffView = requireElement<HTMLDivElement>(document, "mobileDiff");
   const promptForm = requireElement<HTMLFormElement>(document, "mobilePromptForm");
@@ -435,6 +455,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const reviewPreviewSend = requireElement<HTMLButtonElement>(document, "mobileReviewPreviewSend");
 
   let connection: FuraConnection | null = null;
+  const controlClientId = getOrCreateControlClientId(window.sessionStorage);
+  let controlConversationId: string | null = null;
+  let controlMessages: ControlChatMessage[] = [];
+  let controlStatusState: ControlStatusProjection = { status: "idle" };
   let reviewPreviewDraft: { sessionId: string; message: TranscriptMessage; comments: TranscriptReviewComment[]; promptText?: string } | null = null;
   const transcriptReviewActiveMessages = new Map<string, string>();
   const visiblePlanReviews = new Map<string, VisiblePlanReview>();
@@ -462,7 +486,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let nextPendingImageId = 1;
   let createPendingRequestId: string | null = null;
   let pendingCreatedSessionBaseline: Set<string> | null = null;
-  let activeMobileView: "transcript" | "diff" = "transcript";
+  let activeMobileView: MobileWorkspaceView = "transcript";
+  let sessionPromptDraft = "";
+  let controllerPromptDraft = "";
+  let lastSessionMobileView: Exclude<MobileWorkspaceView, "controller"> = "transcript";
   const diffStates = new Map<string, RepoDiffState>();
   const diffErrors = new Map<string, string>();
   const diffLoadingSessions = new Set<string>();
@@ -487,6 +514,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     onDeleteSession: openDeleteSessionPicker,
   });
 
+  askFuraButton.addEventListener("click", () => {
+    setActiveMobileView(activeMobileView === "controller" ? lastSessionMobileView : "controller");
+  });
   transcriptTab.addEventListener("click", () => setActiveMobileView("transcript"));
   diffTab.addEventListener("click", () => setActiveMobileView("diff"));
 
@@ -601,6 +631,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     event.preventDefault();
     const editorText = promptInput.value;
     const text = editorText.trim();
+    if (activeMobileView === "controller") {
+      if (!text) return;
+      if (pendingImages.length > 0) {
+        controlMessages.push({ role: "system", text: "Ask Fura does not accept image attachments yet. Switch back to a session to send images to the agent." });
+        renderControlConversation();
+        return;
+      }
+      if (submitControlPromptText(text)) promptInput.value = "";
+      return;
+    }
     if ((!text && pendingImages.length === 0) || !activeSessionId) return;
     if (hasPendingPlanReview(activeSessionId)) return;
     sendPromptWithBusyHandling({
@@ -1322,10 +1362,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       },
       onRemoveSnippet: () => undefined,
     });
+    if (activeMobileView === "controller") imagePreviews.hidden = true;
     updateComposerStatus();
   }
 
   function updateComposerStatus(): void {
+    if (activeMobileView === "controller") {
+      composerStatus.textContent = controlStatusState.status === "working" ? "Ask Fura thinking" : "Ask Fura";
+      return;
+    }
     if (!activeSessionId) {
       composerStatus.textContent = "No active session";
       return;
@@ -1377,6 +1422,18 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       }
     }
 
+    statusBar.append(...interleaveMobileStatusParts(parts));
+  }
+
+  function updateMobileControlStatusBar(): void {
+    statusBar.replaceChildren();
+    const parts = [
+      mobileStatusPart("π", "status-pi"),
+      mobileStatusPart("Ask Fura", "model"),
+      mobileStatusPart(controlStatusState.status, controlStatusState.status === "working" ? "mode" : "muted"),
+    ];
+    if (controlStatusState.status === "working") parts[0].classList.add("is-running");
+    statusBar.classList.toggle("busy", controlStatusState.status === "working");
     statusBar.append(...interleaveMobileStatusParts(parts));
   }
 
@@ -1540,16 +1597,35 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   }
 
-  function setActiveMobileView(view: "transcript" | "diff"): void {
+  function setActiveMobileView(view: MobileWorkspaceView): void {
+    const wasController = activeMobileView === "controller";
+    const willBeController = view === "controller";
+    if (view !== "controller") lastSessionMobileView = view;
+    if (wasController !== willBeController) {
+      if (wasController) {
+        controllerPromptDraft = promptInput.value;
+        promptInput.value = sessionPromptDraft;
+      } else {
+        sessionPromptDraft = promptInput.value;
+        promptInput.value = controllerPromptDraft;
+      }
+    }
     activeMobileView = view;
+    sessionWorkspaceTabs.hidden = willBeController;
+    controllerView.hidden = !willBeController;
     transcript.hidden = view !== "transcript";
     diffView.hidden = view !== "diff";
-    transcriptTab.classList.toggle("active", view === "transcript");
-    diffTab.classList.toggle("active", view === "diff");
-    transcriptTab.setAttribute("aria-pressed", String(view === "transcript"));
-    diffTab.setAttribute("aria-pressed", String(view === "diff"));
+    askFuraButton.classList.toggle("active", willBeController);
+    askFuraButton.setAttribute("aria-pressed", String(willBeController));
+    syncMobileWorkspaceTab(transcriptTab, view === "transcript");
+    syncMobileWorkspaceTab(diffTab, view === "diff");
     if (view === "diff" && activeSessionId) requestMobileDiffState(activeSessionId);
     renderActiveSession();
+  }
+
+  function syncMobileWorkspaceTab(tab: HTMLButtonElement, active: boolean): void {
+    tab.classList.toggle("active", active);
+    tab.setAttribute("aria-selected", String(active));
   }
 
   type MobileDiffSelection = {
@@ -1725,14 +1801,188 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "diff.reviewWorktree.state":
         break;
       case "control.reply":
+        if (message.targetClientId === controlClientId) handleControlReply(message);
+        break;
       case "control.status":
+        if (!message.targetClientId || message.targetClientId === controlClientId) {
+          controlStatusState = message.status;
+          renderControlConversation();
+          updateComposerStatus();
+        }
+        break;
       case "frontend.control":
+        if (message.targetClientId === controlClientId) handleFrontendControl(message.action);
+        break;
       case "voice.status":
       case "voice.delta":
       case "voice.final":
       case "voice.error":
         break;
     }
+  }
+
+  function submitControlPromptText(text: string): boolean {
+    const prompt = text.trim();
+    if (!prompt) return false;
+    const conversationId = controlConversationId ?? nextClientRequestId("control-conversation");
+    const accepted = send({
+      type: "control.prompt",
+      clientId: controlClientId,
+      conversationId,
+      text: prompt,
+      uiSnapshot: captureFrontendUiSnapshot(),
+    });
+    if (!accepted) return false;
+    controlConversationId = conversationId;
+    controlMessages.push({ role: "user", text: prompt });
+    controlStatusState = { status: "working", message: "Ask Fura is thinking." };
+    renderControlConversation();
+    updateComposerStatus();
+    return true;
+  }
+
+  function captureFrontendUiSnapshot(): FrontendUiSnapshot {
+    const modalOpen = Boolean(document.querySelector(".mobile-dialog-overlay:not([hidden])"));
+    return {
+      activeSessionId,
+      focusedArea: mobileFocusedArea(),
+      sessionIds: sessions.map(session => session.sessionId),
+      promptDraft: {
+        sessionId: activeMobileView === "controller" ? null : activeSessionId,
+        hasText: promptInput.value.trim().length > 0,
+        textLength: promptInput.value.length,
+      },
+      panels: {
+        transcriptVisible: activeMobileView === "transcript" || activeMobileView === "controller",
+        toolsVisible: false,
+      },
+      blockingUi: {
+        modalOpen,
+        dialogOpen: Boolean(activeDialog),
+      },
+    };
+  }
+
+  function mobileFocusedArea(): FrontendUiSnapshot["focusedArea"] {
+    const element = document.activeElement;
+    if (activeMobileView === "controller" && element === promptInput) return "controller";
+    if (element === promptInput) return "prompt";
+    if (element && sessionsList.contains(element)) return "sessionList";
+    if (element && controllerView.contains(element)) return "controller";
+    if (element && transcript.contains(element)) return "transcript";
+    return "unknown";
+  }
+
+  function handleControlReply(message: Extract<ServerMessage, { type: "control.reply" }>): void {
+    controlConversationId = message.conversationId;
+    controlMessages.push({
+      role: "assistant",
+      text: message.message,
+      candidates: message.candidates ?? [],
+      suggestedActions: message.suggestedActions ?? [],
+    });
+    renderControlConversation();
+  }
+
+  function handleFrontendControl(action: FrontendControlAction): void {
+    switch (action.type) {
+      case "selectSession":
+        selectSession(action.sessionId);
+        setActiveMobileView("transcript");
+        break;
+      case "setPromptDraft": {
+        const targetSessionId = action.sessionId ?? activeSessionId;
+        if (targetSessionId) {
+          const target = sessions.find(session => session.sessionId === targetSessionId);
+          if (target) {
+            activateSession(targetSessionId);
+            send(sessionOpenOrAttachMessage(target));
+          }
+        }
+        sessionPromptDraft = action.text;
+        setActiveMobileView("transcript");
+        promptInput.value = action.text;
+        if (action.focus) promptInput.focus();
+        renderActiveSession();
+        break;
+      }
+      case "focus":
+        if (action.target === "controller") setActiveMobileView("controller");
+        else setActiveMobileView("transcript");
+        promptInput.focus();
+        break;
+      case "showNotice":
+        controlMessages.push({ role: "system", text: action.text });
+        renderControlConversation();
+        appendLog(action.text);
+        break;
+    }
+  }
+
+  function renderControlConversation(): void {
+    if (activeMobileView === "controller") renderActiveSession();
+  }
+
+  function renderControllerView(): void {
+    setRenderDocument(controllerView.ownerDocument);
+    const wasNearBottom = controllerView.scrollHeight - controllerView.scrollTop - controllerView.clientHeight < 120;
+    const fragment = controllerView.ownerDocument.createDocumentFragment();
+    for (const [index, message] of controlMessages.entries()) {
+      fragment.append(renderControlTranscriptMessage(message, index));
+    }
+    if (!fragment.hasChildNodes()) {
+      const empty = controllerView.ownerDocument.createElement("p");
+      empty.className = "mobile-empty-state";
+      empty.textContent = "Ask Fura can find sessions, discuss candidates, open a session, or stage a prompt draft.";
+      fragment.append(empty);
+    }
+    controllerView.replaceChildren(fragment);
+    if (wasNearBottom) controllerView.scrollTop = controllerView.scrollHeight;
+  }
+
+  function renderControlTranscriptMessage(message: ControlChatMessage, index: number): HTMLElement {
+    const article = renderMessage({
+      id: `mobile-ask-fura-${index}`,
+      role: message.role,
+      blocks: [{ kind: "text", text: message.text }],
+      timestamp: null,
+      isNew: false,
+    }, { thinkingVisibilityMode });
+    const roleLabel = article.querySelector(".message-heading strong");
+    if (roleLabel && message.role === "assistant") roleLabel.textContent = "Ask Fura";
+    for (const candidate of message.candidates ?? []) article.append(renderControlCandidate(candidate));
+    for (const suggestion of message.suggestedActions ?? []) article.append(renderControlSuggestion(suggestion));
+    return article;
+  }
+
+  function renderControlCandidate(candidate: ControlCandidate): HTMLElement {
+    const card = controllerView.ownerDocument.createElement("div");
+    card.className = "control-candidate mobile-control-candidate";
+    const title = controllerView.ownerDocument.createElement("strong");
+    title.textContent = candidate.title || `Session ${shortId(candidate.sessionId)}`;
+    const reason = controllerView.ownerDocument.createElement("span");
+    reason.textContent = candidate.reason;
+    const open = controllerView.ownerDocument.createElement("button");
+    open.type = "button";
+    open.textContent = "Open";
+    open.addEventListener("click", () => handleFrontendControl({ type: "selectSession", sessionId: candidate.sessionId }));
+    card.append(title, reason, open);
+    for (const snippetText of candidate.snippets ?? []) {
+      const snippet = controllerView.ownerDocument.createElement("p");
+      snippet.className = "control-snippet";
+      snippet.textContent = snippetText;
+      card.append(snippet);
+    }
+    return card;
+  }
+
+  function renderControlSuggestion(suggestion: ControlSuggestedAction): HTMLElement {
+    const button = controllerView.ownerDocument.createElement("button");
+    button.type = "button";
+    button.className = "control-suggestion mobile-control-suggestion";
+    button.textContent = suggestion.label;
+    button.addEventListener("click", () => handleFrontendControl(suggestion.action));
+    return button;
   }
 
   function selectSession(sessionId: string): void {
@@ -1937,6 +2187,22 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     };
   }
   function renderActiveSession(): void {
+    if (activeMobileView === "controller") {
+      const isWorking = controlStatusState.status === "working";
+      sessionTitle.textContent = "Ask Fura";
+      sessionMeta.hidden = false;
+      sessionMeta.textContent = "Find, discuss, and open Fura sessions.";
+      promptInput.disabled = isWorking;
+      sendButton.disabled = isWorking;
+      imageInput.disabled = true;
+      renderMobileImagePreviews();
+      promptInput.placeholder = isWorking ? "Ask Fura is working…" : "Ask Fura about sessions…";
+      updateMobileControlStatusBar();
+      updateComposerStatus();
+      renderControllerView();
+      renderBusyPromptChoice();
+      return;
+    }
     const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
     const summary = projection?.summary ?? sessions.find(session => session.sessionId === activeSessionId);
     if (!activeSessionId || !summary) {
@@ -1949,6 +2215,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       promptInput.placeholder = "Select a session first";
       composerStatus.textContent = "No active session";
       updateMobileStatusBar(undefined);
+      renderMobileImagePreviews();
       closeReviewPreview();
       renderTranscript(undefined);
       renderDiffView(undefined);
@@ -1965,6 +2232,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     promptInput.disabled = !projection || hasPendingPlan;
     sendButton.disabled = !projection || hasPendingPlan;
     imageInput.disabled = !projection || hasPendingPlan;
+    renderMobileImagePreviews();
     promptInput.placeholder = hasPendingPlan ? "Choose Approve and execute, Refine plan, or Discuss plan first…" : "Send a prompt…";
     updateComposerStatus();
     renderTranscript(projection);
@@ -2322,6 +2590,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   return { connect, send };
+}
+
+function getOrCreateControlClientId(storage: MobileSessionStorage): string {
+  const existing = storage.getItem(CONTROL_CLIENT_ID_STORAGE_KEY);
+  if (existing) return existing;
+  const next = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID()
+    : `mobile-control-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  storage.setItem(CONTROL_CLIENT_ID_STORAGE_KEY, next);
+  return next;
 }
 
 function readStoredActiveSessionId(storage: MobileSessionStorage): string | null {

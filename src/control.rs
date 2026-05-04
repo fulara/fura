@@ -508,7 +508,7 @@ async fn dispatch_controller_tool(
                     .unwrap_or_else(|| FrontendUiSnapshot {
                         active_session_id: run.active_session_id.clone(),
                         focused_area: None,
-                        visible_session_ids: Vec::new(),
+                        session_ids: Vec::new(),
                         prompt_draft: None,
                         panels: None,
                         blocking_ui: None,
@@ -632,9 +632,9 @@ Search truthfulness:
 
 Context rules:
 - The frontend snapshot is point-in-time context and may be stale.
+- The snapshot sessionIds field is the complete set of non-controller sessions the frontend currently knows, not just what is visible after UI filters.
 - Prior candidates are the last candidates shown in this control conversation.
 - Session ids are stable; visible UI ordering may change.
-
 Current frontend snapshot JSON:
 {snapshot_json}
 

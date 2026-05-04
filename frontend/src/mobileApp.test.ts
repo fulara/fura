@@ -456,6 +456,73 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileCategorySave")).toBeNull();
   });
 
+  it("sends Ask Fura prompts with all known session ids despite category filters", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "sessions.snapshot",
+      sessions: [summary("live", { category: "ops" }), summary("other", { category: "personal" })],
+    });
+    const filter = document.querySelector<HTMLSelectElement>("#mobileSessionCategoryFilter");
+    const askTab = document.querySelector<HTMLButtonElement>("#mobileAskFuraButton");
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
+    const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
+    if (!filter || !askTab || !input || !form) throw new Error("Ask Fura controls missing");
+    filter.value = "ops";
+    filter.dispatchEvent(new Event("change", { bubbles: true }));
+    connection.sent = [];
+
+    askTab.click();
+    input.value = "find personal";
+    form.requestSubmit();
+
+    const prompt = connection.sent.find((message): message is Extract<ClientMessage, { type: "control.prompt" }> => message.type === "control.prompt");
+    expect(prompt).toBeTruthy();
+    expect(prompt?.text).toBe("find personal");
+    expect(prompt?.uiSnapshot.sessionIds).toEqual(["live", "other"]);
+    expect(prompt?.uiSnapshot).not.toHaveProperty("visibleSessionIds");
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Ask Fura thinking");
+  });
+
+  it("renders Ask Fura candidates and opens the selected session", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live", { title: "Live" })] });
+    const askTab = document.querySelector<HTMLButtonElement>("#mobileAskFuraButton");
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
+    const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
+    if (!askTab || !input || !form) throw new Error("Ask Fura controls missing");
+    askTab.click();
+    input.value = "find live";
+    form.requestSubmit();
+    const prompt = connection.sent.find((message): message is Extract<ClientMessage, { type: "control.prompt" }> => message.type === "control.prompt");
+    if (!prompt) throw new Error("control prompt missing");
+
+    connection.emit({
+      type: "control.reply",
+      targetClientId: prompt.clientId,
+      conversationId: prompt.conversationId ?? "conversation",
+      message: "Found it.",
+      candidates: [{
+        type: "session",
+        candidateId: "session-1",
+        sessionId: "live",
+        title: "Live",
+        cwd: "/repo",
+        timestamp: null,
+        status: "idle",
+        kind: "managed",
+        reason: "matched title",
+      }],
+    });
+
+    expect(document.querySelector("#mobileController")?.textContent).toContain("Found it.");
+    expect(document.querySelector("#mobileController")?.textContent).toContain("Live");
+    document.querySelector<HTMLButtonElement>(".mobile-control-candidate button")?.click();
+
+    expect(connection.sent).toContainEqual({ type: "session.attach", sessionId: "live" });
+    expect(document.querySelector<HTMLButtonElement>("#mobileAskFuraButton")?.getAttribute("aria-pressed")).toBe("false");
+    expect(document.querySelector<HTMLButtonElement>("#mobileTranscriptTab")?.classList.contains("active")).toBe(true);
+  });
+
   it("deletes sessions with a worktree option only for managed worktree sessions", () => {
     const { connection } = createHarness();
     connection.emit({

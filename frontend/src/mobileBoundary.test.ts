@@ -4,12 +4,11 @@ import mobileSource from "./mobile.ts?raw";
 import mobileAppSource from "./mobileApp.ts?raw";
 
 describe("mobile entry boundary", () => {
-  it("does not import desktop Dockview or Ask Fura controller paths", () => {
+  it("does not import desktop Dockview paths", () => {
     for (const source of [mobileSource, mobileAppSource]) {
       expect(source).not.toContain("desktopDockview");
       expect(source).not.toContain("Dockview");
-      expect(source).not.toContain("askFura");
-      expect(source).not.toContain("control.prompt");
+      expect(source).not.toContain("ask-fura-toggle");
     }
   });
 });

@@ -215,7 +215,7 @@ pub(crate) struct FrontendUiSnapshot {
     pub(crate) active_session_id: Option<String>,
     pub(crate) focused_area: Option<String>,
     #[serde(default)]
-    pub(crate) visible_session_ids: Vec<String>,
+    pub(crate) session_ids: Vec<String>,
     pub(crate) prompt_draft: Option<PromptDraftSnapshot>,
     pub(crate) panels: Option<PanelSnapshot>,
     pub(crate) blocking_ui: Option<BlockingUiSnapshot>,
