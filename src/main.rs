@@ -380,6 +380,7 @@ pub(crate) mod tests {
             context_window: None,
             context_percent: None,
             plan_mode: None,
+            pending_plan_review: None,
         }
     }
 
@@ -1095,6 +1096,20 @@ pub(crate) mod tests {
             }),
         )
         .await;
+
+        match events.recv().await.expect("plan review snapshot") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                let pending = state
+                    .pending_plan_review
+                    .expect("pending plan review should be projected");
+                assert_eq!(pending.plan_file_path, "local://PLAN.md");
+                assert_eq!(pending.final_plan_file_path, "local://APPROVED.md");
+                assert_eq!(pending.title.as_deref(), Some("APPROVED"));
+                assert_eq!(pending.content, "# Plan");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
 
         match events.recv().await.expect("plan review event") {
             ServerMessage::PlanReview {

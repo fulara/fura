@@ -301,6 +301,18 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileConnectionStatus")?.textContent).toBe("connected");
   });
 
+  it("does not send prompt.abort when the websocket closes", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession(0);
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    connection.sent = [];
+
+    connection.emitClose("reconnecting in 500ms", "reconnecting");
+
+    expect(connection.sent.some(message => message.type === "prompt.abort")).toBe(false);
+  });
+
   it("refreshes the active and previously attached managed sessions after reconnect", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
@@ -318,6 +330,49 @@ describe("mountMobileApp", () => {
       { type: "state.refresh", sessionId: "other" },
       { type: "state.refresh", sessionId: "live" },
     ]);
+  });
+
+  it("restores pending plan review from a post-reconnect session snapshot", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession(0);
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    connection.sent = [];
+
+    connection.options.onOpen?.();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    expect(connection.sent).toEqual([
+      { type: "session.list" },
+      { type: "state.refresh", sessionId: "live" },
+    ]);
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        planMode: { enabled: true, planFilePath: "local://PLAN.md", discussion: false },
+        pendingPlanReview: {
+          planFilePath: "local://PLAN.md",
+          finalPlanFilePath: "local://FINAL.md",
+          title: "Recovered review",
+          content: "Recovered plan body",
+        },
+      }),
+    });
+
+    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Plan ready: Recovered review");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Plan review waiting");
+
+    document.querySelector<HTMLButtonElement>(".plan-review-approve")?.click();
+    expect(connection.sent).toContainEqual({
+      type: "plan.approve",
+      sessionId: "live",
+      planFilePath: "local://PLAN.md",
+      finalPlanFilePath: "local://FINAL.md",
+      title: "Recovered review",
+      content: "Recovered plan body",
+    });
   });
 
   it("filters sessions by category without exposing mobile category editing", () => {

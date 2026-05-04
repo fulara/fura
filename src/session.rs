@@ -42,6 +42,7 @@ pub(crate) struct SessionRecord {
     pub(crate) context_window: Option<u64>,
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<PlanModeProjection>,
+    pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
 }
 
 impl SessionRecord {
@@ -135,6 +136,7 @@ impl SessionRecord {
             context_window: self.context_window,
             context_percent: self.context_percent,
             plan_mode: self.plan_mode.clone(),
+            pending_plan_review: self.pending_plan_review.clone(),
             todo_phases: self.effective_todo_phases(),
         }
     }
@@ -195,6 +197,7 @@ pub(crate) struct SessionProjection {
     pub(crate) context_window: Option<u64>,
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<PlanModeProjection>,
+    pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
 }
 
@@ -207,6 +210,14 @@ pub(crate) struct PlanModeProjection {
     pub(crate) discussion: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingPlanReviewProjection {
+    pub(crate) plan_file_path: String,
+    pub(crate) final_plan_file_path: String,
+    pub(crate) title: Option<String>,
+    pub(crate) content: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TodoPhaseProjection {

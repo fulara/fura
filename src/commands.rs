@@ -707,7 +707,22 @@ async fn handle_plan_approve(
         "finalPlanFilePath": final_plan_file_path,
     });
     match send_rpc_command(state, &session_id, command).await {
-        Ok(()) => Vec::new(),
+        Ok(()) => {
+            let snapshot = {
+                let mut sessions = state.sessions.write().await;
+                sessions.get_mut(&session_id).map(|record| {
+                    record.pending_plan_review = None;
+                    ServerMessage::SessionSnapshot {
+                        session_id: session_id.clone(),
+                        state: record.projection(),
+                    }
+                })
+            };
+            if let Some(snapshot) = snapshot {
+                let _ = state.events.send(snapshot);
+            }
+            Vec::new()
+        }
         Err(message) => vec![ServerMessage::Error {
             request_id: None,
             message,
@@ -822,6 +837,7 @@ pub(crate) fn opened_session_record(
         context_window: existing.and_then(|record| record.context_window),
         context_percent: existing.and_then(|record| record.context_percent),
         plan_mode: existing.and_then(|record| record.plan_mode.clone()),
+        pending_plan_review: existing.and_then(|record| record.pending_plan_review.clone()),
     }
 }
 

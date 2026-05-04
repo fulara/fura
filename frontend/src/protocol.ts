@@ -109,6 +109,12 @@ export type PlanModeProjection = {
   discussion?: boolean;
 };
 
+export type PendingPlanReviewProjection = {
+  planFilePath: string;
+  finalPlanFilePath: string;
+  title?: string | null;
+  content: string;
+};
 export type SessionProjection = {
   summary: SessionSummary;
   transcript: TranscriptEntry[];
@@ -121,6 +127,7 @@ export type SessionProjection = {
   contextWindow?: number | null;
   contextPercent?: number | null;
   planMode?: PlanModeProjection | null;
+  pendingPlanReview?: PendingPlanReviewProjection | null;
   todoPhases: TodoPhase[];
 };
 

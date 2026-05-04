@@ -673,9 +673,50 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     unreadSessions.add(message.sessionId);
     renderSessions();
   }
-
   function hasPendingPlanReview(sessionId: string): boolean {
     return visiblePlanReviews.get(sessionId)?.mode === "pending";
+  }
+
+  function samePendingPlanReview(left: PendingPlanReview, right: PendingPlanReview): boolean {
+    return left.sessionId === right.sessionId
+      && left.planFilePath === right.planFilePath
+      && left.finalPlanFilePath === right.finalPlanFilePath
+      && (left.title ?? "") === (right.title ?? "")
+      && left.content === right.content;
+  }
+
+  function pendingPlanReviewFromProjection(sessionId: string, projection: SessionProjection): PendingPlanReview | null {
+    const pending = projection.pendingPlanReview;
+    if (!pending) return null;
+    return {
+      sessionId,
+      planFilePath: pending.planFilePath,
+      finalPlanFilePath: pending.finalPlanFilePath,
+      title: pending.title ?? undefined,
+      content: pending.content,
+    };
+  }
+
+  function syncVisiblePlanReviewFromProjection(sessionId: string, projection: SessionProjection): void {
+    const pending = pendingPlanReviewFromProjection(sessionId, projection);
+    if (!pending) {
+      visiblePlanReviews.delete(sessionId);
+      return;
+    }
+    const existing = visiblePlanReviews.get(sessionId);
+    const mode: VisiblePlanReview["mode"] = projection.planMode?.discussion
+      ? "discussing"
+      : existing && existing.mode === "refining" && samePendingPlanReview(existing.review, pending)
+        ? "refining"
+        : "pending";
+    visiblePlanReviews.set(sessionId, { review: pending, mode });
+  }
+
+  function pruneVisiblePlanReviewsWithSessionList(): void {
+    const visibleSessionIds = new Set(sessions.map(session => session.sessionId));
+    for (const sessionId of visiblePlanReviews.keys()) {
+      if (!visibleSessionIds.has(sessionId)) visiblePlanReviews.delete(sessionId);
+    }
   }
 
   function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
@@ -1463,6 +1504,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "sessions.snapshot":
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
         syncTrackedSessionsWithSnapshot();
+        pruneVisiblePlanReviewsWithSessionList();
         if (pendingRestoreAfterSessionsSnapshot) {
           pendingRestoreAfterSessionsSnapshot = false;
           restoreTrackedManagedSessions();
@@ -1473,6 +1515,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         rememberTrackedSessionId(message.sessionId);
         const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
         ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
+        syncVisiblePlanReviewFromProjection(message.sessionId, message.state);
         if (createdByPendingRequest || !activeSessionId || activeSessionId === message.sessionId) {
           activateSession(message.sessionId);
           if (createdByPendingRequest) finishCreateSession();

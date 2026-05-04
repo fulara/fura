@@ -381,6 +381,25 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             title,
             content,
         } => {
+            let persisted = PendingPlanReviewProjection {
+                plan_file_path: plan_file_path.clone(),
+                final_plan_file_path: final_plan_file_path.clone(),
+                title: title.clone(),
+                content: content.clone(),
+            };
+            let snapshot = {
+                let mut sessions = state.sessions.write().await;
+                sessions.get_mut(&target_session_id).map(|record| {
+                    record.pending_plan_review = Some(persisted);
+                    ServerMessage::SessionSnapshot {
+                        session_id: target_session_id.clone(),
+                        state: record.projection(),
+                    }
+                })
+            };
+            if let Some(snapshot) = snapshot {
+                let _ = state.events.send(snapshot);
+            }
             let _ = state.events.send(ServerMessage::PlanReview {
                 session_id: target_session_id.clone(),
                 plan_file_path,
@@ -653,7 +672,13 @@ pub(crate) fn apply_rpc_state_to_record(
     record.context_window = context_window;
     record.context_percent = context_percent;
     if let Some(plan_mode) = plan_mode {
+        let keep_pending_plan = plan_mode
+            .as_ref()
+            .is_some_and(|mode| mode.enabled && !mode.discussion);
         record.plan_mode = plan_mode;
+        if !keep_pending_plan {
+            record.pending_plan_review = None;
+        }
     }
     if let Some(todo_phases) = todo_phases {
         record.todo_phases = Some(todo_phases);
@@ -1051,6 +1076,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                                 context_window: None,
                                 context_percent: None,
                                 plan_mode: None,
+                                pending_plan_review: None,
                             }
                         });
 
