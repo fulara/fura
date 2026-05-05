@@ -12,7 +12,7 @@ use tokio::fs as async_fs;
 use tracing::warn;
 use x509_parser::pem::Pem;
 
-use crate::{AppState, ServerMessage};
+use crate::{AppState, ServerMessage, SessionMode};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -114,6 +114,8 @@ pub(crate) struct FuraConfig {
     pub(crate) thinking_visibility: ThinkingVisibilityPreference,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) session_categories: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub(crate) session_modes: HashMap<String, SessionMode>,
 }
 
 impl Default for FuraConfig {
@@ -124,6 +126,7 @@ impl Default for FuraConfig {
             show_tools: default_show_tools(),
             thinking_visibility: default_thinking_visibility(),
             session_categories: HashMap::new(),
+            session_modes: HashMap::new(),
         }
     }
 }
@@ -370,6 +373,7 @@ pub(crate) async fn save_fura_config(state: &AppState) {
         show_tools: *state.show_tools.read().await,
         thinking_visibility: *state.thinking_visibility.read().await,
         session_categories: state.session_categories.read().await.clone(),
+        session_modes: state.session_modes.read().await.clone(),
     };
     match serde_yaml::to_string(&config) {
         Ok(text) => {

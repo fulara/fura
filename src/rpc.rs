@@ -787,6 +787,15 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 return;
             }
         }
+        if command == Some("repo_diff_snapshot") {
+            if let Some(command_id) = value_str(frame, "id") {
+                state
+                    .pending_session_change_snapshots
+                    .write()
+                    .await
+                    .remove(command_id);
+            }
+        }
         if rpc_prompt_error_settles_turn(command, &message) {
             settle_prompt_error_and_broadcast(state, &current_session_id).await;
         }
@@ -797,6 +806,41 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
     }
 
     match command {
+        Some("repo_diff_snapshot") => {
+            let pending = if let Some(command_id) = value_str(frame, "id") {
+                state
+                    .pending_session_change_snapshots
+                    .write()
+                    .await
+                    .remove(command_id)
+            } else {
+                None
+            };
+            if let Some(pending) = pending {
+                for message in build_session_changes_response(
+                    state,
+                    pending.session_id.clone(),
+                    pending.repo_id,
+                    pending.payload_kind,
+                    pending.current_commit_oid,
+                )
+                .await
+                {
+                    let _ = state.events.send(message);
+                }
+                let _ = state.events.send(notice(
+                    pending.session_id,
+                    NoticeLevel::Info,
+                    "Diff snapshot created.",
+                ));
+            } else {
+                let _ = state.events.send(notice(
+                    current_session_id.clone(),
+                    NoticeLevel::Info,
+                    "Diff snapshot created.",
+                ));
+            }
+        }
         Some("get_available_models") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
             let models = data
@@ -1009,6 +1053,9 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                                     .as_ref()
                                     .and_then(|pending| pending.worktree.clone());
                             }
+                            if let Some(pending) = pending_create.as_ref() {
+                                record.session_mode = pending.session_mode;
+                            }
                         })
                         .or_insert_with(|| {
                             let now = Timestamp::now();
@@ -1046,6 +1093,13 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                                 active_tool_calls: Vec::new(),
                                 todo_phases: None,
                                 kind: SessionKind::Managed,
+                                session_mode: source
+                                    .as_ref()
+                                    .map(|record| record.session_mode)
+                                    .or_else(|| {
+                                        pending_create.as_ref().map(|pending| pending.session_mode)
+                                    })
+                                    .unwrap_or_default(),
                                 session_file: None,
                                 title: pending_create
                                     .as_ref()
@@ -1128,13 +1182,14 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 }
             };
 
-            let target_category = if target_changed {
+            let (target_category, target_mode) = if target_changed {
                 let sessions = state.sessions.read().await;
                 sessions
                     .get(&target_session_id)
-                    .and_then(|record| record.category.clone())
+                    .map(|record| (record.category.clone(), record.session_mode))
+                    .unwrap_or((None, SessionMode::Standard))
             } else {
-                None
+                (None, SessionMode::Standard)
             };
             if let Some(plan_execution) = pending_plan_execution {
                 state
@@ -1155,6 +1210,14 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                         categories.insert(target_session_id.clone(), category);
                     } else {
                         categories.remove(&target_session_id);
+                    }
+                }
+                {
+                    let mut modes = state.session_modes.write().await;
+                    if target_mode == SessionMode::Standard {
+                        modes.remove(&target_session_id);
+                    } else {
+                        modes.insert(target_session_id.clone(), target_mode);
                     }
                 }
                 save_fura_config(state).await;

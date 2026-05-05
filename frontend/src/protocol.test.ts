@@ -4,9 +4,11 @@ import type { ClientMessage, ServerMessage, SessionProjection } from "./protocol
 const emptyProjection = {
   summary: {
     kind: "managed",
+    sessionMode: "standard",
     sessionId: "session-1",
     status: "idle",
     createdAt: 1,
+    updatedAt: 1,
     messageCount: 0,
   },
   transcript: [],

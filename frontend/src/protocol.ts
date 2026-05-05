@@ -1,4 +1,5 @@
 export type SessionStatus = "starting" | "idle" | "busy" | "exited" | "error" | "available";
+export type SessionMode = "standard" | "diffReview";
 export type MessageRole = "user" | "assistant" | "system" | "tool";
 
 export type ContentBlock =
@@ -90,11 +91,13 @@ export type SessionWorktreeSummary = {
 
 export type SessionSummary = {
   kind: "managed" | "available";
+  sessionMode: SessionMode;
   sessionId: string;
   cwd?: string | null;
   status: SessionStatus;
   createdAt: number;
   messageCount: number;
+  updatedAt: number;
   sessionFile?: string | null;
   title?: string | null;
   timestamp?: string | null;
@@ -398,7 +401,7 @@ export type WorktreeCreateOptions = {
 };
 
 export type ClientMessage =
-  | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; args?: string[]; worktree?: WorktreeCreateOptions }
+  | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; sessionMode?: SessionMode; args?: string[]; worktree?: WorktreeCreateOptions }
   | { type: "session.setCategory"; sessionId: string; category?: string }
   | { type: "config.set"; showTools?: boolean; thinkingVisibility?: ThinkingVisibilityMode }
   | { type: "session.open"; sessionFile: string }
@@ -422,6 +425,7 @@ export type ClientMessage =
   | { type: "sessionChanges.open"; sessionId: string }
   | { type: "sessionChanges.selectRepo"; sessionId: string; repoId: string; payloadKind: DiffPayloadKind; currentCommitOid?: string | null }
   | { type: "sessionChanges.refresh"; sessionId: string; repoId?: string | null; payloadKind?: DiffPayloadKind | null; currentCommitOid?: string | null }
+  | { type: "sessionChanges.snapshot"; sessionId: string; repoId?: string | null; label?: string | null; payloadKind?: DiffPayloadKind | null; currentCommitOid?: string | null }
   | { type: "compareDiff.run"; requestId?: string | null; repoRoot: string; base: DiffRefInput; head: DiffRefInput; payloadKind: DiffPayloadKind; mergeBase?: boolean; currentCommitOid?: string | null }
   | { type: "diff.reviewWorktree.ensure"; sourceRepoRoot: string; target?: DiffCheckoutTarget | null }
   | { type: "diff.reviewWorktree.checkout"; worktreeId: string; ref: DiffCheckoutTarget }

@@ -66,6 +66,45 @@ pub(crate) async fn handle_session_changes_refresh(
     .await
 }
 
+pub(crate) async fn handle_session_changes_snapshot(
+    state: &AppState,
+    session_id: String,
+    repo_id: Option<String>,
+    label: Option<String>,
+    payload_kind: DiffPayloadKind,
+    current_commit_oid: Option<String>,
+) -> Vec<ServerMessage> {
+    let command_id = next_rpc_id();
+    let label = label
+        .and_then(|label| non_empty_trimmed(&label).map(str::to_string))
+        .unwrap_or_else(|| "manual".to_string());
+    state.pending_session_change_snapshots.write().await.insert(
+        command_id.clone(),
+        PendingSessionChangesSnapshot {
+            session_id: session_id.clone(),
+            repo_id,
+            payload_kind,
+            current_commit_oid,
+        },
+    );
+    let command = serde_json::json!({
+        "id": command_id.clone(),
+        "type": "repo_diff_snapshot",
+        "label": label,
+    });
+    match send_rpc_command(state, &session_id, command).await {
+        Ok(()) => Vec::new(),
+        Err(message) => {
+            state
+                .pending_session_change_snapshots
+                .write()
+                .await
+                .remove(&command_id);
+            vec![notice(session_id, NoticeLevel::Error, message)]
+        }
+    }
+}
+
 pub(crate) async fn handle_compare_diff_run(
     state: &AppState,
     request_id: Option<String>,
@@ -152,7 +191,7 @@ fn diff_error(
     }
 }
 
-async fn build_session_changes_response(
+pub(crate) async fn build_session_changes_response(
     state: &AppState,
     session_id: String,
     selected_repo_id: Option<String>,
@@ -326,10 +365,10 @@ fn add_snapshot_candidate(
     candidates: &mut Vec<SessionRepoCandidate>,
     snapshot: &SessionDiffSnapshot,
 ) {
-    let repo_root = match discover_repo_root(&snapshot.repo_root) {
-        Ok(root) => root.display().to_string(),
-        Err(_) => snapshot.repo_root.clone(),
+    let Ok(root) = discover_repo_root(&snapshot.repo_root) else {
+        return;
     };
+    let repo_root = root.display().to_string();
     upsert_candidate(
         candidates,
         repo_root,
@@ -1483,6 +1522,7 @@ mod tests {
             thinking_level: None,
             tokens_total: 0,
             cost_usd: 0.0,
+            session_mode: SessionMode::Standard,
             context_tokens: None,
             context_window: None,
             context_percent: None,
@@ -1657,9 +1697,22 @@ mod tests {
         let ServerMessage::SessionChangesState { state } = &responses[0] else {
             panic!("expected session changes state: {:?}", responses);
         };
-        let SessionChangesState::Ready { range, review, .. } = state else {
+        let SessionChangesState::Ready {
+            range,
+            review,
+            repos,
+            ..
+        } = state
+        else {
             panic!("expected ready session changes state: {:?}", state);
         };
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].source, SessionRepoSource::Cwd);
+        assert_eq!(
+            repos[0].repo_root,
+            repo.canonicalize().unwrap().display().to_string()
+        );
+        assert!(repos[0].has_session_start_snapshot);
         assert!(matches!(range.head, DiffEndpoint::WorkingTree));
         assert!(
             matches!(&range.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == snapshot_ref)
@@ -1696,16 +1749,47 @@ mod tests {
         let (_repo_temp, repo, _base, _head) = test_repo();
         let session_file = repo.join("no-snapshot-session.jsonl");
         fs::write(&session_file, "").expect("session file");
-        let state = crate::tests::test_state(8, None);
-        state.sessions.write().await.insert(
+        let app_state = crate::tests::test_state(8, None);
+        app_state.sessions.write().await.insert(
             "missing-snapshot".into(),
             diff_test_record("missing-snapshot", &repo, &session_file),
         );
-        let missing_snapshot = handle_session_changes_open(&state, "missing-snapshot".into()).await;
+        let missing_snapshot =
+            handle_session_changes_open(&app_state, "missing-snapshot".into()).await;
         let ServerMessage::SessionChangesState { state } = &missing_snapshot[0] else {
             panic!("expected session changes state: {:?}", missing_snapshot);
         };
         assert!(matches!(state, SessionChangesState::MissingSnapshot { .. }));
+
+        let stale_snapshot = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": "missing",
+                "createdAt": "2026-05-04T00:00:00.000Z",
+                "kind": "session-start",
+                "label": "session-start",
+                "ref": "refs/omp/diff-snapshots/stale",
+                "repoRoot": repo.join("deleted"),
+                "tree": "missing"
+            },
+            "id": "stale-snapshot-entry"
+        });
+        fs::write(&session_file, format!("{}\n", stale_snapshot)).expect("stale session file");
+        let stale_snapshot_response =
+            handle_session_changes_open(&app_state, "missing-snapshot".into()).await;
+        let ServerMessage::SessionChangesState { state } = &stale_snapshot_response[0] else {
+            panic!(
+                "expected session changes state: {:?}",
+                stale_snapshot_response
+            );
+        };
+        let SessionChangesState::MissingSnapshot { repos, .. } = state else {
+            panic!("expected missing snapshot state: {:?}", state);
+        };
+        assert_eq!(repos.len(), 1);
+        assert_ne!(repos[0].source, SessionRepoSource::Snapshot);
     }
 
     #[tokio::test]
@@ -1767,6 +1851,58 @@ mod tests {
         assert!(
             matches!(&range.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == session_start_ref)
         );
+    }
+
+    #[tokio::test]
+    async fn session_changes_snapshot_queues_repo_diff_snapshot_rpc() {
+        let (_temp, repo, _base, _head) = test_repo();
+        let session_file = repo.join("snapshot-session.jsonl");
+        fs::write(&session_file, "").expect("session file");
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
+        let (stdin, mut commands) = tokio::sync::mpsc::channel(4);
+        let (stop, _stop_rx) = tokio::sync::oneshot::channel();
+        state
+            .rpc_sessions
+            .write()
+            .await
+            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("s1".to_string(), "s1".to_string());
+
+        let responses = handle_session_changes_snapshot(
+            &state,
+            "s1".into(),
+            Some(repo.display().to_string()),
+            Some(" now ".into()),
+            DiffPayloadKind::FullPatch,
+            Some("commit-1".into()),
+        )
+        .await;
+
+        assert!(responses.is_empty());
+        let command = commands.recv().await.expect("snapshot rpc command");
+        assert_eq!(
+            command.get("type").and_then(Value::as_str),
+            Some("repo_diff_snapshot")
+        );
+        assert_eq!(command.get("label").and_then(Value::as_str), Some("now"));
+        let command_id = command
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("command id");
+        let pending = state.pending_session_change_snapshots.read().await;
+        let pending = pending.get(command_id).expect("pending snapshot context");
+        assert_eq!(pending.session_id, "s1");
+        assert_eq!(pending.payload_kind, DiffPayloadKind::FullPatch);
+        assert_eq!(pending.current_commit_oid.as_deref(), Some("commit-1"));
     }
 
     #[tokio::test]

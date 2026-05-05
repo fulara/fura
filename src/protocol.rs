@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, SessionProjection,
-    SessionSummary, ThinkingVisibilityPreference,
+    ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, SessionMode,
+    SessionProjection, SessionSummary, ThinkingVisibilityPreference,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -425,6 +425,7 @@ pub(crate) enum ClientMessage {
         name: Option<String>,
         args: Option<Vec<String>>,
         category: Option<String>,
+        session_mode: Option<SessionMode>,
         worktree: Option<WorktreeCreateRequest>,
     },
     #[serde(rename = "session.setCategory")]
@@ -512,6 +513,14 @@ pub(crate) enum ClientMessage {
     SessionChangesRefresh {
         session_id: String,
         repo_id: Option<String>,
+        payload_kind: Option<DiffPayloadKind>,
+        current_commit_oid: Option<String>,
+    },
+    #[serde(rename = "sessionChanges.snapshot")]
+    SessionChangesSnapshot {
+        session_id: String,
+        repo_id: Option<String>,
+        label: Option<String>,
         payload_kind: Option<DiffPayloadKind>,
         current_commit_oid: Option<String>,
     },

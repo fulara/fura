@@ -876,7 +876,8 @@ h2 {
   font-size: 0.76rem;
 }
 
-.diffs-view {
+.diffs-view,
+.compare-view {
   display: grid;
   grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr);
   height: 100%;
@@ -921,12 +922,10 @@ h2 {
   gap: 0.75rem;
 }
 
-.diff-product-tabs,
 .diff-subview-tabs {
   display: grid;
   gap: 0.4rem;
 }
-.diff-product-tabs button,
 .diff-subview-tabs button {
   text-align: left;
   border-radius: 0.5rem;
@@ -935,7 +934,6 @@ h2 {
   color: #d7dae4;
   padding: 0.55rem 0.65rem;
 }
-.diff-product-tabs button.active,
 .diff-subview-tabs button.active {
   border-color: #6d7cff;
   background: #1a1f2a;

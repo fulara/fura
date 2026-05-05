@@ -5,9 +5,11 @@ import type { SessionSummary } from "./protocol";
 function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
   return {
     kind: "managed",
+    sessionMode: "standard",
     sessionId: "session-1abcdef",
     status: "idle",
     createdAt: 1,
+    updatedAt: 1,
     messageCount: 0,
     ...overrides,
   };

@@ -90,9 +90,11 @@ function createUnauthenticatedHarness(path = "/mobile.html") {
 function summary(sessionId: string, overrides: Partial<SessionSummary> = {}): SessionSummary {
   return {
     kind: "managed",
+    sessionMode: "standard",
     sessionId,
     status: "idle",
     createdAt: 1,
+    updatedAt: 1,
     messageCount: 0,
     cwd: "/repo",
     ...overrides,

@@ -146,6 +146,22 @@ describe("resolveSessionCreateMessage", () => {
     });
   });
 
+  it("includes diff-review mode for cwd-based creates", () => {
+    expect(resolveSessionCreateMessage({
+      requestId: "r1",
+      cwd: "/repo",
+      sessionMode: "diffReview",
+    })).toEqual({
+      type: "message",
+      message: {
+        type: "session.create",
+        requestId: "r1",
+        cwd: "/repo",
+        sessionMode: "diffReview",
+      },
+    });
+  });
+
   it("allows unnamed cwd-based sessions", () => {
     expect(resolveSessionCreateMessage({ requestId: "r1", cwd: "/repo" })).toEqual({
       type: "message",

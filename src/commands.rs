@@ -22,8 +22,21 @@ pub(crate) async fn handle_client_message(
             name,
             args,
             category,
+            session_mode,
             worktree,
-        } => create_session(state, request_id, cwd, name, args, category, worktree).await,
+        } => {
+            create_session(
+                state,
+                request_id,
+                cwd,
+                name,
+                args,
+                category,
+                session_mode.unwrap_or_default(),
+                worktree,
+            )
+            .await
+        }
         ClientMessage::SessionSetCategory {
             session_id,
             category,
@@ -156,6 +169,23 @@ pub(crate) async fn handle_client_message(
                 session_id,
                 repo_id,
                 payload_kind,
+                current_commit_oid,
+            )
+            .await
+        }
+        ClientMessage::SessionChangesSnapshot {
+            session_id,
+            repo_id,
+            label,
+            payload_kind,
+            current_commit_oid,
+        } => {
+            handle_session_changes_snapshot(
+                state,
+                session_id,
+                repo_id,
+                label,
+                payload_kind.unwrap_or(DiffPayloadKind::StatOnly),
                 current_commit_oid,
             )
             .await
@@ -587,6 +617,7 @@ pub(crate) async fn create_session(
     name: Option<String>,
     args: Option<Vec<String>>,
     category: Option<String>,
+    session_mode: SessionMode,
     worktree: Option<WorktreeCreateRequest>,
 ) -> Vec<ServerMessage> {
     let category = match normalize_session_category(category) {
@@ -655,6 +686,7 @@ pub(crate) async fn create_session(
             category: category.clone(),
             created_at,
             worktree: session_worktree,
+            session_mode,
         },
     );
 
@@ -887,6 +919,9 @@ pub(crate) fn opened_session_record(
             .or_else(|| existing.and_then(|record| record.timestamp.clone())),
         category: category.or_else(|| existing.and_then(|record| record.category.clone())),
         worktree: existing.and_then(|record| record.worktree.clone()),
+        session_mode: existing
+            .map(|record| record.session_mode)
+            .unwrap_or_default(),
         kind: SessionKind::Managed,
         model: existing.and_then(|record| record.model.clone()),
         thinking_level: existing.and_then(|record| record.thinking_level.clone()),
@@ -1155,7 +1190,17 @@ pub(crate) async fn handle_slash_command(
                     .map(|record| (record.cwd.clone(), Some(record.args.clone())))
                     .unwrap_or((None, None))
             };
-            create_session(state, None, cwd, None, args, None, None).await
+            create_session(
+                state,
+                None,
+                cwd,
+                None,
+                args,
+                None,
+                SessionMode::Standard,
+                None,
+            )
+            .await
         }
         "abort" => abort_prompt(state, session_id).await,
         "compact" => {

@@ -9,8 +9,8 @@ use serde_json::Value;
 
 use crate::{
     AppState, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader, SessionKind,
-    SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard, TranscriptMessage,
-    is_controller_session_record, project_omp_transcript, save_fura_config,
+    SessionMode, SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard,
+    TranscriptMessage, is_controller_session_record, project_omp_transcript, save_fura_config,
 };
 
 #[derive(Debug)]
@@ -32,12 +32,14 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
     let discovered = discover_sessions(&state.session_root);
     let mut discovered_ids = HashSet::new();
     let categories = state.session_categories.read().await.clone();
+    let modes = state.session_modes.read().await.clone();
     let mut sessions = state.sessions.write().await;
     let before = session_summaries_from_map(&sessions);
 
     for mut session in discovered {
         discovered_ids.insert(session.id.clone());
         let category = categories.get(&session.id).cloned();
+        let session_mode = modes.get(&session.id).copied().unwrap_or_default();
         if should_preload_discovered_session_messages(&sessions, &session) {
             let path = Path::new(&session.session_file);
             let (messages, tool_cards) = read_session_file_messages(path);
@@ -60,6 +62,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                     record.timestamp = session.timestamp;
                 }
                 record.category = category;
+                record.session_mode = session_mode;
                 if should_reload_messages {
                     record.messages = session.messages.clone();
                     record.tool_cards = session.tool_cards.clone();
@@ -76,6 +79,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                     record.timestamp = session.timestamp;
                 }
                 record.category = category;
+                record.session_mode = session_mode;
             }
             None => {
                 sessions.insert(
@@ -98,6 +102,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                         title: session.title,
                         timestamp: session.timestamp,
                         category,
+                        session_mode,
                         worktree: None,
                         model: None,
                         thinking_level: None,
@@ -121,13 +126,25 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
     let sessions_changed = before != session_summaries_from_map(&sessions);
     drop(sessions);
 
-    let categories_pruned = {
-        let mut categories = state.session_categories.write().await;
-        let before_len = categories.len();
-        categories.retain(|session_id, _| retained_session_ids.contains(session_id));
-        categories.len() != before_len
+    let metadata_pruned = {
+        let mut changed = false;
+        {
+            let mut categories = state.session_categories.write().await;
+            let before_len = categories.len();
+            categories.retain(|session_id, _| retained_session_ids.contains(session_id));
+            changed |= categories.len() != before_len;
+        }
+        {
+            let mut modes = state.session_modes.write().await;
+            let before_len = modes.len();
+            modes.retain(|session_id, mode| {
+                retained_session_ids.contains(session_id) && *mode != SessionMode::Standard
+            });
+            changed |= modes.len() != before_len;
+        }
+        changed
     };
-    if categories_pruned {
+    if metadata_pruned {
         save_fura_config(state).await;
     }
 

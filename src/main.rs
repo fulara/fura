@@ -127,6 +127,11 @@ async fn main() -> anyhow::Result<()> {
                 .map(|category| (session_id, category))
         })
         .collect();
+    let session_modes = fura_config
+        .session_modes
+        .into_iter()
+        .filter(|(_, mode)| *mode != SessionMode::Standard)
+        .collect();
     let (events, _) = broadcast::channel(512);
     let shared_state = AppState {
         token: Arc::new(token),
@@ -135,9 +140,11 @@ async fn main() -> anyhow::Result<()> {
         rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
         rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
         session_categories: Arc::new(RwLock::new(session_categories)),
+        session_modes: Arc::new(RwLock::new(session_modes)),
         pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
         pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
+        pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
         plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
@@ -443,6 +450,7 @@ pub(crate) mod tests {
             thinking_level: None,
             tokens_total: 0,
             cost_usd: 0.0,
+            session_mode: SessionMode::Standard,
             context_tokens: None,
             context_window: None,
             context_percent: None,
@@ -554,6 +562,7 @@ pub(crate) mod tests {
         existing.messages = vec![text_message("m1", "cached history")];
         existing.title = Some("Cached title".into());
         existing.tokens_total = 42;
+        existing.session_mode = SessionMode::DiffReview;
 
         let discovered = discovered_session("s1", None, session_path);
         let opened = opened_session_record(
@@ -570,6 +579,7 @@ pub(crate) mod tests {
         assert_eq!(opened.title.as_deref(), Some("Cached title"));
         assert_eq!(opened.category.as_deref(), Some("infra"));
         assert_eq!(opened.tokens_total, 42);
+        assert_eq!(opened.session_mode, SessionMode::DiffReview);
         assert!(opened.live_message_ids.is_empty());
         assert!(opened.streaming_message.is_none());
         assert!(opened.active_tool_calls.is_empty());
@@ -653,9 +663,11 @@ pub(crate) mod tests {
             rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
             rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
             session_categories: Arc::new(RwLock::new(HashMap::new())),
+            session_modes: Arc::new(RwLock::new(HashMap::new())),
             pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
+            pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
             plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
@@ -868,6 +880,10 @@ pub(crate) mod tests {
             ("s1".to_string(), "infra".to_string()),
             ("missing-session".to_string(), "stale".to_string()),
         ]);
+        state.session_modes.write().await.extend([
+            ("s1".to_string(), SessionMode::DiffReview),
+            ("missing-session".to_string(), SessionMode::DiffReview),
+        ]);
 
         assert!(refresh_session_catalog(&state).await);
         let sessions = state.sessions.read().await;
@@ -877,6 +893,7 @@ pub(crate) mod tests {
         assert_eq!(record.title.as_deref(), Some("External session"));
         assert_eq!(record.cwd.as_deref(), Some("/workspace/project"));
         assert_eq!(record.category.as_deref(), Some("infra"));
+        assert_eq!(record.session_mode, SessionMode::DiffReview);
         assert_eq!(record.messages.len(), 1);
         assert_eq!(
             record.session_file.as_deref(),
@@ -887,6 +904,10 @@ pub(crate) mod tests {
         assert_eq!(categories.get("s1").map(String::as_str), Some("infra"));
         assert!(!categories.contains_key("missing-session"));
         drop(categories);
+        let modes = state.session_modes.read().await;
+        assert_eq!(modes.get("s1"), Some(&SessionMode::DiffReview));
+        assert!(!modes.contains_key("missing-session"));
+        drop(modes);
         let saved_config_text = fs::read_to_string(root.join("config.yaml"))
             .expect("category pruning should save Fura config");
         let saved_config: FuraConfig =
@@ -903,6 +924,11 @@ pub(crate) mod tests {
                 .session_categories
                 .contains_key("missing-session")
         );
+        assert_eq!(
+            saved_config.session_modes.get("s1"),
+            Some(&SessionMode::DiffReview),
+        );
+        assert!(!saved_config.session_modes.contains_key("missing-session"));
 
         assert!(!refresh_session_catalog(&state).await);
         let _ = fs::remove_dir_all(root);
@@ -1999,6 +2025,7 @@ pub(crate) mod tests {
                 name: Some("feature".to_string()),
                 args: None,
                 category: None,
+                session_mode: None,
                 worktree: Some(WorktreeCreateRequest {
                     source_repo: missing_repo.to_string_lossy().into_owned(),
                     directory: env::temp_dir()
@@ -2594,6 +2621,7 @@ pub(crate) mod tests {
                 show_tools: default_show_tools(),
                 thinking_visibility: default_thinking_visibility(),
                 session_categories: HashMap::new(),
+                session_modes: HashMap::new(),
             })
             .expect("config should serialize"),
         )
@@ -2619,6 +2647,7 @@ pub(crate) mod tests {
                 show_tools: default_show_tools(),
                 thinking_visibility: default_thinking_visibility(),
                 session_categories: HashMap::new(),
+                session_modes: HashMap::new(),
             })
             .expect("config should serialize"),
         )
@@ -3205,6 +3234,7 @@ pub(crate) mod tests {
                 title: Some("diffs2".to_string()),
                 request_id: Some("create-1".to_string()),
                 category: Some("infra".to_string()),
+                session_mode: SessionMode::DiffReview,
                 worktree: None,
                 created_at: Timestamp::from_rpc(&serde_json::json!(123_000))
                     .expect("valid test timestamp"),
@@ -3247,6 +3277,7 @@ pub(crate) mod tests {
             assert_eq!(next.session_file.as_deref(), Some("omp-session.jsonl"));
             assert_eq!(next.title.as_deref(), Some("diffs2"));
             assert_eq!(next.category.as_deref(), Some("infra"));
+            assert_eq!(next.session_mode, SessionMode::DiffReview);
         }
 
         assert!(
@@ -3272,6 +3303,10 @@ pub(crate) mod tests {
                 .get("omp-session")
                 .map(String::as_str),
             Some("infra"),
+        );
+        assert_eq!(
+            state.session_modes.read().await.get("omp-session"),
+            Some(&SessionMode::DiffReview),
         );
         assert!(
             rpc_transport_session_id(&state, "transport-session")

@@ -681,11 +681,12 @@ let projections = new Map<string, SessionProjection>();
 const sessionChangesStates = new Map<string, SessionChangesState>();
 const sessionChangesPayloadKinds = new Map<string, DiffPayloadKind>();
 let compareDiffState: CompareDiffState | null = null;
+let compareDiffLoading = false;
 let compareRepoRoot = "";
 let compareBaseRef = "HEAD";
 let compareHeadRef = "WORKTREE";
 let comparePayloadKind: DiffPayloadKind = "fullPatch";
-let diffProductView: "sessionChanges" | "compare" = "sessionChanges";
+let comparePanelDirty = true;
 let sessionChangesSubview: "diff" | "transcript" = "diff";
 const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
 const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
@@ -1278,6 +1279,7 @@ function handleServerMessage(message: ServerMessage): void {
           }
         }
       }
+        syncSessionModePanels();
       render();
       break;
     case "session.snapshot": {
@@ -1291,18 +1293,15 @@ function handleServerMessage(message: ServerMessage): void {
         markToolsViewDirty();
         render();
         if (createdByPendingRequest && cwdPickerCreatePending) {
+          const activateSessionChanges = Boolean(pendingDiffCreate);
           setCwdPickerCreatePending(false);
           closeCwdPicker();
           if (pendingDiffCreate) {
-            const diff = pendingDiffCreate;
             pendingDiffCreate = null;
-            compareRepoRoot = diff.repoRoot;
-            compareBaseRef = diff.base;
-            compareHeadRef = diff.head;
-            comparePayloadKind = diff.payloadKind;
-            desktopDockview?.activatePanel("diffs");
-            requestCompareDiff({ repoRoot: diff.repoRoot, base: diff.base, head: diff.head, payloadKind: diff.payloadKind, currentCommitOid: null });
           }
+          syncSessionModePanels(activateSessionChanges);
+        } else {
+          syncSessionModePanels();
         }
       } else {
         unreadSessions.add(message.sessionId);
@@ -1320,17 +1319,16 @@ function handleServerMessage(message: ServerMessage): void {
         if (state.reviewWorktree) diffReviewWorktrees.set(state.reviewWorktree.sourceRepoRoot, state.reviewWorktree);
       }
       markDiffsViewDirty();
-      if (state.sessionId === activeSessionId && desktopDockview?.isPanelActive("diffs")) {
-        desktopDockview.withPanel("diffs", container => renderDiffsView(container, projections.get(state.sessionId)));
-      }
+      if (state.sessionId === activeSessionId) renderDiffsViewIfActive(state.sessionId);
       break;
     }
     case "compareDiff.state": {
       compareDiffState = message.state;
+      compareDiffLoading = false;
       diffErrors.delete("compareDiff");
       if (message.state.reviewWorktree) diffReviewWorktrees.set(message.state.reviewWorktree.sourceRepoRoot, message.state.reviewWorktree);
-      markDiffsViewDirty();
-      renderDiffsViewIfActive(activeSessionId ?? "");
+      markComparePanelDirty();
+      renderComparePanelIfActive();
       break;
     }
     case "diff.error": {
@@ -1338,8 +1336,14 @@ function handleServerMessage(message: ServerMessage): void {
       if (message.sessionId) diffLoadingSessions.delete(message.sessionId);
       if (errorKey) {
         diffErrors.set(errorKey, message.message);
-        markDiffsViewDirty();
-        if (message.scope === "compareDiff" || message.sessionId === activeSessionId) renderDiffsViewIfActive(activeSessionId ?? "");
+        if (message.scope === "compareDiff") {
+          compareDiffLoading = false;
+          markComparePanelDirty();
+          renderComparePanelIfActive();
+        } else {
+          markDiffsViewDirty();
+          if (message.sessionId === activeSessionId) renderDiffsViewIfActive(activeSessionId ?? "");
+        }
       } else {
         appendLog(`diff error: ${message.message}`);
       }
@@ -2892,10 +2896,17 @@ function renderActiveDockviewPanel(projection: SessionProjection | undefined): v
   if (desktopDockview?.isPanelActive("diffs") && shouldRenderDiffsView(projection)) {
     desktopDockview.withPanel("diffs", container => renderDiffsView(container, projection));
   }
+  if (desktopDockview?.isPanelActive("sessionChanges") && shouldRenderDiffsView(projection)) {
+    desktopDockview.withPanel("sessionChanges", container => renderDiffsView(container, projection));
+  }
+  if (desktopDockview?.isPanelActive("compare") && comparePanelDirty) {
+    desktopDockview.withPanel("compare", container => renderComparePanel(container));
+  }
   if (desktopDockview?.isPanelActive("code")) {
     ensureActiveCodeWorkspace();
     renderCodePanelIfNeeded();
   }
+  syncSessionModePanels();
 }
 
 function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
@@ -3354,12 +3365,25 @@ function requestSessionChangesRepo(sessionId: string, repoId: string, payloadKin
   renderDiffsViewIfActive(sessionId);
 }
 
+function requestSessionChangesSnapshot(sessionId: string): void {
+  if (diffLoadingSessions.has(sessionId)) return;
+  const state = sessionChangesStates.get(sessionId);
+  const repoId = state?.status === "ready" ? state.selectedRepoId : null;
+  const payloadKind = state?.status === "ready" ? state.range.payload.kind : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
+  const currentCommitOid = state?.status === "ready" ? state.review.currentCommitOid ?? null : null;
+  diffErrors.delete(sessionId);
+  diffLoadingSessions.add(sessionId);
+  markDiffsViewDirty();
+  send({ type: "sessionChanges.snapshot", sessionId, repoId, payloadKind, currentCommitOid });
+  renderDiffsViewIfActive(sessionId);
+}
+
 function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?: string; payloadKind?: DiffPayloadKind; currentCommitOid?: string | null } = {}): void {
   const repoRoot = overrides.repoRoot?.trim() || compareRepoRoot.trim();
   if (!repoRoot) {
     diffErrors.set("compareDiff", "Compare diff requires a repository root.");
-    markDiffsViewDirty();
-    renderDiffsViewIfActive(activeSessionId ?? "");
+    markComparePanelDirty();
+    renderComparePanelIfActive();
     return;
   }
   compareRepoRoot = repoRoot;
@@ -3369,8 +3393,10 @@ function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?
   const base = diffRefInputFromText(compareBaseRef, { kind: "gitRef", value: "HEAD" });
   const head = diffRefInputFromText(compareHeadRef, { kind: "workingTree" });
   diffErrors.delete("compareDiff");
-  markDiffsViewDirty();
-  send({
+  compareDiffState = null;
+  compareDiffLoading = true;
+  markComparePanelDirty();
+  const sent = send({
     type: "compareDiff.run",
     requestId: `compare-${Date.now()}`,
     repoRoot,
@@ -3379,17 +3405,34 @@ function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?
     payloadKind: comparePayloadKind,
     currentCommitOid: overrides.currentCommitOid ?? null,
   });
-  renderDiffsViewIfActive(activeSessionId ?? "");
+  if (!sent) {
+    compareDiffLoading = false;
+    diffErrors.set("compareDiff", "Not connected to the Fura bridge.");
+  }
+  renderComparePanelIfActive();
 }
 
 function renderDiffsViewIfActive(sessionId: string): void {
   if (desktopDockview?.isPanelActive("diffs")) {
     desktopDockview.withPanel("diffs", container => renderDiffsView(container, sessionId ? projections.get(sessionId) : undefined));
   }
+  if (desktopDockview?.isPanelActive("sessionChanges")) {
+    desktopDockview.withPanel("sessionChanges", container => renderDiffsView(container, sessionId ? projections.get(sessionId) : undefined));
+  }
+}
+
+function renderComparePanelIfActive(): void {
+  if (desktopDockview?.isPanelActive("compare")) {
+    desktopDockview.withPanel("compare", container => renderComparePanel(container));
+  }
 }
 
 function markDiffsViewDirty(): void {
   diffPanelDirty = true;
+}
+
+function markComparePanelDirty(): void {
+  comparePanelDirty = true;
 }
 
 function shouldRenderDiffsView(projection: SessionProjection | undefined): boolean {
@@ -3400,25 +3443,63 @@ function shouldRenderDiffsView(projection: SessionProjection | undefined): boole
   );
 }
 
-function isDiffsPanelActive(): boolean {
-  return desktopDockview?.isPanelActive("diffs") ?? false;
+function isSessionChangesPanelActive(): boolean {
+  return (desktopDockview?.isPanelActive("diffs") ?? false) || (desktopDockview?.isPanelActive("sessionChanges") ?? false);
 }
 
 function requestActiveDiffState(): void {
-  if (!activeSessionId || !isDiffsPanelActive()) return;
+  if (!activeSessionId || !isSessionChangesPanelActive()) return;
   if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
   if (!sessionChangesStates.has(activeSessionId)) requestSessionChanges(activeSessionId);
 }
 
+function syncSessionModePanels(activateCreatedDiffReview = false): void {
+  if (!desktopDockview) return;
+  const summary = (activeSessionId ? projections.get(activeSessionId)?.summary : undefined) ?? (activeSessionId ? currentSessionSummary(activeSessionId) : undefined);
+  const isDiffReview = summary?.sessionMode === "diffReview";
+  if (isDiffReview) {
+    desktopDockview.ensureSessionChangesPanel();
+    markDiffsViewDirty();
+    if (activateCreatedDiffReview) desktopDockview.activatePanel("sessionChanges");
+    renderDiffsViewIfActive(activeSessionId ?? "");
+    requestActiveDiffState();
+  } else {
+    desktopDockview.closePanel("sessionChanges");
+  }
+}
+
 function rerenderDiffsViewPreservingScroll(sessionId: string): void {
-  if (!desktopDockview?.isPanelActive("diffs")) return;
-  desktopDockview.withPanel("diffs", container => {
+  if (sessionId === "compareDiff") {
+    markComparePanelDirty();
+    rerenderComparePanelPreservingScroll();
+    return;
+  }
+  const panelId = desktopDockview?.isPanelActive("sessionChanges") ? "sessionChanges" : "diffs";
+  if (!desktopDockview?.isPanelActive(panelId)) return;
+  desktopDockview.withPanel(panelId, container => {
     const mainBody = container.querySelector<HTMLElement>(".diffs-main-body");
     const sidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
     const mainScrollTop = mainBody?.scrollTop ?? 0;
     const sidebarScrollTop = sidebarScroll?.scrollTop ?? 0;
 
     renderDiffsView(container, projections.get(sessionId));
+
+    const nextMainBody = container.querySelector<HTMLElement>(".diffs-main-body");
+    const nextSidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
+    if (nextMainBody) nextMainBody.scrollTop = mainScrollTop;
+    if (nextSidebarScroll) nextSidebarScroll.scrollTop = sidebarScrollTop;
+  });
+}
+
+function rerenderComparePanelPreservingScroll(): void {
+  if (!desktopDockview?.isPanelActive("compare")) return;
+  desktopDockview.withPanel("compare", container => {
+    const mainBody = container.querySelector<HTMLElement>(".diffs-main-body");
+    const sidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
+    const mainScrollTop = mainBody?.scrollTop ?? 0;
+    const sidebarScrollTop = sidebarScroll?.scrollTop ?? 0;
+
+    renderComparePanel(container);
 
     const nextMainBody = container.querySelector<HTMLElement>(".diffs-main-body");
     const nextSidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
@@ -3778,27 +3859,11 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   container.replaceChildren();
 
   const root = mkEl("div");
-  root.className = "diffs-view diff-products-view";
+  root.className = "diffs-view session-changes-view";
   const sidebar = mkEl("aside");
   sidebar.className = "diffs-sidebar";
   const sidebarScroll = mkEl("div");
   sidebarScroll.className = "diffs-sidebar-scroll";
-  const productTabs = mkEl("div");
-  productTabs.className = "diff-product-tabs";
-  for (const [product, label] of [["sessionChanges", "Session changes"], ["compare", "Compare"]] as const) {
-    const button = mkEl("button");
-    button.type = "button";
-    button.className = product === diffProductView ? "active" : "";
-    button.textContent = label;
-    button.addEventListener("click", () => {
-      diffProductView = product;
-      markDiffsViewDirty();
-      renderDiffsView(container, projection);
-      if (product === "sessionChanges" && activeSessionId && !sessionChangesStates.has(activeSessionId)) requestSessionChanges(activeSessionId);
-    });
-    productTabs.append(button);
-  }
-  sidebarScroll.append(productTabs);
   sidebar.append(sidebarScroll);
 
   const main = mkEl("section");
@@ -3806,10 +3871,6 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   root.append(sidebar, main);
   container.append(root);
 
-  if (diffProductView === "compare") {
-    renderCompareDiffView(sidebarScroll, main);
-    return;
-  }
   if (!activeSessionId || !projection) {
     renderDiffMessage(main, "No session selected.", false);
     return;
@@ -3848,6 +3909,12 @@ function renderSessionChangesView(sessionId: string, projection: SessionProjecti
   refresh.disabled = diffLoadingSessions.has(sessionId);
   refresh.addEventListener("click", () => requestSessionChangesRefresh(sessionId));
   actions.append(refresh);
+  const snapshot = mkEl("button");
+  snapshot.type = "button";
+  snapshot.textContent = "Snapshot now";
+  snapshot.disabled = diffLoadingSessions.has(sessionId);
+  snapshot.addEventListener("click", () => requestSessionChangesSnapshot(sessionId));
+  actions.append(snapshot);
   header.append(title, actions);
   main.append(header);
 
@@ -3922,7 +3989,22 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesState
   sidebar.append(section);
 }
 
-function renderCompareDiffView(sidebar: HTMLElement, main: HTMLElement): void {
+function renderComparePanel(container: HTMLElement): void {
+  setRenderDocument(container.ownerDocument);
+  comparePanelDirty = false;
+  container.replaceChildren();
+
+  const root = mkEl("div");
+  root.className = "compare-view";
+  const sidebarContainer = mkEl("aside");
+  sidebarContainer.className = "diffs-sidebar compare-sidebar";
+  const sidebar = mkEl("div");
+  sidebar.className = "diffs-sidebar-scroll";
+  sidebarContainer.append(sidebar);
+  const main = mkEl("section");
+  main.className = "diffs-main compare-main";
+  root.append(sidebarContainer, main);
+  container.append(root);
   const form = mkEl("section");
   form.className = "diffs-repo-selector compare-diff-controls";
   const repoInput = mkEl("input");
@@ -3964,7 +4046,7 @@ function renderCompareDiffView(sidebar: HTMLElement, main: HTMLElement): void {
     return;
   }
   if (!compareDiffState) {
-    renderDiffMessage(main, "Run an explicit repository/ref comparison.", false);
+    renderDiffMessage(main, compareDiffLoading ? "Loading compare diff…" : "Run an explicit repository/ref comparison.", false);
     return;
   }
   renderReviewableDiff("compareDiff", compareDiffState, sidebar, main, null, false);
@@ -4221,6 +4303,8 @@ function initDesktopWorkspace(): void {
       if (id === "transcript") markTranscriptViewDirty();
       if (id === "tools") markToolsViewDirty();
       if (id === "diffs") markDiffsViewDirty();
+      if (id === "sessionChanges") markDiffsViewDirty();
+      if (id === "compare") markComparePanelDirty();
       if (id === "code") markCodeViewDirty();
     },
     onPanelActivated: id => {
@@ -4238,9 +4322,12 @@ function initDesktopWorkspace(): void {
         renderCodePanelIfNeeded(true);
         return;
       }
-      if (id === "diffs") {
-        desktopDockview?.withPanel("diffs", container => renderDiffsView(container, projection));
+      if (id === "diffs" || id === "sessionChanges") {
+        desktopDockview?.withPanel(id, container => renderDiffsView(container, projection));
         requestActiveDiffState();
+      }
+      if (id === "compare") {
+        desktopDockview?.withPanel("compare", container => renderComparePanel(container));
       }
     },
     onPopoutBlocked: () => {
@@ -4254,7 +4341,7 @@ function initDesktopWorkspace(): void {
     },
   });
   renderActiveDockviewPanel(activeSessionId ? projections.get(activeSessionId) : undefined);
-  if (isDiffsPanelActive()) requestActiveDiffState();
+  if (isSessionChangesPanelActive()) requestActiveDiffState();
 }
 
 // --- Status bar ---
@@ -4591,12 +4678,12 @@ function submitCwdPickerDiff(): void {
   const diff = { repoRoot, base, head, payloadKind };
   if (!cwdPickerDiffAgentSession.checked) {
     closeCwdPicker();
-    diffProductView = "compare";
     compareRepoRoot = repoRoot;
     compareBaseRef = base;
     compareHeadRef = head;
     comparePayloadKind = payloadKind;
-    desktopDockview?.activatePanel("diffs");
+    desktopDockview?.ensureComparePanel();
+    desktopDockview?.activatePanel("compare");
     requestCompareDiff({ repoRoot, base, head, payloadKind });
     return;
   }
@@ -4607,6 +4694,7 @@ function submitCwdPickerDiff(): void {
     name: cwdPickerNameInput.value || `diff: ${repoRoot.split(/[/\\]/).filter(Boolean).at(-1) ?? "repo"} ${base}..${head}`,
     cwd: repoRoot,
     category: normalizedCategory(cwdPickerCategoryInput.value),
+    sessionMode: "diffReview",
     worktree: { enabled: false, sourceRepo: repoRoot, directory: repoRoot, baseBranch: base, branchName: undefined },
   });
   if (result.type === "invalid") {

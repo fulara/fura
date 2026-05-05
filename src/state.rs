@@ -4,8 +4,9 @@ use serde_json::Value;
 use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
 use crate::{
-    CodeWorkspaceRegistry, ControlCandidate, DiffReviewWorktreeRegistry, FrontendUiSnapshot,
-    ServerMessage, SessionRecord, ThinkingVisibilityPreference, Timestamp, VoiceCommand,
+    CodeWorkspaceRegistry, ControlCandidate, DiffPayloadKind, DiffReviewWorktreeRegistry,
+    FrontendUiSnapshot, ServerMessage, SessionMode, SessionRecord, ThinkingVisibilityPreference,
+    Timestamp, VoiceCommand,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -16,12 +17,15 @@ pub(crate) struct AppState {
     pub(crate) rpc_session_targets: Arc<RwLock<HashMap<String, String>>>,
     /// Persisted Fura-owned session metadata, keyed by OMP session id.
     pub(crate) session_categories: Arc<RwLock<HashMap<String, String>>>,
+    pub(crate) session_modes: Arc<RwLock<HashMap<String, SessionMode>>>,
     /// Metadata for a newly spawned RPC child before OMP reports its real session id.
     pub(crate) pending_created_sessions: Arc<RwLock<HashMap<String, PendingCreatedSession>>>,
     /// Name to apply to the next new session spawned by a fork or handoff on this transport.
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
+    pub(crate) pending_session_change_snapshots:
+        Arc<RwLock<HashMap<String, PendingSessionChangesSnapshot>>>,
     /// Approved plan metadata waiting for / attached to the execution session spawned by OMP.
     pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,
     pub(crate) code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>,
@@ -66,6 +70,7 @@ pub(crate) struct PendingCreatedSession {
     pub(crate) request_id: Option<String>,
     pub(crate) category: Option<String>,
     pub(crate) created_at: Timestamp,
+    pub(crate) session_mode: SessionMode,
     pub(crate) worktree: Option<crate::SessionWorktreeSummary>,
 }
 
@@ -74,6 +79,14 @@ pub(crate) struct PendingPromptDraft {
     pub(crate) session_id: String,
     pub(crate) text: String,
     pub(crate) images: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingSessionChangesSnapshot {
+    pub(crate) session_id: String,
+    pub(crate) repo_id: Option<String>,
+    pub(crate) payload_kind: DiffPayloadKind,
+    pub(crate) current_commit_oid: Option<String>,
 }
 
 #[derive(Debug, Clone)]

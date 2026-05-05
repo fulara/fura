@@ -1,7 +1,7 @@
 import "dockview-core/dist/styles/dockview.css";
 import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
 
-export type DesktopDockviewPanelId = "transcript" | "code" | "tools" | "diffs";
+export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "code" | "tools" | "diffs" | "compare";
 
 export type DesktopDockview = {
   panelMounted(id: DesktopDockviewPanelId): boolean;
@@ -9,6 +9,9 @@ export type DesktopDockview = {
   isPanelActive(id: DesktopDockviewPanelId): boolean;
   activatePanel(id: DesktopDockviewPanelId): boolean;
   withPanel(id: DesktopDockviewPanelId, render: (container: HTMLElement) => void): boolean;
+  ensureSessionChangesPanel(): boolean;
+  ensureComparePanel(): boolean;
+  closePanel(id: "sessionChanges" | "compare"): boolean;
 };
 
 type DesktopDockviewOptions = {
@@ -120,6 +123,20 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       render(panel);
       return true;
     },
+    ensureSessionChangesPanel() {
+      return ensureSessionChangesPanel(api);
+    },
+    ensureComparePanel() {
+      return ensureComparePanel(api);
+    },
+    closePanel(id) {
+      const panel = api.getGroupPanel(id);
+      if (!panel) return false;
+      delete panelEls[id];
+      delete panelActivators[id];
+      api.removePanel(panel);
+      return true;
+    },
   };
 }
 
@@ -227,8 +244,34 @@ function ensureDiffsPanel(api: DockviewComponent): void {
   });
 }
 
+function ensureSessionChangesPanel(api: DockviewComponent): boolean {
+  const hasSessionChangesPanel = api.panels.some(panel => panel.id === "sessionChanges");
+  if (hasSessionChangesPanel) return false;
+  api.addPanel({
+    id: "sessionChanges",
+    component: "sessionChanges",
+    title: "Session changes",
+    position: { referencePanel: "transcript", direction: "within", index: 0 },
+    renderer: "always",
+  });
+  return true;
+}
+
+function ensureComparePanel(api: DockviewComponent): boolean {
+  const hasComparePanel = api.panels.some(panel => panel.id === "compare");
+  if (hasComparePanel) return false;
+  api.addPanel({
+    id: "compare",
+    component: "compare",
+    title: "Compare",
+    position: { referencePanel: "diffs", direction: "within" },
+    renderer: "always",
+  });
+  return true;
+}
+
 function desktopPanelId(name: string): DesktopDockviewPanelId | null {
-  return name === "transcript" || name === "code" || name === "tools" || name === "diffs" ? name : null;
+  return name === "sessionChanges" || name === "transcript" || name === "code" || name === "tools" || name === "diffs" || name === "compare" ? name : null;
 }
 
 function copyStylesToPopout(owner: Document, popWin: Window): void {

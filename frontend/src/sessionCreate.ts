@@ -1,10 +1,11 @@
-import type { ClientMessage, WorktreeCreateOptions } from "./protocol";
+import type { ClientMessage, SessionMode, WorktreeCreateOptions } from "./protocol";
 
 export type SessionCreateDraft = {
   requestId: string;
   name?: string;
   cwd?: string;
   category?: string;
+  sessionMode?: SessionMode;
   worktree?: {
     enabled: boolean;
     sourceRepo?: string;
@@ -159,6 +160,7 @@ export function resolveSessionCreateMessage(draft: SessionCreateDraft): SessionC
   const requestId = trimSessionCreateText(draft.requestId);
   const name = trimSessionCreateText(draft.name);
   const category = trimSessionCreateText(draft.category);
+  const sessionMode = draft.sessionMode === "diffReview" ? draft.sessionMode : undefined;
   if (!requestId) {
     return { type: "invalid", message: "Request id is required.", target: "name" };
   }
@@ -191,6 +193,7 @@ export function resolveSessionCreateMessage(draft: SessionCreateDraft): SessionC
         requestId,
         name,
         ...(category ? { category } : {}),
+        ...(sessionMode ? { sessionMode } : {}),
         worktree,
       },
     };
@@ -207,6 +210,7 @@ export function resolveSessionCreateMessage(draft: SessionCreateDraft): SessionC
       requestId,
       ...(name ? { name } : {}),
       ...(category ? { category } : {}),
+      ...(sessionMode ? { sessionMode } : {}),
       cwd,
     },
   };

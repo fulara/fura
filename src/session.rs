@@ -13,6 +13,7 @@ pub(crate) struct SessionRecord {
     pub(crate) status: SessionStatus,
     pub(crate) created_at: Timestamp,
     pub(crate) updated_at: Timestamp,
+    pub(crate) session_mode: SessionMode,
     pub(crate) messages: Vec<TranscriptMessage>,
     /// IDs of messages that arrived live via `message_end`; preserved across `get_messages` reconciliation.
     pub(crate) live_message_ids: HashSet<String>,
@@ -55,6 +56,7 @@ impl SessionRecord {
             updated_at: self.updated_at,
             message_count: self.messages.len(),
             kind: self.kind,
+            session_mode: self.session_mode,
             session_file: self.session_file.clone(),
             title: self.title.clone(),
             timestamp: self.timestamp.clone(),
@@ -149,6 +151,13 @@ pub(crate) enum SessionKind {
     Available,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SessionMode {
+    #[default]
+    Standard,
+    DiffReview,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum SessionStatus {
@@ -170,6 +179,7 @@ pub(crate) struct SessionSummary {
     pub(crate) updated_at: Timestamp,
     pub(crate) message_count: usize,
     pub(crate) kind: SessionKind,
+    pub(crate) session_mode: SessionMode,
     pub(crate) session_file: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) timestamp: Option<String>,
