@@ -64,6 +64,8 @@ import type {
   DiffLineLocation,
   SessionChangesState,
   ServerConfig,
+  ModelSummary,
+  ProposedModelConfig,
   ServerMessage,
   SessionProjection,
   SessionSummary,
@@ -80,6 +82,7 @@ import {
   type SessionCreateValidationTarget,
 } from "./sessionCreate";
 import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
+import { catalogContainsProposedModel, filterCatalogModels, formatCatalogModelLabel, formatProposedModelDetails, normalizeSelectedProposedModelId, proposedModelIdFromName, removeProposedModel, upsertProposedModel, validateProposedModels } from "./proposedModels";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
@@ -168,6 +171,25 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
               <div id="mobileOptionsMenu" class="mobile-options-menu" role="menu" hidden>
                 <button id="mobileToolVisibilityToggle" class="mobile-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
                 <button id="mobileThinkingVisibilityToggle" class="mobile-option-item" type="button" role="menuitem">Thinking: auto</button>
+                <div class="mobile-options-section">
+                  <div class="mobile-options-heading">Proposed models</div>
+                  <div id="mobileProposedModelsList" class="mobile-proposed-models-list"></div>
+                  <div class="mobile-proposed-model-form">
+                    <input id="mobileProposedModelName" autocomplete="off" spellcheck="false" placeholder="Custom name" />
+                    <input id="mobileProposedModelSearch" autocomplete="off" spellcheck="false" placeholder="Search runtime models" />
+                    <select id="mobileProposedModelCatalog"></select>
+                    <select id="mobileProposedModelThinking">
+                      <option value="default">Default</option>
+                      <option value="off">Off</option>
+                      <option value="minimal">Minimal</option>
+                      <option value="low">Low</option>
+                      <option value="medium">Medium</option>
+                      <option value="high">High</option>
+                    </select>
+                    <button id="mobileProposedModelAdd" type="button">Add proposed model</button>
+                  </div>
+                  <p id="mobileProposedModelStatus" class="mobile-dialog-status" aria-live="polite"></p>
+                </div>
               </div>
             </div>
           </div>
@@ -186,6 +208,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
             <input id="mobileCreateName" autocomplete="off" spellcheck="false" placeholder="my-session" />
             <label for="mobileCreateCwd">Working directory</label>
             <input id="mobileCreateCwd" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+            <label for="mobileCreateProposedModel">Model</label>
+            <select id="mobileCreateProposedModel"></select>
             <label class="mobile-checkbox-row" for="mobileCreateWorktreeEnabled">
               <input id="mobileCreateWorktreeEnabled" type="checkbox" />
               <span>Create git worktree</span>
@@ -391,12 +415,20 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const optionsMenu = requireElement<HTMLDivElement>(document, "mobileOptionsMenu");
   const toolVisibilityToggle = requireElement<HTMLButtonElement>(document, "mobileToolVisibilityToggle");
   const thinkingVisibilityToggle = requireElement<HTMLButtonElement>(document, "mobileThinkingVisibilityToggle");
+  const proposedModelsList = requireElement<HTMLDivElement>(document, "mobileProposedModelsList");
+  const proposedModelName = requireElement<HTMLInputElement>(document, "mobileProposedModelName");
+  const proposedModelSearch = requireElement<HTMLInputElement>(document, "mobileProposedModelSearch");
+  const proposedModelCatalog = requireElement<HTMLSelectElement>(document, "mobileProposedModelCatalog");
+  const proposedModelThinking = requireElement<HTMLSelectElement>(document, "mobileProposedModelThinking");
+  const proposedModelAdd = requireElement<HTMLButtonElement>(document, "mobileProposedModelAdd");
+  const proposedModelStatus = requireElement<HTMLParagraphElement>(document, "mobileProposedModelStatus");
   const sessionsDrawer = requireElement<HTMLElement>(document, "mobileSessionsDrawer");
   const sessionsList = requireElement<HTMLElement>(document, "mobileSessionsList");
   const createDrawer = requireElement<HTMLElement>(document, "mobileCreateDrawer");
   const createForm = requireElement<HTMLFormElement>(document, "mobileCreateForm");
   const createNameInput = requireElement<HTMLInputElement>(document, "mobileCreateName");
   const createCwdInput = requireElement<HTMLInputElement>(document, "mobileCreateCwd");
+  const createProposedModel = requireElement<HTMLSelectElement>(document, "mobileCreateProposedModel");
   const createWorktreeEnabled = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeEnabled");
   const createWorktreeFields = requireElement<HTMLDivElement>(document, "mobileCreateWorktreeFields");
   const createWorktreeSourceRepo = requireElement<HTMLInputElement>(document, "mobileCreateWorktreeSourceRepo");
@@ -473,6 +505,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let showToolBubbles = true;
   let thinkingVisibilityMode: ThinkingVisibilityMode = "auto";
   let optionsMenuOpen = false;
+  let proposedModelCatalogModels: ModelSummary[] = [];
+  let proposedModelCatalogRequestId: string | null = null;
+  let proposedModelEditingId: string | null = null;
   let sessions: SessionSummary[] = [];
   let activeSessionId: string | null = readStoredActiveSessionId(window.sessionStorage);
   let projections = new Map<string, SessionProjection>();
@@ -559,6 +594,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     applyVisibilityPreferences(showToolBubbles, nextMode);
     setOptionsMenuOpen(false);
   });
+  proposedModelAdd.addEventListener("click", addMobileProposedModel);
+  proposedModelSearch.addEventListener("input", syncMobileProposedModelsUi);
 
   document.addEventListener("click", event => {
     if (!optionsMenuOpen) return;
@@ -770,9 +807,109 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     optionsMenu.hidden = !optionsMenuOpen;
   }
 
+  function syncMobileProposedModelsUi(): void {
+    createProposedModel.replaceChildren();
+    createProposedModel.append(new Option("Default", "default"));
+    proposedModelsList.replaceChildren();
+    proposedModelCatalog.replaceChildren();
+    for (const model of filterCatalogModels(proposedModelCatalogModels, proposedModelSearch.value)) {
+      proposedModelCatalog.append(new Option(formatCatalogModelLabel(model), `${model.provider}\u0000${model.id}`));
+    }
+    const proposed = serverConfig?.proposedModels ?? [];
+    if (proposed.length === 0) {
+      proposedModelsList.textContent = "No proposed models.";
+    }
+    for (const model of proposed) {
+      createProposedModel.append(new Option(model.name, model.id));
+      const row = document.createElement("div");
+      row.className = "mobile-proposed-model-row";
+      const text = document.createElement("span");
+      text.textContent = `${model.name}: ${formatProposedModelDetails(model)}`;
+      if (proposedModelCatalogModels.length > 0 && !catalogContainsProposedModel(proposedModelCatalogModels, model)) {
+        text.textContent += " · Not in current OMP model catalog";
+        text.classList.add("mobile-proposed-model-warning");
+      }
+      const actions = document.createElement("div");
+      actions.className = "mobile-proposed-model-actions";
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => editMobileProposedModel(model));
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => saveMobileProposedModels(removeProposedModel(proposed, model.id)));
+      actions.append(edit, remove);
+      row.append(text, actions);
+      proposedModelsList.append(row);
+    }
+    createProposedModel.value = normalizeSelectedProposedModelId(createProposedModel.value, proposed);
+  }
+
+  function requestMobileModelCatalog(): void {
+    if (proposedModelCatalogRequestId || proposedModelCatalogModels.length > 0) return;
+    proposedModelCatalogRequestId = nextClientRequestId("mobile-model-catalog");
+    proposedModelStatus.textContent = "Loading runtime models…";
+    if (!send({ type: "config.modelCatalog.list", requestId: proposedModelCatalogRequestId })) {
+      proposedModelCatalogRequestId = null;
+      proposedModelStatus.textContent = "Not connected to the Fura bridge.";
+    }
+  }
+
+  function addMobileProposedModel(): void {
+    const name = proposedModelName.value.trim();
+    if (!name) {
+      proposedModelStatus.textContent = "Name is required.";
+      return;
+    }
+    const [provider, modelId] = proposedModelCatalog.value.split("\u0000");
+    const catalogModel = proposedModelCatalogModels.find(model => model.provider === provider && model.id === modelId);
+    if (!catalogModel) {
+      proposedModelStatus.textContent = "Choose a runtime model.";
+      return;
+    }
+    const existing = serverConfig?.proposedModels ?? [];
+    const editingId = proposedModelEditingId;
+    const model: ProposedModelConfig = {
+      id: editingId ?? proposedModelIdFromName(name, existing.map(item => item.id)),
+      name,
+      provider: catalogModel.provider,
+      modelId: catalogModel.id,
+      modelName: catalogModel.name ?? null,
+      thinkingLevel: proposedModelThinking.value as ProposedModelConfig["thinkingLevel"],
+    };
+    const nextModels = upsertProposedModel(existing, model, editingId);
+    saveMobileProposedModels(nextModels);
+  }
+
+  function editMobileProposedModel(model: ProposedModelConfig): void {
+    proposedModelEditingId = model.id;
+    proposedModelName.value = model.name;
+    proposedModelSearch.value = model.modelName || model.modelId;
+    proposedModelThinking.value = model.thinkingLevel;
+    syncMobileProposedModelsUi();
+    const value = `${model.provider}\u0000${model.modelId}`;
+    if (Array.from(proposedModelCatalog.options).some(option => option.value === value)) {
+      proposedModelCatalog.value = value;
+    }
+  }
+
+  function saveMobileProposedModels(models: ProposedModelConfig[]): void {
+    const error = validateProposedModels(models);
+    if (error) {
+      proposedModelStatus.textContent = error;
+      return;
+    }
+    proposedModelStatus.textContent = "Saving proposed models…";
+    if (!send({ type: "config.set", proposedModels: models })) {
+      proposedModelStatus.textContent = "Not connected to the Fura bridge.";
+    }
+  }
+
   function setOptionsMenuOpen(open: boolean): void {
     optionsMenuOpen = open;
     syncOptionsMenu();
+    if (open) requestMobileModelCatalog();
   }
 
   function applyVisibilityPreferences(
@@ -1462,6 +1599,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (open) {
       syncCreateCwdDefault();
       syncCreateWorktreeFields();
+      syncMobileProposedModelsUi();
     }
   }
 
@@ -1531,6 +1669,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       requestId,
       cwd: createCwdInput.value,
       name: createNameInput.value,
+      proposedModelId: createProposedModel.value,
       worktree: {
         enabled: createWorktreeEnabled.checked,
         sourceRepo: createWorktreeSourceRepo.value,
@@ -1679,6 +1818,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           parseThinkingVisibilityMode(message.config.thinkingVisibility),
         );
         syncCreateCwdDefault();
+        syncMobileProposedModelsUi();
         console.debug(`[fura-mobile] Connected to fura ${message.serverVersion}.`);
         break;
       case "config.updated":
@@ -1688,6 +1828,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           parseThinkingVisibilityMode(message.config.thinkingVisibility),
         );
         syncCreateCwdDefault();
+        syncMobileProposedModelsUi();
+        proposedModelName.value = "";
+        proposedModelEditingId = null;
+        proposedModelSearch.value = "";
+        proposedModelStatus.textContent = "Saved.";
         break;
       case "sessions.snapshot":
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
@@ -1732,8 +1877,21 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "log.stderr":
         console.debug(`[fura-mobile] [${message.sessionId}] ${message.text}`);
         break;
+      case "config.modelCatalog.list":
+        if (!message.requestId || message.requestId === proposedModelCatalogRequestId) {
+          proposedModelCatalogModels = message.models;
+          proposedModelCatalogRequestId = null;
+          proposedModelStatus.textContent = `${message.models.length} runtime model${message.models.length === 1 ? "" : "s"}`;
+          syncMobileProposedModelsUi();
+        }
+        break;
       case "error":
         appendLog(`Error: ${message.message}`);
+        if (message.requestId && message.requestId === proposedModelCatalogRequestId) {
+          proposedModelCatalogRequestId = null;
+          proposedModelStatus.textContent = message.message;
+          break;
+        }
         if (handleCreateError(message.requestId ?? null, message.message)) break;
         break;
       case "dialog.request":

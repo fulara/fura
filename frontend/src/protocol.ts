@@ -285,6 +285,18 @@ export type ModelSummary = {
   thinking: boolean;
 };
 
+export type ProposedThinkingLevel = "default" | "off" | "minimal" | "low" | "medium" | "high";
+
+export type ProposedModelConfig = {
+  id: string;
+  name: string;
+  provider: string;
+  modelId: string;
+  modelName?: string | null;
+  thinkingLevel: ProposedThinkingLevel;
+};
+
+
 export type ThinkingVisibilityMode = "auto" | "shown" | "hidden";
 
 export type ServerConfig = {
@@ -292,6 +304,7 @@ export type ServerConfig = {
   voiceLanguage: string;
   showTools: boolean;
   thinkingVisibility: ThinkingVisibilityMode;
+  proposedModels: ProposedModelConfig[];
 };
 
 export type FrontendUiSnapshot = {
@@ -372,6 +385,7 @@ export type ServerMessage =
   | { type: "session.notice"; sessionId: string; level: "info" | "warning" | "error"; text: string }
   | { type: "prompt.busy"; sessionId: string; text: string; images?: unknown[] | null }
   | { type: "model.list"; sessionId: string; models: ModelSummary[] }
+  | { type: "config.modelCatalog.list"; requestId?: string | null; models: ModelSummary[] }
   | { type: "plan.review"; sessionId: string; planFilePath: string; finalPlanFilePath: string; title?: string | null; content: string }
   | { type: "model.changed"; sessionId: string; model: ModelSummary }
   | { type: "raw.omp"; sessionId: string; frame: unknown }
@@ -401,9 +415,10 @@ export type WorktreeCreateOptions = {
 };
 
 export type ClientMessage =
-  | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; sessionMode?: SessionMode; args?: string[]; worktree?: WorktreeCreateOptions }
+  | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; sessionMode?: SessionMode; args?: string[]; worktree?: WorktreeCreateOptions; proposedModelId?: string }
   | { type: "session.setCategory"; sessionId: string; category?: string }
-  | { type: "config.set"; showTools?: boolean; thinkingVisibility?: ThinkingVisibilityMode }
+  | { type: "config.set"; showTools?: boolean; thinkingVisibility?: ThinkingVisibilityMode; proposedModels?: ProposedModelConfig[] }
+  | { type: "config.modelCatalog.list"; requestId?: string }
   | { type: "session.open"; sessionFile: string }
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }

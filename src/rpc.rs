@@ -18,6 +18,150 @@ pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Res
     send_rpc_command(state, session_id, get_session_stats_command(next_rpc_id())).await
 }
 
+async fn is_model_catalog_transport(state: &AppState, session_id: &str) -> bool {
+    state
+        .model_catalog
+        .read()
+        .await
+        .transport_session_id
+        .as_deref()
+        == Some(session_id)
+}
+
+async fn reset_model_catalog_if_transport_exited(state: &AppState, session_id: &str) -> bool {
+    let mut catalog = state.model_catalog.write().await;
+    if catalog.transport_session_id.as_deref() != Some(session_id) {
+        return false;
+    }
+    let had_in_flight = catalog.in_flight;
+    let request_id = catalog.in_flight_request_id.take();
+    catalog.in_flight = false;
+    catalog.transport_session_id = None;
+    drop(catalog);
+    if had_in_flight {
+        let _ = state.events.send(ServerMessage::Error {
+            request_id,
+            message: "Model catalog RPC child exited before returning models.".to_string(),
+        });
+    }
+    true
+}
+
+async fn complete_model_catalog_request(state: &AppState, session_id: &str) -> Option<String> {
+    let mut catalog = state.model_catalog.write().await;
+    if catalog.transport_session_id.as_deref() != Some(session_id) {
+        return None;
+    }
+    catalog.in_flight = false;
+    catalog.in_flight_request_id.take()
+}
+
+async fn stop_transport(state: &AppState, transport_session_id: &str) {
+    if let Some(handle) = state
+        .rpc_sessions
+        .write()
+        .await
+        .remove(transport_session_id)
+    {
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .remove(transport_session_id);
+        let _ = handle.stop.send(());
+    }
+}
+
+async fn initialize_pending_created_session(state: &AppState, transport_session_id: &str) -> bool {
+    let pending = state
+        .pending_created_sessions
+        .read()
+        .await
+        .get(transport_session_id)
+        .cloned();
+    let Some(pending) = pending else {
+        return false;
+    };
+
+    if let Some(name) = pending.title.as_ref() {
+        let command = serde_json::json!({
+            "id": next_rpc_id(),
+            "type": "set_session_name",
+            "name": name,
+        });
+        if let Err(message) = send_rpc_command(state, transport_session_id, command).await {
+            fail_pending_create_initialization(
+                state,
+                transport_session_id,
+                pending.request_id.clone(),
+                message,
+            )
+            .await;
+            return true;
+        }
+    }
+
+    if let Some(model) = pending.proposed_model.as_ref() {
+        let command = set_model_command(
+            next_rpc_id(),
+            model.provider.clone(),
+            model.model_id.clone(),
+        );
+        if let Err(message) = send_rpc_command(state, transport_session_id, command).await {
+            fail_pending_create_initialization(
+                state,
+                transport_session_id,
+                pending.request_id.clone(),
+                message,
+            )
+            .await;
+            return true;
+        }
+        if let Some(level) = model.thinking_level.as_rpc_level() {
+            let command = set_thinking_level_command(next_rpc_id(), level.to_string());
+            if let Err(message) = send_rpc_command(state, transport_session_id, command).await {
+                fail_pending_create_initialization(
+                    state,
+                    transport_session_id,
+                    pending.request_id.clone(),
+                    message,
+                )
+                .await;
+                return true;
+            }
+        }
+    }
+
+    if let Err(message) = refresh_rpc_state(state, transport_session_id).await {
+        fail_pending_create_initialization(
+            state,
+            transport_session_id,
+            pending.request_id.clone(),
+            message,
+        )
+        .await;
+    }
+    true
+}
+
+async fn fail_pending_create_initialization(
+    state: &AppState,
+    transport_session_id: &str,
+    request_id: Option<String>,
+    message: String,
+) {
+    state
+        .pending_created_sessions
+        .write()
+        .await
+        .remove(transport_session_id);
+    let _ = state.events.send(ServerMessage::Error {
+        request_id,
+        message,
+    });
+    stop_transport(state, transport_session_id).await;
+}
+
 pub(crate) async fn rpc_session_target_id(state: &AppState, transport_session_id: &str) -> String {
     state
         .rpc_session_targets
@@ -197,6 +341,9 @@ pub(crate) async fn spawn_rpc_child(
         if reset_controller_if_transport_exited(&state, &session_id).await {
             return;
         }
+        if reset_model_catalog_if_transport_exited(&state, &session_id).await {
+            return;
+        }
         let pending_create = state
             .pending_created_sessions
             .write()
@@ -346,6 +493,25 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
     match typed_frame {
         OmpRpcFrame::Ready => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
+            if is_model_catalog_transport(state, session_id).await {
+                if let Err(message) = send_rpc_command(
+                    state,
+                    session_id,
+                    get_available_models_command(next_rpc_id()),
+                )
+                .await
+                {
+                    let request_id = complete_model_catalog_request(state, session_id).await;
+                    let _ = state.events.send(ServerMessage::Error {
+                        request_id,
+                        message,
+                    });
+                }
+                return;
+            }
+            if initialize_pending_created_session(state, session_id).await {
+                return;
+            }
             if let Err(message) = refresh_rpc_state(state, session_id).await {
                 warn!(session_id = %session_id, %message, "initial RPC refresh failed");
             }
@@ -781,6 +947,46 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             handle_controller_rpc_error(state, message).await;
             return;
         }
+        if is_model_catalog_transport(state, session_id).await {
+            let request_id = complete_model_catalog_request(state, session_id).await;
+            let _ = state.events.send(ServerMessage::Error {
+                request_id,
+                message,
+            });
+            return;
+        }
+        let pending_create = {
+            state
+                .pending_created_sessions
+                .read()
+                .await
+                .get(session_id)
+                .cloned()
+        };
+        if let Some(pending) = pending_create {
+            let label = pending
+                .proposed_model
+                .as_ref()
+                .map(|model| model.name.clone())
+                .unwrap_or_else(|| "session".to_string());
+            let create_message = match command {
+                Some("set_model") => {
+                    format!("Failed to apply proposed model \"{label}\": {message}")
+                }
+                Some("set_thinking_level") => {
+                    format!("Failed to apply thinking level for \"{label}\": {message}")
+                }
+                _ => message,
+            };
+            fail_pending_create_initialization(
+                state,
+                session_id,
+                pending.request_id,
+                create_message,
+            )
+            .await;
+            return;
+        }
         if rpc_prompt_busy_needs_client_choice(command, &message) {
             if let Some(prompt_busy) = take_pending_prompt_busy_message(state, frame).await {
                 let _ = state.events.send(prompt_busy);
@@ -848,10 +1054,17 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 .and_then(|models| models.as_array())
                 .map(|models| models.iter().filter_map(model_summary).collect())
                 .unwrap_or_default();
-            let _ = state.events.send(ServerMessage::ModelList {
-                session_id: current_session_id.clone(),
-                models,
-            });
+            if is_model_catalog_transport(state, session_id).await {
+                let request_id = complete_model_catalog_request(state, session_id).await;
+                let _ = state
+                    .events
+                    .send(ServerMessage::ConfigModelCatalogList { request_id, models });
+            } else {
+                let _ = state.events.send(ServerMessage::ModelList {
+                    session_id: current_session_id.clone(),
+                    models,
+                });
+            }
         }
         Some("approve_plan_mode") => {
             let pending_name = state
@@ -1220,7 +1433,9 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                         modes.insert(target_session_id.clone(), target_mode);
                     }
                 }
-                save_fura_config(state).await;
+                if let Err(error) = save_fura_config(state).await {
+                    warn!(%error, "failed to save remapped session metadata");
+                }
             }
 
             if let Some(snapshot) = previous_snapshot {

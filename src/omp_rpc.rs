@@ -200,6 +200,8 @@ pub(crate) enum OmpRpcCommand {
         #[serde(rename = "modelId")]
         model_id: String,
     },
+    #[serde(rename = "set_thinking_level")]
+    SetThinkingLevel { id: String, level: String },
     #[serde(rename = "prompt")]
     Prompt {
         id: String,
@@ -242,6 +244,10 @@ pub(crate) fn set_model_command(id: String, provider: String, model_id: String) 
         model_id,
     }
     .into_value()
+}
+
+pub(crate) fn set_thinking_level_command(id: String, level: String) -> Value {
+    OmpRpcCommand::SetThinkingLevel { id, level }.into_value()
 }
 
 pub(crate) fn prompt_command(

@@ -5,8 +5,8 @@ use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
 
 use crate::{
     CodeWorkspaceRegistry, ControlCandidate, DiffPayloadKind, DiffReviewWorktreeRegistry,
-    FrontendUiSnapshot, ServerMessage, SessionMode, SessionRecord, ThinkingVisibilityPreference,
-    Timestamp, VoiceCommand,
+    FrontendUiSnapshot, ProposedModelConfig, ServerMessage, SessionMode, SessionRecord,
+    ThinkingVisibilityPreference, Timestamp, VoiceCommand,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -30,6 +30,8 @@ pub(crate) struct AppState {
     pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,
     pub(crate) code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>,
     pub(crate) review_worktrees: Arc<RwLock<DiffReviewWorktreeRegistry>>,
+    pub(crate) proposed_models: Arc<RwLock<Vec<ProposedModelConfig>>>,
+    pub(crate) model_catalog: Arc<RwLock<ModelCatalogState>>,
     pub(crate) bridge_controller: Arc<RwLock<BridgeControllerState>>,
     pub(crate) voice_sessions: Arc<RwLock<HashMap<String, VoiceSessionHandle>>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,
@@ -72,6 +74,7 @@ pub(crate) struct PendingCreatedSession {
     pub(crate) created_at: Timestamp,
     pub(crate) session_mode: SessionMode,
     pub(crate) worktree: Option<crate::SessionWorktreeSummary>,
+    pub(crate) proposed_model: Option<ProposedModelConfig>,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +108,13 @@ pub(crate) struct BridgeControllerState {
     pub(crate) tools_restricted: bool,
     pub(crate) active_run: Option<BridgeControllerRun>,
     pub(crate) conversations: HashMap<String, ControlConversationState>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ModelCatalogState {
+    pub(crate) transport_session_id: Option<String>,
+    pub(crate) in_flight: bool,
+    pub(crate) in_flight_request_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]

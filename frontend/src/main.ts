@@ -89,6 +89,20 @@ import {
   resolveSessionCreateMessage,
   type SessionCreateValidationTarget,
 } from "./sessionCreate";
+import {
+  catalogContainsProposedModel,
+  filterCatalogModels,
+  formatCatalogModelLabel,
+  formatModelContext,
+  formatModelSelector,
+  formatProposedModelDetails,
+  normalizeSelectedProposedModelId,
+  proposedModelIdFromName,
+  PROPOSED_THINKING_LEVELS,
+  removeProposedModel,
+  upsertProposedModel,
+  validateProposedModels,
+} from "./proposedModels";
 import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import {
@@ -144,6 +158,8 @@ import type {
   FrontendControlAction,
   FrontendUiSnapshot,
   ModelSummary,
+  ProposedModelConfig,
+  ProposedThinkingLevel,
   ServerConfig,
   ServerMessage,
   SessionChangesState,
@@ -216,6 +232,25 @@ app.innerHTML = `
             <div id="workspaceOptionsMenu" class="workspace-options-menu" role="menu" hidden>
               <button id="toolVisibilityToggle" class="workspace-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
               <button id="thinkingVisibilityToggle" class="workspace-option-item" type="button" role="menuitem">Thinking: auto</button>
+              <div class="workspace-options-section">
+                <div class="workspace-options-heading">Proposed models</div>
+                <div id="proposedModelsList" class="proposed-models-list"></div>
+                <button id="proposedModelAdd" class="workspace-option-item" type="button">Add proposed model</button>
+                <div id="proposedModelForm" class="proposed-model-form" hidden>
+                  <label for="proposedModelNameInput">Name</label>
+                  <input id="proposedModelNameInput" autocomplete="off" spellcheck="false" placeholder="Fast review" />
+                  <label for="proposedModelSearchInput">Runtime model</label>
+                  <input id="proposedModelSearchInput" autocomplete="off" spellcheck="false" placeholder="Search OMP models" />
+                  <div id="proposedModelCatalogList" class="proposed-model-catalog" role="listbox"></div>
+                  <label for="proposedModelThinkingSelect">Thinking</label>
+                  <select id="proposedModelThinkingSelect"></select>
+                  <div class="proposed-model-actions">
+                    <button id="proposedModelSave" type="button">Save</button>
+                    <button id="proposedModelCancel" type="button">Cancel</button>
+                  </div>
+                </div>
+                <p id="proposedModelStatus" class="workspace-option-status" aria-live="polite"></p>
+              </div>
             </div>
           </div>
           <button id="abortButton" type="button">Abort</button>
@@ -366,6 +401,8 @@ app.innerHTML = `
         <label id="cwdPickerInputLabel" for="cwdPickerInput">Working directory</label>
         <input id="cwdPickerInput" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
         <p id="cwdPickerInputHelp" class="field-help">For a normal session, this is the directory where OMP starts.</p>
+        <label for="cwdPickerProposedModel">Model</label>
+        <select id="cwdPickerProposedModel"></select>
         <label class="checkbox-row" for="cwdPickerWorktreeEnabled">
           <input id="cwdPickerWorktreeEnabled" type="checkbox" />
           <span>Add worktree</span>
@@ -525,6 +562,16 @@ const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
 const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
 const thinkingVisibilityToggle = requireElement<HTMLButtonElement>("thinkingVisibilityToggle");
+const proposedModelsList = requireElement<HTMLDivElement>("proposedModelsList");
+const proposedModelAdd = requireElement<HTMLButtonElement>("proposedModelAdd");
+const proposedModelForm = requireElement<HTMLDivElement>("proposedModelForm");
+const proposedModelNameInput = requireElement<HTMLInputElement>("proposedModelNameInput");
+const proposedModelSearchInput = requireElement<HTMLInputElement>("proposedModelSearchInput");
+const proposedModelCatalogList = requireElement<HTMLDivElement>("proposedModelCatalogList");
+const proposedModelThinkingSelect = requireElement<HTMLSelectElement>("proposedModelThinkingSelect");
+const proposedModelSave = requireElement<HTMLButtonElement>("proposedModelSave");
+const proposedModelCancel = requireElement<HTMLButtonElement>("proposedModelCancel");
+const proposedModelStatus = requireElement<HTMLParagraphElement>("proposedModelStatus");
 const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const deleteSessionButton = requireElement<HTMLButtonElement>("deleteSessionButton");
@@ -570,6 +617,7 @@ const cwdPickerInput = requireElement<HTMLInputElement>("cwdPickerInput");
 const cwdPickerSessionBody = requireElement<HTMLDivElement>("cwdPickerSessionBody");
 const cwdPickerInputLabel = requireElement<HTMLLabelElement>("cwdPickerInputLabel");
 const cwdPickerInputHelp = requireElement<HTMLParagraphElement>("cwdPickerInputHelp");
+const cwdPickerProposedModel = requireElement<HTMLSelectElement>("cwdPickerProposedModel");
 const cwdPickerCancel = requireElement<HTMLButtonElement>("cwdPickerCancel");
 const cwdPickerCreate = requireElement<HTMLButtonElement>("cwdPickerCreate");
 const cwdPickerStatus = requireElement<HTMLSpanElement>("cwdPickerStatus");
@@ -677,6 +725,13 @@ let paletteCommands: SlashCommandSpec[] = [];
 let paletteSelectedIndex = -1;
 let cwdCategoryCombobox: CategoryCombobox;
 let activeCategoryCombobox: CategoryCombobox;
+let proposedModelCatalog: ModelSummary[] = [];
+let proposedModelCatalogLoading = false;
+let proposedModelCatalogRequestId: string | null = null;
+let proposedModelCatalogSelectedIndex = 0;
+let proposedModelFormOpen = false;
+let proposedModelSavePending = false;
+let proposedModelEditingId: string | null = null;
 let projections = new Map<string, SessionProjection>();
 const sessionChangesStates = new Map<string, SessionChangesState>();
 const sessionChangesPayloadKinds = new Map<string, DiffPayloadKind>();
@@ -738,6 +793,12 @@ let workspaceOptionsOpen = false;
 syncToolVisibilityToggle();
 syncThinkingVisibilityToggle();
 syncWorkspaceOptionsMenu();
+for (const level of PROPOSED_THINKING_LEVELS) {
+  const option = document.createElement("option");
+  option.value = level;
+  option.textContent = level === "default" ? "Default" : level[0].toUpperCase() + level.slice(1);
+  proposedModelThinkingSelect.append(option);
+}
 
 type CodeOpenRequest =
   | { source: "sessionWorktree"; sessionId: string; path: string }
@@ -823,6 +884,13 @@ thinkingVisibilityToggle.addEventListener("click", () => {
   applyVisibilityPreferences(showToolBubbles, nextMode);
   setWorkspaceOptionsOpen(false);
 });
+proposedModelAdd.addEventListener("click", () => openProposedModelForm());
+proposedModelCancel.addEventListener("click", () => closeProposedModelForm());
+proposedModelSearchInput.addEventListener("input", () => {
+  proposedModelCatalogSelectedIndex = 0;
+  renderProposedModelCatalog();
+});
+proposedModelSave.addEventListener("click", saveProposedModelFromForm);
 document.addEventListener("click", event => {
   if (!workspaceOptionsOpen) return;
   const target = event.target;
@@ -1256,6 +1324,7 @@ function handleServerMessage(message: ServerMessage): void {
         parseToolVisibility(message.config.showTools),
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
       );
+      syncProposedModelsUi();
       break;
     case "config.updated":
       serverConfig = message.config;
@@ -1263,6 +1332,12 @@ function handleServerMessage(message: ServerMessage): void {
         parseToolVisibility(message.config.showTools),
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
       );
+      syncProposedModelsUi();
+      proposedModelSavePending = false;
+      if (proposedModelFormOpen) {
+        proposedModelStatus.textContent = "Saved.";
+        closeProposedModelForm();
+      }
       break;
     case "sessions.snapshot":
       {
@@ -1473,6 +1548,20 @@ function handleServerMessage(message: ServerMessage): void {
         renderModelPicker();
       }
       break;
+    case "config.modelCatalog.list":
+      if (!message.requestId || message.requestId === proposedModelCatalogRequestId) {
+        proposedModelCatalog = message.models;
+        proposedModelCatalogLoading = false;
+        proposedModelCatalogRequestId = null;
+        proposedModelStatus.textContent = `${message.models.length} runtime model${message.models.length === 1 ? "" : "s"}`;
+        renderProposedModelCatalog();
+        if (proposedModelEditingId) {
+          const editing = serverConfig?.proposedModels.find(model => model.id === proposedModelEditingId);
+          if (editing) selectProposedCatalogModel(editing.provider, editing.modelId);
+        }
+        renderProposedModelsList();
+      }
+      break;
     case "model.changed":
       if (modelPickerSessionId === message.sessionId) {
         closeModelPicker();
@@ -1508,6 +1597,18 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     case "error":
       appendLog(`Error: ${message.message}`);
+      if (message.requestId && message.requestId === proposedModelCatalogRequestId) {
+        proposedModelCatalogLoading = false;
+        proposedModelCatalogRequestId = null;
+        proposedModelStatus.textContent = message.message;
+        renderProposedModelCatalog();
+        break;
+      }
+      if (proposedModelSavePending) {
+        proposedModelSavePending = false;
+        proposedModelStatus.textContent = message.message;
+        break;
+      }
       if (handleCwdPickerCreateError(message.requestId ?? null, message.message)) {
         break;
       }
@@ -2463,6 +2564,174 @@ function syncThinkingVisibilityToggle(): void {
 function syncWorkspaceOptionsMenu(): void {
   workspaceOptionsToggle.setAttribute("aria-expanded", String(workspaceOptionsOpen));
   workspaceOptionsMenu.hidden = !workspaceOptionsOpen;
+}
+
+function syncProposedModelsUi(): void {
+  renderProposedModelsList();
+  renderCwdProposedModelOptions();
+}
+
+function renderProposedModelsList(): void {
+  proposedModelsList.replaceChildren();
+  const models = serverConfig?.proposedModels ?? [];
+  if (models.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "proposed-model-empty";
+    empty.textContent = "No proposed models.";
+    proposedModelsList.append(empty);
+    return;
+  }
+  for (const model of models) {
+    const row = document.createElement("div");
+    row.className = "proposed-model-row";
+    const text = document.createElement("div");
+    const title = document.createElement("strong");
+    title.textContent = model.name;
+    const details = document.createElement("span");
+    details.textContent = formatProposedModelDetails(model);
+    text.append(title, details);
+    if (proposedModelCatalog.length > 0 && !catalogContainsProposedModel(proposedModelCatalog, model)) {
+      const warning = document.createElement("span");
+      warning.className = "proposed-model-warning";
+      warning.textContent = "Not in current OMP model catalog";
+      text.append(warning);
+    }
+    const actions = document.createElement("div");
+    actions.className = "proposed-model-row-actions";
+    const edit = document.createElement("button");
+    edit.type = "button";
+    edit.textContent = "Edit";
+    edit.addEventListener("click", () => openProposedModelForm(model));
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => saveProposedModels(removeProposedModel(models, model.id)));
+    actions.append(edit, remove);
+    row.append(text, actions);
+    proposedModelsList.append(row);
+  }
+}
+
+function renderCwdProposedModelOptions(): void {
+  const previous = cwdPickerProposedModel.value || "default";
+  cwdPickerProposedModel.replaceChildren();
+  cwdPickerProposedModel.append(new Option("Default", "default"));
+  for (const model of serverConfig?.proposedModels ?? []) {
+    cwdPickerProposedModel.append(new Option(model.name, model.id));
+  }
+  const normalizedSelection = normalizeSelectedProposedModelId(previous, serverConfig?.proposedModels ?? []);
+  cwdPickerProposedModel.value = normalizedSelection;
+}
+
+function openProposedModelForm(model: ProposedModelConfig | null = null): void {
+  proposedModelFormOpen = true;
+  proposedModelEditingId = model?.id ?? null;
+  proposedModelForm.hidden = false;
+  proposedModelNameInput.value = model?.name ?? "";
+  proposedModelSearchInput.value = model?.modelName || model?.modelId || "";
+  proposedModelThinkingSelect.value = model?.thinkingLevel ?? "default";
+  proposedModelCatalogSelectedIndex = 0;
+  proposedModelStatus.textContent = "";
+  renderProposedModelCatalog();
+  if (model && proposedModelCatalog.length > 0) {
+    selectProposedCatalogModel(model.provider, model.modelId);
+  }
+  if (proposedModelCatalog.length === 0 && !proposedModelCatalogLoading) {
+    proposedModelCatalogLoading = true;
+    proposedModelCatalogRequestId = nextClientRequestId("model-catalog");
+    proposedModelStatus.textContent = "Loading runtime models…";
+    if (!send({ type: "config.modelCatalog.list", requestId: proposedModelCatalogRequestId })) {
+      proposedModelCatalogLoading = false;
+      proposedModelStatus.textContent = "Not connected to the Fura bridge.";
+    }
+  }
+  window.setTimeout(() => proposedModelNameInput.focus(), 0);
+}
+
+function closeProposedModelForm(): void {
+  if (proposedModelSavePending) return;
+  proposedModelFormOpen = false;
+  proposedModelEditingId = null;
+  proposedModelForm.hidden = true;
+  proposedModelStatus.textContent = "";
+}
+
+function renderProposedModelCatalog(): void {
+  proposedModelCatalogList.replaceChildren();
+  const models = filterCatalogModels(proposedModelCatalog, proposedModelSearchInput.value);
+  if (proposedModelCatalogSelectedIndex >= models.length) {
+    proposedModelCatalogSelectedIndex = Math.max(0, models.length - 1);
+  }
+  if (proposedModelCatalogLoading && proposedModelCatalog.length === 0) {
+    proposedModelCatalogList.textContent = "Loading models…";
+    return;
+  }
+  if (models.length === 0) {
+    proposedModelCatalogList.textContent = proposedModelSearchInput.value.trim() ? "No matching models." : "No models loaded.";
+    return;
+  }
+  for (let index = 0; index < models.length; index++) {
+    const model = models[index];
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "proposed-model-catalog-row";
+    row.classList.toggle("selected", index === proposedModelCatalogSelectedIndex);
+    row.textContent = formatCatalogModelLabel(model);
+    row.addEventListener("click", () => {
+      proposedModelCatalogSelectedIndex = index;
+      renderProposedModelCatalog();
+    });
+    proposedModelCatalogList.append(row);
+  }
+}
+
+function selectProposedCatalogModel(provider: string, modelId: string): void {
+  const models = filterCatalogModels(proposedModelCatalog, proposedModelSearchInput.value);
+  const index = models.findIndex(model => model.provider === provider && model.id === modelId);
+  if (index >= 0) {
+    proposedModelCatalogSelectedIndex = index;
+    renderProposedModelCatalog();
+  }
+}
+
+function saveProposedModelFromForm(): void {
+  if (proposedModelSavePending) return;
+  const name = proposedModelNameInput.value.trim();
+  if (!name) {
+    proposedModelStatus.textContent = "Name is required.";
+    return;
+  }
+  const selected = filterCatalogModels(proposedModelCatalog, proposedModelSearchInput.value)[proposedModelCatalogSelectedIndex];
+  if (!selected) {
+    proposedModelStatus.textContent = "Choose a runtime model.";
+    return;
+  }
+  const existing = serverConfig?.proposedModels ?? [];
+  const editingId = proposedModelEditingId;
+  const model: ProposedModelConfig = {
+    id: editingId ?? proposedModelIdFromName(name, existing.map(item => item.id)),
+    name,
+    provider: selected.provider,
+    modelId: selected.id,
+    modelName: selected.name ?? null,
+    thinkingLevel: proposedModelThinkingSelect.value as ProposedThinkingLevel,
+  };
+  const nextModels = upsertProposedModel(existing, model, editingId);
+  saveProposedModels(nextModels);
+}
+
+function saveProposedModels(models: ProposedModelConfig[]): void {
+  const error = validateProposedModels(models);
+  if (error) {
+    proposedModelStatus.textContent = error;
+    return;
+  }
+  proposedModelSavePending = true;
+  proposedModelStatus.textContent = "Saving proposed models…";
+  if (!send({ type: "config.set", proposedModels: models })) {
+    proposedModelSavePending = false;
+    proposedModelStatus.textContent = "Not connected to the Fura bridge.";
+  }
 }
 
 function setWorkspaceOptionsOpen(open: boolean): void {
@@ -4510,6 +4779,7 @@ function setCwdPickerCreatePending(pending: boolean, requestId: string | null = 
   cwdPickerWorktreeSourceRepo.disabled = pending;
   cwdPickerWorktreeBase.disabled = pending;
   cwdPickerWorktreeBranch.disabled = pending;
+  cwdPickerProposedModel.disabled = pending;
   cwdPickerClose.disabled = pending;
   cwdPickerCancel.disabled = pending;
   cwdPickerCreate.disabled = pending;
@@ -4637,6 +4907,7 @@ function openCwdPicker(): void {
   lastAutofilledWorktreeBranch = "";
   setCwdPickerCreatePending(false);
   setCwdPickerError(null);
+  renderCwdProposedModelOptions();
   syncCwdPickerWorktreeFields();
   syncCwdPickerDiffDefaults();
   setCwdPickerMode("session");
@@ -4695,6 +4966,7 @@ function submitCwdPickerDiff(): void {
     cwd: repoRoot,
     category: normalizedCategory(cwdPickerCategoryInput.value),
     sessionMode: "diffReview",
+    proposedModelId: cwdPickerProposedModel.value,
     worktree: { enabled: false, sourceRepo: repoRoot, directory: repoRoot, baseBranch: base, branchName: undefined },
   });
   if (result.type === "invalid") {
@@ -4725,6 +4997,7 @@ function submitCwdPicker(): void {
     name: cwdPickerNameInput.value,
     cwd: cwdPickerInput.value,
     category: normalizedCategory(cwdPickerCategoryInput.value),
+    proposedModelId: cwdPickerProposedModel.value,
     worktree: {
       enabled: cwdPickerWorktreeEnabled.checked,
       sourceRepo: cwdPickerWorktreeSourceRepo.value,
@@ -4814,18 +5087,9 @@ function closeModelPicker(): void {
 }
 
 function filteredModelPickerModels(): ModelSummary[] {
-  const query = normalizeModelQuery(modelPickerSearch.value);
-  if (!query) return modelPickerModels;
-  return modelPickerModels.filter(model => normalizeModelQuery(modelSearchText(model)).includes(query));
+  return filterCatalogModels(modelPickerModels, modelPickerSearch.value);
 }
 
-function normalizeModelQuery(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-}
-
-function modelSearchText(model: ModelSummary): string {
-  return [model.provider, model.id, model.name ?? ""].join(" ");
-}
 
 function handleModelPickerKeydown(event: KeyboardEvent): void {
   if (modelPickerOverlay.hidden) return;
@@ -4928,16 +5192,6 @@ function renderModelPicker(): void {
   }
 }
 
-function formatModelSelector(model: ModelSummary): string {
-  return `${model.provider}/${model.id}`;
-}
-
-function formatModelContext(model: ModelSummary): string | null {
-  if (!model.contextWindow) return null;
-  if (model.contextWindow >= 1_000_000) return `${(model.contextWindow / 1_000_000).toFixed(1)}M context`;
-  if (model.contextWindow >= 1_000) return `${Math.round(model.contextWindow / 1_000)}K context`;
-  return `${model.contextWindow} context`;
-}
 
 // --- Command palette ---
 

@@ -117,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
     let voice_language = fura_config.voice_language.clone();
     let show_tools = fura_config.show_tools;
     let thinking_visibility = fura_config.thinking_visibility;
+    let proposed_models = fura_config.proposed_models.clone();
     let session_categories = fura_config
         .session_categories
         .into_iter()
@@ -148,6 +149,8 @@ async fn main() -> anyhow::Result<()> {
         plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
+        proposed_models: Arc::new(RwLock::new(proposed_models)),
+        model_catalog: Arc::new(RwLock::new(ModelCatalogState::default())),
         bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
         voice_sessions: Arc::new(RwLock::new(HashMap::new())),
         events,
@@ -671,6 +674,8 @@ pub(crate) mod tests {
             plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
+            proposed_models: Arc::new(RwLock::new(Vec::new())),
+            model_catalog: Arc::new(RwLock::new(ModelCatalogState::default())),
             bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
             voice_sessions: Arc::new(RwLock::new(HashMap::new())),
             events,
@@ -1805,6 +1810,48 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn catalog_transport_available_models_emits_global_catalog() {
+        let state = test_state(8, None);
+        state.model_catalog.write().await.transport_session_id =
+            Some("catalog-transport".to_string());
+        state.model_catalog.write().await.in_flight = true;
+        state.model_catalog.write().await.in_flight_request_id = Some("catalog-1".to_string());
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "catalog-transport",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_available_models",
+                "success": true,
+                "data": {
+                    "models": [{
+                        "provider": "mock",
+                        "id": "mock-model",
+                        "name": "Mock Model",
+                        "contextWindow": 200000,
+                        "thinking": null
+                    }]
+                }
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("catalog event") {
+            ServerMessage::ConfigModelCatalogList { request_id, models } => {
+                assert_eq!(request_id.as_deref(), Some("catalog-1"));
+                assert_eq!(models.len(), 1);
+                assert_eq!(models[0].provider, "mock");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        let catalog = state.model_catalog.read().await;
+        assert!(!catalog.in_flight);
+        assert!(catalog.in_flight_request_id.is_none());
+    }
+
+    #[tokio::test]
     async fn rpc_set_model_response_updates_projection_and_emits_change() {
         let state = test_state(8, None);
         state
@@ -1854,6 +1901,20 @@ pub(crate) mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn set_thinking_level_command_serializes_wire_shape() {
+        let command = set_thinking_level_command("rpc-1".to_string(), "high".to_string());
+
+        assert_eq!(
+            command,
+            serde_json::json!({
+                "id": "rpc-1",
+                "type": "set_thinking_level",
+                "level": "high"
+            })
+        );
     }
 
     #[tokio::test]
@@ -2035,6 +2096,7 @@ pub(crate) mod tests {
                     base_branch: "HEAD".to_string(),
                     branch_name: Some("feature/request-id".to_string()),
                 }),
+                proposed_model_id: None,
             },
         )
         .await;
@@ -2622,6 +2684,7 @@ pub(crate) mod tests {
                 thinking_visibility: default_thinking_visibility(),
                 session_categories: HashMap::new(),
                 session_modes: HashMap::new(),
+                proposed_models: Vec::new(),
             })
             .expect("config should serialize"),
         )
@@ -2648,6 +2711,7 @@ pub(crate) mod tests {
                 thinking_visibility: default_thinking_visibility(),
                 session_categories: HashMap::new(),
                 session_modes: HashMap::new(),
+                proposed_models: Vec::new(),
             })
             .expect("config should serialize"),
         )
@@ -2694,6 +2758,7 @@ pub(crate) mod tests {
             &state,
             Some(false),
             Some(ThinkingVisibilityPreference::Hidden),
+            None,
         )
         .await;
 
@@ -2722,14 +2787,14 @@ pub(crate) mod tests {
     async fn config_set_rejects_empty_payload() {
         let state = test_state(8, None);
 
-        let responses = set_client_config(&state, None, None).await;
+        let responses = set_client_config(&state, None, None, None).await;
 
         assert_eq!(responses.len(), 1);
         match &responses[0] {
             ServerMessage::Error { message, .. } => {
                 assert_eq!(
                     message,
-                    "config.set requires showTools or thinkingVisibility"
+                    "config.set requires showTools, thinkingVisibility, or proposedModels"
                 );
             }
             other => panic!("unexpected response: {other:?}"),
@@ -2746,6 +2811,7 @@ pub(crate) mod tests {
                 voice_language: "pl-PL".to_string(),
                 show_tools: true,
                 thinking_visibility: ThinkingVisibilityPreference::Auto,
+                proposed_models: Vec::new(),
             },
         })
         .expect("hello should serialize");
@@ -2757,6 +2823,28 @@ pub(crate) mod tests {
         assert_eq!(json["config"]["voiceLanguage"], "pl-PL");
         assert_eq!(json["config"]["showTools"], true);
         assert_eq!(json["config"]["thinkingVisibility"], "auto");
+    }
+
+    #[test]
+    fn serializes_client_config_proposed_model_default_thinking() {
+        let json = serde_json::to_value(ClientConfig {
+            default_cwd: "/workspace".to_string(),
+            voice_language: "en".to_string(),
+            show_tools: true,
+            thinking_visibility: ThinkingVisibilityPreference::Auto,
+            proposed_models: vec![ProposedModelConfig {
+                id: "fast-review".to_string(),
+                name: "Fast review".to_string(),
+                provider: "mock".to_string(),
+                model_id: "mock-model".to_string(),
+                model_name: None,
+                thinking_level: ProposedThinkingLevel::Default,
+            }],
+        })
+        .expect("config should serialize");
+
+        assert_eq!(json["proposedModels"][0]["thinkingLevel"], "default");
+        assert_eq!(json["proposedModels"][0]["modelId"], "mock-model");
     }
 
     #[test]
@@ -3181,6 +3269,294 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn pending_create_ready_queues_model_thinking_then_refresh() {
+        let state = test_state(8, None);
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Value>(8);
+        let (stop_tx, _stop_rx) = oneshot::channel();
+        state.rpc_sessions.write().await.insert(
+            "transport-session".to_string(),
+            RpcSessionHandle {
+                stdin: stdin_tx,
+                stop: stop_tx,
+            },
+        );
+        state.rpc_session_targets.write().await.insert(
+            "transport-session".to_string(),
+            "transport-session".to_string(),
+        );
+        state.pending_created_sessions.write().await.insert(
+            "transport-session".to_string(),
+            PendingCreatedSession {
+                cwd: Some("/workspace/project".to_string()),
+                args: Vec::new(),
+                title: Some("Review session".to_string()),
+                request_id: Some("create-1".to_string()),
+                category: None,
+                session_mode: SessionMode::Standard,
+                created_at: Timestamp::now(),
+                worktree: None,
+                proposed_model: Some(ProposedModelConfig {
+                    id: "fast-review".to_string(),
+                    name: "Fast review".to_string(),
+                    provider: "mock".to_string(),
+                    model_id: "mock-reasoner".to_string(),
+                    model_name: Some("Mock Reasoner".to_string()),
+                    thinking_level: ProposedThinkingLevel::High,
+                }),
+            },
+        );
+
+        apply_rpc_frame(
+            &state,
+            "transport-session",
+            &serde_json::json!({ "type": "ready" }),
+        )
+        .await;
+
+        let mut command_types = Vec::new();
+        for _ in 0..6 {
+            let command = stdin_rx.recv().await.expect("queued command");
+            command_types.push(command["type"].as_str().unwrap_or_default().to_string());
+        }
+        assert_eq!(
+            command_types,
+            vec![
+                "set_session_name",
+                "set_model",
+                "set_thinking_level",
+                "get_state",
+                "get_messages",
+                "get_session_stats",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_create_default_model_skips_model_and_thinking_commands() {
+        let state = test_state(8, None);
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Value>(8);
+        let (stop_tx, _stop_rx) = oneshot::channel();
+        state.rpc_sessions.write().await.insert(
+            "transport-session".to_string(),
+            RpcSessionHandle {
+                stdin: stdin_tx,
+                stop: stop_tx,
+            },
+        );
+        state.rpc_session_targets.write().await.insert(
+            "transport-session".to_string(),
+            "transport-session".to_string(),
+        );
+        state.pending_created_sessions.write().await.insert(
+            "transport-session".to_string(),
+            PendingCreatedSession {
+                cwd: Some("/workspace/project".to_string()),
+                args: Vec::new(),
+                title: Some("Review session".to_string()),
+                request_id: Some("create-default".to_string()),
+                category: None,
+                session_mode: SessionMode::Standard,
+                created_at: Timestamp::now(),
+                worktree: None,
+                proposed_model: None,
+            },
+        );
+
+        apply_rpc_frame(
+            &state,
+            "transport-session",
+            &serde_json::json!({ "type": "ready" }),
+        )
+        .await;
+
+        let mut command_types = Vec::new();
+        for _ in 0..4 {
+            let command = stdin_rx.recv().await.expect("queued command");
+            command_types.push(command["type"].as_str().unwrap_or_default().to_string());
+        }
+        assert_eq!(
+            command_types,
+            vec![
+                "set_session_name",
+                "get_state",
+                "get_messages",
+                "get_session_stats",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_create_set_model_error_returns_request_scoped_error_and_stops_transport() {
+        let state = test_state(8, None);
+        let (stdin_tx, _stdin_rx) = mpsc::channel::<Value>(8);
+        let (stop_tx, _stop_rx) = oneshot::channel();
+        state.rpc_sessions.write().await.insert(
+            "transport-session".to_string(),
+            RpcSessionHandle {
+                stdin: stdin_tx,
+                stop: stop_tx,
+            },
+        );
+        state.rpc_session_targets.write().await.insert(
+            "transport-session".to_string(),
+            "transport-session".to_string(),
+        );
+        state.pending_created_sessions.write().await.insert(
+            "transport-session".to_string(),
+            PendingCreatedSession {
+                cwd: Some("/workspace/project".to_string()),
+                args: Vec::new(),
+                title: Some("Review session".to_string()),
+                request_id: Some("create-model-error".to_string()),
+                category: None,
+                session_mode: SessionMode::Standard,
+                created_at: Timestamp::now(),
+                worktree: None,
+                proposed_model: Some(ProposedModelConfig {
+                    id: "fast-review".to_string(),
+                    name: "Fast review".to_string(),
+                    provider: "mock".to_string(),
+                    model_id: "missing".to_string(),
+                    model_name: Some("Missing".to_string()),
+                    thinking_level: ProposedThinkingLevel::Default,
+                }),
+            },
+        );
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "transport-session",
+            &serde_json::json!({
+                "type": "response",
+                "command": "set_model",
+                "success": false,
+                "error": "Model not found: mock/missing"
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("error event") {
+            ServerMessage::Error {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id.as_deref(), Some("create-model-error"));
+                assert_eq!(
+                    message,
+                    "Failed to apply proposed model \"Fast review\": Model not found: mock/missing"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            events.try_recv().is_err(),
+            "unexpected extra event after set_model failure"
+        );
+        assert!(
+            state
+                .pending_created_sessions
+                .read()
+                .await
+                .get("transport-session")
+                .is_none()
+        );
+        assert!(
+            state
+                .rpc_sessions
+                .read()
+                .await
+                .get("transport-session")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_create_set_thinking_error_returns_request_scoped_error_and_stops_transport() {
+        let state = test_state(8, None);
+        let (stdin_tx, _stdin_rx) = mpsc::channel::<Value>(8);
+        let (stop_tx, _stop_rx) = oneshot::channel();
+        state.rpc_sessions.write().await.insert(
+            "transport-session".to_string(),
+            RpcSessionHandle {
+                stdin: stdin_tx,
+                stop: stop_tx,
+            },
+        );
+        state.rpc_session_targets.write().await.insert(
+            "transport-session".to_string(),
+            "transport-session".to_string(),
+        );
+        state.pending_created_sessions.write().await.insert(
+            "transport-session".to_string(),
+            PendingCreatedSession {
+                cwd: Some("/workspace/project".to_string()),
+                args: Vec::new(),
+                title: Some("Review session".to_string()),
+                request_id: Some("create-thinking-error".to_string()),
+                category: None,
+                session_mode: SessionMode::Standard,
+                created_at: Timestamp::now(),
+                worktree: None,
+                proposed_model: Some(ProposedModelConfig {
+                    id: "fast-review".to_string(),
+                    name: "Fast review".to_string(),
+                    provider: "mock".to_string(),
+                    model_id: "mock-reasoner".to_string(),
+                    model_name: Some("Mock Reasoner".to_string()),
+                    thinking_level: ProposedThinkingLevel::High,
+                }),
+            },
+        );
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "transport-session",
+            &serde_json::json!({
+                "type": "response",
+                "command": "set_thinking_level",
+                "success": false,
+                "error": "Thinking level unsupported"
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("error event") {
+            ServerMessage::Error {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id.as_deref(), Some("create-thinking-error"));
+                assert_eq!(
+                    message,
+                    "Failed to apply thinking level for \"Fast review\": Thinking level unsupported"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            events.try_recv().is_err(),
+            "unexpected extra event after set_thinking_level failure"
+        );
+        assert!(
+            state
+                .pending_created_sessions
+                .read()
+                .await
+                .get("transport-session")
+                .is_none()
+        );
+        assert!(
+            state
+                .rpc_sessions
+                .read()
+                .await
+                .get("transport-session")
+                .is_none()
+        );
+    }
+    #[tokio::test]
     async fn get_state_updates_current_todo_projection() {
         let state = test_state(8, None);
         state
@@ -3238,6 +3614,7 @@ pub(crate) mod tests {
                 worktree: None,
                 created_at: Timestamp::from_rpc(&serde_json::json!(123_000))
                     .expect("valid test timestamp"),
+                proposed_model: None,
             },
         );
         state.rpc_session_targets.write().await.insert(

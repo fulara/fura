@@ -42,6 +42,7 @@ const models = [
   },
 ];
 let currentModel = models[0];
+let currentThinkingLevel = undefined;
 const processSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 let currentSessionId = `mock-session-${processSeed}`;
 let currentSessionFile = `${currentSessionId}.jsonl`;
@@ -103,7 +104,7 @@ for await (const line of rl) {
     case "get_state": {
       success(command, {
         model: currentModel,
-        thinkingLevel: undefined,
+        thinkingLevel: currentThinkingLevel,
         sessionId: currentSessionId,
         sessionFile: currentSessionFile,
         sessionName: currentSessionName,
@@ -147,6 +148,17 @@ for await (const line of rl) {
       }
       currentModel = nextModel;
       success(command, currentModel);
+      break;
+    }
+    case "set_thinking_level": {
+      const level = String(command.level ?? "");
+      const validLevels = ["off", "minimal", "low", "medium", "high", "inherit"];
+      if (!validLevels.includes(level)) {
+        error(command, `Invalid thinking level: ${level}`);
+        break;
+      }
+      currentThinkingLevel = level === "inherit" ? undefined : level;
+      success(command, { thinkingLevel: currentThinkingLevel });
       break;
     }
     case "cycle_model": {

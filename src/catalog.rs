@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde_json::Value;
+use tracing::warn;
 
 use crate::{
     AppState, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader, SessionKind,
@@ -145,7 +146,9 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
         changed
     };
     if metadata_pruned {
-        save_fura_config(state).await;
+        if let Err(error) = save_fura_config(state).await {
+            warn!(%error, "failed to save pruned session metadata");
+        }
     }
 
     sessions_changed

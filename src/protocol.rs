@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, SessionMode,
-    SessionProjection, SessionSummary, ThinkingVisibilityPreference,
+    ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, ProposedModelConfig,
+    SessionMode, SessionProjection, SessionSummary, ThinkingVisibilityPreference,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -427,6 +427,7 @@ pub(crate) enum ClientMessage {
         category: Option<String>,
         session_mode: Option<SessionMode>,
         worktree: Option<WorktreeCreateRequest>,
+        proposed_model_id: Option<String>,
     },
     #[serde(rename = "session.setCategory")]
     SessionSetCategory {
@@ -437,7 +438,10 @@ pub(crate) enum ClientMessage {
     ConfigSet {
         show_tools: Option<bool>,
         thinking_visibility: Option<ThinkingVisibilityPreference>,
+        proposed_models: Option<Vec<ProposedModelConfig>>,
     },
+    #[serde(rename = "config.modelCatalog.list")]
+    ConfigModelCatalogList { request_id: Option<String> },
     #[serde(rename = "session.attach")]
     SessionAttach { session_id: String },
     #[serde(rename = "session.open")]
@@ -663,6 +667,11 @@ pub(crate) enum ServerMessage {
     #[serde(rename = "model.list")]
     ModelList {
         session_id: String,
+        models: Vec<ModelSummary>,
+    },
+    #[serde(rename = "config.modelCatalog.list")]
+    ConfigModelCatalogList {
+        request_id: Option<String>,
         models: Vec<ModelSummary>,
     },
     #[serde(rename = "model.changed")]

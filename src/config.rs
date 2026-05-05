@@ -2,7 +2,7 @@ use anyhow::{Context, ensure};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     env, fs,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -102,6 +102,54 @@ impl Default for ThinkingVisibilityPreference {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ProposedThinkingLevel {
+    Default,
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl Default for ProposedThinkingLevel {
+    fn default() -> Self {
+        Self::Default
+    }
+}
+
+impl ProposedThinkingLevel {
+    pub(crate) fn as_rpc_level(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Off => Some("off"),
+            Self::Minimal => Some("minimal"),
+            Self::Low => Some("low"),
+            Self::Medium => Some("medium"),
+            Self::High => Some("high"),
+        }
+    }
+}
+
+pub(crate) fn is_default_proposed_thinking_level(level: &ProposedThinkingLevel) -> bool {
+    *level == ProposedThinkingLevel::Default
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProposedModelConfig {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) provider: String,
+    #[serde(alias = "model-id")]
+    pub(crate) model_id: String,
+    #[serde(default, alias = "model-name", skip_serializing_if = "Option::is_none")]
+    pub(crate) model_name: Option<String>,
+    #[serde(default, alias = "thinking-level")]
+    pub(crate) thinking_level: ProposedThinkingLevel,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct FuraConfig {
@@ -116,6 +164,60 @@ pub(crate) struct FuraConfig {
     pub(crate) session_categories: HashMap<String, String>,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub(crate) session_modes: HashMap<String, SessionMode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) proposed_models: Vec<ProposedModelConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct FuraConfigDisk<'a> {
+    last_cwd: &'a Option<String>,
+    voice_language: &'a String,
+    show_tools: bool,
+    thinking_visibility: ThinkingVisibilityPreference,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    session_categories: &'a HashMap<String, String>,
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    session_modes: &'a HashMap<String, SessionMode>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    proposed_models: Vec<ProposedModelDisk<'a>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "kebab-case")]
+struct ProposedModelDisk<'a> {
+    id: &'a String,
+    name: &'a String,
+    provider: &'a String,
+    model_id: &'a String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_name: &'a Option<String>,
+    #[serde(skip_serializing_if = "is_default_proposed_thinking_level")]
+    thinking_level: ProposedThinkingLevel,
+}
+
+fn serialize_fura_config_for_disk(config: &FuraConfig) -> serde_yaml::Result<String> {
+    let proposed_models = config
+        .proposed_models
+        .iter()
+        .map(|model| ProposedModelDisk {
+            id: &model.id,
+            name: &model.name,
+            provider: &model.provider,
+            model_id: &model.model_id,
+            model_name: &model.model_name,
+            thinking_level: model.thinking_level,
+        })
+        .collect();
+    serde_yaml::to_string(&FuraConfigDisk {
+        last_cwd: &config.last_cwd,
+        voice_language: &config.voice_language,
+        show_tools: config.show_tools,
+        thinking_visibility: config.thinking_visibility,
+        session_categories: &config.session_categories,
+        session_modes: &config.session_modes,
+        proposed_models,
+    })
 }
 
 impl Default for FuraConfig {
@@ -127,6 +229,7 @@ impl Default for FuraConfig {
             thinking_visibility: default_thinking_visibility(),
             session_categories: HashMap::new(),
             session_modes: HashMap::new(),
+            proposed_models: Vec::new(),
         }
     }
 }
@@ -138,6 +241,7 @@ pub(crate) struct ClientConfig {
     pub(crate) voice_language: String,
     pub(crate) show_tools: bool,
     pub(crate) thinking_visibility: ThinkingVisibilityPreference,
+    pub(crate) proposed_models: Vec<ProposedModelConfig>,
 }
 
 pub(crate) fn default_voice_language() -> String {
@@ -150,6 +254,86 @@ pub(crate) fn default_show_tools() -> bool {
 
 pub(crate) fn default_thinking_visibility() -> ThinkingVisibilityPreference {
     ThinkingVisibilityPreference::Auto
+}
+
+pub(crate) fn validate_proposed_models(models: &[ProposedModelConfig]) -> anyhow::Result<()> {
+    let mut ids = HashSet::new();
+    let mut names = HashSet::new();
+    for model in models {
+        ensure!(
+            is_valid_proposed_model_id(&model.id),
+            "proposed model id must contain lowercase letters/digits separated by single dashes: {}",
+            model.id
+        );
+        ensure!(
+            !model.name.trim().is_empty(),
+            "proposed model name is required"
+        );
+        ensure!(
+            !model.provider.trim().is_empty(),
+            "proposed model provider is required for {}",
+            model.name
+        );
+        ensure!(
+            !model.model_id.trim().is_empty(),
+            "proposed model id is required for {}",
+            model.name
+        );
+        ensure!(
+            ids.insert(model.id.clone()),
+            "duplicate proposed model id: {}",
+            model.id
+        );
+        let normalized_name = model.name.trim().to_lowercase();
+        ensure!(
+            names.insert(normalized_name),
+            "duplicate proposed model name: {}",
+            model.name
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_proposed_models(
+    models: Vec<ProposedModelConfig>,
+) -> Vec<ProposedModelConfig> {
+    models
+        .into_iter()
+        .map(|model| ProposedModelConfig {
+            id: model.id.trim().to_string(),
+            name: model.name.trim().to_string(),
+            provider: model.provider.trim().to_string(),
+            model_id: model.model_id.trim().to_string(),
+            model_name: model.model_name.and_then(|name| {
+                let trimmed = name.trim().to_string();
+                (!trimmed.is_empty()).then_some(trimmed)
+            }),
+            thinking_level: model.thinking_level,
+        })
+        .collect()
+}
+
+pub(crate) fn is_valid_proposed_model_id(id: &str) -> bool {
+    let bytes = id.as_bytes();
+    if bytes.is_empty() || bytes.first() == Some(&b'-') || bytes.last() == Some(&b'-') {
+        return false;
+    }
+    let mut previous_dash = false;
+    for byte in bytes {
+        let valid = byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-';
+        if !valid {
+            return false;
+        }
+        if *byte == b'-' {
+            if previous_dash {
+                return false;
+            }
+            previous_dash = true;
+        } else {
+            previous_dash = false;
+        }
+    }
+    true
 }
 
 const MIN_REMOTE_CERT_VALIDITY: Duration = Duration::from_secs(5 * 24 * 60 * 60);
@@ -314,7 +498,14 @@ pub(crate) fn load_fura_config(config_path: Option<&Path>) -> FuraConfig {
 
     match fs::read_to_string(path) {
         Ok(text) => match serde_yaml::from_str::<FuraConfig>(&text) {
-            Ok(config) => config,
+            Ok(mut config) => {
+                config.proposed_models = normalize_proposed_models(config.proposed_models);
+                if let Err(error) = validate_proposed_models(&config.proposed_models) {
+                    warn!(path = %path.display(), %error, "invalid proposed models in Fura config");
+                    config.proposed_models.clear();
+                }
+                config
+            }
             Err(error) => {
                 warn!(path = %path.display(), %error, "failed to parse Fura config");
                 FuraConfig::default()
@@ -347,6 +538,7 @@ pub(crate) async fn client_config(state: &AppState) -> ClientConfig {
         voice_language: state.voice_language.read().await.clone(),
         show_tools: *state.show_tools.read().await,
         thinking_visibility: *state.thinking_visibility.read().await,
+        proposed_models: state.proposed_models.read().await.clone(),
     }
 }
 
@@ -355,16 +547,18 @@ pub(crate) async fn broadcast_config(state: &AppState) {
     let _ = state.events.send(ServerMessage::ConfigUpdated { config });
 }
 
-pub(crate) async fn save_fura_config(state: &AppState) {
+pub(crate) async fn save_fura_config(state: &AppState) -> anyhow::Result<()> {
     let Some(path) = state.config_path.as_ref() else {
-        return;
+        return Ok(());
     };
 
     if let Some(parent) = path.parent() {
-        if let Err(error) = async_fs::create_dir_all(parent).await {
-            warn!(path = %parent.display(), %error, "failed to create Fura config directory");
-            return;
-        }
+        async_fs::create_dir_all(parent).await.with_context(|| {
+            format!(
+                "failed to create Fura config directory {}",
+                parent.display()
+            )
+        })?;
     }
 
     let config = FuraConfig {
@@ -374,21 +568,22 @@ pub(crate) async fn save_fura_config(state: &AppState) {
         thinking_visibility: *state.thinking_visibility.read().await,
         session_categories: state.session_categories.read().await.clone(),
         session_modes: state.session_modes.read().await.clone(),
+        proposed_models: state.proposed_models.read().await.clone(),
     };
-    match serde_yaml::to_string(&config) {
-        Ok(text) => {
-            if let Err(error) = async_fs::write(path, text).await {
-                warn!(path = %path.display(), %error, "failed to write Fura config");
-            }
-        }
-        Err(error) => warn!(%error, "failed to serialize Fura config"),
-    }
+    let text =
+        serialize_fura_config_for_disk(&config).context("failed to serialize Fura config")?;
+    async_fs::write(path, text)
+        .await
+        .with_context(|| format!("failed to write Fura config {}", path.display()))?;
+    Ok(())
 }
 
 pub(crate) async fn save_default_cwd(state: &AppState, cwd: &str) {
     *state.default_cwd.write().await = cwd.to_string();
 
-    save_fura_config(state).await;
+    if let Err(error) = save_fura_config(state).await {
+        warn!(%error, "failed to save default cwd");
+    }
     broadcast_config(state).await;
 }
 
@@ -512,5 +707,134 @@ mod tests {
 
         let error = validate_remote_cert_expiry(&remote).expect_err("cert should be rejected");
         assert!(error.to_string().contains("expires in less than 5 days"));
+    }
+
+    #[test]
+    fn fura_config_defaults_to_no_proposed_models() {
+        let config = serde_yaml::from_str::<FuraConfig>("show-tools: true\n").expect("config");
+
+        assert!(config.proposed_models.is_empty());
+    }
+
+    #[test]
+    fn fura_config_omits_empty_proposed_models() {
+        let text =
+            serialize_fura_config_for_disk(&FuraConfig::default()).expect("serialize config");
+
+        assert!(!text.contains("proposed-models"));
+    }
+
+    #[test]
+    fn proposed_model_default_thinking_is_omitted() {
+        let config = FuraConfig {
+            proposed_models: vec![ProposedModelConfig {
+                id: "fast-review".to_string(),
+                name: "Fast review".to_string(),
+                provider: "cursor".to_string(),
+                model_id: "gpt-5.2-codex".to_string(),
+                model_name: Some("GPT-5.2 Codex".to_string()),
+                thinking_level: ProposedThinkingLevel::Default,
+            }],
+            ..FuraConfig::default()
+        };
+
+        let text = serialize_fura_config_for_disk(&config).expect("serialize config");
+
+        assert!(text.contains("proposed-models:"));
+        assert!(text.contains("model-id: gpt-5.2-codex"));
+        assert!(!text.contains("thinking-level"));
+    }
+
+    #[test]
+    fn proposed_model_non_default_thinking_serializes_lowercase() {
+        let config = FuraConfig {
+            proposed_models: vec![ProposedModelConfig {
+                id: "fast-review".to_string(),
+                name: "Fast review".to_string(),
+                provider: "cursor".to_string(),
+                model_id: "gpt-5.2-codex".to_string(),
+                model_name: None,
+                thinking_level: ProposedThinkingLevel::High,
+            }],
+            ..FuraConfig::default()
+        };
+
+        let text = serialize_fura_config_for_disk(&config).expect("serialize config");
+
+        assert!(text.contains("thinking-level: high"));
+    }
+
+    #[test]
+    fn proposed_model_parse_keeps_model_id_slashes() {
+        let config = serde_yaml::from_str::<FuraConfig>(
+            r#"
+proposed-models:
+  - id: fast-review
+    name: Fast review
+    provider: openrouter
+    model-id: anthropic/claude-sonnet-4.5
+    thinking-level: low
+"#,
+        )
+        .expect("config");
+
+        assert_eq!(config.proposed_models[0].provider, "openrouter");
+        assert_eq!(
+            config.proposed_models[0].model_id,
+            "anthropic/claude-sonnet-4.5"
+        );
+        assert_eq!(
+            config.proposed_models[0].thinking_level,
+            ProposedThinkingLevel::Low
+        );
+    }
+
+    #[test]
+    fn validate_proposed_models_rejects_bad_ids_and_duplicates() {
+        let valid = ProposedModelConfig {
+            id: "fast-one".to_string(),
+            name: "Fast one".to_string(),
+            provider: "cursor".to_string(),
+            model_id: "gpt-5.2-codex".to_string(),
+            model_name: None,
+            thinking_level: ProposedThinkingLevel::Default,
+        };
+        validate_proposed_models(std::slice::from_ref(&valid)).expect("valid model");
+
+        let mut bad = valid.clone();
+        bad.id = "Fast One".to_string();
+        assert!(validate_proposed_models(&[bad]).is_err());
+
+        let duplicate = ProposedModelConfig {
+            id: valid.id.clone(),
+            name: "Other".to_string(),
+            ..valid.clone()
+        };
+        assert!(validate_proposed_models(&[valid.clone(), duplicate]).is_err());
+
+        let duplicate_name = ProposedModelConfig {
+            id: "other".to_string(),
+            name: valid.name.clone(),
+            ..valid.clone()
+        };
+        assert!(validate_proposed_models(&[valid, duplicate_name]).is_err());
+    }
+
+    #[test]
+    fn normalize_proposed_models_trims_fields_and_drops_empty_cached_name() {
+        let normalized = normalize_proposed_models(vec![ProposedModelConfig {
+            id: " fast-review ".to_string(),
+            name: " Fast review ".to_string(),
+            provider: " mock ".to_string(),
+            model_id: " mock-model ".to_string(),
+            model_name: Some("   ".to_string()),
+            thinking_level: ProposedThinkingLevel::Default,
+        }]);
+
+        assert_eq!(normalized[0].id, "fast-review");
+        assert_eq!(normalized[0].name, "Fast review");
+        assert_eq!(normalized[0].provider, "mock");
+        assert_eq!(normalized[0].model_id, "mock-model");
+        assert_eq!(normalized[0].model_name, None);
     }
 }

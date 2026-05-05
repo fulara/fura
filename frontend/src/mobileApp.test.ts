@@ -43,7 +43,7 @@ class FakeConnection implements FuraConnection {
   }
 }
 
-const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en", showTools: true, thinkingVisibility: "auto" };
+const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en", showTools: true, thinkingVisibility: "auto", proposedModels: [] };
 
 function createHarness(path = "/mobile.html", storedToken = "dev") {
   document.body.innerHTML = `<div id="app"></div>`;
@@ -957,6 +957,95 @@ describe("mountMobileApp", () => {
     });
     expect(createMessage).not.toHaveProperty("worktree");
     expect(document.querySelector("#mobileCreateStatus")?.textContent).toBe("Creating session…");
+  });
+
+  it("renders proposed model options and sends selected proposedModelId", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "config.updated",
+      config: {
+        ...config,
+        proposedModels: [{
+          id: "fast-review",
+          name: "Fast review",
+          provider: "mock",
+          modelId: "mock-reasoner",
+          modelName: "Mock Reasoner",
+          thinkingLevel: "high",
+        }],
+      },
+    });
+
+    openCreateDrawer();
+    const select = document.querySelector<HTMLSelectElement>("#mobileCreateProposedModel");
+    if (!select) throw new Error("model select missing");
+    expect(Array.from(select.options).map(option => option.textContent)).toEqual(["Default", "Fast review"]);
+    select.value = "fast-review";
+    submitCreateForm("Mobile session", "/tmp/mobile");
+
+    expect(connection.sent.find(message => message.type === "session.create")).toMatchObject({
+      proposedModelId: "fast-review",
+    });
+  });
+
+
+  it("resets the mobile create proposed model selection when config removes it", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "config.updated",
+      config: {
+        ...config,
+        proposedModels: [{
+          id: "fast-review",
+          name: "Fast review",
+          provider: "mock",
+          modelId: "mock-reasoner",
+          modelName: "Mock Reasoner",
+          thinkingLevel: "high",
+        }],
+      },
+    });
+    openCreateDrawer();
+    const select = document.querySelector<HTMLSelectElement>("#mobileCreateProposedModel");
+    if (!select) throw new Error("model select missing");
+    select.value = "fast-review";
+    connection.emit({
+      type: "config.updated",
+      config: {
+        ...config,
+        proposedModels: [],
+      },
+    });
+    expect(select.value).toBe("default");
+  });
+  it("sends config.set when adding a mobile proposed model", () => {
+    const { connection } = createHarness();
+    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    connection.emit({
+      type: "config.modelCatalog.list",
+      requestId: connection.sent.find(message => message.type === "config.modelCatalog.list")?.requestId,
+      models: [{ provider: "mock", id: "mock-reasoner", name: "Mock Reasoner", contextWindow: 1000000, thinking: true }],
+    });
+    const search = document.querySelector<HTMLInputElement>("#mobileProposedModelSearch");
+    if (!search) throw new Error("proposed model search missing");
+    search.value = "reasoner";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    const name = document.querySelector<HTMLInputElement>("#mobileProposedModelName");
+    if (!name) throw new Error("proposed model name missing");
+    name.value = "Fast review";
+    document.querySelector<HTMLButtonElement>("#mobileProposedModelAdd")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "config.set",
+      proposedModels: [{
+        id: "fast-review",
+        name: "Fast review",
+        provider: "mock",
+        modelId: "mock-reasoner",
+        modelName: "Mock Reasoner",
+        thinkingLevel: "default",
+      }],
+    });
   });
 
   it("rejects mobile session creation without a working directory", () => {

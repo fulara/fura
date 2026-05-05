@@ -6,6 +6,7 @@ export type SessionCreateDraft = {
   cwd?: string;
   category?: string;
   sessionMode?: SessionMode;
+  proposedModelId?: string;
   worktree?: {
     enabled: boolean;
     sourceRepo?: string;
@@ -195,6 +196,7 @@ export function resolveSessionCreateMessage(draft: SessionCreateDraft): SessionC
         ...(category ? { category } : {}),
         ...(sessionMode ? { sessionMode } : {}),
         worktree,
+        ...(draft.proposedModelId && draft.proposedModelId !== "default" ? { proposedModelId: draft.proposedModelId } : {}),
       },
     };
   }
@@ -212,6 +214,7 @@ export function resolveSessionCreateMessage(draft: SessionCreateDraft): SessionC
       ...(category ? { category } : {}),
       ...(sessionMode ? { sessionMode } : {}),
       cwd,
+      ...(draft.proposedModelId && draft.proposedModelId !== "default" ? { proposedModelId: draft.proposedModelId } : {}),
     },
   };
 }

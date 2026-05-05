@@ -42,6 +42,35 @@ describe("protocol type fixtures", () => {
     expect(message.behavior).toBe("followUp");
   });
 
+  it("preserves proposed model config and catalog message shapes", () => {
+    const create = {
+      type: "session.create",
+      requestId: "create-1",
+      cwd: "/repo",
+      proposedModelId: "fast-review",
+    } satisfies ClientMessage;
+    const setConfig = {
+      type: "config.set",
+      proposedModels: [{
+        id: "fast-review",
+        name: "Fast review",
+        provider: "mock",
+        modelId: "mock-reasoner",
+        modelName: "Mock Reasoner",
+        thinkingLevel: "high",
+      }],
+    } satisfies ClientMessage;
+    const catalog = {
+      type: "config.modelCatalog.list",
+      requestId: "catalog-1",
+      models: [{ provider: "mock", id: "mock-reasoner", name: "Mock Reasoner", contextWindow: 1000000, thinking: true }],
+    } satisfies ServerMessage;
+
+    expect(create.proposedModelId).toBe("fast-review");
+    expect(setConfig.proposedModels?.[0]?.thinkingLevel).toBe("high");
+    expect(catalog.models[0]?.id).toBe("mock-reasoner");
+  });
+
   it("preserves code viewer message shapes", () => {
     const open = {
       type: "code.workspace.open",

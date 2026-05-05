@@ -24,6 +24,7 @@ pub(crate) async fn handle_client_message(
             category,
             session_mode,
             worktree,
+            proposed_model_id,
         } => {
             create_session(
                 state,
@@ -34,6 +35,7 @@ pub(crate) async fn handle_client_message(
                 category,
                 session_mode.unwrap_or_default(),
                 worktree,
+                proposed_model_id,
             )
             .await
         }
@@ -44,7 +46,11 @@ pub(crate) async fn handle_client_message(
         ClientMessage::ConfigSet {
             show_tools,
             thinking_visibility,
-        } => set_client_config(state, show_tools, thinking_visibility).await,
+            proposed_models,
+        } => set_client_config(state, show_tools, thinking_visibility, proposed_models).await,
+        ClientMessage::ConfigModelCatalogList { request_id } => {
+            handle_model_catalog_list_command(state, request_id).await
+        }
         ClientMessage::SessionOpen { session_file } => open_session(state, session_file).await,
         ClientMessage::SessionList => {
             info!(action = "session.list");
@@ -313,6 +319,24 @@ pub(crate) fn normalize_session_category(value: Option<String>) -> Result<Option
         );
     }
     Ok(Some(value))
+}
+
+pub(crate) async fn resolve_proposed_model_for_create(
+    state: &AppState,
+    proposed_model_id: Option<String>,
+) -> Result<Option<ProposedModelConfig>, String> {
+    let Some(id) = normalize_optional_field(proposed_model_id) else {
+        return Ok(None);
+    };
+    if id == "default" {
+        return Ok(None);
+    }
+    let proposed_models = state.proposed_models.read().await;
+    let Some(model) = proposed_models.iter().find(|model| model.id == id).cloned() else {
+        return Err(format!("Unknown proposed model: {id}"));
+    };
+    validate_proposed_models(std::slice::from_ref(&model)).map_err(|error| error.to_string())?;
+    Ok(Some(model))
 }
 
 pub(crate) fn ensure_worktree_directory_available(path: &Path) -> anyhow::Result<()> {
@@ -619,6 +643,7 @@ pub(crate) async fn create_session(
     category: Option<String>,
     session_mode: SessionMode,
     worktree: Option<WorktreeCreateRequest>,
+    proposed_model_id: Option<String>,
 ) -> Vec<ServerMessage> {
     let category = match normalize_session_category(category) {
         Ok(category) => category,
@@ -639,6 +664,16 @@ pub(crate) async fn create_session(
     let mut session_worktree = None;
     let mut session_cwd = requested_cwd.clone();
     let mut default_cwd_to_save = requested_cwd;
+
+    let proposed_model = match resolve_proposed_model_for_create(state, proposed_model_id).await {
+        Ok(model) => model,
+        Err(message) => {
+            return vec![ServerMessage::Error {
+                request_id,
+                message,
+            }];
+        }
+    };
 
     if let Some(worktree) = worktree {
         default_cwd_to_save = worktree.source_repo.trim().to_string();
@@ -687,6 +722,7 @@ pub(crate) async fn create_session(
             created_at,
             worktree: session_worktree,
             session_mode,
+            proposed_model,
         },
     );
 
@@ -712,19 +748,6 @@ pub(crate) async fn create_session(
     }
 
     save_default_cwd(state, &default_cwd_to_save).await;
-
-    // Persist the name in the OMP session file immediately after spawn. The visible
-    // session appears only after OMP reports its real session id via get_state.
-    if let Some(ref n) = name {
-        let cmd = serde_json::json!({
-            "id": next_rpc_id(),
-            "type": "set_session_name",
-            "name": n,
-        });
-        if let Err(e) = send_rpc_command(state, &transport_id, cmd).await {
-            warn!(transport_session_id = %transport_id, error = %e, "failed to queue initial set_session_name");
-        }
-    }
 
     Vec::new()
 }
@@ -851,7 +874,9 @@ pub(crate) async fn set_session_category(
             categories.remove(&session_id);
         }
     }
-    save_fura_config(state).await;
+    if let Err(error) = save_fura_config(state).await {
+        warn!(%error, "failed to save session category");
+    }
 
     vec![snapshot, sessions_snapshot]
 }
@@ -860,13 +885,29 @@ pub(crate) async fn set_client_config(
     state: &AppState,
     show_tools: Option<bool>,
     thinking_visibility: Option<ThinkingVisibilityPreference>,
+    proposed_models: Option<Vec<ProposedModelConfig>>,
 ) -> Vec<ServerMessage> {
-    if show_tools.is_none() && thinking_visibility.is_none() {
+    if show_tools.is_none() && thinking_visibility.is_none() && proposed_models.is_none() {
         return vec![ServerMessage::Error {
             request_id: None,
-            message: "config.set requires showTools or thinkingVisibility".to_string(),
+            message: "config.set requires showTools, thinkingVisibility, or proposedModels"
+                .to_string(),
         }];
     }
+
+    let proposed_models = proposed_models.map(normalize_proposed_models);
+    if let Some(models) = proposed_models.as_ref() {
+        if let Err(error) = validate_proposed_models(models) {
+            return vec![ServerMessage::Error {
+                request_id: None,
+                message: error.to_string(),
+            }];
+        }
+    }
+
+    let previous_show_tools = *state.show_tools.read().await;
+    let previous_thinking_visibility = *state.thinking_visibility.read().await;
+    let previous_proposed_models = state.proposed_models.read().await.clone();
 
     if let Some(value) = show_tools {
         *state.show_tools.write().await = value;
@@ -878,10 +919,97 @@ pub(crate) async fn set_client_config(
     info!(
         action = "config.set",
         show_tools = show_tools.is_some(),
-        thinking_visibility = thinking_visibility.is_some()
+        thinking_visibility = thinking_visibility.is_some(),
+        proposed_models = proposed_models.is_some()
     );
-    save_fura_config(state).await;
+    if let Some(models) = proposed_models {
+        *state.proposed_models.write().await = models;
+    }
+
+    if let Err(error) = save_fura_config(state).await {
+        *state.show_tools.write().await = previous_show_tools;
+        *state.thinking_visibility.write().await = previous_thinking_visibility;
+        *state.proposed_models.write().await = previous_proposed_models;
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: error.to_string(),
+        }];
+    }
     broadcast_config(state).await;
+    Vec::new()
+}
+
+pub(crate) async fn handle_model_catalog_list_command(
+    state: &AppState,
+    request_id: Option<String>,
+) -> Vec<ServerMessage> {
+    let default_cwd = state.default_cwd.read().await.clone();
+    let existing_transport = {
+        let mut catalog = state.model_catalog.write().await;
+        if catalog.in_flight {
+            return vec![ServerMessage::Error {
+                request_id,
+                message: "Model catalog request already in progress".to_string(),
+            }];
+        }
+        let existing = catalog.transport_session_id.clone().filter(|transport_id| {
+            state
+                .rpc_sessions
+                .try_read()
+                .map(|sessions| sessions.contains_key(transport_id))
+                .unwrap_or(false)
+        });
+        if existing.is_none() {
+            catalog.transport_session_id = None;
+        }
+        catalog.in_flight = true;
+        catalog.in_flight_request_id = request_id.clone();
+        existing
+    };
+
+    if let Some(transport_id) = existing_transport {
+        if let Err(message) = send_rpc_command(
+            state,
+            &transport_id,
+            get_available_models_command(next_rpc_id()),
+        )
+        .await
+        {
+            let mut catalog = state.model_catalog.write().await;
+            catalog.in_flight = false;
+            catalog.in_flight_request_id = None;
+            catalog.transport_session_id = None;
+            return vec![ServerMessage::Error {
+                request_id,
+                message,
+            }];
+        }
+        return Vec::new();
+    }
+
+    let transport_id = Uuid::new_v4().to_string();
+    {
+        let mut catalog = state.model_catalog.write().await;
+        catalog.transport_session_id = Some(transport_id.clone());
+    }
+    if let Err(error) = spawn_rpc_child(
+        state.clone(),
+        transport_id.clone(),
+        Some(default_cwd),
+        Vec::new(),
+        None,
+    )
+    .await
+    {
+        let mut catalog = state.model_catalog.write().await;
+        catalog.transport_session_id = None;
+        catalog.in_flight = false;
+        catalog.in_flight_request_id = None;
+        return vec![ServerMessage::Error {
+            request_id,
+            message: format!("failed to start model catalog RPC child: {error}"),
+        }];
+    }
     Vec::new()
 }
 
@@ -1198,6 +1326,7 @@ pub(crate) async fn handle_slash_command(
                 args,
                 None,
                 SessionMode::Standard,
+                None,
                 None,
             )
             .await

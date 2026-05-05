@@ -417,6 +417,12 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             model_count = models.len()
         ),
+        ServerMessage::ConfigModelCatalogList { request_id, models } => info!(
+            direction = "bridge_to_client",
+            message_type = "config.modelCatalog.list",
+            request_id = ?request_id,
+            model_count = models.len()
+        ),
         ServerMessage::ModelChanged { session_id, model } => info!(
             direction = "bridge_to_client",
             message_type = "model.changed",

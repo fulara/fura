@@ -169,6 +169,17 @@ describe("resolveSessionCreateMessage", () => {
     });
   });
 
+  it("omits default proposed model and includes selected proposed model", () => {
+    expect(resolveSessionCreateMessage({ requestId: "r1", cwd: "/repo", proposedModelId: "default" })).toEqual({
+      type: "message",
+      message: { type: "session.create", requestId: "r1", cwd: "/repo" },
+    });
+    expect(resolveSessionCreateMessage({ requestId: "r1", cwd: "/repo", proposedModelId: "fast-review" })).toEqual({
+      type: "message",
+      message: { type: "session.create", requestId: "r1", cwd: "/repo", proposedModelId: "fast-review" },
+    });
+  });
+
   it("rejects cwd-based create without a working directory", () => {
     expect(resolveSessionCreateMessage({ requestId: "r1", cwd: " " })).toEqual({
       type: "invalid",
@@ -204,6 +215,25 @@ describe("resolveSessionCreateMessage", () => {
         },
       },
     });
+  });
+
+  it("includes selected proposed model for worktree create", () => {
+    const result = resolveSessionCreateMessage({
+      requestId: "r1",
+      name: "Feature work",
+      proposedModelId: "fast-review",
+      worktree: {
+        enabled: true,
+        sourceRepo: "/repo",
+        directory: "/repo-feature",
+        baseBranch: "main",
+      },
+    });
+
+    expect(result.type).toBe("message");
+    if (result.type === "message") {
+      expect(result.message).toMatchObject({ proposedModelId: "fast-review" });
+    }
   });
 
   it("rejects worktree create without a session name", () => {
