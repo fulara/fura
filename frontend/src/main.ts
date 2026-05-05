@@ -743,7 +743,7 @@ type PendingDiffFilePatchRequest = { diffId: string; comparisonKey: string; file
 type DiffFilePatchError = { filePath: string; message: string };
 let comparePayloadKind: DiffDetailMode = "filePatch";
 let comparePanelDirty = true;
-let sessionChangesSubview: "diff" | "transcript" = "diff";
+const diffFileFilters = new Map<string, string>();
 const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
 const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
@@ -4439,9 +4439,11 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   root.className = "diffs-view session-changes-view";
   const sidebar = mkEl("aside");
   sidebar.className = "diffs-sidebar";
+  const sidebarTop = mkEl("div");
+  sidebarTop.className = "diffs-sidebar-top";
   const sidebarScroll = mkEl("div");
   sidebarScroll.className = "diffs-sidebar-scroll";
-  sidebar.append(sidebarScroll);
+  sidebar.append(sidebarTop, sidebarScroll);
 
   const main = mkEl("section");
   main.className = "diffs-main";
@@ -4452,27 +4454,12 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     renderDiffMessage(main, "No session selected.", false);
     return;
   }
-  renderSessionChangesView(activeSessionId, projection, sidebarScroll, main, container);
+  renderSessionChangesView(activeSessionId, sidebarTop, sidebarScroll, main, container);
 }
 
-function renderSessionChangesView(sessionId: string, projection: SessionProjection, sidebar: HTMLElement, main: HTMLElement, container: HTMLElement): void {
+function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, sidebar: HTMLElement, main: HTMLElement, container: HTMLElement): void {
   const state = sessionChangesStates.get(sessionId);
   const error = diffErrors.get(sessionId);
-  const subviews = mkEl("div");
-  subviews.className = "diff-subview-tabs";
-  for (const [view, label] of [["diff", "Diff"], ["transcript", "Transcript"]] as const) {
-    const button = mkEl("button");
-    button.type = "button";
-    button.className = view === sessionChangesSubview ? "active" : "";
-    button.textContent = label;
-    button.addEventListener("click", () => {
-      sessionChangesSubview = view;
-      markDiffsViewDirty();
-      renderDiffsViewIfActive(sessionId);
-    });
-    subviews.append(button);
-  }
-  sidebar.append(subviews);
 
   const header = mkEl("div");
   header.className = "diffs-toolbar";
@@ -4495,28 +4482,12 @@ function renderSessionChangesView(sessionId: string, projection: SessionProjecti
   header.append(title, actions);
   main.append(header);
 
-  if (sessionChangesSubview === "transcript") {
-    const transcript = mkEl("div");
-    transcript.className = "diffs-main-body session-changes-transcript";
-    const items = buildTranscriptRenderItems(projection);
-    if (items.length === 0) {
-      const empty = mkEl("p");
-      empty.className = "empty";
-      empty.textContent = "Transcript is empty.";
-      transcript.append(empty);
-    } else {
-      for (const item of items) transcript.append(item.render());
-    }
-    main.append(transcript);
-    return;
-  }
-
   if (!state) {
     renderDiffMessage(main, diffLoadingSessions.has(sessionId) ? "Loading session changes…" : "Session changes have not been loaded.", false);
     if (!diffLoadingSessions.has(sessionId)) requestSessionChanges(sessionId);
     return;
   }
-  renderSessionRepoControls(sessionId, state, sidebar);
+  renderSessionRepoControls(sessionId, state, sidebarTop);
   if (error) {
     renderDiffMessage(main, error, true);
     return;
@@ -4529,7 +4500,7 @@ function renderSessionChangesView(sessionId: string, projection: SessionProjecti
     renderDiffMessage(main, state.reason, true);
     return;
   }
-  renderReviewableDiff(sessionId, state, sidebar, main, container, true);
+  renderReviewableDiff(sessionId, state, sidebarTop, sidebar, main, container, true);
 }
 
 function renderSessionRepoControls(sessionId: string, state: SessionChangesSummaryState, sidebar: HTMLElement): void {
@@ -4575,9 +4546,11 @@ function renderComparePanel(container: HTMLElement): void {
   root.className = "compare-view";
   const sidebarContainer = mkEl("aside");
   sidebarContainer.className = "diffs-sidebar compare-sidebar";
+  const sidebarTop = mkEl("div");
+  sidebarTop.className = "diffs-sidebar-top";
   const sidebar = mkEl("div");
   sidebar.className = "diffs-sidebar-scroll";
-  sidebarContainer.append(sidebar);
+  sidebarContainer.append(sidebarTop, sidebar);
   const main = mkEl("section");
   main.className = "diffs-main compare-main";
   root.append(sidebarContainer, main);
@@ -4609,7 +4582,7 @@ function renderComparePanel(container: HTMLElement): void {
   run.textContent = "Compare";
   run.addEventListener("click", () => requestCompareDiff({ repoRoot: repoInput.value, base: baseInput.value, head: headInput.value, payloadKind: payload.value as DiffDetailMode }));
   form.append(repoInput, baseInput, headInput, payload, run);
-  sidebar.append(form);
+  sidebarTop.append(form);
 
   const header = mkEl("div");
   header.className = "diffs-toolbar";
@@ -4626,7 +4599,7 @@ function renderComparePanel(container: HTMLElement): void {
     renderDiffMessage(main, compareDiffLoading ? "Loading compare diff…" : "Run an explicit repository/ref comparison.", false);
     return;
   }
-  renderReviewableDiff("compareDiff", compareDiffState, sidebar, main, null, false);
+  renderReviewableDiff("compareDiff", compareDiffState, sidebarTop, sidebar, main, null, false);
 }
 
 function renderDiffMessage(main: HTMLElement, message: string, error: boolean): void {
@@ -4692,6 +4665,7 @@ function requestSelectedFilePatch(annotationKey: string, state: DiffReviewableSt
 function renderReviewableDiff(
   annotationKey: string,
   state: DiffReviewableState,
+  sidebarTop: HTMLElement,
   sidebar: HTMLElement,
   main: HTMLElement,
   jumpContainer: HTMLElement | null,
@@ -4700,7 +4674,9 @@ function renderReviewableDiff(
   const key = comparisonKey(state);
   const annotations = diffAnnotations.get(annotationKey) ?? [];
   const fileSummaries = summarizeWireDiffFiles(state.summary.files, annotations, key);
-  renderDesktopModifiedFiles(sidebar, fileSummaries, annotationKey, jumpContainer);
+  const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
+  renderDiffFileFilter(sidebarTop, annotationKey);
+  renderDesktopModifiedFiles(sidebar, fileSummaries, selectedFilePath, annotationKey, jumpContainer);
   const summary = mkEl("section");
   summary.className = "diffs-summary";
   const comparison = mkEl("p");
@@ -4787,7 +4763,6 @@ function renderReviewableDiff(
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
-  const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
   const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
   const filePatchError = selectedFilePath ? selectedDiffFilePatchError(annotationKey, selectedFilePath) : null;
   if (cachedPatch?.truncated) {
@@ -4824,21 +4799,58 @@ function renderReviewableDiff(
   main.append(body);
 }
 
+function renderDiffFileFilter(sidebarTop: HTMLElement, annotationKey: string): void {
+  const section = mkEl("section");
+  section.className = "diffs-file-filter";
+  const label = mkEl("label");
+  label.className = "diffs-repo-label";
+  label.textContent = "Filter files";
+  const input = mkEl("input");
+  input.className = "diff-filter-input";
+  input.type = "search";
+  input.placeholder = "Search modified files";
+  input.value = diffFileFilters.get(annotationKey) ?? "";
+  input.addEventListener("input", () => {
+    const nextValue = input.value;
+    if (nextValue) diffFileFilters.set(annotationKey, nextValue);
+    else diffFileFilters.delete(annotationKey);
+    if (annotationKey === "compareDiff") rerenderComparePanelPreservingScroll();
+    else rerenderDiffsViewPreservingScroll(annotationKey);
+  });
+  section.append(label, input);
+  sidebarTop.append(section);
+}
+
 function renderDesktopModifiedFiles(
   sidebar: HTMLElement,
   files: ReturnType<typeof summarizeWireDiffFiles>,
+  selectedFilePath: string | null,
   annotationKey: string,
   jumpContainer: HTMLElement | null,
 ): void {
-  if (files.length === 0) return;
+  const filterValue = (diffFileFilters.get(annotationKey) ?? "").trim().toLowerCase();
+  const visibleFiles = filterValue
+    ? files.filter(file =>
+        file.filePath.toLowerCase().includes(filterValue) ||
+        file.oldPath?.toLowerCase().includes(filterValue),
+      )
+    : files;
   const filesSection = mkEl("section");
   filesSection.className = "diffs-files";
   const filesTitle = mkEl("strong");
   filesTitle.textContent = `Modified files (${files.length})`;
   filesSection.append(filesTitle);
+  if (visibleFiles.length === 0) {
+    const empty = mkEl("p");
+    empty.className = "diffs-filter-empty";
+    empty.textContent = filterValue ? "No files match the current filter." : "No modified files.";
+    filesSection.append(empty);
+    sidebar.append(filesSection);
+    return;
+  }
   const filesList = mkEl("div");
   filesList.className = "diffs-file-list";
-  for (const file of files) {
+  for (const file of visibleFiles) {
     const item = mkEl("div");
     item.className = "diffs-file-item";
     const name = mkEl("code");
@@ -4851,7 +4863,7 @@ function renderDesktopModifiedFiles(
     meta.textContent = `+${file.added} -${file.removed}${notes ? ` · ${notes}` : ""}`;
     const jump = mkEl("button");
     jump.type = "button";
-    jump.className = "diffs-file-jump";
+    jump.className = `diffs-file-jump${file.filePath === selectedFilePath ? " active" : ""}`;
     jump.append(name, meta);
     jump.addEventListener("click", () => {
       sessionChangesSelectedFiles.set(annotationKey, file.filePath);
