@@ -10,15 +10,16 @@ export type DesktopDockview = {
   activatePanel(id: DesktopDockviewPanelId): boolean;
   withPanel(id: DesktopDockviewPanelId, render: (container: HTMLElement) => void): boolean;
   ensureSessionChangesPanel(): boolean;
+  ensureDiffsPanel(): boolean;
   ensureComparePanel(): boolean;
-  closePanel(id: "sessionChanges" | "compare"): boolean;
+  closePanel(id: "sessionChanges" | "diffs" | "compare"): boolean;
 };
 
 type DesktopDockviewOptions = {
   host: HTMLDivElement;
   onPanelReady(id: DesktopDockviewPanelId, container: HTMLElement): void;
   onPanelActivated(id: DesktopDockviewPanelId): void;
-  onPanelClosed?(id: "sessionChanges" | "compare"): void;
+  onPanelClosed?(id: "sessionChanges" | "diffs" | "compare"): void;
   onPopoutBlocked(): void;
 };
 
@@ -126,6 +127,10 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     },
     ensureSessionChangesPanel() {
       return ensureSessionChangesPanel(api);
+    },
+    ensureDiffsPanel() {
+      ensureDiffsPanel(api);
+      return true;
     },
     ensureComparePanel() {
       return ensureComparePanel(api);

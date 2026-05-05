@@ -4093,6 +4093,8 @@ function requestActiveDiffState(): void {
   const projection = projections.get(activeSessionId);
   if (!projection || diffLoadingSessions.has(activeSessionId)) return;
   if (projection.summary.sessionMode === "diffReview") {
+    const request = diffReviewRequestForSummary(projection.summary);
+    if (!request || compareDiffLoading || compareStateMatchesDiffReview(request)) return;
     requestDiffReviewState(activeSessionId, projection.summary);
     return;
   }
@@ -4111,6 +4113,7 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
   const summary = (activeSessionId ? projections.get(activeSessionId)?.summary : undefined) ?? (activeSessionId ? currentSessionSummary(activeSessionId) : undefined);
   const isDiffReview = summary?.sessionMode === "diffReview";
   if (isDiffReview) {
+    desktopDockview.closePanel("diffs");
     desktopDockview.ensureSessionChangesPanel();
     markDiffsViewDirty();
     if (activateCreatedDiffReview) desktopDockview.activatePanel("sessionChanges");
@@ -4119,6 +4122,7 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
   } else {
     clearCurrentSessionChangesRequest("closed");
     desktopDockview.closePanel("sessionChanges");
+    desktopDockview.ensureDiffsPanel();
   }
 }
 
@@ -4660,22 +4664,9 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesSumma
     option.selected = state.status === "ready" ? repo.id === state.selectedRepoId : repo.repoRoot === (state.status === "missingSnapshot" ? state.repoRoot : "");
     select.append(option);
   }
-  const payload = mkEl("select");
-  payload.className = "diff-payload-select";
   const currentPayload = state.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
-  for (const [value, text] of [["filePatch", "File patch"], ["statOnly", "Stat"]] as const) {
-    const option = mkEl("option");
-    option.value = value;
-    option.textContent = text;
-    option.selected = currentPayload === value;
-    payload.append(option);
-  }
-  select.addEventListener("change", () => requestSessionChangesRepo(sessionId, select.value, payload.value as DiffDetailMode));
-  payload.addEventListener("change", () => {
-    sessionChangesPayloadKinds.set(sessionId, payload.value as DiffDetailMode);
-    if (select.value) requestSessionChangesRepo(sessionId, select.value, payload.value as DiffDetailMode);
-  });
-  section.append(label, select, payload);
+  select.addEventListener("change", () => requestSessionChangesRepo(sessionId, select.value, currentPayload));
+  section.append(label, select);
   sidebar.append(section);
 }
 
@@ -5212,6 +5203,10 @@ function initDesktopWorkspace(): void {
     onPanelClosed: id => {
       if (id === "sessionChanges") {
         clearCurrentSessionChangesRequest("closed");
+        markDiffsViewDirty();
+        return;
+      }
+      if (id === "diffs") {
         markDiffsViewDirty();
         return;
       }
