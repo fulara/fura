@@ -1428,30 +1428,9 @@ function handleServerMessage(message: ServerMessage): void {
         renderCodePanelIfNeeded(true);
       }
       break;
-    case "plan.review": {
-      const preview = message.content.length > 6000 ? `${message.content.slice(0, 6000)}\n\n… truncated …` : message.content;
-      const approved = window.confirm(
-        `Plan ready${message.title ? `: ${message.title}` : ""}\n\n${preview}\n\nApprove and execute this plan? Press Cancel to stay in plan mode.`,
-      );
-      if (approved) {
-        send({
-          type: "raw.rpc",
-          sessionId: message.sessionId,
-          command: {
-            type: "approve_plan_mode",
-            planFilePath: message.planFilePath,
-            finalPlanFilePath: message.finalPlanFilePath,
-          },
-        });
-      } else {
-        appendSessionNotice(message.sessionId, {
-          level: "info",
-          text: "Stayed in plan mode. Type a refinement prompt to continue planning.",
-        });
-        render();
-      }
+    case "plan.review":
+      handlePlanReview(message);
       break;
-    }
     case "session.exited":
       appendLog(`Session ${message.sessionId} exited with code ${message.code ?? "unknown"}.`);
       render();

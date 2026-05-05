@@ -18,7 +18,6 @@ type PlanReviewLineReviewOptions = {
   onFlush?(message: TranscriptMessage): void;
 };
 
-const PLAN_REVIEW_PREVIEW_LIMIT = 12_000;
 
 export function pendingPlanReviewFromMessage(message: PlanReviewMessage): PendingPlanReview {
   return {
@@ -116,18 +115,13 @@ export function renderPlanReviewCard(
   details.open = true;
   const summary = mkEl("summary");
   summary.textContent = "Finalized plan preview";
-  const truncated = review.content.length > PLAN_REVIEW_PREVIEW_LIMIT;
   if (mode === "refining" && lineReview) {
     details.append(summary, renderMessage(planReviewTranscriptMessage(review), {
       thinkingVisibilityMode: "hidden",
       review: lineReview,
     }));
   } else {
-    const preview = renderMarkdown(
-      truncated
-        ? `${review.content.slice(0, PLAN_REVIEW_PREVIEW_LIMIT)}\n\n… preview truncated; approval uses the full plan file …`
-        : review.content,
-    );
+    const preview = renderMarkdown(review.content);
     preview.classList.add("plan-review-markdown");
     details.append(summary, preview);
   }
