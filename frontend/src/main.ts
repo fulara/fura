@@ -753,6 +753,8 @@ type CachedDiffPatch = { patch: string; truncated: boolean };
 const diffPatchCache = new Map<string, CachedDiffPatch>();
 const pendingDiffFilePatches = new Map<string, PendingDiffFilePatchRequest>();
 const diffFilePatchErrors = new Map<string, DiffFilePatchError>();
+type DiffFileMenuState = { annotationKey: string; filePath: string };
+let openDiffFileMenu: DiffFileMenuState | null = null;
 const diffClientId = (() => {
   const key = "fura.diff.clientId";
   const existing = sessionStorage.getItem(key);
@@ -1032,6 +1034,17 @@ stopButton.addEventListener("click", () => {
   if (activeSessionId) {
     send({ type: "session.stop", sessionId: activeSessionId });
   }
+});
+
+document.addEventListener("click", event => {
+  if (!openDiffFileMenu) return;
+  const target = event.target;
+  if (target instanceof Element && target.closest(".diffs-file-menu")) return;
+  openDiffFileMenu = null;
+  markDiffsViewDirty();
+  markComparePanelDirty();
+  if (activeSessionId) renderDiffsViewIfActive(activeSessionId);
+  renderComparePanelIfActive();
 });
 voiceButton.addEventListener("pointerdown", event => {
   event.preventDefault();
@@ -5042,8 +5055,10 @@ function renderDesktopModifiedFiles(
     const jump = mkEl("button");
     jump.type = "button";
     jump.className = `diffs-file-jump${file.filePath === selectedFilePath ? " active" : ""}`;
+    jump.title = "Click to select. Right-click for file actions.";
     jump.append(name, meta);
     jump.addEventListener("click", () => {
+      openDiffFileMenu = null;
       sessionChangesSelectedFiles.set(annotationKey, file.filePath);
       if (jumpContainer) scrollDiffsToFile(jumpContainer, file.filePath);
       markDiffsViewDirty();
@@ -5051,16 +5066,31 @@ function renderDesktopModifiedFiles(
       if (annotationKey === "compareDiff") renderComparePanelIfActive();
       else renderDiffsViewIfActive(annotationKey);
     });
-    const codeBtn = mkEl("button");
-    codeBtn.type = "button";
-    codeBtn.className = "diffs-file-code";
-    codeBtn.textContent = "C";
-    codeBtn.title = `Open ${file.filePath} in Code`;
-    codeBtn.addEventListener("click", event => {
-      event.stopPropagation();
-      openDiffFileInCode(state, file.filePath);
+    jump.addEventListener("contextmenu", event => {
+      event.preventDefault();
+      sessionChangesSelectedFiles.set(annotationKey, file.filePath);
+      openDiffFileMenu = { annotationKey, filePath: file.filePath };
+      markDiffsViewDirty();
+      markComparePanelDirty();
+      if (annotationKey === "compareDiff") renderComparePanelIfActive();
+      else renderDiffsViewIfActive(annotationKey);
     });
-    item.append(jump, codeBtn);
+    item.append(jump);
+    if (openDiffFileMenu?.annotationKey === annotationKey && openDiffFileMenu.filePath === file.filePath) {
+      const menu = mkEl("div");
+      menu.className = "diffs-file-menu";
+      const openInCode = mkEl("button");
+      openInCode.type = "button";
+      openInCode.className = "diffs-file-menu-item";
+      openInCode.textContent = "Open in Code";
+      openInCode.addEventListener("click", event => {
+        event.stopPropagation();
+        openDiffFileMenu = null;
+        openDiffFileInCode(state, file.filePath);
+      });
+      menu.append(openInCode);
+      item.append(menu);
+    }
     filesList.append(item);
   }
   filesSection.append(filesList);

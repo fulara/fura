@@ -1075,8 +1075,9 @@ h2 {
 }
 
 .diffs-file-item {
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   align-items: stretch;
   gap: 0.35rem;
 }
@@ -1093,21 +1094,43 @@ h2 {
   color: #d7dae4;
 }
 
-.diffs-file-code {
-  align-self: stretch;
-  border-radius: 0.5rem;
-  padding: 0 0.55rem;
-  border-color: #343a46;
-  background: #171b24;
-  color: #c7cedc;
-  font-size: 0.78rem;
-}
 
-.diffs-file-code:hover:not(:disabled),
+
 .diffs-file-jump:hover:not(:disabled),
 .diffs-file-jump.active {
   border-color: #6d7cff;
   background: #1a1f2a;
+}
+
+.diffs-file-menu {
+  position: absolute;
+  top: calc(100% + 0.2rem);
+  right: 0;
+  z-index: 5;
+  display: grid;
+  gap: 0.25rem;
+  min-width: 10rem;
+  padding: 0.35rem;
+  border: 1px solid #2f3a50;
+  border-radius: 0.6rem;
+  background: rgba(12, 15, 22, 0.98);
+  box-shadow: 0 0.9rem 2rem rgba(0, 0, 0, 0.35);
+}
+
+.diffs-file-menu-item {
+  text-align: left;
+  border-radius: 0.45rem;
+  border: 1px solid #343a46;
+  background: #171b24;
+  color: #d7dae4;
+  padding: 0.45rem 0.6rem;
+}
+
+.diffs-file-menu-item:hover,
+.diffs-file-menu-item:focus-visible {
+  border-color: #6d7cff;
+  background: #1a1f2a;
+  outline: none;
 }
 
 .diffs-file-jump span {
