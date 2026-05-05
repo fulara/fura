@@ -3383,7 +3383,7 @@ function ensureReviewWorktreeThenCheckout(state: DiffReviewableState, target: Di
 function openDiffFileInCode(state: DiffReviewableState, filePath: string): void {
   const target = checkoutTargetForDiffFile(state);
   if (target.kind === "workingTree") {
-    const sessionId = workspaceMode === "session" ? activeSessionId : null;
+    const sessionId = activeSessionId;
     if (!sessionId) return;
     openCodeRequest({ source: "sessionWorktree", sessionId, path: filePath });
     return;
@@ -4676,7 +4676,7 @@ function renderReviewableDiff(
   const fileSummaries = summarizeWireDiffFiles(state.summary.files, annotations, key);
   const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
   renderDiffFileFilter(sidebarTop, annotationKey);
-  renderDesktopModifiedFiles(sidebar, fileSummaries, selectedFilePath, annotationKey, jumpContainer);
+  renderDesktopModifiedFiles(sidebar, state, fileSummaries, selectedFilePath, annotationKey, jumpContainer);
   const summary = mkEl("section");
   summary.className = "diffs-summary";
   const comparison = mkEl("p");
@@ -4759,6 +4759,14 @@ function renderReviewableDiff(
     checkout.addEventListener("click", () => ensureReviewWorktreeThenCheckout(state, { kind: "commit", oid: state.review.currentCommitOid! }));
     toolbar.append(checkout);
   }
+  if (selectedFilePath) {
+    const code = mkEl("button");
+    code.type = "button";
+    code.textContent = "Code";
+    code.title = `Open ${selectedFilePath} in Code`;
+    code.addEventListener("click", () => openDiffFileInCode(state, selectedFilePath));
+    toolbar.append(code);
+  }
   main.append(toolbar);
 
   const body = mkEl("div");
@@ -4823,6 +4831,7 @@ function renderDiffFileFilter(sidebarTop: HTMLElement, annotationKey: string): v
 
 function renderDesktopModifiedFiles(
   sidebar: HTMLElement,
+  state: DiffReviewableState,
   files: ReturnType<typeof summarizeWireDiffFiles>,
   selectedFilePath: string | null,
   annotationKey: string,
@@ -4873,7 +4882,16 @@ function renderDesktopModifiedFiles(
       if (annotationKey === "compareDiff") renderComparePanelIfActive();
       else renderDiffsViewIfActive(annotationKey);
     });
-    item.append(jump);
+    const codeBtn = mkEl("button");
+    codeBtn.type = "button";
+    codeBtn.className = "diffs-file-code";
+    codeBtn.textContent = "C";
+    codeBtn.title = `Open ${file.filePath} in Code`;
+    codeBtn.addEventListener("click", event => {
+      event.stopPropagation();
+      openDiffFileInCode(state, file.filePath);
+    });
+    item.append(jump, codeBtn);
     filesList.append(item);
   }
   filesSection.append(filesList);
@@ -4952,14 +4970,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typ
   const text = mkEl("code");
   text.textContent = row.text;
   line.append(spacer, text);
-  if (row.type === "file") {
-    const codeBtn = mkEl("button");
-    codeBtn.type = "button";
-    codeBtn.className = "diff-file-code-btn";
-    codeBtn.textContent = "Code";
-    codeBtn.addEventListener("click", () => openDiffFileInCode(state, row.filePath));
-    line.append(codeBtn);
-  }
+
   diff.append(line);
 }
 
