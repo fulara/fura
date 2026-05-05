@@ -1,4 +1,4 @@
-import { comparisonKey, diffPayloadText, parseDiffRows, resolvedRefLabel, type ParsedDiffRow } from "./diffState";
+import { comparisonKey, parseDiffRows, resolvedRefLabel, type ParsedDiffRow } from "./diffState";
 import type { DiffCheckoutTarget, DiffEndpoint, DiffLineLocation, DiffReviewAnnotation, DiffReviewableState } from "./protocol";
 
 export type DiffPreviewDraft = {
@@ -7,6 +7,10 @@ export type DiffPreviewDraft = {
   comparisonKey: string;
   comments: DiffReviewAnnotation[];
 };
+
+export type DiffCommentPromptResult =
+  | { ok: true; prompt: string }
+  | { ok: false; message: string; missingFiles: string[] };
 
 const DIFF_CONTEXT_RADIUS = 4;
 
@@ -133,6 +137,9 @@ function buildDiffAnnotationContext(rows: ParsedDiffRow[], annotation: DiffRevie
   return targetRow ? [...before, diffRowText(targetRow), ...after].join("\n") : annotation.anchor.text;
 }
 
+function reviewPatchText(state: DiffReviewableState): string {
+  return state.patch ?? state.summary.stat ?? "";
+}
 function reviewModeLine(state: DiffReviewableState): string {
   if (state.review.currentCommitOid) {
     const commit = state.review.commits.find(candidate => candidate.oid === state.review.currentCommitOid);
@@ -143,9 +150,9 @@ function reviewModeLine(state: DiffReviewableState): string {
 
 function comparisonLines(state: DiffReviewableState): string[] {
   return [
-    `Repository: ${state.range.repoRoot}`,
-    `Base: ${resolvedRefLabel(state.range.base)}`,
-    `Head: ${resolvedRefLabel(state.range.head)}`,
+    `Repository: ${state.comparison.repoRoot}`,
+    `Base: ${resolvedRefLabel(state.comparison.base)}`,
+    `Head: ${resolvedRefLabel(state.comparison.head)}`,
     reviewModeLine(state),
     `Comparison key: ${comparisonKey(state)}`,
   ];
@@ -157,43 +164,75 @@ const reviewHelperInstruction = [
   "Do not edit files, generate patches, or modify a checkout from this review prompt. If implementation changes are needed, say that they should be handled in a separate coding session/worktree.",
 ].join(" ");
 
-export function buildDiffCommentPrompt(state: DiffReviewableState, comments: DiffReviewAnnotation[]): string {
+function buildCommentSection(comment: DiffReviewAnnotation, index: number, rows: ParsedDiffRow[]): string {
+  return [
+    `### Comment ${index + 1}`,
+    `Location: ${formatDiffLocation(comment)}`,
+    comment.anchor.hunk ? `Hunk: ${comment.anchor.hunk}` : undefined,
+    `Diff line: ${comment.anchor.text}`,
+    `Comment: ${comment.text}`,
+    "",
+    "Relevant diff context:",
+    "```diff",
+    buildDiffAnnotationContext(rows, comment),
+    "```",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+export function prepareDiffCommentPrompt(
+  state: DiffReviewableState,
+  comments: DiffReviewAnnotation[],
+  patchForComment?: (comment: DiffReviewAnnotation) => string | null,
+): DiffCommentPromptResult {
   const key = comparisonKey(state);
   const selectedComments = comments.filter(annotation => annotation.kind === "comment" && annotation.comparisonKey === key);
-  const rows = parseDiffRows(diffPayloadText(state.range.payload));
+  const missingFiles = new Set<string>();
   const commentSections = selectedComments
-    .map((comment, index) =>
-      [
-        `### Comment ${index + 1}`,
-        `Location: ${formatDiffLocation(comment)}`,
-        comment.anchor.hunk ? `Hunk: ${comment.anchor.hunk}` : undefined,
-        `Diff line: ${comment.anchor.text}`,
-        `Comment: ${comment.text}`,
-        "",
-        "Relevant diff context:",
-        "```diff",
-        buildDiffAnnotationContext(rows, comment),
-        "```",
-      ]
-        .filter(Boolean)
-        .join("\n"),
-    )
+    .map((comment, index) => {
+      const patch = patchForComment?.(comment) ?? reviewPatchText(state);
+      if (!patch) {
+        missingFiles.add(pathForDiffLocation(comment.anchor));
+        return null;
+      }
+      return buildCommentSection(comment, index, parseDiffRows(patch));
+    })
+    .filter((section): section is string => Boolean(section))
     .join("\n\n");
-  return [
-    "I reviewed a repository diff in Fura and left comments on specific diff lines.",
-    reviewHelperInstruction,
-    ...comparisonLines(state),
-    "",
-    "Only the diff context around commented lines is included below; the full diff is intentionally omitted.",
-    "",
-    commentSections,
-    "",
-    "Please respond to these review comments using the path, side, and old/new diff line metadata to locate each comment precisely.",
-  ].join("\n");
+  if (missingFiles.size > 0) {
+    const files = [...missingFiles].sort();
+    return {
+      ok: false,
+      message: files.length === 1
+        ? `Load patch for ${files[0]} before flushing comments.`
+        : `Load patches for ${files.join(", ")} before flushing comments.`,
+      missingFiles: files,
+    };
+  }
+  return {
+    ok: true,
+    prompt: [
+      "I reviewed a repository diff in Fura and left comments on specific diff lines.",
+      reviewHelperInstruction,
+      ...comparisonLines(state),
+      "",
+      "Only the diff context around commented lines is included below; the full diff is intentionally omitted.",
+      "",
+      commentSections,
+      "",
+      "Please respond to these review comments using the path, side, and old/new diff line metadata to locate each comment precisely.",
+    ].join("\n"),
+  };
+}
+
+export function buildDiffCommentPrompt(state: DiffReviewableState, comments: DiffReviewAnnotation[]): string {
+  const prompt = prepareDiffCommentPrompt(state, comments);
+  return prompt.ok ? prompt.prompt : "";
 }
 
 export function buildDiffQuestionPrompt(state: DiffReviewableState, question: DiffReviewAnnotation): string {
-  const rows = parseDiffRows(diffPayloadText(state.range.payload));
+  const rows = parseDiffRows(reviewPatchText(state));
   return [
     "I have a question about this exact diff line in Fura.",
     reviewHelperInstruction,
@@ -235,15 +274,15 @@ function checkoutTargetForEndpoint(endpoint: DiffEndpoint): DiffCheckoutTarget {
 export function checkoutTargetForDiffLocation(state: DiffReviewableState, location: DiffLineLocation): DiffCheckoutTarget {
   if (location.side === "left") {
     if (state.review.previousCommitOid) return { kind: "commit", oid: state.review.previousCommitOid };
-    return checkoutTargetForEndpoint(state.range.base);
+    return checkoutTargetForEndpoint(state.comparison.base);
   }
   if (state.review.currentCommitOid) return { kind: "commit", oid: state.review.currentCommitOid };
-  return checkoutTargetForEndpoint(state.range.head);
+  return checkoutTargetForEndpoint(state.comparison.head);
 }
 
 export function checkoutTargetForDiffFile(state: DiffReviewableState): DiffCheckoutTarget {
   if (state.review.currentCommitOid) return { kind: "commit", oid: state.review.currentCommitOid };
-  return checkoutTargetForEndpoint(state.range.head);
+  return checkoutTargetForEndpoint(state.comparison.head);
 }
 
 export function pathForDiffLocation(location: DiffLineLocation): string {

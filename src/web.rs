@@ -19,8 +19,8 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::{
-    AppState, AuthSession, ClientMessage, DiffPayload, ServerMessage, client_config,
-    handle_client_message, refresh_session_catalog, sessions_snapshot_from_map,
+    AppState, AuthSession, ClientMessage, ServerMessage, client_config, handle_client_message,
+    refresh_session_catalog, sessions_snapshot_from_map,
 };
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
@@ -335,13 +335,6 @@ pub(crate) async fn send_json(
     }
 }
 
-fn diff_payload_bytes(payload: &DiffPayload) -> usize {
-    match payload {
-        DiffPayload::StatOnly { stat, .. } => stat.len(),
-        DiffPayload::FullPatch { patch, .. } => patch.len(),
-    }
-}
-
 pub(crate) fn log_server_message(message: &ServerMessage) {
     match message {
         ServerMessage::Hello { .. } => {
@@ -440,18 +433,55 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             bytes = content.len()
         ),
-        ServerMessage::SessionChangesState { state } => info!(
+        ServerMessage::SessionChangesSummary { state } => info!(
             direction = "bridge_to_client",
-            message_type = "sessionChanges.state",
+            message_type = "sessionChanges.summary",
             status = ?state
         ),
-        ServerMessage::CompareDiffState { state } => info!(
+        ServerMessage::CompareDiffSummary { state } => info!(
             direction = "bridge_to_client",
-            message_type = "compareDiff.state",
-            repo_root = %state.range.repo_root,
-            diff_bytes = diff_payload_bytes(&state.range.payload)
+            message_type = "compareDiff.summary",
+            target_client_id = %state.target_client_id,
+            diff_id = %state.diff_id,
+            repo_root = %state.comparison.repo_root,
+            file_count = state.summary.files.len()
+        ),
+        ServerMessage::DiffFilePatch { patch } => info!(
+            direction = "bridge_to_client",
+            message_type = "diff.filePatch",
+            target_client_id = %patch.target_client_id,
+            diff_id = %patch.diff_id,
+            scope = ?patch.scope,
+            file = %patch.file.new_path,
+            patch_bytes = patch.patch.len()
+        ),
+        ServerMessage::DiffComplete {
+            target_client_id,
+            diff_id,
+            scope,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "diff.complete",
+            target_client_id = %target_client_id,
+            diff_id = %diff_id,
+            scope = ?scope
+        ),
+        ServerMessage::DiffCancelled {
+            target_client_id,
+            diff_id,
+            scope,
+            reason,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "diff.cancelled",
+            target_client_id = %target_client_id,
+            diff_id = %diff_id,
+            scope = ?scope,
+            reason = reason.as_deref().unwrap_or("")
         ),
         ServerMessage::DiffError {
+            target_client_id,
+            diff_id,
             scope,
             session_id,
             repo_root,
@@ -459,6 +489,8 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
         } => info!(
             direction = "bridge_to_client",
             message_type = "diff.error",
+            target_client_id = target_client_id.as_deref().unwrap_or(""),
+            diff_id = diff_id.as_deref().unwrap_or(""),
             scope = ?scope,
             session_id = session_id.as_deref().unwrap_or(""),
             repo_root = repo_root.as_deref().unwrap_or(""),

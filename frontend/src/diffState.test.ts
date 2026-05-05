@@ -18,13 +18,19 @@ const patch = [
 ].join("\n");
 
 const state = (selectedCommitOid: string | null = null): DiffReviewableState => ({
-  range: {
+  comparison: {
     repoRoot: "/repo",
     base: { kind: "gitRef", input: "main", refKind: "branch", oid: "a".repeat(40), display: "main" },
     head: { kind: "gitRef", input: "feature", refKind: "branch", oid: "b".repeat(40), display: "feature" },
-    payload: { kind: "fullPatch", files: [], patch, truncated: false },
+    leftTreeOrCommit: "a".repeat(40),
+    rightTreeOrCommit: "b".repeat(40),
+    detailMode: "filePatch",
+    currentCommitOid: selectedCommitOid,
     generatedAt: "1",
+    comparisonKey: `/repo|${selectedCommitOid ?? "range"}`,
   },
+  summary: { files: [], stat: null, truncated: false },
+  patch,
   review: { commits: [], currentCommitOid: selectedCommitOid },
 });
 

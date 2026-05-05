@@ -24,13 +24,19 @@ const patch = [
 ].join("\n");
 
 const state: DiffReviewableState = {
-  range: {
+  comparison: {
     repoRoot: "/repo",
     base: { kind: "gitRef", input: "main", refKind: "branch", oid: "a".repeat(40), display: "main" },
     head: { kind: "gitRef", input: "feature", refKind: "branch", oid: "b".repeat(40), display: "feature" },
-    payload: { kind: "fullPatch", files: [], patch, truncated: false },
+    leftTreeOrCommit: "a".repeat(40),
+    rightTreeOrCommit: "b".repeat(40),
+    detailMode: "filePatch",
+    currentCommitOid: "b".repeat(40),
     generatedAt: "1",
+    comparisonKey: "/repo|commit",
   },
+  summary: { files: [], stat: null, truncated: false },
+  patch,
   review: {
     commits: [{ oid: "b".repeat(40), shortOid: "bbbbbbbbbbbb", subject: "change value", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
     currentCommitOid: "b".repeat(40),

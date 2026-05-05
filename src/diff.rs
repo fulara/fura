@@ -4,6 +4,7 @@ use std::{
     io::{BufRead, BufReader as StdBufReader},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 
@@ -17,6 +18,7 @@ use crate::*;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_DIFF_BYTES: usize = 2_000_000;
+const MAX_DIFF_FILE_PATCH_BYTES: usize = 1_000_000;
 const MAX_GIT_OUTPUT_BYTES: usize = 4_000_000;
 
 #[derive(Debug, Default)]
@@ -25,55 +27,87 @@ pub(crate) struct DiffReviewWorktreeRegistry {
     by_source_repo: HashMap<PathBuf, String>,
 }
 
-pub(crate) async fn handle_session_changes_open(
+pub(crate) async fn handle_session_changes_request(
     state: &AppState,
-    session_id: String,
-) -> Vec<ServerMessage> {
-    build_session_changes_response(state, session_id, None, DiffPayloadKind::StatOnly, None).await
-}
-
-pub(crate) async fn handle_session_changes_select_repo(
-    state: &AppState,
-    session_id: String,
-    repo_id: String,
-    payload_kind: DiffPayloadKind,
-    current_commit_oid: Option<String>,
-) -> Vec<ServerMessage> {
-    build_session_changes_response(
-        state,
-        session_id,
-        Some(repo_id),
-        payload_kind,
-        current_commit_oid,
-    )
-    .await
-}
-
-pub(crate) async fn handle_session_changes_refresh(
-    state: &AppState,
+    client_id: String,
+    diff_id: String,
     session_id: String,
     repo_id: Option<String>,
-    payload_kind: Option<DiffPayloadKind>,
+    detail_mode: DiffDetailMode,
     current_commit_oid: Option<String>,
+    selected_file: Option<DiffFileSelector>,
 ) -> Vec<ServerMessage> {
-    build_session_changes_response(
+    if let Err(error) = validate_diff_id(&diff_id) {
+        return vec![diff_error(
+            Some(client_id),
+            Some(diff_id),
+            DiffErrorScope::SessionChanges,
+            Some(session_id),
+            None,
+            error,
+        )];
+    }
+    let request = DiffRequestIdentity::SessionChanges {
+        client_id: client_id.clone(),
+        diff_id: diff_id.clone(),
+        session_id: session_id.clone(),
+        repo_id: repo_id.clone(),
+        detail_mode,
+        current_commit_oid: current_commit_oid.clone(),
+        selected_file: selected_file.clone(),
+    };
+    if selected_file.is_some()
+        && current_diff_id(state, &client_id, DiffScope::SessionChanges)
+            .await
+            .as_deref()
+            == Some(diff_id.as_str())
+    {
+        start_session_changes_file_patch_job(
+            state,
+            client_id,
+            diff_id,
+            session_id,
+            selected_file.expect("checked selected file"),
+        )
+        .await;
+        return Vec::new();
+    }
+    start_session_changes_generation_job(
         state,
+        client_id,
+        diff_id,
         session_id,
         repo_id,
-        payload_kind.unwrap_or(DiffPayloadKind::StatOnly),
+        detail_mode,
         current_commit_oid,
+        selected_file,
+        request,
     )
-    .await
+    .await;
+    Vec::new()
 }
 
 pub(crate) async fn handle_session_changes_snapshot(
     state: &AppState,
+    client_id: String,
+    diff_id: String,
     session_id: String,
     repo_id: Option<String>,
     label: Option<String>,
-    payload_kind: DiffPayloadKind,
+    detail_mode: DiffDetailMode,
     current_commit_oid: Option<String>,
+    selected_file: Option<DiffFileSelector>,
 ) -> Vec<ServerMessage> {
+    if let Err(error) = validate_diff_id(&diff_id) {
+        return vec![diff_error(
+            Some(client_id),
+            Some(diff_id),
+            DiffErrorScope::SessionChanges,
+            Some(session_id),
+            None,
+            error,
+        )];
+    }
     let command_id = next_rpc_id();
     let label = label
         .and_then(|label| non_empty_trimmed(&label).map(str::to_string))
@@ -81,10 +115,13 @@ pub(crate) async fn handle_session_changes_snapshot(
     state.pending_session_change_snapshots.write().await.insert(
         command_id.clone(),
         PendingSessionChangesSnapshot {
+            client_id,
+            diff_id,
             session_id: session_id.clone(),
             repo_id,
-            payload_kind,
+            detail_mode,
             current_commit_oid,
+            selected_file,
         },
     );
     let command = serde_json::json!({
@@ -105,43 +142,104 @@ pub(crate) async fn handle_session_changes_snapshot(
     }
 }
 
-pub(crate) async fn handle_compare_diff_run(
+pub(crate) async fn handle_compare_diff_request(
     state: &AppState,
-    request_id: Option<String>,
+    client_id: String,
+    diff_id: String,
     repo_root: String,
     base: DiffRefInput,
     head: DiffRefInput,
-    payload_kind: DiffPayloadKind,
+    detail_mode: DiffDetailMode,
     merge_base: Option<bool>,
     current_commit_oid: Option<String>,
+    selected_file: Option<DiffFileSelector>,
 ) -> Vec<ServerMessage> {
-    match discover_repo_root(&repo_root) {
-        Ok(root) => match build_compare_diff_state(
-            state,
-            request_id.clone(),
-            root,
-            base,
-            head,
-            payload_kind,
-            merge_base.unwrap_or(false),
-            current_commit_oid,
-        )
-        .await
-        {
-            Ok(state_value) => vec![ServerMessage::CompareDiffState { state: state_value }],
-            Err(error) => vec![diff_error(
-                DiffErrorScope::CompareDiff,
-                None,
-                Some(repo_root),
-                error,
-            )],
-        },
-        Err(error) => vec![diff_error(
+    if let Err(error) = validate_diff_id(&diff_id) {
+        return vec![diff_error(
+            Some(client_id),
+            Some(diff_id),
             DiffErrorScope::CompareDiff,
             None,
             Some(repo_root),
             error,
-        )],
+        )];
+    }
+    let request = DiffRequestIdentity::CompareDiff {
+        client_id: client_id.clone(),
+        diff_id: diff_id.clone(),
+        repo_root: repo_root.clone(),
+        base: base.clone(),
+        head: head.clone(),
+        detail_mode,
+        merge_base,
+        current_commit_oid: current_commit_oid.clone(),
+        selected_file: selected_file.clone(),
+    };
+    if selected_file.is_some()
+        && current_diff_id(state, &client_id, DiffScope::CompareDiff)
+            .await
+            .as_deref()
+            == Some(diff_id.as_str())
+    {
+        start_compare_file_patch_job(
+            state,
+            client_id,
+            diff_id,
+            repo_root,
+            selected_file.expect("checked selected file"),
+        )
+        .await;
+        return Vec::new();
+    }
+    start_compare_generation_job(
+        state,
+        client_id,
+        diff_id,
+        repo_root,
+        base,
+        head,
+        detail_mode,
+        merge_base,
+        current_commit_oid,
+        selected_file,
+        request,
+    )
+    .await;
+    Vec::new()
+}
+
+pub(crate) async fn handle_diff_cancel(
+    state: &AppState,
+    client_id: String,
+    diff_id: String,
+    scope: DiffScope,
+    reason: Option<String>,
+) -> Vec<ServerMessage> {
+    let _ = cancel_current_diff(state, &client_id, scope, &diff_id, reason).await;
+    Vec::new()
+}
+
+fn validate_diff_id(diff_id: &str) -> anyhow::Result<()> {
+    Uuid::parse_str(diff_id)
+        .map(|_| ())
+        .with_context(|| format!("invalid diffId UUID: {diff_id}"))
+}
+
+fn diff_error(
+    target_client_id: Option<String>,
+    diff_id: Option<String>,
+    scope: DiffErrorScope,
+    session_id: Option<String>,
+    repo_root: Option<String>,
+    error: anyhow::Error,
+) -> ServerMessage {
+    ServerMessage::DiffError {
+        target_client_id,
+        diff_id,
+        scope,
+        session_id,
+        repo_root,
+        message: error.to_string(),
     }
 }
 
@@ -153,6 +251,8 @@ pub(crate) async fn handle_diff_review_worktree_ensure(
     match ensure_review_worktree(state, &source_repo_root, target).await {
         Ok(worktree) => vec![ServerMessage::DiffReviewWorktreeState { worktree }],
         Err(error) => vec![diff_error(
+            None,
+            None,
             DiffErrorScope::ReviewWorktree,
             None,
             Some(source_repo_root),
@@ -169,6 +269,8 @@ pub(crate) async fn handle_diff_review_worktree_checkout(
     match checkout_review_worktree(state, &worktree_id, ref_target).await {
         Ok(worktree) => vec![ServerMessage::DiffReviewWorktreeState { worktree }],
         Err(error) => vec![diff_error(
+            None,
+            None,
             DiffErrorScope::ReviewWorktree,
             None,
             None,
@@ -177,112 +279,551 @@ pub(crate) async fn handle_diff_review_worktree_checkout(
     }
 }
 
-fn diff_error(
-    scope: DiffErrorScope,
-    session_id: Option<String>,
-    repo_root: Option<String>,
-    error: anyhow::Error,
-) -> ServerMessage {
-    ServerMessage::DiffError {
-        scope,
-        session_id,
-        repo_root,
-        message: error.to_string(),
+fn is_expected_missing_session_changes(error: &anyhow::Error) -> bool {
+    let text = error.to_string();
+    text == "missing repository for session changes"
+        || text == "missing session-start diff snapshot"
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedDiff {
+    repo_root: PathBuf,
+    left_tree_or_commit: String,
+    right_tree_or_commit: String,
+    comparison: DiffComparisonIdentity,
+    review: CommitStepState,
+    review_worktree: Option<DiffReviewWorktree>,
+}
+
+async fn next_diff_job_token(state: &AppState) -> u64 {
+    let mut jobs = state.diff_jobs.write().await;
+    jobs.next_token = jobs.next_token.saturating_add(1);
+    jobs.next_token
+}
+
+async fn current_diff_id(state: &AppState, client_id: &str, scope: DiffScope) -> Option<String> {
+    let jobs = state.diff_jobs.read().await;
+    jobs.state_generations
+        .get(&(client_id.to_string(), scope))
+        .map(|job| job.diff_id.clone())
+}
+
+async fn current_prepared_diff(
+    state: &AppState,
+    client_id: &str,
+    scope: DiffScope,
+    diff_id: &str,
+) -> Option<Arc<PreparedDiff>> {
+    let jobs = state.diff_jobs.read().await;
+    jobs.state_generations
+        .get(&(client_id.to_string(), scope))
+        .filter(|job| job.diff_id == diff_id)
+        .and_then(|job| job.prepared.clone())
+}
+
+async fn is_current_generation(
+    state: &AppState,
+    client_id: &str,
+    scope: DiffScope,
+    diff_id: &str,
+    token: u64,
+) -> bool {
+    let jobs = state.diff_jobs.read().await;
+    jobs.state_generations
+        .get(&(client_id.to_string(), scope))
+        .is_some_and(|job| job.diff_id == diff_id && job.token == token)
+}
+
+fn abort_file_patch_jobs_for_diff(
+    jobs: &mut DiffJobRegistry,
+    client_id: &str,
+    scope: DiffScope,
+    diff_id: &str,
+) {
+    let patch_keys: Vec<_> = jobs
+        .file_patches
+        .keys()
+        .filter(|(patch_client, patch_scope, patch_diff_id, _)| {
+            patch_client == client_id && *patch_scope == scope && patch_diff_id == diff_id
+        })
+        .cloned()
+        .collect();
+    for key in patch_keys {
+        if let Some(job) = jobs.file_patches.remove(&key) {
+            job.handle.abort();
+        }
     }
 }
 
-pub(crate) async fn build_session_changes_response(
+async fn register_generation_job(
     state: &AppState,
-    session_id: String,
-    selected_repo_id: Option<String>,
-    payload_kind: DiffPayloadKind,
-    current_commit_oid: Option<String>,
-) -> Vec<ServerMessage> {
-    let (repos, selected) = match session_repo_candidates(state, &session_id).await {
-        Ok(candidates) => {
-            if candidates.is_empty() {
-                let session_state = SessionChangesState::MissingRepo {
-                    session_id,
-                    reason: "Fura could not identify a git repository for this session."
-                        .to_string(),
-                    repos: candidates,
-                };
-                return vec![ServerMessage::SessionChangesState {
-                    state: session_state,
-                }];
-            }
-            let selected = select_session_repo(&candidates, selected_repo_id.as_deref());
-            (candidates, selected)
-        }
-        Err(error) => {
-            return vec![diff_error(
-                DiffErrorScope::SessionChanges,
-                Some(session_id),
-                None,
-                error,
-            )];
-        }
-    };
-
-    let Some(candidate) = selected else {
-        let session_state = SessionChangesState::MissingRepo {
-            session_id,
-            reason: "Selected repository is not available for this session.".to_string(),
-            repos,
-        };
-        return vec![ServerMessage::SessionChangesState {
-            state: session_state,
-        }];
-    };
-
-    let repo_root_text = candidate.repo_root.clone();
-    let Some(snapshot) = candidate.session_start_snapshot.clone() else {
-        let session_state = SessionChangesState::MissingSnapshot {
-            session_id,
-            repo_root: repo_root_text,
-            reason: "This session has no session-start diff snapshot for the selected repository."
-                .to_string(),
-            repos,
-        };
-        return vec![ServerMessage::SessionChangesState {
-            state: session_state,
-        }];
-    };
-
-    let repo_root = match discover_repo_root(&repo_root_text) {
-        Ok(root) => root,
-        Err(error) => {
-            return vec![diff_error(
-                DiffErrorScope::SessionChanges,
-                Some(session_id),
-                Some(repo_root_text),
-                error,
-            )];
-        }
-    };
-
-    match build_session_changes_state(
-        state,
-        session_id.clone(),
-        repos,
-        candidate.id.clone(),
-        repo_root,
-        snapshot,
-        payload_kind,
-        current_commit_oid,
-    )
-    .await
+    client_id: String,
+    scope: DiffScope,
+    diff_id: String,
+    token: u64,
+    handle: tokio::task::JoinHandle<()>,
+) {
+    let mut cancelled_diff_id = None;
     {
-        Ok(session_state) => vec![ServerMessage::SessionChangesState {
-            state: session_state,
-        }],
-        Err(error) => vec![diff_error(
+        let mut jobs = state.diff_jobs.write().await;
+        let key = (client_id.clone(), scope);
+        if let Some(mut previous) = jobs.state_generations.remove(&key) {
+            if let Some(previous_handle) = previous.handle.take() {
+                previous_handle.abort();
+            }
+            abort_file_patch_jobs_for_diff(&mut jobs, &client_id, scope, &previous.diff_id);
+            if previous.diff_id != diff_id {
+                cancelled_diff_id = Some(previous.diff_id.clone());
+            }
+            jobs.state_generations.insert(
+                key,
+                DiffStateGenerationJob {
+                    token,
+                    diff_id: diff_id.clone(),
+                    prepared: if previous.diff_id == diff_id {
+                        previous.prepared
+                    } else {
+                        None
+                    },
+                    handle: Some(handle),
+                },
+            );
+        } else {
+            jobs.state_generations.insert(
+                key,
+                DiffStateGenerationJob {
+                    token,
+                    diff_id: diff_id.clone(),
+                    prepared: None,
+                    handle: Some(handle),
+                },
+            );
+        }
+    }
+    if let Some(cancelled_diff_id) = cancelled_diff_id {
+        let _ = state.events.send(ServerMessage::DiffCancelled {
+            target_client_id: client_id,
+            diff_id: cancelled_diff_id,
+            scope,
+            reason: Some("replaced".to_string()),
+        });
+    }
+}
+
+async fn register_file_patch_job(
+    state: &AppState,
+    key: (String, DiffScope, String, String),
+    token: u64,
+    handle: tokio::task::JoinHandle<()>,
+) {
+    let mut jobs = state.diff_jobs.write().await;
+    if let Some(previous) = jobs
+        .file_patches
+        .insert(key, DiffFilePatchJob { token, handle })
+    {
+        previous.handle.abort();
+    }
+}
+
+async fn store_prepared_generation(
+    state: &AppState,
+    client_id: &str,
+    scope: DiffScope,
+    diff_id: &str,
+    token: u64,
+    prepared: Arc<PreparedDiff>,
+) -> bool {
+    let mut jobs = state.diff_jobs.write().await;
+    let Some(current) = jobs
+        .state_generations
+        .get_mut(&(client_id.to_string(), scope))
+    else {
+        return false;
+    };
+    if current.diff_id != diff_id || current.token != token {
+        return false;
+    }
+    current.prepared = Some(prepared);
+    true
+}
+
+async fn clear_generation_handle(
+    state: &AppState,
+    client_id: &str,
+    scope: DiffScope,
+    diff_id: &str,
+    token: u64,
+) {
+    let mut jobs = state.diff_jobs.write().await;
+    if let Some(current) = jobs
+        .state_generations
+        .get_mut(&(client_id.to_string(), scope))
+    {
+        if current.diff_id == diff_id && current.token == token {
+            current.handle = None;
+        }
+    }
+}
+
+async fn finish_file_patch_job(
+    state: &AppState,
+    key: &(String, DiffScope, String, String),
+    token: u64,
+) {
+    let mut jobs = state.diff_jobs.write().await;
+    if jobs
+        .file_patches
+        .get(key)
+        .is_some_and(|current| current.token == token)
+    {
+        jobs.file_patches.remove(key);
+    }
+}
+
+async fn cancel_current_diff(
+    state: &AppState,
+    client_id: &str,
+    scope: DiffScope,
+    diff_id: &str,
+    reason: Option<String>,
+) -> bool {
+    let cancelled = {
+        let mut jobs = state.diff_jobs.write().await;
+        let key = (client_id.to_string(), scope);
+        let Some(current) = jobs.state_generations.get(&key) else {
+            return false;
+        };
+        if current.diff_id != diff_id {
+            return false;
+        }
+        if let Some(current) = jobs.state_generations.remove(&key) {
+            if let Some(handle) = current.handle {
+                handle.abort();
+            }
+        }
+        abort_file_patch_jobs_for_diff(&mut jobs, client_id, scope, diff_id);
+        true
+    };
+    if cancelled {
+        let _ = state.events.send(ServerMessage::DiffCancelled {
+            target_client_id: client_id.to_string(),
+            diff_id: diff_id.to_string(),
+            scope,
+            reason,
+        });
+    }
+    cancelled
+}
+
+fn file_patch_key(file: &DiffFileSelector) -> String {
+    format!(
+        "{}\0{}",
+        file.old_path.as_deref().unwrap_or(""),
+        file.new_path
+    )
+}
+
+pub(crate) async fn start_session_changes_generation_job(
+    state: &AppState,
+    client_id: String,
+    diff_id: String,
+    session_id: String,
+    repo_id: Option<String>,
+    detail_mode: DiffDetailMode,
+    current_commit_oid: Option<String>,
+    selected_file: Option<DiffFileSelector>,
+    request: DiffRequestIdentity,
+) {
+    let generation_token = next_diff_job_token(state).await;
+    let job_state = state.clone();
+    let job_client_id = client_id.clone();
+    let job_diff_id = diff_id.clone();
+    let cleanup_client_id = client_id.clone();
+    let cleanup_diff_id = diff_id.clone();
+    let handle = tokio::spawn(async move {
+        let result = build_session_changes_summary(
+            &job_state,
+            job_client_id.clone(),
+            job_diff_id.clone(),
+            session_id.clone(),
+            repo_id,
+            detail_mode,
+            current_commit_oid,
+            selected_file.clone(),
+            request.clone(),
+        )
+        .await;
+        match result {
+            Ok((message, prepared)) => {
+                let prepared = Arc::new(prepared);
+                if store_prepared_generation(
+                    &job_state,
+                    &job_client_id,
+                    DiffScope::SessionChanges,
+                    &job_diff_id,
+                    generation_token,
+                    prepared.clone(),
+                )
+                .await
+                {
+                    let _ = job_state.events.send(message);
+                    if detail_mode == DiffDetailMode::FilePatch {
+                        if let Some(file) = selected_file {
+                            send_file_patch_for_prepared(
+                                &job_state,
+                                job_client_id.clone(),
+                                job_diff_id.clone(),
+                                DiffScope::SessionChanges,
+                                prepared,
+                                file,
+                            )
+                            .await;
+                        }
+                    }
+                    let _ = job_state.events.send(ServerMessage::DiffComplete {
+                        target_client_id: job_client_id,
+                        diff_id: job_diff_id,
+                        scope: DiffScope::SessionChanges,
+                    });
+                }
+            }
+            Err(error) if is_expected_missing_session_changes(&error) => {}
+            Err(error) => {
+                if is_current_generation(
+                    &job_state,
+                    &job_client_id,
+                    DiffScope::SessionChanges,
+                    &job_diff_id,
+                    generation_token,
+                )
+                .await
+                {
+                    let _ = job_state.events.send(diff_error(
+                        Some(job_client_id),
+                        Some(job_diff_id),
+                        DiffErrorScope::SessionChanges,
+                        Some(session_id),
+                        None,
+                        error,
+                    ));
+                }
+            }
+        }
+        clear_generation_handle(
+            &job_state,
+            &cleanup_client_id,
+            DiffScope::SessionChanges,
+            &cleanup_diff_id,
+            generation_token,
+        )
+        .await;
+    });
+    register_generation_job(
+        state,
+        client_id,
+        DiffScope::SessionChanges,
+        diff_id,
+        generation_token,
+        handle,
+    )
+    .await;
+}
+
+async fn start_session_changes_file_patch_job(
+    state: &AppState,
+    client_id: String,
+    diff_id: String,
+    session_id: String,
+    selected_file: DiffFileSelector,
+) {
+    let Some(prepared) =
+        current_prepared_diff(state, &client_id, DiffScope::SessionChanges, &diff_id).await
+    else {
+        let _ = state.events.send(diff_error(
+            Some(client_id),
+            Some(diff_id),
             DiffErrorScope::SessionChanges,
             Some(session_id),
-            Some(repo_root_text),
-            error,
-        )],
-    }
+            None,
+            anyhow!("diff summary is not ready for the selected file"),
+        ));
+        return;
+    };
+    let key = (
+        client_id.clone(),
+        DiffScope::SessionChanges,
+        diff_id.clone(),
+        file_patch_key(&selected_file),
+    );
+    let token = next_diff_job_token(state).await;
+    let job_state = state.clone();
+    let key_for_task = key.clone();
+    let handle = tokio::spawn(async move {
+        send_file_patch_for_prepared(
+            &job_state,
+            client_id,
+            diff_id,
+            DiffScope::SessionChanges,
+            prepared,
+            selected_file,
+        )
+        .await;
+        finish_file_patch_job(&job_state, &key_for_task, token).await;
+    });
+    register_file_patch_job(state, key, token, handle).await;
+}
+
+async fn start_compare_generation_job(
+    state: &AppState,
+    client_id: String,
+    diff_id: String,
+    repo_root: String,
+    base: DiffRefInput,
+    head: DiffRefInput,
+    detail_mode: DiffDetailMode,
+    merge_base: Option<bool>,
+    current_commit_oid: Option<String>,
+    selected_file: Option<DiffFileSelector>,
+    request: DiffRequestIdentity,
+) {
+    let generation_token = next_diff_job_token(state).await;
+    let job_state = state.clone();
+    let job_client_id = client_id.clone();
+    let job_diff_id = diff_id.clone();
+    let cleanup_client_id = client_id.clone();
+    let cleanup_diff_id = diff_id.clone();
+    let handle = tokio::spawn(async move {
+        let result = build_compare_summary(
+            &job_state,
+            job_client_id.clone(),
+            job_diff_id.clone(),
+            repo_root.clone(),
+            base,
+            head,
+            detail_mode,
+            merge_base,
+            current_commit_oid,
+            selected_file.clone(),
+            request,
+        )
+        .await;
+        match result {
+            Ok((message, prepared)) => {
+                let prepared = Arc::new(prepared);
+                if store_prepared_generation(
+                    &job_state,
+                    &job_client_id,
+                    DiffScope::CompareDiff,
+                    &job_diff_id,
+                    generation_token,
+                    prepared.clone(),
+                )
+                .await
+                {
+                    let _ = job_state.events.send(message);
+                    if detail_mode == DiffDetailMode::FilePatch {
+                        if let Some(file) = selected_file {
+                            send_file_patch_for_prepared(
+                                &job_state,
+                                job_client_id.clone(),
+                                job_diff_id.clone(),
+                                DiffScope::CompareDiff,
+                                prepared,
+                                file,
+                            )
+                            .await;
+                        }
+                    }
+                    let _ = job_state.events.send(ServerMessage::DiffComplete {
+                        target_client_id: job_client_id,
+                        diff_id: job_diff_id,
+                        scope: DiffScope::CompareDiff,
+                    });
+                }
+            }
+            Err(error) => {
+                if is_current_generation(
+                    &job_state,
+                    &job_client_id,
+                    DiffScope::CompareDiff,
+                    &job_diff_id,
+                    generation_token,
+                )
+                .await
+                {
+                    let _ = job_state.events.send(diff_error(
+                        Some(job_client_id),
+                        Some(job_diff_id),
+                        DiffErrorScope::CompareDiff,
+                        None,
+                        Some(repo_root),
+                        error,
+                    ));
+                }
+            }
+        }
+        clear_generation_handle(
+            &job_state,
+            &cleanup_client_id,
+            DiffScope::CompareDiff,
+            &cleanup_diff_id,
+            generation_token,
+        )
+        .await;
+    });
+    register_generation_job(
+        state,
+        client_id,
+        DiffScope::CompareDiff,
+        diff_id,
+        generation_token,
+        handle,
+    )
+    .await;
+}
+
+async fn start_compare_file_patch_job(
+    state: &AppState,
+    client_id: String,
+    diff_id: String,
+    repo_root: String,
+    selected_file: DiffFileSelector,
+) {
+    let Some(prepared) =
+        current_prepared_diff(state, &client_id, DiffScope::CompareDiff, &diff_id).await
+    else {
+        let _ = state.events.send(diff_error(
+            Some(client_id),
+            Some(diff_id),
+            DiffErrorScope::CompareDiff,
+            None,
+            Some(repo_root),
+            anyhow!("diff summary is not ready for the selected file"),
+        ));
+        return;
+    };
+    let key = (
+        client_id.clone(),
+        DiffScope::CompareDiff,
+        diff_id.clone(),
+        file_patch_key(&selected_file),
+    );
+    let token = next_diff_job_token(state).await;
+    let job_state = state.clone();
+    let key_for_task = key.clone();
+    let handle = tokio::spawn(async move {
+        send_file_patch_for_prepared(
+            &job_state,
+            client_id,
+            diff_id,
+            DiffScope::CompareDiff,
+            prepared,
+            selected_file,
+        )
+        .await;
+        finish_file_patch_job(&job_state, &key_for_task, token).await;
+    });
+    register_file_patch_job(state, key, token, handle).await;
 }
 
 fn select_session_repo(
@@ -544,94 +1085,223 @@ fn discover_repo_root(path: &str) -> anyhow::Result<PathBuf> {
     Ok(workdir)
 }
 
-async fn build_session_changes_state(
+async fn build_session_changes_summary(
     state: &AppState,
+    client_id: String,
+    diff_id: String,
     session_id: String,
-    repos: Vec<SessionRepoCandidate>,
-    selected_repo_id: String,
-    repo_root: PathBuf,
-    snapshot: SessionDiffSnapshotSummary,
-    payload_kind: DiffPayloadKind,
+    selected_repo_id: Option<String>,
+    detail_mode: DiffDetailMode,
     current_commit_oid: Option<String>,
-) -> anyhow::Result<SessionChangesState> {
+    selected_file: Option<DiffFileSelector>,
+    request: DiffRequestIdentity,
+) -> anyhow::Result<(ServerMessage, PreparedDiff)> {
+    let (repos, selected_repo_id, prepared) = prepare_session_changes_diff(
+        state,
+        client_id.clone(),
+        diff_id.clone(),
+        session_id.clone(),
+        selected_repo_id,
+        detail_mode,
+        current_commit_oid,
+        selected_file,
+        request.clone(),
+    )
+    .await?;
+    let summary = build_summary_payload(
+        &prepared.repo_root,
+        &prepared.left_tree_or_commit,
+        &prepared.right_tree_or_commit,
+    )
+    .await?;
+    Ok((
+        ServerMessage::SessionChangesSummary {
+            state: SessionChangesSummaryState::Ready {
+                target_client_id: client_id,
+                diff_id,
+                request,
+                comparison: prepared.comparison.clone(),
+                session_id,
+                repos,
+                selected_repo_id,
+                summary,
+                review: prepared.review.clone(),
+                review_worktree: prepared.review_worktree.clone(),
+            },
+        },
+        prepared,
+    ))
+}
+
+async fn prepare_session_changes_diff(
+    state: &AppState,
+    client_id: String,
+    diff_id: String,
+    session_id: String,
+    selected_repo_id: Option<String>,
+    detail_mode: DiffDetailMode,
+    current_commit_oid: Option<String>,
+    selected_file: Option<DiffFileSelector>,
+    request: DiffRequestIdentity,
+) -> anyhow::Result<(Vec<SessionRepoCandidate>, String, PreparedDiff)> {
+    let candidates = session_repo_candidates(state, &session_id).await?;
+    if candidates.is_empty() {
+        let _ = state.events.send(ServerMessage::SessionChangesSummary {
+            state: SessionChangesSummaryState::MissingRepo {
+                target_client_id: client_id,
+                diff_id,
+                request,
+                session_id,
+                repo_root: None,
+                reason: "Fura could not identify a git repository for this session.".to_string(),
+                repos: candidates,
+            },
+        });
+        bail!("missing repository for session changes");
+    }
+    let selected = select_session_repo(&candidates, selected_repo_id.as_deref())
+        .ok_or_else(|| anyhow!("Selected repository is not available for this session."))?;
+    let repo_root_text = selected.repo_root.clone();
+    let Some(snapshot) = selected.session_start_snapshot.clone() else {
+        let _ = state.events.send(ServerMessage::SessionChangesSummary {
+            state: SessionChangesSummaryState::MissingSnapshot {
+                target_client_id: client_id,
+                diff_id,
+                request,
+                session_id,
+                repo_root: Some(repo_root_text),
+                reason:
+                    "This session has no session-start diff snapshot for the selected repository."
+                        .to_string(),
+                repos: candidates,
+            },
+        });
+        bail!("missing session-start diff snapshot");
+    };
+    let repo_root = discover_repo_root(&repo_root_text)?;
     let base_resolved = resolve_git_ref(&repo_root, &snapshot.ref_name).await?;
     let head_resolved = ResolvedDiffRef::WorkingTree;
     let base_endpoint = DiffEndpoint::SessionStartSnapshot {
         snapshot: snapshot.clone(),
     };
     let head_endpoint = DiffEndpoint::WorkingTree;
-    let (range, review) = build_diff_range_state(
-        &repo_root,
+    let prepared = prepare_diff_range(
+        state,
+        repo_root,
         base_endpoint,
         head_endpoint,
         base_resolved,
         head_resolved,
-        payload_kind,
+        detail_mode,
         false,
         current_commit_oid,
+        selected_file,
     )
     .await?;
-    let review_worktree = current_review_worktree(state, &repo_root).await;
-    Ok(SessionChangesState::Ready {
-        session_id,
-        repos,
-        selected_repo_id,
-        range,
-        review,
-        review_worktree,
-    })
+    Ok((candidates, selected.id, prepared))
 }
 
-async fn build_compare_diff_state(
+async fn build_compare_summary(
     state: &AppState,
-    request_id: Option<String>,
-    repo_root: PathBuf,
+    client_id: String,
+    diff_id: String,
+    repo_root: String,
     base: DiffRefInput,
     head: DiffRefInput,
-    payload_kind: DiffPayloadKind,
-    merge_base: bool,
+    detail_mode: DiffDetailMode,
+    merge_base: Option<bool>,
     current_commit_oid: Option<String>,
-) -> anyhow::Result<CompareDiffState> {
+    selected_file: Option<DiffFileSelector>,
+    request: DiffRequestIdentity,
+) -> anyhow::Result<(ServerMessage, PreparedDiff)> {
+    let (refs, prepared) = prepare_compare_diff(
+        state,
+        client_id.clone(),
+        diff_id.clone(),
+        repo_root,
+        base,
+        head,
+        detail_mode,
+        merge_base,
+        current_commit_oid,
+        selected_file,
+        request.clone(),
+    )
+    .await?;
+    let summary = build_summary_payload(
+        &prepared.repo_root,
+        &prepared.left_tree_or_commit,
+        &prepared.right_tree_or_commit,
+    )
+    .await?;
+    Ok((
+        ServerMessage::CompareDiffSummary {
+            state: CompareDiffSummaryState {
+                target_client_id: client_id,
+                diff_id,
+                request,
+                comparison: prepared.comparison.clone(),
+                refs,
+                summary,
+                review: prepared.review.clone(),
+                review_worktree: prepared.review_worktree.clone(),
+            },
+        },
+        prepared,
+    ))
+}
+
+async fn prepare_compare_diff(
+    state: &AppState,
+    _client_id: String,
+    _diff_id: String,
+    repo_root: String,
+    base: DiffRefInput,
+    head: DiffRefInput,
+    detail_mode: DiffDetailMode,
+    merge_base: Option<bool>,
+    current_commit_oid: Option<String>,
+    selected_file: Option<DiffFileSelector>,
+    _request: DiffRequestIdentity,
+) -> anyhow::Result<(Vec<GitRefSummary>, PreparedDiff)> {
+    let repo_root = discover_repo_root(&repo_root)?;
     let refs = list_refs(&repo_root).await?;
     let base_resolved = resolve_diff_ref(&repo_root, &base).await?;
     let head_resolved = resolve_diff_ref(&repo_root, &head).await?;
     let base_endpoint = endpoint_from_resolved(&base_resolved);
     let head_endpoint = endpoint_from_resolved(&head_resolved);
-    let (range, review) = build_diff_range_state(
-        &repo_root,
+    let prepared = prepare_diff_range(
+        state,
+        repo_root,
         base_endpoint,
         head_endpoint,
         base_resolved,
         head_resolved,
-        payload_kind,
-        merge_base,
+        detail_mode,
+        merge_base.unwrap_or(false),
         current_commit_oid,
+        selected_file,
     )
     .await?;
-    let review_worktree = current_review_worktree(state, &repo_root).await;
-    Ok(CompareDiffState {
-        request_id,
-        refs,
-        range,
-        review,
-        review_worktree,
-    })
+    Ok((refs, prepared))
 }
 
-async fn build_diff_range_state(
-    repo_root: &Path,
+async fn prepare_diff_range(
+    state: &AppState,
+    repo_root: PathBuf,
     range_base_endpoint: DiffEndpoint,
     range_head_endpoint: DiffEndpoint,
     base_resolved: ResolvedDiffRef,
     head_resolved: ResolvedDiffRef,
-    payload_kind: DiffPayloadKind,
+    detail_mode: DiffDetailMode,
     merge_base: bool,
     current_commit_oid: Option<String>,
-) -> anyhow::Result<(DiffRangeState, CommitStepState)> {
+    selected_file: Option<DiffFileSelector>,
+) -> anyhow::Result<PreparedDiff> {
     let range_base_oid =
-        effective_merge_base_oid(repo_root, &base_resolved, &head_resolved, merge_base).await?;
+        effective_merge_base_oid(&repo_root, &base_resolved, &head_resolved, merge_base).await?;
     let commits = commits_for_range(
-        repo_root,
+        &repo_root,
         &base_resolved,
         &head_resolved,
         range_base_oid.as_deref(),
@@ -646,38 +1316,36 @@ async fn build_diff_range_state(
         )?),
         None => None,
     };
-
-    let (
-        display_left,
-        display_right,
-        current_commit_index,
-        previous_commit_oid,
-        displayed_patch_range,
-    ) = if let Some((left, right, index, previous_oid, displayed_range)) = commit_patch {
-        (
-            left,
-            right,
-            Some(index),
-            Some(previous_oid),
-            Some(displayed_range),
-        )
-    } else {
-        (
-            base_resolved.clone(),
-            head_resolved.clone(),
-            None,
-            None,
-            None,
-        )
+    let (display_left, display_right, current_commit_index, previous_commit_oid) =
+        if let Some((left, right, index, previous_oid, _displayed_range)) = commit_patch {
+            (left, right, Some(index), Some(previous_oid))
+        } else {
+            (base_resolved.clone(), head_resolved.clone(), None, None)
+        };
+    let left_tree_or_commit = oid_for_diff(&display_left)?.to_string();
+    let right_tree_or_commit = match &display_right {
+        ResolvedDiffRef::WorkingTree => current_worktree_tree(&repo_root).await?,
+        ResolvedDiffRef::GitRef { oid, .. } => oid.clone(),
     };
-    let payload = build_payload(repo_root, &display_left, &display_right, payload_kind).await?;
-    let range = DiffRangeState {
+    let generated_at = Timestamp::now().millis().to_string();
+    let comparison_key = format!(
+        "{}:{}:{}:{:?}",
+        repo_root.display(),
+        left_tree_or_commit,
+        right_tree_or_commit,
+        detail_mode
+    );
+    let comparison = DiffComparisonIdentity {
         repo_root: repo_root.display().to_string(),
         base: range_base_endpoint,
         head: range_head_endpoint,
-        payload,
-        generated_at: Timestamp::now().millis().to_string(),
-        displayed_patch_range,
+        left_tree_or_commit: left_tree_or_commit.clone(),
+        right_tree_or_commit: right_tree_or_commit.clone(),
+        detail_mode,
+        current_commit_oid: current_commit_oid.clone(),
+        selected_file,
+        generated_at,
+        comparison_key,
     };
     let review = CommitStepState {
         commits,
@@ -685,9 +1353,16 @@ async fn build_diff_range_state(
         current_commit_index,
         previous_commit_oid,
     };
-    Ok((range, review))
+    let review_worktree = current_review_worktree(state, &repo_root).await;
+    Ok(PreparedDiff {
+        repo_root,
+        left_tree_or_commit,
+        right_tree_or_commit,
+        comparison,
+        review,
+        review_worktree,
+    })
 }
-
 async fn effective_merge_base_oid(
     repo_root: &Path,
     base_resolved: &ResolvedDiffRef,
@@ -830,28 +1505,126 @@ fn endpoint_from_resolved(reference: &ResolvedDiffRef) -> DiffEndpoint {
     }
 }
 
-async fn build_payload(
+async fn build_summary_payload(
     repo_root: &Path,
-    left: &ResolvedDiffRef,
-    right: &ResolvedDiffRef,
-    payload_kind: DiffPayloadKind,
-) -> anyhow::Result<DiffPayload> {
-    let (text, truncated) = generate_diff(repo_root, left, right, payload_kind).await?;
-    let files = summarize_files(repo_root, left, right)
-        .await
-        .unwrap_or_default();
-    Ok(match payload_kind {
-        DiffPayloadKind::StatOnly => DiffPayload::StatOnly {
-            files,
-            stat: text,
-            truncated,
-        },
-        DiffPayloadKind::FullPatch => DiffPayload::FullPatch {
-            files,
-            patch: text,
-            truncated,
-        },
+    left_tree_or_commit: &str,
+    right_tree_or_commit: &str,
+) -> anyhow::Result<DiffSummaryPayload> {
+    let (stat, truncated) = git_stdout_limited(
+        repo_root,
+        &[
+            "diff",
+            "--find-renames",
+            "--stat",
+            left_tree_or_commit,
+            right_tree_or_commit,
+        ],
+        MAX_DIFF_BYTES,
+    )
+    .await?;
+    let (files, file_limit_reached) =
+        summarize_files_between(repo_root, left_tree_or_commit, right_tree_or_commit).await?;
+    Ok(DiffSummaryPayload {
+        files,
+        stat: Some(stat),
+        truncated,
+        file_limit_reached: Some(file_limit_reached),
     })
+}
+
+async fn send_file_patch_for_prepared(
+    state: &AppState,
+    client_id: String,
+    diff_id: String,
+    scope: DiffScope,
+    prepared: Arc<PreparedDiff>,
+    file: DiffFileSelector,
+) {
+    let result = generate_file_patch(
+        &prepared.repo_root,
+        &prepared.left_tree_or_commit,
+        &prepared.right_tree_or_commit,
+        &file,
+    )
+    .await;
+    match result {
+        Ok((patch, truncated)) => {
+            let _ = state.events.send(ServerMessage::DiffFilePatch {
+                patch: DiffFilePatchState {
+                    target_client_id: client_id,
+                    diff_id,
+                    scope,
+                    comparison_key: prepared.comparison.comparison_key.clone(),
+                    file,
+                    patch,
+                    truncated,
+                    generated_at: Timestamp::now().millis().to_string(),
+                },
+            });
+        }
+        Err(error) => {
+            let _ = state.events.send(diff_error(
+                Some(client_id),
+                Some(diff_id),
+                match scope {
+                    DiffScope::SessionChanges => DiffErrorScope::SessionChanges,
+                    DiffScope::CompareDiff => DiffErrorScope::CompareDiff,
+                },
+                None,
+                Some(prepared.repo_root.display().to_string()),
+                error,
+            ));
+        }
+    }
+}
+
+async fn generate_file_patch(
+    repo_root: &Path,
+    left_tree_or_commit: &str,
+    right_tree_or_commit: &str,
+    file: &DiffFileSelector,
+) -> anyhow::Result<(String, bool)> {
+    if let Some(old_path) = file.old_path.as_deref() {
+        let combined = [
+            "diff",
+            "--find-renames",
+            left_tree_or_commit,
+            right_tree_or_commit,
+            "--",
+            old_path,
+            file.new_path.as_str(),
+        ];
+        let (patch, truncated) =
+            git_stdout_limited(repo_root, &combined, MAX_DIFF_FILE_PATCH_BYTES).await?;
+        if !patch.trim().is_empty() {
+            return Ok((patch, truncated));
+        }
+    }
+
+    let primary = file.new_path.as_str();
+    let args = [
+        "diff",
+        "--find-renames",
+        left_tree_or_commit,
+        right_tree_or_commit,
+        "--",
+        primary,
+    ];
+    let (patch, truncated) =
+        git_stdout_limited(repo_root, &args, MAX_DIFF_FILE_PATCH_BYTES).await?;
+    if !patch.trim().is_empty() || file.old_path.as_deref().is_none() {
+        return Ok((patch, truncated));
+    }
+    let old_path = file.old_path.as_deref().expect("checked old path");
+    let fallback = [
+        "diff",
+        "--find-renames",
+        left_tree_or_commit,
+        right_tree_or_commit,
+        "--",
+        old_path,
+    ];
+    git_stdout_limited(repo_root, &fallback, MAX_DIFF_FILE_PATCH_BYTES).await
 }
 
 async fn current_review_worktree(state: &AppState, repo_root: &Path) -> Option<DiffReviewWorktree> {
@@ -1122,14 +1895,15 @@ async fn current_worktree_tree(repo_root: &Path) -> anyhow::Result<String> {
     Ok(tree.trim().to_string())
 }
 
+#[cfg(test)]
 async fn generate_diff(
     repo_root: &Path,
     base: &ResolvedDiffRef,
     head: &ResolvedDiffRef,
-    payload_kind: DiffPayloadKind,
+    payload_kind: DiffDetailMode,
 ) -> anyhow::Result<(String, bool)> {
     let mut args = vec!["diff", "--find-renames"];
-    if payload_kind == DiffPayloadKind::StatOnly {
+    if payload_kind == DiffDetailMode::StatOnly {
         args.push("--stat");
     }
     let base_oid = oid_for_diff(base)?;
@@ -1148,35 +1922,27 @@ async fn generate_diff(
     }
 }
 
-async fn summarize_files(
+async fn summarize_files_between(
     repo_root: &Path,
-    base: &ResolvedDiffRef,
-    head: &ResolvedDiffRef,
-) -> anyhow::Result<Vec<DiffFileSummary>> {
-    let base_oid = oid_for_diff(base)?;
-    let head_oid;
-    let right = match head {
-        ResolvedDiffRef::WorkingTree => {
-            head_oid = current_worktree_tree(repo_root).await?;
-            head_oid.as_str()
-        }
-        ResolvedDiffRef::GitRef { oid, .. } => oid.as_str(),
-    };
-    let numstat = git_stdout(
+    base_oid: &str,
+    right: &str,
+) -> anyhow::Result<(Vec<DiffFileSummary>, bool)> {
+    let (numstat, numstat_truncated) = git_stdout_limited(
         repo_root,
         &["diff", "--find-renames", "--numstat", base_oid, right],
         MAX_GIT_OUTPUT_BYTES,
     )
     .await?;
-    let name_status = git_stdout(
+    let (name_status, name_status_truncated) = git_stdout_limited(
         repo_root,
         &["diff", "--find-renames", "--name-status", base_oid, right],
         MAX_GIT_OUTPUT_BYTES,
     )
     .await?;
-    Ok(parse_numstat_name_status(&format!(
-        "{numstat}\n{name_status}"
-    )))
+    Ok((
+        parse_numstat_name_status(&numstat, &name_status),
+        numstat_truncated || name_status_truncated,
+    ))
 }
 
 fn oid_for_diff(reference: &ResolvedDiffRef) -> anyhow::Result<&str> {
@@ -1188,39 +1954,99 @@ fn oid_for_diff(reference: &ResolvedDiffRef) -> anyhow::Result<&str> {
     }
 }
 
-fn parse_numstat_name_status(output: &str) -> Vec<DiffFileSummary> {
-    let mut summaries: Vec<DiffFileSummary> = Vec::new();
-    for line in output.lines() {
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 3 && (parts[0] == "-" || parts[0].chars().all(|ch| ch.is_ascii_digit())) {
-            let binary = parts[0] == "-" || parts[1] == "-";
-            let added = parts[0].parse::<u64>().unwrap_or(0);
-            let removed = parts[1].parse::<u64>().unwrap_or(0);
-            let (old_path, new_path) = if parts.len() >= 4 {
-                (Some(parts[2].to_string()), parts[3].to_string())
-            } else {
-                (None, parts[2].to_string())
-            };
-            summaries.push(DiffFileSummary {
-                old_path,
-                new_path,
-                status: if binary {
-                    DiffFileStatus::Binary
-                } else {
-                    DiffFileStatus::Unknown
-                },
-                added,
-                removed,
-            });
-        } else if let Some(summary) = summaries.iter_mut().find(|summary| {
-            parts.last().is_some_and(|path| {
-                *path == summary.new_path || summary.old_path.as_deref() == Some(*path)
-            })
+fn parse_numstat_name_status(numstat: &str, name_status: &str) -> Vec<DiffFileSummary> {
+    let mut summaries = parse_numstat_summaries(numstat);
+    let statuses = parse_name_status_entries(name_status);
+    if summaries.len() == statuses.len() {
+        for (summary, status) in summaries.iter_mut().zip(statuses) {
+            summary.status = status.status;
+            if let Some(old_path) = status.old_path {
+                summary.old_path = Some(old_path);
+            }
+            summary.new_path = status.new_path;
+        }
+        return summaries;
+    }
+
+    for status in statuses {
+        if let Some(summary) = summaries.iter_mut().find(|summary| {
+            summary.new_path == status.new_path
+                || summary.old_path.as_deref() == status.old_path.as_deref()
+                || status
+                    .old_path
+                    .as_deref()
+                    .is_some_and(|old_path| summary.new_path == old_path)
         }) {
-            summary.status = status_from_name_status(parts.first().copied().unwrap_or(""));
+            summary.status = status.status;
+            if let Some(old_path) = status.old_path {
+                summary.old_path = Some(old_path);
+            }
+            summary.new_path = status.new_path;
         }
     }
     summaries
+}
+
+fn parse_numstat_summaries(numstat: &str) -> Vec<DiffFileSummary> {
+    let mut summaries = Vec::new();
+    for line in numstat.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 3 || !(parts[0] == "-" || parts[0].chars().all(|ch| ch.is_ascii_digit())) {
+            continue;
+        }
+        let binary = parts[0] == "-" || parts[1] == "-";
+        let added = parts[0].parse::<u64>().unwrap_or(0);
+        let removed = parts[1].parse::<u64>().unwrap_or(0);
+        let (old_path, new_path) = if parts.len() >= 4 {
+            (Some(parts[2].to_string()), parts[3].to_string())
+        } else {
+            (None, parts[2].to_string())
+        };
+        summaries.push(DiffFileSummary {
+            old_path,
+            new_path,
+            status: if binary {
+                DiffFileStatus::Binary
+            } else {
+                DiffFileStatus::Unknown
+            },
+            added,
+            removed,
+        });
+    }
+    summaries
+}
+
+struct ParsedNameStatusEntry {
+    status: DiffFileStatus,
+    old_path: Option<String>,
+    new_path: String,
+}
+
+fn parse_name_status_entries(name_status: &str) -> Vec<ParsedNameStatusEntry> {
+    let mut entries = Vec::new();
+    for line in name_status.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        let status = status_from_name_status(parts.first().copied().unwrap_or(""));
+        match status {
+            DiffFileStatus::Renamed | DiffFileStatus::Copied if parts.len() >= 3 => {
+                entries.push(ParsedNameStatusEntry {
+                    status,
+                    old_path: Some(parts[1].to_string()),
+                    new_path: parts[2].to_string(),
+                });
+            }
+            _ if parts.len() >= 2 => {
+                entries.push(ParsedNameStatusEntry {
+                    status,
+                    old_path: None,
+                    new_path: parts[1].to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    entries
 }
 
 fn status_from_name_status(status: &str) -> DiffFileStatus {
@@ -1398,7 +2224,8 @@ async fn git_stdout_limited_with_env(
         .args(args)
         .envs(env.iter().copied())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to run git {}", args.join(" ")))?;
@@ -1531,6 +2358,31 @@ mod tests {
         }
     }
 
+    fn test_diff_id() -> String {
+        "550e8400-e29b-41d4-a716-446655440000".to_string()
+    }
+
+    async fn session_changes_response(state: &AppState, session_id: &str) -> ServerMessage {
+        let diff_id = test_diff_id();
+        let mut events = state.events.subscribe();
+        let responses = handle_session_changes_request(
+            state,
+            "test-client".into(),
+            diff_id,
+            session_id.into(),
+            None,
+            DiffDetailMode::StatOnly,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            responses.is_empty(),
+            "unexpected direct responses: {responses:?}"
+        );
+        events.recv().await.expect("session changes event")
+    }
+
     fn write_file(repo: &Path, path: &str, text: &str) {
         let target = repo.join(path);
         if let Some(parent) = target.parent() {
@@ -1595,7 +2447,7 @@ mod tests {
             }
         ));
         let (patch, truncated) =
-            generate_diff(&repo, &base_ref, &head_ref, DiffPayloadKind::FullPatch)
+            generate_diff(&repo, &base_ref, &head_ref, DiffDetailMode::FilePatch)
                 .await
                 .unwrap();
         assert!(!truncated);
@@ -1609,7 +2461,7 @@ mod tests {
                 oid: head,
                 display: "head".into(),
             },
-            DiffPayloadKind::StatOnly,
+            DiffDetailMode::StatOnly,
         )
         .await
         .unwrap();
@@ -1693,14 +2545,15 @@ mod tests {
             .await
             .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
 
-        let responses = handle_session_changes_open(&state, "s1".into()).await;
-        let ServerMessage::SessionChangesState { state } = &responses[0] else {
-            panic!("expected session changes state: {:?}", responses);
+        let response = session_changes_response(&state, "s1").await;
+        let ServerMessage::SessionChangesSummary { state } = &response else {
+            panic!("expected session changes summary: {:?}", response);
         };
-        let SessionChangesState::Ready {
-            range,
+        let SessionChangesSummaryState::Ready {
+            comparison,
             review,
             repos,
+            summary,
             ..
         } = state
         else {
@@ -1713,18 +2566,21 @@ mod tests {
             repo.canonicalize().unwrap().display().to_string()
         );
         assert!(repos[0].has_session_start_snapshot);
-        assert!(matches!(range.head, DiffEndpoint::WorkingTree));
+        assert!(matches!(comparison.head, DiffEndpoint::WorkingTree));
         assert!(
-            matches!(&range.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == snapshot_ref)
+            matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == snapshot_ref)
         );
         assert_eq!(review.current_commit_oid, None);
-        let DiffPayload::StatOnly { stat, files, .. } = &range.payload else {
-            panic!("expected stat payload: {:?}", range.payload);
-        };
+        let stat = summary.stat.as_deref().unwrap_or("");
         assert!(stat.contains("src/lib.rs"), "{}", stat);
         assert!(stat.contains("src/new.rs"), "{}", stat);
         assert!(stat.contains("untracked.txt"), "{}", stat);
-        assert!(files.iter().any(|file| file.new_path == "untracked.txt"));
+        assert!(
+            summary
+                .files
+                .iter()
+                .any(|file| file.new_path == "untracked.txt")
+        );
     }
 
     #[tokio::test]
@@ -1740,11 +2596,14 @@ mod tests {
             "missing-repo".into(),
             diff_test_record("missing-repo", &repo, &session_file),
         );
-        let missing_repo = handle_session_changes_open(&state, "missing-repo".into()).await;
-        let ServerMessage::SessionChangesState { state } = &missing_repo[0] else {
+        let missing_repo = session_changes_response(&state, "missing-repo").await;
+        let ServerMessage::SessionChangesSummary { state } = &missing_repo else {
             panic!("expected session changes state: {:?}", missing_repo);
         };
-        assert!(matches!(state, SessionChangesState::MissingRepo { .. }));
+        assert!(matches!(
+            state,
+            SessionChangesSummaryState::MissingRepo { .. }
+        ));
 
         let (_repo_temp, repo, _base, _head) = test_repo();
         let session_file = repo.join("no-snapshot-session.jsonl");
@@ -1754,12 +2613,14 @@ mod tests {
             "missing-snapshot".into(),
             diff_test_record("missing-snapshot", &repo, &session_file),
         );
-        let missing_snapshot =
-            handle_session_changes_open(&app_state, "missing-snapshot".into()).await;
-        let ServerMessage::SessionChangesState { state } = &missing_snapshot[0] else {
+        let missing_snapshot = session_changes_response(&app_state, "missing-snapshot").await;
+        let ServerMessage::SessionChangesSummary { state } = &missing_snapshot else {
             panic!("expected session changes state: {:?}", missing_snapshot);
         };
-        assert!(matches!(state, SessionChangesState::MissingSnapshot { .. }));
+        assert!(matches!(
+            state,
+            SessionChangesSummaryState::MissingSnapshot { .. }
+        ));
 
         let stale_snapshot = serde_json::json!({
             "type": "custom",
@@ -1778,14 +2639,14 @@ mod tests {
         });
         fs::write(&session_file, format!("{}\n", stale_snapshot)).expect("stale session file");
         let stale_snapshot_response =
-            handle_session_changes_open(&app_state, "missing-snapshot".into()).await;
-        let ServerMessage::SessionChangesState { state } = &stale_snapshot_response[0] else {
+            session_changes_response(&app_state, "missing-snapshot").await;
+        let ServerMessage::SessionChangesSummary { state } = &stale_snapshot_response else {
             panic!(
                 "expected session changes state: {:?}",
                 stale_snapshot_response
             );
         };
-        let SessionChangesState::MissingSnapshot { repos, .. } = state else {
+        let SessionChangesSummaryState::MissingSnapshot { repos, .. } = state else {
             panic!("expected missing snapshot state: {:?}", state);
         };
         assert_eq!(repos.len(), 1);
@@ -1841,15 +2702,15 @@ mod tests {
             "manual".into(),
             diff_test_record("manual", &repo, &session_file),
         );
-        let responses = handle_session_changes_open(&state, "manual".into()).await;
-        let ServerMessage::SessionChangesState { state } = &responses[0] else {
-            panic!("expected session changes state: {:?}", responses);
+        let response = session_changes_response(&state, "manual").await;
+        let ServerMessage::SessionChangesSummary { state } = &response else {
+            panic!("expected session changes state: {:?}", response);
         };
-        let SessionChangesState::Ready { range, .. } = state else {
+        let SessionChangesSummaryState::Ready { comparison, .. } = state else {
             panic!("expected ready state: {:?}", state);
         };
         assert!(
-            matches!(&range.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == session_start_ref)
+            matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == session_start_ref)
         );
     }
 
@@ -1879,11 +2740,14 @@ mod tests {
 
         let responses = handle_session_changes_snapshot(
             &state,
+            "client-1".into(),
+            test_diff_id(),
             "s1".into(),
             Some(repo.display().to_string()),
             Some(" now ".into()),
-            DiffPayloadKind::FullPatch,
+            DiffDetailMode::FilePatch,
             Some("commit-1".into()),
+            None,
         )
         .await;
 
@@ -1901,7 +2765,7 @@ mod tests {
         let pending = state.pending_session_change_snapshots.read().await;
         let pending = pending.get(command_id).expect("pending snapshot context");
         assert_eq!(pending.session_id, "s1");
-        assert_eq!(pending.payload_kind, DiffPayloadKind::FullPatch);
+        assert_eq!(pending.detail_mode, DiffDetailMode::FilePatch);
         assert_eq!(pending.current_commit_oid.as_deref(), Some("commit-1"));
     }
 
@@ -1914,41 +2778,276 @@ mod tests {
         let third = git_output(&repo, &["rev-parse", "HEAD"]);
 
         let state = crate::tests::test_state(8, None);
-        let full = build_compare_diff_state(
+        let selector = DiffFileSelector {
+            old_path: None,
+            new_path: "src/lib.rs".into(),
+        };
+        let request = DiffRequestIdentity::CompareDiff {
+            client_id: "client-1".into(),
+            diff_id: test_diff_id(),
+            repo_root: repo.display().to_string(),
+            base: DiffRefInput::GitRef {
+                value: base.clone(),
+            },
+            head: DiffRefInput::GitRef {
+                value: third.clone(),
+            },
+            detail_mode: DiffDetailMode::FilePatch,
+            merge_base: Some(false),
+            current_commit_oid: Some(third.clone()),
+            selected_file: Some(selector.clone()),
+        };
+        let (_refs, prepared) = prepare_compare_diff(
             &state,
-            Some("req".into()),
-            repo.clone(),
+            "client-1".into(),
+            test_diff_id(),
+            repo.display().to_string(),
             DiffRefInput::GitRef {
                 value: base.clone(),
             },
             DiffRefInput::GitRef {
                 value: third.clone(),
             },
-            DiffPayloadKind::FullPatch,
-            false,
+            DiffDetailMode::FilePatch,
+            Some(false),
             Some(third.clone()),
+            Some(selector.clone()),
+            request,
         )
         .await
         .unwrap();
 
         assert_eq!(
-            full.review.current_commit_oid.as_deref(),
+            prepared.review.current_commit_oid.as_deref(),
             Some(third.as_str())
         );
-        assert_eq!(full.review.current_commit_index, Some(1));
-        assert!(matches!(&full.range.base, DiffEndpoint::GitRef { oid, .. } if oid == &base));
-        assert!(matches!(&full.range.head, DiffEndpoint::GitRef { oid, .. } if oid == &third));
-        let displayed = full
-            .range
-            .displayed_patch_range
-            .as_ref()
-            .expect("displayed patch range");
-        assert!(matches!(&displayed.base, DiffEndpoint::Commit { oid, .. } if oid == &second));
-        assert!(matches!(&displayed.head, DiffEndpoint::Commit { oid, .. } if oid == &third));
-        let DiffPayload::FullPatch { patch, .. } = &full.range.payload else {
-            panic!("expected full patch payload: {:?}", full.range.payload);
-        };
+        assert_eq!(prepared.review.current_commit_index, Some(1));
+        assert!(
+            matches!(&prepared.comparison.base, DiffEndpoint::GitRef { oid, .. } if oid == &base)
+        );
+        assert!(
+            matches!(&prepared.comparison.head, DiffEndpoint::GitRef { oid, .. } if oid == &third)
+        );
+        assert_eq!(prepared.left_tree_or_commit, second);
+        assert_eq!(prepared.right_tree_or_commit, third);
+        let (patch, _truncated) = generate_file_patch(
+            &prepared.repo_root,
+            &prepared.left_tree_or_commit,
+            &prepared.right_tree_or_commit,
+            &selector,
+        )
+        .await
+        .unwrap();
         assert!(patch.contains("+pub fn value() -> i32 { 4 }"), "{}", patch);
+    }
+
+    #[test]
+    fn parse_name_status_rewrites_preserve_loadable_selectors() {
+        let summaries = parse_numstat_name_status(
+            "0\t0\tsrc/{old.rs => new.rs}\n0\t0\tsrc/{base.rs => copy.rs}\n",
+            "R100\tsrc/old.rs\tsrc/new.rs\nC100\tsrc/base.rs\tsrc/copy.rs\n",
+        );
+        assert_eq!(summaries.len(), 2);
+        assert!(matches!(summaries[0].status, DiffFileStatus::Renamed));
+        assert_eq!(summaries[0].old_path.as_deref(), Some("src/old.rs"));
+        assert_eq!(summaries[0].new_path, "src/new.rs");
+        assert!(matches!(summaries[1].status, DiffFileStatus::Copied));
+        assert_eq!(summaries[1].old_path.as_deref(), Some("src/base.rs"));
+        assert_eq!(summaries[1].new_path, "src/copy.rs");
+    }
+
+    #[tokio::test]
+    async fn renamed_file_summary_selector_loads_lazy_patch() {
+        let (_temp, repo, _base, before_rename) = test_repo();
+        git(&repo, &["mv", "src/lib.rs", "src/renamed.rs"]);
+        git(&repo, &["commit", "-am", "rename file"]);
+        let after_rename = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let (files, truncated) = summarize_files_between(&repo, &before_rename, &after_rename)
+            .await
+            .unwrap();
+        assert!(!truncated);
+        let summary = files
+            .iter()
+            .find(|summary| matches!(summary.status, DiffFileStatus::Renamed))
+            .expect("rename summary");
+        assert_eq!(summary.old_path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(summary.new_path, "src/renamed.rs");
+
+        let (patch, patch_truncated) = generate_file_patch(
+            &repo,
+            &before_rename,
+            &after_rename,
+            &DiffFileSelector {
+                old_path: summary.old_path.clone(),
+                new_path: summary.new_path.clone(),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!patch_truncated);
+        assert!(patch.contains("rename from src/lib.rs"), "{patch}");
+        assert!(patch.contains("rename to src/renamed.rs"), "{patch}");
+    }
+
+    #[tokio::test]
+    async fn superseded_generation_errors_are_suppressed() {
+        let state = crate::tests::test_state(8, None);
+        let mut events = state.events.subscribe();
+        let old_handle = tokio::spawn(async {});
+        register_generation_job(
+            &state,
+            "client-1".into(),
+            DiffScope::CompareDiff,
+            "diff-old".into(),
+            1,
+            old_handle,
+        )
+        .await;
+        let new_handle = tokio::spawn(async {});
+        register_generation_job(
+            &state,
+            "client-1".into(),
+            DiffScope::CompareDiff,
+            "diff-new".into(),
+            2,
+            new_handle,
+        )
+        .await;
+
+        assert!(
+            !is_current_generation(&state, "client-1", DiffScope::CompareDiff, "diff-old", 1).await
+        );
+        if is_current_generation(&state, "client-1", DiffScope::CompareDiff, "diff-old", 1).await {
+            let _ = state.events.send(diff_error(
+                Some("client-1".into()),
+                Some("diff-old".into()),
+                DiffErrorScope::CompareDiff,
+                None,
+                Some("repo".into()),
+                anyhow!("stale error"),
+            ));
+        }
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), events.recv()).await {
+                Ok(Ok(ServerMessage::DiffCancelled { .. })) => continue,
+                Ok(Ok(ServerMessage::DiffError { .. })) => panic!("stale diff error emitted"),
+                Ok(Ok(_)) => {}
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn lazy_session_changes_patch_reuses_prepared_generation_identity() {
+        let (_temp, repo, base, _head) = test_repo();
+        let snapshot_ref = "refs/omp/diff-snapshots/session-start";
+        git(&repo, &["update-ref", snapshot_ref, &base]);
+        let tree = git_output(&repo, &["rev-parse", &format!("{base}^{{tree}}")]);
+        let session_file = repo.join("prepared-session.jsonl");
+        let header = serde_json::json!({
+            "cwd": repo,
+            "id": "s1",
+            "timestamp": "2026-05-04T00:00:00.000Z",
+            "title": "prepared generation"
+        });
+        let snapshot = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": base,
+                "createdAt": "2026-05-04T00:00:00.000Z",
+                "headCommit": base,
+                "kind": "session-start",
+                "label": "session-start",
+                "ref": snapshot_ref,
+                "repoRoot": repo,
+                "tree": tree
+            },
+            "id": "snapshot-entry",
+            "parentId": null,
+            "timestamp": "2026-05-04T00:00:00.000Z"
+        });
+        fs::write(&session_file, format!("{}\n{}\n", header, snapshot)).expect("session file");
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
+        write_file(&repo, "src/lib.rs", "pub fn value() -> i32 { 3 }\n");
+        let diff_id = test_diff_id();
+        let mut events = state.events.subscribe();
+        let responses = handle_session_changes_request(
+            &state,
+            "test-client".into(),
+            diff_id.clone(),
+            "s1".into(),
+            None,
+            DiffDetailMode::FilePatch,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            responses.is_empty(),
+            "unexpected direct responses: {responses:?}"
+        );
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("summary timeout")
+                .expect("summary event");
+            if matches!(
+                message,
+                ServerMessage::DiffComplete {
+                    ref diff_id,
+                    scope: DiffScope::SessionChanges,
+                    ..
+                } if diff_id == &test_diff_id()
+            ) {
+                break;
+            }
+        }
+        write_file(&repo, "src/lib.rs", "pub fn value() -> i32 { 4 }\n");
+        let responses = handle_session_changes_request(
+            &state,
+            "test-client".into(),
+            diff_id,
+            "s1".into(),
+            None,
+            DiffDetailMode::FilePatch,
+            None,
+            Some(DiffFileSelector {
+                old_path: None,
+                new_path: "src/lib.rs".into(),
+            }),
+        )
+        .await;
+        assert!(
+            responses.is_empty(),
+            "unexpected direct responses: {responses:?}"
+        );
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("patch timeout")
+                .expect("patch event");
+            if let ServerMessage::DiffFilePatch { patch } = message {
+                assert!(
+                    patch.patch.contains("+pub fn value() -> i32 { 3 }"),
+                    "{}",
+                    patch.patch
+                );
+                assert!(
+                    !patch.patch.contains("+pub fn value() -> i32 { 4 }"),
+                    "{}",
+                    patch.patch
+                );
+                break;
+            }
+        }
     }
 
     #[tokio::test]

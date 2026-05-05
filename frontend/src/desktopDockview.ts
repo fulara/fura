@@ -18,6 +18,7 @@ type DesktopDockviewOptions = {
   host: HTMLDivElement;
   onPanelReady(id: DesktopDockviewPanelId, container: HTMLElement): void;
   onPanelActivated(id: DesktopDockviewPanelId): void;
+  onPanelClosed?(id: "sessionChanges" | "compare"): void;
   onPopoutBlocked(): void;
 };
 
@@ -135,6 +136,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       delete panelEls[id];
       delete panelActivators[id];
       api.removePanel(panel);
+      options.onPanelClosed?.(id);
       return true;
     },
   };

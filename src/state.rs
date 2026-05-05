@@ -1,11 +1,15 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
 
 use serde_json::Value;
-use tokio::sync::{RwLock, broadcast, mpsc, oneshot};
+use tokio::{
+    sync::{RwLock, broadcast, mpsc, oneshot},
+    task::JoinHandle,
+};
 
 use crate::{
-    CodeWorkspaceRegistry, ControlCandidate, DiffPayloadKind, DiffReviewWorktreeRegistry,
-    FrontendUiSnapshot, ProposedModelConfig, ServerMessage, SessionMode, SessionRecord,
+    CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode, DiffFileSelector,
+    DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, PreparedDiff,
+    ProposedModelConfig, ServerMessage, SessionMode, SessionRecord,
     ThinkingVisibilityPreference, Timestamp, VoiceCommand,
 };
 #[derive(Clone)]
@@ -34,6 +38,7 @@ pub(crate) struct AppState {
     pub(crate) model_catalog: Arc<RwLock<ModelCatalogState>>,
     pub(crate) bridge_controller: Arc<RwLock<BridgeControllerState>>,
     pub(crate) voice_sessions: Arc<RwLock<HashMap<String, VoiceSessionHandle>>>,
+    pub(crate) diff_jobs: Arc<RwLock<DiffJobRegistry>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
@@ -86,10 +91,32 @@ pub(crate) struct PendingPromptDraft {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingSessionChangesSnapshot {
+    pub(crate) client_id: String,
+    pub(crate) diff_id: String,
     pub(crate) session_id: String,
     pub(crate) repo_id: Option<String>,
-    pub(crate) payload_kind: DiffPayloadKind,
+    pub(crate) detail_mode: DiffDetailMode,
     pub(crate) current_commit_oid: Option<String>,
+    pub(crate) selected_file: Option<DiffFileSelector>,
+}
+
+#[derive(Default)]
+pub(crate) struct DiffJobRegistry {
+    pub(crate) next_token: u64,
+    pub(crate) state_generations: HashMap<(String, DiffScope), DiffStateGenerationJob>,
+    pub(crate) file_patches: HashMap<(String, DiffScope, String, String), DiffFilePatchJob>,
+}
+
+pub(crate) struct DiffStateGenerationJob {
+    pub(crate) token: u64,
+    pub(crate) diff_id: String,
+    pub(crate) prepared: Option<Arc<PreparedDiff>>,
+    pub(crate) handle: Option<JoinHandle<()>>,
+}
+
+pub(crate) struct DiffFilePatchJob {
+    pub(crate) token: u64,
+    pub(crate) handle: JoinHandle<()>,
 }
 
 #[derive(Debug, Clone)]

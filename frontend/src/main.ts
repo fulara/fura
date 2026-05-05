@@ -48,21 +48,15 @@ import { applySessionSnapshot, applySessionsSnapshot, activateSession as activat
 import {
   comparisonKey,
   diffEndpointInputText,
-  diffPayloadFiles,
-  diffPayloadText,
-  diffPayloadTruncated,
   diffRefInputFromText,
   diffRefInputText,
   formatDiffRepoLabel,
-  isFullPatchPayload,
   parseDiffRows,
   resolvedRefLabel,
-  summarizeDiffFiles,
   summarizeWireDiffFiles,
 } from "./diffState";
 import {
   annotationsForDiffLocation,
-  buildDiffCommentPrompt,
   buildDiffQuestionPrompt,
   checkoutTargetForDiffFile,
   createDiffReviewAnnotation,
@@ -70,6 +64,7 @@ import {
   diffCommentPreviewStatus,
   formatDiffLineLocation,
   formatDiffLocation,
+  prepareDiffCommentPrompt,
   removeSelectedDiffComments,
   selectedDiffAnnotations,
   type DiffPreviewDraft,
@@ -148,9 +143,9 @@ import type {
   ControlCandidate,
   ControlStatusProjection,
   ControlSuggestedAction,
-  CompareDiffState,
+  CompareDiffSummaryState,
   DiffCheckoutTarget,
-  DiffPayloadKind,
+  DiffDetailMode,
   DiffReviewAnnotation,
   DiffLineLocation,
   DiffReviewWorktree,
@@ -162,7 +157,7 @@ import type {
   ProposedThinkingLevel,
   ServerConfig,
   ServerMessage,
-  SessionChangesState,
+  SessionChangesSummaryState,
   SessionProjection,
   SessionStatus,
   SessionSummary,
@@ -694,7 +689,7 @@ let pendingSessionSelectionId: string | null = null;
 let cwdPickerCreatePending = false;
 let cwdPickerPendingRequestId: string | null = null;
 let cwdPickerMode: "session" | "diff" = "session";
-let pendingDiffCreate: { repoRoot: string; base: string; head: string; payloadKind: DiffPayloadKind } | null = null;
+let pendingDiffCreate: { repoRoot: string; base: string; head: string; payloadKind: DiffDetailMode } | null = null;
 let deleteSessionTarget: SessionDeleteView | null = null;
 let cwdPickerSourceRepoAutofill = true;
 let cwdPickerDirectoryAutofill = true;
@@ -733,14 +728,20 @@ let proposedModelFormOpen = false;
 let proposedModelSavePending = false;
 let proposedModelEditingId: string | null = null;
 let projections = new Map<string, SessionProjection>();
-const sessionChangesStates = new Map<string, SessionChangesState>();
-const sessionChangesPayloadKinds = new Map<string, DiffPayloadKind>();
-let compareDiffState: CompareDiffState | null = null;
+const sessionChangesStates = new Map<string, SessionChangesSummaryState>();
+const sessionChangesPayloadKinds = new Map<string, DiffDetailMode>();
+const sessionChangesDiffIds = new Map<string, string>();
+const sessionChangesSelectedFiles = new Map<string, string>();
+let currentSessionChangesRequest: { sessionId: string; diffId: string } | null = null;
+let compareDiffState: CompareDiffSummaryState | null = null;
+let compareDiffId: string | null = null;
 let compareDiffLoading = false;
 let compareRepoRoot = "";
 let compareBaseRef = "HEAD";
 let compareHeadRef = "WORKTREE";
-let comparePayloadKind: DiffPayloadKind = "fullPatch";
+type PendingDiffFilePatchRequest = { diffId: string; comparisonKey: string; filePath: string };
+type DiffFilePatchError = { filePath: string; message: string };
+let comparePayloadKind: DiffDetailMode = "filePatch";
 let comparePanelDirty = true;
 let sessionChangesSubview: "diff" | "transcript" = "diff";
 const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
@@ -748,6 +749,130 @@ const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
+type CachedDiffPatch = { patch: string; truncated: boolean };
+const diffPatchCache = new Map<string, CachedDiffPatch>();
+const pendingDiffFilePatches = new Map<string, PendingDiffFilePatchRequest>();
+const diffFilePatchErrors = new Map<string, DiffFilePatchError>();
+const diffClientId = (() => {
+  const key = "fura.diff.clientId";
+  const existing = sessionStorage.getItem(key);
+  if (existing) return existing;
+  const next = crypto.randomUUID();
+  sessionStorage.setItem(key, next);
+  return next;
+})();
+
+function newDiffId(): string {
+  return crypto.randomUUID();
+}
+
+function diffPatchCacheKey(comparisonKey: string, filePath: string): string {
+  return `${comparisonKey}\0${filePath}`;
+}
+
+function patchCacheComparisonKey(cacheKey: string): string {
+  const separator = cacheKey.indexOf("\0");
+  return separator === -1 ? cacheKey : cacheKey.slice(0, separator);
+}
+
+function currentDiffComparisonKeys(): Set<string> {
+  const keys = new Set<string>();
+  const sessionState = currentSessionChangesRequest ? sessionChangesStates.get(currentSessionChangesRequest.sessionId) : undefined;
+  if (sessionState?.status === "ready") keys.add(sessionState.comparison.comparisonKey);
+  if (compareDiffState) keys.add(compareDiffState.comparison.comparisonKey);
+  return keys;
+}
+
+function pruneDiffPatchCache(keepKeys = currentDiffComparisonKeys()): void {
+  for (const cacheKey of [...diffPatchCache.keys()]) {
+    if (!keepKeys.has(patchCacheComparisonKey(cacheKey))) diffPatchCache.delete(cacheKey);
+  }
+}
+
+function rememberDiffPatch(key: string, value: CachedDiffPatch): void {
+  diffPatchCache.set(key, value);
+  let totalBytes = 0;
+  for (const entry of diffPatchCache.values()) totalBytes += entry.patch.length;
+  while (diffPatchCache.size > 20 || totalBytes > 8 * 1024 * 1024) {
+    const oldest = diffPatchCache.keys().next().value;
+    if (!oldest) break;
+    const removed = diffPatchCache.get(oldest);
+    diffPatchCache.delete(oldest);
+    totalBytes -= removed?.patch.length ?? 0;
+  }
+}
+
+function pendingDiffFilePatchMatches(panelKey: string, diffId: string, key: string, filePath: string): boolean {
+  const pending = pendingDiffFilePatches.get(panelKey);
+  return Boolean(pending && pending.diffId === diffId && pending.comparisonKey === key && pending.filePath === filePath);
+}
+
+function clearPendingDiffFilePatch(panelKey: string, diffId?: string): void {
+  const pending = pendingDiffFilePatches.get(panelKey);
+  if (!pending || (diffId && pending.diffId !== diffId)) return;
+  pendingDiffFilePatches.delete(panelKey);
+}
+
+function selectedDiffFilePatchError(panelKey: string, filePath: string): string | null {
+  const error = diffFilePatchErrors.get(panelKey);
+  return error?.filePath === filePath ? error.message : null;
+}
+let diffRowsRenderRevision = 0;
+
+function setCurrentSessionChangesRequest(sessionId: string, diffId: string, reason: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed"): void {
+  if (currentSessionChangesRequest && currentSessionChangesRequest.diffId !== diffId) {
+    send({ type: "diff.cancel", clientId: diffClientId, diffId: currentSessionChangesRequest.diffId, scope: "sessionChanges", reason });
+    diffLoadingSessions.delete(currentSessionChangesRequest.sessionId);
+    clearPendingDiffFilePatch(currentSessionChangesRequest.sessionId, currentSessionChangesRequest.diffId);
+    diffFilePatchErrors.delete(currentSessionChangesRequest.sessionId);
+  }
+  currentSessionChangesRequest = { sessionId, diffId };
+}
+
+function clearCurrentSessionChangesRequest(reason: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed"): void {
+  if (currentSessionChangesRequest) {
+    send({ type: "diff.cancel", clientId: diffClientId, diffId: currentSessionChangesRequest.diffId, scope: "sessionChanges", reason });
+    diffLoadingSessions.delete(currentSessionChangesRequest.sessionId);
+    clearPendingDiffFilePatch(currentSessionChangesRequest.sessionId, currentSessionChangesRequest.diffId);
+    diffFilePatchErrors.delete(currentSessionChangesRequest.sessionId);
+    currentSessionChangesRequest = null;
+    pruneDiffPatchCache();
+  }
+}
+
+function setCurrentCompareDiff(diffId: string, reason: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed"): void {
+  if (compareDiffId && compareDiffId !== diffId) {
+    send({ type: "diff.cancel", clientId: diffClientId, diffId: compareDiffId, scope: "compareDiff", reason });
+    clearPendingDiffFilePatch("compareDiff", compareDiffId);
+    diffFilePatchErrors.delete("compareDiff");
+  }
+  compareDiffId = diffId;
+}
+
+function clearCurrentCompareDiff(reason: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed"): void {
+  if (compareDiffId) {
+    send({ type: "diff.cancel", clientId: diffClientId, diffId: compareDiffId, scope: "compareDiff", reason });
+    clearPendingDiffFilePatch("compareDiff", compareDiffId);
+    compareDiffId = null;
+  }
+  compareDiffState = null;
+  compareDiffLoading = false;
+  sessionChangesSelectedFiles.delete("compareDiff");
+  diffErrors.delete("compareDiff");
+  diffFilePatchErrors.delete("compareDiff");
+  pruneDiffPatchCache();
+}
+
+function selectedDiffFilePath(key: string, state: DiffReviewableState, filePaths: string[]): string | null {
+  const requestedPath = state.comparison.selectedFile?.newPath ?? null;
+  const rememberedPath = sessionChangesSelectedFiles.get(key) ?? null;
+  const nextPath = [requestedPath, rememberedPath, filePaths[0] ?? null].find(
+    (candidate): candidate is string => candidate !== null && filePaths.includes(candidate),
+  ) ?? null;
+  if (nextPath) sessionChangesSelectedFiles.set(key, nextPath);
+  else sessionChangesSelectedFiles.delete(key);
+  return nextPath;
+}
 let lastDiffsRenderedSessionId: string | null = null;
 let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
@@ -1280,11 +1405,15 @@ function activateControllerWorkspace(): void {
 
 function activateSession(sessionId: string): void {
   const previousMode = workspaceMode;
+  const previousSessionId = activeSessionId;
   const sessionChanged = activeSessionId !== sessionId || workspaceMode !== "session";
   if (sessionChanged) {
     if (previousMode === "controller") {
       controllerPromptDraft = promptInput.value;
       promptInput.value = sessionPromptDraft;
+    }
+    if (previousSessionId && previousSessionId !== sessionId && currentSessionChangesRequest?.sessionId === previousSessionId) {
+      clearCurrentSessionChangesRequest("sessionChanged");
     }
     workspaceMode = "session";
     resetPromptHistoryNavigation();
@@ -1384,44 +1513,148 @@ function handleServerMessage(message: ServerMessage): void {
       }
       break;
     }
-    case "sessionChanges.state": {
+    case "sessionChanges.summary": {
       const state = message.state;
+      const currentRequest = currentSessionChangesRequest;
+      if (
+        state.targetClientId !== diffClientId ||
+        currentRequest?.sessionId !== state.sessionId ||
+        currentRequest?.diffId !== state.diffId
+      ) {
+        break;
+      }
       diffLoadingSessions.delete(state.sessionId);
       diffErrors.delete(state.sessionId);
+      clearPendingDiffFilePatch(state.sessionId, state.diffId);
+      diffFilePatchErrors.delete(state.sessionId);
       sessionChangesStates.set(state.sessionId, state);
       if (state.status === "ready") {
-        sessionChangesPayloadKinds.set(state.sessionId, state.range.payload.kind);
+        sessionChangesPayloadKinds.set(state.sessionId, state.comparison.detailMode);
         if (state.reviewWorktree) diffReviewWorktrees.set(state.reviewWorktree.sourceRepoRoot, state.reviewWorktree);
+        selectedDiffFilePath(state.sessionId, state, state.summary.files.map(file => file.newPath));
+      } else {
+        sessionChangesSelectedFiles.delete(state.sessionId);
       }
+      pruneDiffPatchCache();
       markDiffsViewDirty();
       if (state.sessionId === activeSessionId) renderDiffsViewIfActive(state.sessionId);
       break;
     }
-    case "compareDiff.state": {
-      compareDiffState = message.state;
+    case "compareDiff.summary": {
+      const state = message.state;
+      if (state.targetClientId !== diffClientId || compareDiffId !== state.diffId) break;
+      compareDiffState = state;
       compareDiffLoading = false;
       diffErrors.delete("compareDiff");
-      if (message.state.reviewWorktree) diffReviewWorktrees.set(message.state.reviewWorktree.sourceRepoRoot, message.state.reviewWorktree);
+      clearPendingDiffFilePatch("compareDiff", state.diffId);
+      diffFilePatchErrors.delete("compareDiff");
+      if (state.reviewWorktree) diffReviewWorktrees.set(state.reviewWorktree.sourceRepoRoot, state.reviewWorktree);
+      selectedDiffFilePath("compareDiff", state, state.summary.files.map(file => file.newPath));
+      pruneDiffPatchCache();
       markComparePanelDirty();
       renderComparePanelIfActive();
       break;
     }
+    case "diff.filePatch": {
+      const patch = message.patch;
+      if (patch.targetClientId !== diffClientId) break;
+      if (patch.scope === "compareDiff") {
+        if (compareDiffId !== patch.diffId || compareDiffState?.comparison.comparisonKey !== patch.comparisonKey) break;
+        rememberDiffPatch(diffPatchCacheKey(patch.comparisonKey, patch.file.newPath), { patch: patch.patch, truncated: patch.truncated });
+        clearPendingDiffFilePatch("compareDiff", patch.diffId);
+        if (diffFilePatchErrors.get("compareDiff")?.filePath === patch.file.newPath) diffFilePatchErrors.delete("compareDiff");
+        markComparePanelDirty();
+        renderComparePanelIfActive();
+      } else {
+        const sessionId = currentSessionChangesRequest?.sessionId;
+        const state = sessionId ? sessionChangesStates.get(sessionId) : undefined;
+        if (
+          !sessionId ||
+          currentSessionChangesRequest?.diffId !== patch.diffId ||
+          state?.status !== "ready" ||
+          state.comparison.comparisonKey !== patch.comparisonKey
+        ) {
+          break;
+        }
+        rememberDiffPatch(diffPatchCacheKey(patch.comparisonKey, patch.file.newPath), { patch: patch.patch, truncated: patch.truncated });
+        clearPendingDiffFilePatch(sessionId, patch.diffId);
+        if (diffFilePatchErrors.get(sessionId)?.filePath === patch.file.newPath) diffFilePatchErrors.delete(sessionId);
+        markDiffsViewDirty();
+        renderDiffsViewIfActive(sessionId);
+      }
+      break;
+    }
+    case "diff.complete":
+    case "diff.cancelled": {
+      if (message.targetClientId !== diffClientId) break;
+      if (message.scope === "compareDiff") {
+        if (compareDiffId !== message.diffId) break;
+        compareDiffLoading = false;
+        clearPendingDiffFilePatch("compareDiff", message.diffId);
+        markComparePanelDirty();
+        renderComparePanelIfActive();
+      } else {
+        const currentRequest = currentSessionChangesRequest;
+        if (currentRequest?.diffId !== message.diffId) break;
+        diffLoadingSessions.delete(currentRequest.sessionId);
+        clearPendingDiffFilePatch(currentRequest.sessionId, message.diffId);
+        markDiffsViewDirty();
+        if (currentRequest.sessionId === activeSessionId) renderDiffsViewIfActive(currentRequest.sessionId);
+      }
+      break;
+    }
     case "diff.error": {
-      const errorKey = message.scope === "compareDiff" ? "compareDiff" : message.sessionId ?? activeSessionId;
-      if (message.sessionId) diffLoadingSessions.delete(message.sessionId);
-      if (errorKey) {
-        diffErrors.set(errorKey, message.message);
-        if (message.scope === "compareDiff") {
+      if (message.targetClientId && message.targetClientId !== diffClientId) break;
+      if (message.scope === "compareDiff") {
+        if (!message.diffId || compareDiffId !== message.diffId) break;
+        const pending = pendingDiffFilePatches.get("compareDiff");
+        if (pending && compareDiffState && pending.diffId === message.diffId && pending.comparisonKey === compareDiffState.comparison.comparisonKey) {
+          pendingDiffFilePatches.delete("compareDiff");
+          diffFilePatchErrors.set("compareDiff", { filePath: pending.filePath, message: message.message });
           compareDiffLoading = false;
           markComparePanelDirty();
           renderComparePanelIfActive();
-        } else {
-          markDiffsViewDirty();
-          if (message.sessionId === activeSessionId) renderDiffsViewIfActive(activeSessionId ?? "");
+          break;
         }
-      } else {
-        appendLog(`diff error: ${message.message}`);
+        compareDiffLoading = false;
+        diffErrors.set("compareDiff", message.message);
+        markComparePanelDirty();
+        renderComparePanelIfActive();
+        break;
       }
+      if (message.scope === "sessionChanges") {
+        const pending = message.sessionId ? pendingDiffFilePatches.get(message.sessionId) : undefined;
+        const state = message.sessionId ? sessionChangesStates.get(message.sessionId) : undefined;
+        if (
+          message.sessionId &&
+          message.diffId &&
+          pending &&
+          state?.status === "ready" &&
+          pending.diffId === message.diffId &&
+          pending.comparisonKey === state.comparison.comparisonKey
+        ) {
+          pendingDiffFilePatches.delete(message.sessionId);
+          diffFilePatchErrors.set(message.sessionId, { filePath: pending.filePath, message: message.message });
+          markDiffsViewDirty();
+          if (message.sessionId === activeSessionId) renderDiffsViewIfActive(message.sessionId);
+          break;
+        }
+        const currentRequest = currentSessionChangesRequest;
+        if (
+          !message.sessionId ||
+          !message.diffId ||
+          currentRequest?.sessionId !== message.sessionId ||
+          currentRequest?.diffId !== message.diffId
+        ) {
+          break;
+        }
+        diffLoadingSessions.delete(message.sessionId);
+        diffErrors.set(message.sessionId, message.message);
+        markDiffsViewDirty();
+        if (message.sessionId === activeSessionId) renderDiffsViewIfActive(message.sessionId);
+        break;
+      }
+      appendLog(`diff error: ${message.message}`);
       break;
     }
     case "diff.reviewWorktree.state": {
@@ -3139,9 +3372,9 @@ function openCodeRequest(request: CodeOpenRequest): void {
 }
 
 function ensureReviewWorktreeThenCheckout(state: DiffReviewableState, target: DiffCheckoutTarget): void {
-  const worktree = diffReviewWorktrees.get(state.range.repoRoot) ?? state.reviewWorktree ?? null;
+  const worktree = diffReviewWorktrees.get(state.comparison.repoRoot) ?? state.reviewWorktree ?? null;
   if (!worktree) {
-    send({ type: "diff.reviewWorktree.ensure", sourceRepoRoot: state.range.repoRoot, target });
+    send({ type: "diff.reviewWorktree.ensure", sourceRepoRoot: state.comparison.repoRoot, target });
     return;
   }
   send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: target });
@@ -3155,7 +3388,7 @@ function openDiffFileInCode(state: DiffReviewableState, filePath: string): void 
     openCodeRequest({ source: "sessionWorktree", sessionId, path: filePath });
     return;
   }
-  openCodeRequest({ source: "reviewCommit", repoRoot: state.range.repoRoot, target, path: filePath });
+  openCodeRequest({ source: "reviewCommit", repoRoot: state.comparison.repoRoot, target, path: filePath });
 }
 
 
@@ -3599,38 +3832,65 @@ function renderToolsView(
 
 function requestSessionChanges(sessionId: string): void {
   if (diffLoadingSessions.has(sessionId)) return;
+  const diffId = newDiffId();
+  setCurrentSessionChangesRequest(sessionId, diffId, "replaced");
+  sessionChangesDiffIds.set(sessionId, diffId);
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
-  send({ type: "sessionChanges.open", sessionId });
+  const sent = send({ type: "sessionChanges.request", clientId: diffClientId, diffId, sessionId, repoId: null, detailMode: "statOnly", currentCommitOid: null, selectedFile: null });
+  if (!sent) {
+    if (currentSessionChangesRequest?.diffId === diffId) currentSessionChangesRequest = null;
+    diffLoadingSessions.delete(sessionId);
+    diffErrors.set(sessionId, "Not connected to the Fura bridge.");
+  }
   renderDiffsViewIfActive(sessionId);
 }
 
 function requestSessionChangesRefresh(
   sessionId: string,
-  options: { repoId?: string | null; payloadKind?: DiffPayloadKind | null; currentCommitOid?: string | null } = {},
+  options: { repoId?: string | null; payloadKind?: DiffDetailMode | null; currentCommitOid?: string | null } = {},
 ): void {
   if (diffLoadingSessions.has(sessionId)) return;
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
-  send({
-    type: "sessionChanges.refresh",
+  const diffId = newDiffId();
+  setCurrentSessionChangesRequest(sessionId, diffId, options.payloadKind ? "payloadChanged" : options.currentCommitOid ? "refsChanged" : "refreshed");
+  sessionChangesDiffIds.set(sessionId, diffId);
+  const sent = send({
+    type: "sessionChanges.request",
+    clientId: diffClientId,
+    diffId,
     sessionId,
     repoId: options.repoId ?? null,
-    payloadKind: options.payloadKind ?? sessionChangesPayloadKinds.get(sessionId) ?? "statOnly",
+    detailMode: options.payloadKind ?? sessionChangesPayloadKinds.get(sessionId) ?? "statOnly",
     currentCommitOid: options.currentCommitOid ?? null,
+    selectedFile: null,
   });
+  if (!sent) {
+    if (currentSessionChangesRequest?.diffId === diffId) currentSessionChangesRequest = null;
+    diffLoadingSessions.delete(sessionId);
+    diffErrors.set(sessionId, "Not connected to the Fura bridge.");
+  }
   renderDiffsViewIfActive(sessionId);
 }
 
-function requestSessionChangesRepo(sessionId: string, repoId: string, payloadKind: DiffPayloadKind, currentCommitOid: string | null = null): void {
+function requestSessionChangesRepo(sessionId: string, repoId: string, payloadKind: DiffDetailMode, currentCommitOid: string | null = null): void {
   if (diffLoadingSessions.has(sessionId)) return;
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   sessionChangesPayloadKinds.set(sessionId, payloadKind);
   markDiffsViewDirty();
-  send({ type: "sessionChanges.selectRepo", sessionId, repoId, payloadKind, currentCommitOid });
+  const diffId = newDiffId();
+  setCurrentSessionChangesRequest(sessionId, diffId, "repoChanged");
+  sessionChangesDiffIds.set(sessionId, diffId);
+  const sent = send({ type: "sessionChanges.request", clientId: diffClientId, diffId, sessionId, repoId, detailMode: payloadKind, currentCommitOid, selectedFile: null });
+  if (!sent) {
+    if (currentSessionChangesRequest?.diffId === diffId) currentSessionChangesRequest = null;
+    diffLoadingSessions.delete(sessionId);
+    diffErrors.set(sessionId, "Not connected to the Fura bridge.");
+  }
   renderDiffsViewIfActive(sessionId);
 }
 
@@ -3638,16 +3898,23 @@ function requestSessionChangesSnapshot(sessionId: string): void {
   if (diffLoadingSessions.has(sessionId)) return;
   const state = sessionChangesStates.get(sessionId);
   const repoId = state?.status === "ready" ? state.selectedRepoId : null;
-  const payloadKind = state?.status === "ready" ? state.range.payload.kind : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
+  const payloadKind = state?.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
   const currentCommitOid = state?.status === "ready" ? state.review.currentCommitOid ?? null : null;
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
-  send({ type: "sessionChanges.snapshot", sessionId, repoId, payloadKind, currentCommitOid });
+  const diffId = newDiffId();
+  sessionChangesDiffIds.set(sessionId, diffId);
+  setCurrentSessionChangesRequest(sessionId, diffId, "refreshed");
+  const sent = send({ type: "sessionChanges.snapshot", clientId: diffClientId, diffId, sessionId, repoId, detailMode: payloadKind, currentCommitOid, selectedFile: null });
+  if (!sent) {
+    diffLoadingSessions.delete(sessionId);
+    diffErrors.set(sessionId, "Not connected to the Fura bridge.");
+  }
   renderDiffsViewIfActive(sessionId);
 }
 
-function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?: string; payloadKind?: DiffPayloadKind; currentCommitOid?: string | null } = {}): void {
+function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?: string; payloadKind?: DiffDetailMode; currentCommitOid?: string | null } = {}): void {
   const repoRoot = overrides.repoRoot?.trim() || compareRepoRoot.trim();
   if (!repoRoot) {
     diffErrors.set("compareDiff", "Compare diff requires a repository root.");
@@ -3662,19 +3929,24 @@ function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?
   const base = diffRefInputFromText(compareBaseRef, { kind: "gitRef", value: "HEAD" });
   const head = diffRefInputFromText(compareHeadRef, { kind: "workingTree" });
   diffErrors.delete("compareDiff");
+  const diffId = newDiffId();
+  setCurrentCompareDiff(diffId, overrides.repoRoot ? "repoChanged" : overrides.base || overrides.head || overrides.currentCommitOid ? "refsChanged" : overrides.payloadKind ? "payloadChanged" : "replaced");
   compareDiffState = null;
   compareDiffLoading = true;
   markComparePanelDirty();
   const sent = send({
-    type: "compareDiff.run",
-    requestId: `compare-${Date.now()}`,
+    type: "compareDiff.request",
+    clientId: diffClientId,
+    diffId,
     repoRoot,
     base,
     head,
-    payloadKind: comparePayloadKind,
+    detailMode: comparePayloadKind,
     currentCommitOid: overrides.currentCommitOid ?? null,
+    selectedFile: null,
   });
   if (!sent) {
+    if (compareDiffId === diffId) compareDiffId = null;
     compareDiffLoading = false;
     diffErrors.set("compareDiff", "Not connected to the Fura bridge.");
   }
@@ -3719,7 +3991,14 @@ function isSessionChangesPanelActive(): boolean {
 function requestActiveDiffState(): void {
   if (!activeSessionId || !isSessionChangesPanelActive()) return;
   if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
-  if (!sessionChangesStates.has(activeSessionId)) requestSessionChanges(activeSessionId);
+  const state = sessionChangesStates.get(activeSessionId);
+  if (!state) {
+    requestSessionChanges(activeSessionId);
+    return;
+  }
+  if (currentSessionChangesRequest?.sessionId !== activeSessionId || currentSessionChangesRequest?.diffId !== state.diffId) {
+    currentSessionChangesRequest = { sessionId: activeSessionId, diffId: state.diffId };
+  }
 }
 
 function syncSessionModePanels(activateCreatedDiffReview = false): void {
@@ -3733,6 +4012,7 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
     renderDiffsViewIfActive(activeSessionId ?? "");
     requestActiveDiffState();
   } else {
+    clearCurrentSessionChangesRequest("closed");
     desktopDockview.closePanel("sessionChanges");
   }
 }
@@ -4023,25 +4303,36 @@ function askDiffQuestion(
   });
 }
 
+function cachedDiffPatchForAnnotation(state: DiffReviewableState, annotation: DiffReviewAnnotation): string | null {
+  return diffPatchCache.get(diffPatchCacheKey(comparisonKey(state), annotation.anchor.newPath))?.patch ?? null;
+}
+
 function sendDiffComments(
   sessionId: string,
   state: DiffReviewableState,
   comments: DiffReviewAnnotation[],
 ): void {
   if (comments.length === 0) return;
-  const key = comparisonKey(state);
-  const clearFlushedComments = () => {
-    diffAnnotations.set(sessionId, removeSelectedDiffComments(diffAnnotations.get(sessionId) ?? [], key));
-    markDiffsViewDirty();
-    rerenderDiffsViewPreservingScroll(sessionId);
-  };
-  sendPromptWithBusyHandling({
-    sessionId,
-    text: buildDiffCommentPrompt(state, comments),
-    editorText: diffCommentFlushEditorText(comments.length),
-    images: [],
-    onSend: clearFlushedComments,
-  });
+  const prompt = prepareDiffCommentPrompt(state, comments, comment => cachedDiffPatchForAnnotation(state, comment));
+  if (prompt.ok) {
+    const key = comparisonKey(state);
+    const clearFlushedComments = () => {
+      diffAnnotations.set(sessionId, removeSelectedDiffComments(diffAnnotations.get(sessionId) ?? [], key));
+      markDiffsViewDirty();
+      rerenderDiffsViewPreservingScroll(sessionId);
+    };
+    closeDiffPreview();
+    sendPromptWithBusyHandling({
+      sessionId,
+      text: prompt.prompt,
+      editorText: diffCommentFlushEditorText(comments.length),
+      images: [],
+      onSend: clearFlushedComments,
+    });
+    return;
+  }
+  diffPreviewStatus.textContent = "message" in prompt ? prompt.message : "";
+  return;
 }
 
 function previewDiffComments(
@@ -4051,13 +4342,29 @@ function previewDiffComments(
   const key = comparisonKey(state);
   const comments = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, "comment");
   if (comments.length === 0) return;
-  diffPreviewDraft = { sessionId, state, comparisonKey: key, comments };
+  const prompt = prepareDiffCommentPrompt(state, comments, comment => cachedDiffPatchForAnnotation(state, comment));
+  if (prompt.ok) {
+    diffPreviewDraft = { sessionId, state, comparisonKey: key, comments };
+    transcriptPreviewDraft = null;
+    diffPreviewTitle.textContent = "Preview diff comments";
+    diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+    diffPreviewSend.textContent = "Send comments";
+    diffPreviewSend.disabled = false;
+    diffPreviewText.value = prompt.prompt;
+    diffPreviewStatus.textContent = diffCommentPreviewStatus(comments.length);
+    diffPreviewOverlay.hidden = false;
+    diffPreviewText.scrollTop = 0;
+    diffPreviewSend.focus();
+    return;
+  }
+  diffPreviewDraft = null;
   transcriptPreviewDraft = null;
-  diffPreviewTitle.textContent = "Preview diff comments";
-  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
+  diffPreviewTitle.textContent = "Diff comments blocked";
+  diffPreviewSubtitle.textContent = "message" in prompt ? prompt.message : "";
   diffPreviewSend.textContent = "Send comments";
-  diffPreviewText.value = buildDiffCommentPrompt(state, comments);
-  diffPreviewStatus.textContent = diffCommentPreviewStatus(comments.length);
+  diffPreviewSend.disabled = true;
+  diffPreviewText.value = "";
+  diffPreviewStatus.textContent = "message" in prompt ? prompt.message : "";
   diffPreviewOverlay.hidden = false;
   diffPreviewText.scrollTop = 0;
   diffPreviewSend.focus();
@@ -4070,6 +4377,7 @@ function closeDiffPreview(): void {
   diffPreviewTitle.textContent = "Preview diff comments";
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewSend.textContent = "Send comments";
+  diffPreviewSend.disabled = false;
   diffPreviewDraft = null;
   transcriptPreviewDraft = null;
 }
@@ -4077,12 +4385,12 @@ function closeDiffPreview(): void {
 function sendPromptPreviewDraft(): void {
   const diffDraft = diffPreviewDraft;
   const transcriptDraft = transcriptPreviewDraft;
-  closeDiffPreview();
   if (diffDraft) {
     sendDiffComments(diffDraft.sessionId, diffDraft.state, diffDraft.comments);
     return;
   }
   if (transcriptDraft) {
+    closeDiffPreview();
     sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments);
   }
 }
@@ -4224,7 +4532,7 @@ function renderSessionChangesView(sessionId: string, projection: SessionProjecti
   renderReviewableDiff(sessionId, state, sidebar, main, container, true);
 }
 
-function renderSessionRepoControls(sessionId: string, state: SessionChangesState, sidebar: HTMLElement): void {
+function renderSessionRepoControls(sessionId: string, state: SessionChangesSummaryState, sidebar: HTMLElement): void {
   const section = mkEl("section");
   section.className = "diffs-repo-selector";
   const label = mkEl("label");
@@ -4241,18 +4549,18 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesState
   }
   const payload = mkEl("select");
   payload.className = "diff-payload-select";
-  const currentPayload = state.status === "ready" ? state.range.payload.kind : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
-  for (const [value, text] of [["fullPatch", "Full patch"], ["statOnly", "Stat"]] as const) {
+  const currentPayload = state.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
+  for (const [value, text] of [["filePatch", "File patch"], ["statOnly", "Stat"]] as const) {
     const option = mkEl("option");
     option.value = value;
     option.textContent = text;
     option.selected = currentPayload === value;
     payload.append(option);
   }
-  select.addEventListener("change", () => requestSessionChangesRepo(sessionId, select.value, payload.value as DiffPayloadKind));
+  select.addEventListener("change", () => requestSessionChangesRepo(sessionId, select.value, payload.value as DiffDetailMode));
   payload.addEventListener("change", () => {
-    sessionChangesPayloadKinds.set(sessionId, payload.value as DiffPayloadKind);
-    if (select.value) requestSessionChangesRepo(sessionId, select.value, payload.value as DiffPayloadKind);
+    sessionChangesPayloadKinds.set(sessionId, payload.value as DiffDetailMode);
+    if (select.value) requestSessionChangesRepo(sessionId, select.value, payload.value as DiffDetailMode);
   });
   section.append(label, select, payload);
   sidebar.append(section);
@@ -4289,7 +4597,7 @@ function renderComparePanel(container: HTMLElement): void {
   headInput.placeholder = "head ref or WORKTREE";
   headInput.value = compareHeadRef;
   const payload = mkEl("select");
-  for (const [value, text] of [["fullPatch", "Full patch"], ["statOnly", "Stat"]] as const) {
+  for (const [value, text] of [["filePatch", "File patch"], ["statOnly", "Stat"]] as const) {
     const option = mkEl("option");
     option.value = value;
     option.textContent = text;
@@ -4299,7 +4607,7 @@ function renderComparePanel(container: HTMLElement): void {
   const run = mkEl("button");
   run.type = "button";
   run.textContent = "Compare";
-  run.addEventListener("click", () => requestCompareDiff({ repoRoot: repoInput.value, base: baseInput.value, head: headInput.value, payloadKind: payload.value as DiffPayloadKind }));
+  run.addEventListener("click", () => requestCompareDiff({ repoRoot: repoInput.value, base: baseInput.value, head: headInput.value, payloadKind: payload.value as DiffDetailMode }));
   form.append(repoInput, baseInput, headInput, payload, run);
   sidebar.append(form);
 
@@ -4331,6 +4639,56 @@ function renderDiffMessage(main: HTMLElement, message: string, error: boolean): 
   main.append(body);
 }
 
+function requestSelectedFilePatch(annotationKey: string, state: DiffReviewableState, filePath: string): void {
+  const file = state.summary.files.find(candidate => candidate.newPath === filePath);
+  if (!file) return;
+  const key = comparisonKey(state);
+  if (annotationKey === "compareDiff") {
+    if (!compareDiffId || !compareDiffState || pendingDiffFilePatchMatches(annotationKey, compareDiffId, key, filePath)) return;
+    pendingDiffFilePatches.set(annotationKey, { diffId: compareDiffId, comparisonKey: key, filePath });
+    diffFilePatchErrors.delete(annotationKey);
+    const sent = send({
+      type: "compareDiff.request",
+      clientId: diffClientId,
+      diffId: compareDiffId,
+      repoRoot: compareDiffState.comparison.repoRoot,
+      base: compareDiffState.request.scope === "compareDiff" ? compareDiffState.request.base : state.comparison.base.kind === "workingTree" ? { kind: "workingTree" } : { kind: "gitRef", value: state.comparison.leftTreeOrCommit },
+      head: compareDiffState.request.scope === "compareDiff" ? compareDiffState.request.head : { kind: "workingTree" },
+      detailMode: "filePatch",
+      mergeBase: compareDiffState.request.scope === "compareDiff" ? Boolean(compareDiffState.request.mergeBase) : false,
+      currentCommitOid: state.review.currentCommitOid ?? null,
+      selectedFile: { oldPath: file.oldPath ?? null, newPath: file.newPath },
+    });
+    if (sent) return;
+    clearPendingDiffFilePatch(annotationKey, compareDiffId);
+    diffFilePatchErrors.set(annotationKey, { filePath, message: "Not connected to the Fura bridge." });
+    markComparePanelDirty();
+    renderComparePanelIfActive();
+    return;
+  }
+  const diffId = sessionChangesDiffIds.get(annotationKey);
+  const summary = sessionChangesStates.get(annotationKey);
+  if (!diffId || !summary || pendingDiffFilePatchMatches(annotationKey, diffId, key, filePath)) return;
+  pendingDiffFilePatches.set(annotationKey, { diffId, comparisonKey: key, filePath });
+  diffFilePatchErrors.delete(annotationKey);
+  const sent = send({
+    type: "sessionChanges.request",
+    clientId: diffClientId,
+    diffId,
+    sessionId: annotationKey,
+    repoId: summary.status === "ready" ? summary.selectedRepoId : null,
+    detailMode: "filePatch",
+    currentCommitOid: state.review.currentCommitOid ?? null,
+    selectedFile: { oldPath: file.oldPath ?? null, newPath: file.newPath },
+  });
+  if (sent) return;
+  clearPendingDiffFilePatch(annotationKey, diffId);
+  diffFilePatchErrors.set(annotationKey, { filePath, message: "Not connected to the Fura bridge." });
+  markDiffsViewDirty();
+  renderDiffsViewIfActive(annotationKey);
+}
+
+
 function renderReviewableDiff(
   annotationKey: string,
   state: DiffReviewableState,
@@ -4341,14 +4699,12 @@ function renderReviewableDiff(
 ): void {
   const key = comparisonKey(state);
   const annotations = diffAnnotations.get(annotationKey) ?? [];
-  const payload = state.range.payload;
-  const parsedRows = payload.kind === "fullPatch" ? parseDiffRows(payload.patch) : [];
-  const fileSummaries = payload.kind === "fullPatch" ? summarizeDiffFiles(parsedRows, annotations, key) : summarizeWireDiffFiles(diffPayloadFiles(payload), annotations, key);
-  renderDesktopModifiedFiles(sidebar, fileSummaries, jumpContainer);
+  const fileSummaries = summarizeWireDiffFiles(state.summary.files, annotations, key);
+  renderDesktopModifiedFiles(sidebar, fileSummaries, annotationKey, jumpContainer);
   const summary = mkEl("section");
   summary.className = "diffs-summary";
   const comparison = mkEl("p");
-  comparison.textContent = `${resolvedRefLabel(state.range.base)} → ${resolvedRefLabel(state.range.head)}`;
+  comparison.textContent = `${resolvedRefLabel(state.comparison.base)} → ${resolvedRefLabel(state.comparison.head)}`;
   const commits = mkEl("p");
   commits.textContent = state.review.currentCommitOid ? `Commit ${(state.review.currentCommitIndex ?? 0) + 1}/${state.review.commits.length}` : `Range · ${state.review.commits.length} commit${state.review.commits.length === 1 ? "" : "s"}`;
   summary.append(comparison, commits);
@@ -4358,9 +4714,9 @@ function renderReviewableDiff(
   toolbar.className = "diffs-actions diff-step-actions";
   const payloadToggle = mkEl("button");
   payloadToggle.type = "button";
-  payloadToggle.textContent = payload.kind === "fullPatch" ? "Show stat" : "Show full patch";
+  payloadToggle.textContent = state.comparison.detailMode === "filePatch" ? "Show stat" : "Show file patch";
   payloadToggle.addEventListener("click", () => {
-    const nextPayload: DiffPayloadKind = payload.kind === "fullPatch" ? "statOnly" : "fullPatch";
+    const nextPayload: DiffDetailMode = state.comparison.detailMode === "filePatch" ? "statOnly" : "filePatch";
     if (annotationKey === "compareDiff") requestCompareDiff({ payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
     else requestSessionChangesRefresh(annotationKey, { payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
   });
@@ -4431,34 +4787,47 @@ function renderReviewableDiff(
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
-  if (diffPayloadTruncated(payload)) {
+  const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
+  const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
+  const filePatchError = selectedFilePath ? selectedDiffFilePatchError(annotationKey, selectedFilePath) : null;
+  if (cachedPatch?.truncated) {
     const warning = mkEl("p");
     warning.className = "diffs-warning";
     warning.textContent = "Diff output is truncated by Fura's safety limit.";
     body.append(warning);
   }
-  if (!diffPayloadText(payload).trim()) {
+  if (!selectedFilePath) {
     const empty = mkEl("p");
     empty.className = "empty diffs-empty";
     empty.textContent = "No changes for this comparison.";
     body.append(empty);
-  } else if (!isFullPatchPayload(payload)) {
+  } else if (state.comparison.detailMode !== "filePatch") {
     const note = mkEl("p");
     note.className = "diffs-stat-note";
-    note.textContent = "Stat-only payload: line comments, questions, and Code actions require full patch.";
+    note.textContent = "Stat-only payload: select File patch for line comments, questions, and Code actions.";
     const pre = mkEl("pre");
     pre.className = "diff-stat-output";
-    pre.textContent = diffPayloadText(payload);
+    pre.textContent = state.summary.stat ?? "";
     body.append(note, pre);
+  } else if (!cachedPatch) {
+    if (!filePatchError) requestSelectedFilePatch(annotationKey, state, selectedFilePath);
+    const loading = mkEl("p");
+    loading.className = `empty diffs-empty ${filePatchError ? "diffs-error" : ""}`;
+    loading.textContent = filePatchError
+      ? `Failed to load patch for ${selectedFilePath}: ${filePatchError}`
+      : `Loading patch for ${selectedFilePath}…`;
+    body.append(loading);
   } else {
-    renderDiffRows(body, annotationKey, state, parsedRows, annotations, key, allowPromptActions);
+    const reviewState = { ...state, patch: cachedPatch.patch };
+    renderDiffRows(body, annotationKey, reviewState, parseDiffRows(cachedPatch.patch), annotations, key, allowPromptActions);
   }
   main.append(body);
 }
 
 function renderDesktopModifiedFiles(
   sidebar: HTMLElement,
-  files: ReturnType<typeof summarizeDiffFiles>,
+  files: ReturnType<typeof summarizeWireDiffFiles>,
+  annotationKey: string,
   jumpContainer: HTMLElement | null,
 ): void {
   if (files.length === 0) return;
@@ -4480,16 +4849,19 @@ function renderDesktopModifiedFiles(
       file.questionCount > 0 ? `${file.questionCount} question${file.questionCount === 1 ? "" : "s"}` : null,
     ].filter(Boolean).join(" · ");
     meta.textContent = `+${file.added} -${file.removed}${notes ? ` · ${notes}` : ""}`;
-    if (jumpContainer) {
-      const jump = mkEl("button");
-      jump.type = "button";
-      jump.className = "diffs-file-jump";
-      jump.append(name, meta);
-      jump.addEventListener("click", () => scrollDiffsToFile(jumpContainer, file.filePath));
-      item.append(jump);
-    } else {
-      item.append(name, meta);
-    }
+    const jump = mkEl("button");
+    jump.type = "button";
+    jump.className = "diffs-file-jump";
+    jump.append(name, meta);
+    jump.addEventListener("click", () => {
+      sessionChangesSelectedFiles.set(annotationKey, file.filePath);
+      if (jumpContainer) scrollDiffsToFile(jumpContainer, file.filePath);
+      markDiffsViewDirty();
+      markComparePanelDirty();
+      if (annotationKey === "compareDiff") renderComparePanelIfActive();
+      else renderDiffsViewIfActive(annotationKey);
+    });
+    item.append(jump);
     filesList.append(item);
   }
   filesSection.append(filesList);
@@ -4498,69 +4870,85 @@ function renderDesktopModifiedFiles(
 
 
 function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: ReturnType<typeof parseDiffRows>, annotations: DiffReviewAnnotation[], key: string, allowPromptActions: boolean): void {
+  const revision = ++diffRowsRenderRevision;
   const diff = mkEl("div");
   diff.className = "diff-lines";
-  for (const row of rows) {
-    if (row.type === "line") {
-      const lineAnnotations = annotationsForDiffLocation(annotations, key, row.location);
-      const lineComments = lineAnnotations.filter(annotation => annotation.kind === "comment");
-      const lineQuestions = lineAnnotations.filter(annotation => annotation.kind === "question");
-      const lineWrap = mkEl("div");
-      lineWrap.className = "diff-line-wrap";
-      const line = mkEl("div");
-      line.className = `diff-line diff-line-${row.location.kind}`;
-      const commentBtn = mkEl("button");
-      commentBtn.type = "button";
-      commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
-      commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
-      commentBtn.disabled = !allowPromptActions;
-      commentBtn.title = allowPromptActions ? "Comment on this diff line" : "Comments require a session changes review";
-      commentBtn.addEventListener("click", () => addDiffComment(annotationKey, state, row.location));
-      const gutter = mkEl("span");
-      gutter.className = "diff-gutter";
-      gutter.textContent = row.location.newLine !== undefined ? String(row.location.newLine) : String(row.location.oldLine ?? "");
-      const content = mkEl("div");
-      content.className = "diff-line-content";
-      const text = mkEl("code");
-      text.textContent = row.location.text;
-      content.append(text);
-      const questionBtn = mkEl("button");
-      questionBtn.type = "button";
-      questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
-      questionBtn.textContent = lineQuestions.length > 0 ? String(lineQuestions.length) : "?";
-      questionBtn.disabled = !allowPromptActions;
-      questionBtn.title = allowPromptActions ? "Ask the agent about this diff line" : "Questions require a session changes review";
-      questionBtn.addEventListener("click", () => askDiffQuestion(annotationKey, state, row.location));
-      line.append(commentBtn, gutter, content, questionBtn);
-      lineWrap.append(line);
-      if (lineAnnotations.length > 0) {
-        const thread = mkEl("div");
-        thread.className = "diff-inline-comments";
-        for (const annotation of lineAnnotations) thread.append(renderDiffAnnotationItem(annotationKey, annotation));
-        lineWrap.append(thread);
-      }
-      diff.append(lineWrap);
-      continue;
-    }
-    const line = mkEl("div");
-    line.className = `diff-line diff-line-${row.type}`;
-    if (row.type === "file") line.dataset.diffFilePath = row.filePath;
-    const spacer = mkEl("span");
-    spacer.className = "diff-comment-spacer";
-    const text = mkEl("code");
-    text.textContent = row.text;
-    line.append(spacer, text);
-    if (row.type === "file") {
-      const codeBtn = mkEl("button");
-      codeBtn.type = "button";
-      codeBtn.className = "diff-file-code-btn";
-      codeBtn.textContent = "Code";
-      codeBtn.addEventListener("click", () => openDiffFileInCode(state, row.filePath));
-      line.append(codeBtn);
-    }
-    diff.append(line);
-  }
   container.append(diff);
+  let index = 0;
+  const renderBatch = () => {
+    if (revision !== diffRowsRenderRevision) return;
+    const fragment = document.createDocumentFragment();
+    const started = performance.now();
+    let count = 0;
+    while (index < rows.length && count < 150 && performance.now() - started < 8) {
+      appendDiffRow(fragment, rows[index++]!, annotationKey, state, annotations, key, allowPromptActions);
+      count += 1;
+    }
+    diff.append(fragment);
+    if (index < rows.length) requestAnimationFrame(renderBatch);
+  };
+  renderBatch();
+}
+
+function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typeof parseDiffRows>[number], annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], key: string, allowPromptActions: boolean): void {
+  if (row.type === "line") {
+    const lineAnnotations = annotationsForDiffLocation(annotations, key, row.location);
+    const lineComments = lineAnnotations.filter(annotation => annotation.kind === "comment");
+    const lineQuestions = lineAnnotations.filter(annotation => annotation.kind === "question");
+    const lineWrap = mkEl("div");
+    lineWrap.className = "diff-line-wrap";
+    const line = mkEl("div");
+    line.className = `diff-line diff-line-${row.location.kind}`;
+    const commentBtn = mkEl("button");
+    commentBtn.type = "button";
+    commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
+    commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
+    commentBtn.disabled = !allowPromptActions;
+    commentBtn.title = allowPromptActions ? "Comment on this diff line" : "Comments require a session changes review";
+    commentBtn.addEventListener("click", () => addDiffComment(annotationKey, state, row.location));
+    const gutter = mkEl("span");
+    gutter.className = "diff-gutter";
+    gutter.textContent = row.location.newLine !== undefined ? String(row.location.newLine) : String(row.location.oldLine ?? "");
+    const content = mkEl("div");
+    content.className = "diff-line-content";
+    const text = mkEl("code");
+    text.textContent = row.location.text;
+    content.append(text);
+    const questionBtn = mkEl("button");
+    questionBtn.type = "button";
+    questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
+    questionBtn.textContent = lineQuestions.length > 0 ? String(lineQuestions.length) : "?";
+    questionBtn.disabled = !allowPromptActions;
+    questionBtn.title = allowPromptActions ? "Ask the agent about this diff line" : "Questions require a session changes review";
+    questionBtn.addEventListener("click", () => askDiffQuestion(annotationKey, state, row.location));
+    line.append(commentBtn, gutter, content, questionBtn);
+    lineWrap.append(line);
+    if (lineAnnotations.length > 0) {
+      const thread = mkEl("div");
+      thread.className = "diff-inline-comments";
+      for (const annotation of lineAnnotations) thread.append(renderDiffAnnotationItem(annotationKey, annotation));
+      lineWrap.append(thread);
+    }
+    diff.append(lineWrap);
+    return;
+  }
+  const line = mkEl("div");
+  line.className = `diff-line diff-line-${row.type}`;
+  if (row.type === "file") line.dataset.diffFilePath = row.filePath;
+  const spacer = mkEl("span");
+  spacer.className = "diff-comment-spacer";
+  const text = mkEl("code");
+  text.textContent = row.text;
+  line.append(spacer, text);
+  if (row.type === "file") {
+    const codeBtn = mkEl("button");
+    codeBtn.type = "button";
+    codeBtn.className = "diff-file-code-btn";
+    codeBtn.textContent = "Code";
+    codeBtn.addEventListener("click", () => openDiffFileInCode(state, row.filePath));
+    line.append(codeBtn);
+  }
+  diff.append(line);
 }
 
 // --- Desktop workspace initialization ---
@@ -4598,6 +4986,16 @@ function initDesktopWorkspace(): void {
       if (id === "compare") {
         desktopDockview?.withPanel("compare", container => renderComparePanel(container));
       }
+    },
+    onPanelClosed: id => {
+      if (id === "sessionChanges") {
+        clearCurrentSessionChangesRequest("closed");
+        markDiffsViewDirty();
+        return;
+      }
+      clearCurrentCompareDiff("closed");
+      markComparePanelDirty();
+      renderComparePanelIfActive();
     },
     onPopoutBlocked: () => {
       const sid = activeSessionId;
@@ -4940,7 +5338,7 @@ function submitCwdPickerDiff(): void {
   const repoRoot = cwdPickerDiffRepo.value.trim();
   const base = cwdPickerDiffBase.value.trim() || "HEAD";
   const head = cwdPickerDiffHead.value.trim() || "HEAD";
-  const payloadKind: DiffPayloadKind = cwdPickerDiffMode.value === "stat" ? "statOnly" : "fullPatch";
+  const payloadKind: DiffDetailMode = cwdPickerDiffMode.value === "stat" ? "statOnly" : "filePatch";
   if (!repoRoot) {
     setCwdPickerError("Repository root is required for diff review.");
     cwdPickerDiffRepo.focus();

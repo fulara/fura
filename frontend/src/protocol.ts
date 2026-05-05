@@ -134,7 +134,8 @@ export type SessionProjection = {
   todoPhases: TodoPhase[];
 };
 
-export type DiffPayloadKind = "fullPatch" | "statOnly";
+export type DiffDetailMode = "filePatch" | "statOnly";
+export type DiffPayloadKind = DiffDetailMode;
 export type DiffSide = "left" | "right";
 export type DiffRefKind = "branch" | "tag" | "commit" | "remote" | "other";
 
@@ -189,6 +190,11 @@ export type DiffFileSummary = {
   removed: number;
 };
 
+export type DiffFileSelector = {
+  oldPath?: string | null;
+  newPath: string;
+};
+
 export type DiffCommitSummary = {
   oid: string;
   shortOid: string;
@@ -236,22 +242,115 @@ export type DiffReviewWorktree = {
   statusMessage?: string | null;
 };
 
-export type SessionChangesState =
-  | { status: "ready"; sessionId: string; repos: SessionRepoCandidate[]; selectedRepoId: string; range: DiffRangeState; review: CommitStepState; reviewWorktree?: DiffReviewWorktree | null }
-  | { status: "missingRepo"; sessionId: string; reason: string; repos: SessionRepoCandidate[] }
-  | { status: "missingSnapshot"; sessionId: string; repoRoot: string; reason: string; repos: SessionRepoCandidate[] };
+export type DiffScope = "sessionChanges" | "compareDiff";
 
-export type CompareDiffState = {
-  requestId?: string | null;
+export type DiffRequestIdentity =
+  | {
+      scope: "sessionChanges";
+      clientId: string;
+      diffId: string;
+      sessionId: string;
+      repoId?: string | null;
+      detailMode: DiffDetailMode;
+      currentCommitOid?: string | null;
+      selectedFile?: DiffFileSelector | null;
+    }
+  | {
+      scope: "compareDiff";
+      clientId: string;
+      diffId: string;
+      repoRoot: string;
+      base: DiffRefInput;
+      head: DiffRefInput;
+      detailMode: DiffDetailMode;
+      mergeBase?: boolean | null;
+      currentCommitOid?: string | null;
+      selectedFile?: DiffFileSelector | null;
+    };
+
+export type DiffComparisonIdentity = {
+  repoRoot: string;
+  base: DiffEndpoint;
+  head: DiffEndpoint;
+  leftTreeOrCommit: string;
+  rightTreeOrCommit: string;
+  detailMode: DiffDetailMode;
+  currentCommitOid?: string | null;
+  selectedFile?: DiffFileSelector | null;
+  generatedAt: string;
+  comparisonKey: string;
+};
+
+export type DiffSummaryPayload = {
+  files: DiffFileSummary[];
+  stat?: string | null;
+  truncated: boolean;
+  fileLimitReached?: boolean | null;
+};
+
+export type SessionChangesSummaryState =
+  | {
+      status: "ready";
+      targetClientId: string;
+      diffId: string;
+      request: DiffRequestIdentity;
+      comparison: DiffComparisonIdentity;
+      sessionId: string;
+      repos: SessionRepoCandidate[];
+      selectedRepoId: string;
+      summary: DiffSummaryPayload;
+      review: CommitStepState;
+      reviewWorktree?: DiffReviewWorktree | null;
+      patch?: string | null;
+    }
+  | {
+      status: "missingRepo";
+      targetClientId: string;
+      diffId: string;
+      request: DiffRequestIdentity;
+      sessionId: string;
+      repoRoot?: string | null;
+      reason: string;
+      repos: SessionRepoCandidate[];
+    }
+  | {
+      status: "missingSnapshot";
+      targetClientId: string;
+      diffId: string;
+      request: DiffRequestIdentity;
+      sessionId: string;
+      repoRoot?: string | null;
+      reason: string;
+      repos: SessionRepoCandidate[];
+    };
+
+export type CompareDiffSummaryState = {
+  targetClientId: string;
+  diffId: string;
+  request: DiffRequestIdentity;
+  comparison: DiffComparisonIdentity;
   refs: GitRefSummary[];
-  range: DiffRangeState;
+  summary: DiffSummaryPayload;
   review: CommitStepState;
   reviewWorktree?: DiffReviewWorktree | null;
 };
 
+export type DiffFilePatchState = {
+  targetClientId: string;
+  diffId: string;
+  scope: DiffScope;
+  comparisonKey: string;
+  file: DiffFileSelector;
+  patch: string;
+  truncated: boolean;
+  generatedAt: string;
+};
+
 export type DiffReviewableState = {
-  range: DiffRangeState;
+  comparison: DiffComparisonIdentity;
+  summary: DiffSummaryPayload;
   review: CommitStepState;
+  patch?: string | null;
   reviewWorktree?: DiffReviewWorktree | null;
 };
 
@@ -394,9 +493,12 @@ export type ServerMessage =
   | { type: "code.file"; workspaceId: string; file: CodeFileContent }
   | { type: "code.file.searchResults"; workspaceId: string; basePath: string; query: string; entries: CodeTreeEntry[] }
   | { type: "code.error"; workspaceId?: string | null; path?: string | null; message: string }
-  | { type: "sessionChanges.state"; state: SessionChangesState }
-  | { type: "compareDiff.state"; state: CompareDiffState }
-  | { type: "diff.error"; scope: "sessionChanges" | "compareDiff" | "reviewWorktree"; sessionId?: string | null; repoRoot?: string | null; message: string }
+  | { type: "sessionChanges.summary"; state: SessionChangesSummaryState }
+  | { type: "compareDiff.summary"; state: CompareDiffSummaryState }
+  | { type: "diff.filePatch"; patch: DiffFilePatchState }
+  | { type: "diff.complete"; targetClientId: string; diffId: string; scope: DiffScope }
+  | { type: "diff.cancelled"; targetClientId: string; diffId: string; scope: DiffScope; reason?: string | null }
+  | { type: "diff.error"; targetClientId?: string | null; diffId?: string | null; scope: "sessionChanges" | "compareDiff" | "reviewWorktree"; sessionId?: string | null; repoRoot?: string | null; message: string }
   | { type: "diff.reviewWorktree.state"; worktree: DiffReviewWorktree }
   | { type: "control.reply"; targetClientId: string; conversationId: string; message: string; candidates?: ControlCandidate[]; suggestedActions?: ControlSuggestedAction[] }
   | { type: "control.status"; targetClientId?: string | null; status: ControlStatusProjection }
@@ -437,11 +539,10 @@ export type ClientMessage =
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }
-  | { type: "sessionChanges.open"; sessionId: string }
-  | { type: "sessionChanges.selectRepo"; sessionId: string; repoId: string; payloadKind: DiffPayloadKind; currentCommitOid?: string | null }
-  | { type: "sessionChanges.refresh"; sessionId: string; repoId?: string | null; payloadKind?: DiffPayloadKind | null; currentCommitOid?: string | null }
-  | { type: "sessionChanges.snapshot"; sessionId: string; repoId?: string | null; label?: string | null; payloadKind?: DiffPayloadKind | null; currentCommitOid?: string | null }
-  | { type: "compareDiff.run"; requestId?: string | null; repoRoot: string; base: DiffRefInput; head: DiffRefInput; payloadKind: DiffPayloadKind; mergeBase?: boolean; currentCommitOid?: string | null }
+  | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null }
+  | { type: "sessionChanges.snapshot"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; label?: string | null; detailMode?: DiffDetailMode | null; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null }
+  | { type: "compareDiff.request"; clientId: string; diffId: string; repoRoot: string; base: DiffRefInput; head: DiffRefInput; detailMode: DiffDetailMode; mergeBase?: boolean; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null }
+  | { type: "diff.cancel"; clientId: string; diffId: string; scope: DiffScope; reason?: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed" }
   | { type: "diff.reviewWorktree.ensure"; sourceRepoRoot: string; target?: DiffCheckoutTarget | null }
   | { type: "diff.reviewWorktree.checkout"; worktreeId: string; ref: DiffCheckoutTarget }
   | { type: "code.workspace.open"; sessionId: string }

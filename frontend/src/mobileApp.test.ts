@@ -124,25 +124,44 @@ function projection(sessionId: string, overrides: Partial<SessionProjection> = {
 
 function diffState(
   diff = "src/main.ts | 2 ++",
-  payloadKind: "statOnly" | "fullPatch" = "statOnly",
-  overrides: Partial<Extract<import("./protocol").SessionChangesState, { status: "ready" }>> = {},
-): import("./protocol").SessionChangesState {
-  const payload = payloadKind === "fullPatch"
-    ? { kind: "fullPatch" as const, files: [], patch: diff, truncated: false }
-    : { kind: "statOnly" as const, files: [{ oldPath: null, newPath: "src/main.ts", status: "modified" as const, added: 2, removed: 0 }], stat: diff, truncated: false };
+  payloadKind: "statOnly" | "filePatch" = "statOnly",
+  overrides: Partial<Extract<import("./protocol").SessionChangesSummaryState, { status: "ready" }>> = {},
+): import("./protocol").SessionChangesSummaryState {
+  const summary = payloadKind === "filePatch"
+    ? { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified" as const, added: 1, removed: 1 }], stat: null, truncated: false }
+    : { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified" as const, added: 2, removed: 0 }], stat: diff, truncated: false };
+  const diffId = window.sessionStorage.getItem("fura.mobile.diff.current.live") ?? crypto.randomUUID();
   return {
     status: "ready",
-    sessionId: "live",
-    repos: [{ id: "/repo", repoRoot: "/repo", label: "repo", source: "cwd", hasSessionStartSnapshot: true, sessionStartSnapshot: null }],
-    selectedRepoId: "/repo",
-    range: {
+    targetClientId: window.sessionStorage.getItem("fura.mobile.diff.clientId") ?? "client",
+    diffId,
+    request: {
+      scope: "sessionChanges",
+      clientId: window.sessionStorage.getItem("fura.mobile.diff.clientId") ?? "client",
+      diffId,
+      sessionId: "live",
+      repoId: "/repo",
+      detailMode: payloadKind,
+      currentCommitOid: null,
+      selectedFile: null,
+    },
+    comparison: {
       repoRoot: "/repo",
       base: { kind: "sessionStartSnapshot", snapshot: { entryId: "snap", label: "session-start", createdAt: "now", refName: "refs/omp/diff-snapshots/snap", tree: "tree", commit: "a".repeat(40) } },
       head: { kind: "workingTree" },
-      payload,
+      leftTreeOrCommit: "a".repeat(40),
+      rightTreeOrCommit: "tree",
+      detailMode: payloadKind,
+      currentCommitOid: null,
       generatedAt: "1",
+      comparisonKey: "/repo|tree",
     },
+    sessionId: "live",
+    repos: [{ id: "/repo", repoRoot: "/repo", label: "repo", source: "cwd", hasSessionStartSnapshot: true, sessionStartSnapshot: null }],
+    selectedRepoId: "/repo",
+    summary,
     review: { commits: [] },
+    patch: payloadKind === "filePatch" ? diff : null,
     reviewWorktree: null,
     ...overrides,
   };
@@ -1146,7 +1165,7 @@ describe("mountMobileApp", () => {
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Loading session changes");
 
-    connection.emit({ type: "sessionChanges.state", state: diffState() });
+    connection.emit({ type: "sessionChanges.summary", state: diffState() });
 
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("src/main.ts | 2 ++");
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Stat-only payload");
@@ -1167,8 +1186,8 @@ describe("mountMobileApp", () => {
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
     connection.emit({
-      type: "sessionChanges.state",
-      state: diffState(patch, "fullPatch"),
+      type: "sessionChanges.summary",
+      state: diffState(patch, "filePatch"),
     });
 
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Modified files (1)");
@@ -1181,7 +1200,7 @@ describe("mountMobileApp", () => {
     selects[1]!.value = "statOnly";
     selects[1]!.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "sessionChanges.selectRepo", sessionId: "live", repoId: "/repo", payloadKind: "statOnly" }));
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "sessionChanges.request", sessionId: "live", repoId: "/repo", detailMode: "statOnly" }));
   });
 
   it("switches mobile diff between stat and full diff", () => {
@@ -1190,13 +1209,13 @@ describe("mountMobileApp", () => {
     clickSession();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
-    connection.emit({ type: "sessionChanges.state", state: diffState() });
+    connection.emit({ type: "sessionChanges.summary", state: diffState() });
 
     const payloadSelect = document.querySelectorAll<HTMLSelectElement>(".mobile-diff-field select")[1];
-    payloadSelect!.value = "fullPatch";
+    payloadSelect!.value = "filePatch";
     payloadSelect!.dispatchEvent(new Event("change", { bubbles: true }));
 
-    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "sessionChanges.selectRepo", sessionId: "live", payloadKind: "fullPatch" }));
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "sessionChanges.request", sessionId: "live", detailMode: "filePatch" }));
   });
 
   it("shows diff errors without leaving the diff tab", () => {
@@ -1225,7 +1244,7 @@ describe("mountMobileApp", () => {
     clickSession();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
-    connection.emit({ type: "sessionChanges.state", state: diffState(patch, "fullPatch") });
+    connection.emit({ type: "sessionChanges.summary", state: diffState(patch, "filePatch") });
 
     document.querySelector<HTMLButtonElement>(".mobile-diff-line-add .mobile-diff-comment-button")?.click();
     const commentText = document.querySelector<HTMLTextAreaElement>("#mobileDiffCommentText");
@@ -1265,7 +1284,7 @@ describe("mountMobileApp", () => {
     clickSession();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { isBusy: true }) });
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
-    connection.emit({ type: "sessionChanges.state", state: diffState(patch, "fullPatch") });
+    connection.emit({ type: "sessionChanges.summary", state: diffState(patch, "filePatch") });
 
     document.querySelector<HTMLButtonElement>(".mobile-diff-line-add .mobile-diff-comment-button")?.click();
     const commentText = document.querySelector<HTMLTextAreaElement>("#mobileDiffCommentText");

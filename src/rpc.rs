@@ -1023,17 +1023,27 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 None
             };
             if let Some(pending) = pending {
-                for message in build_session_changes_response(
+                let request = DiffRequestIdentity::SessionChanges {
+                    client_id: pending.client_id.clone(),
+                    diff_id: pending.diff_id.clone(),
+                    session_id: pending.session_id.clone(),
+                    repo_id: pending.repo_id.clone(),
+                    detail_mode: pending.detail_mode,
+                    current_commit_oid: pending.current_commit_oid.clone(),
+                    selected_file: pending.selected_file.clone(),
+                };
+                start_session_changes_generation_job(
                     state,
+                    pending.client_id.clone(),
+                    pending.diff_id.clone(),
                     pending.session_id.clone(),
                     pending.repo_id,
-                    pending.payload_kind,
+                    pending.detail_mode,
                     pending.current_commit_oid,
+                    pending.selected_file,
+                    request,
                 )
-                .await
-                {
-                    let _ = state.events.send(message);
-                }
+                .await;
                 let _ = state.events.send(notice(
                     pending.session_id,
                     NoticeLevel::Info,

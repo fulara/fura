@@ -102,8 +102,7 @@ export function isFullPatchPayload(payload: DiffPayload | undefined): boolean {
 }
 
 export function comparisonKey(state: DiffReviewableState): string {
-  const selected = state.review.currentCommitOid ?? "range";
-  return [state.range.repoRoot, endpointKey(state.range.base), endpointKey(state.range.head), state.range.payload.kind, selected].join("|");
+  return state.comparison.comparisonKey;
 }
 
 export function summarizeWireDiffFiles(

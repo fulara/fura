@@ -32,10 +32,10 @@ pub(crate) struct WorktreeCreateRequest {
     pub(crate) branch_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) enum DiffPayloadKind {
-    FullPatch,
+pub(crate) enum DiffDetailMode {
+    FilePatch,
     StatOnly,
 }
 
@@ -197,6 +197,13 @@ pub(crate) struct DiffFileSummary {
     pub(crate) removed: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffFileSelector {
+    pub(crate) old_path: Option<String>,
+    pub(crate) new_path: String,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DiffCommitSummary {
@@ -211,40 +218,10 @@ pub(crate) struct DiffCommitSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-pub(crate) enum DiffPayload {
-    StatOnly {
-        files: Vec<DiffFileSummary>,
-        stat: String,
-        truncated: bool,
-    },
-    FullPatch {
-        files: Vec<DiffFileSummary>,
-        patch: String,
-        truncated: bool,
-    },
-}
-
-#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DisplayedPatchRange {
     pub(crate) base: DiffEndpoint,
     pub(crate) head: DiffEndpoint,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct DiffRangeState {
-    pub(crate) repo_root: String,
-    pub(crate) base: DiffEndpoint,
-    pub(crate) head: DiffEndpoint,
-    pub(crate) payload: DiffPayload,
-    pub(crate) generated_at: String,
-    pub(crate) displayed_patch_range: Option<DisplayedPatchRange>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -256,29 +233,100 @@ pub(crate) struct CommitStepState {
     pub(crate) previous_commit_oid: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum DiffScope {
+    SessionChanges,
+    CompareDiff,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(
+    tag = "scope",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum DiffRequestIdentity {
+    SessionChanges {
+        client_id: String,
+        diff_id: String,
+        session_id: String,
+        repo_id: Option<String>,
+        detail_mode: DiffDetailMode,
+        current_commit_oid: Option<String>,
+        selected_file: Option<DiffFileSelector>,
+    },
+    CompareDiff {
+        client_id: String,
+        diff_id: String,
+        repo_root: String,
+        base: DiffRefInput,
+        head: DiffRefInput,
+        detail_mode: DiffDetailMode,
+        merge_base: Option<bool>,
+        current_commit_oid: Option<String>,
+        selected_file: Option<DiffFileSelector>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffComparisonIdentity {
+    pub(crate) repo_root: String,
+    pub(crate) base: DiffEndpoint,
+    pub(crate) head: DiffEndpoint,
+    pub(crate) left_tree_or_commit: String,
+    pub(crate) right_tree_or_commit: String,
+    pub(crate) detail_mode: DiffDetailMode,
+    pub(crate) current_commit_oid: Option<String>,
+    pub(crate) selected_file: Option<DiffFileSelector>,
+    pub(crate) generated_at: String,
+    pub(crate) comparison_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffSummaryPayload {
+    pub(crate) files: Vec<DiffFileSummary>,
+    pub(crate) stat: Option<String>,
+    pub(crate) truncated: bool,
+    pub(crate) file_limit_reached: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(
     tag = "status",
     rename_all = "camelCase",
     rename_all_fields = "camelCase"
 )]
-pub(crate) enum SessionChangesState {
+pub(crate) enum SessionChangesSummaryState {
     Ready {
+        target_client_id: String,
+        diff_id: String,
+        request: DiffRequestIdentity,
+        comparison: DiffComparisonIdentity,
         session_id: String,
         repos: Vec<SessionRepoCandidate>,
         selected_repo_id: String,
-        range: DiffRangeState,
+        summary: DiffSummaryPayload,
         review: CommitStepState,
         review_worktree: Option<DiffReviewWorktree>,
     },
     MissingRepo {
+        target_client_id: String,
+        diff_id: String,
+        request: DiffRequestIdentity,
         session_id: String,
+        repo_root: Option<String>,
         reason: String,
         repos: Vec<SessionRepoCandidate>,
     },
     MissingSnapshot {
+        target_client_id: String,
+        diff_id: String,
+        request: DiffRequestIdentity,
         session_id: String,
-        repo_root: String,
+        repo_root: Option<String>,
         reason: String,
         repos: Vec<SessionRepoCandidate>,
     },
@@ -286,12 +334,28 @@ pub(crate) enum SessionChangesState {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CompareDiffState {
-    pub(crate) request_id: Option<String>,
+pub(crate) struct CompareDiffSummaryState {
+    pub(crate) target_client_id: String,
+    pub(crate) diff_id: String,
+    pub(crate) request: DiffRequestIdentity,
+    pub(crate) comparison: DiffComparisonIdentity,
     pub(crate) refs: Vec<GitRefSummary>,
-    pub(crate) range: DiffRangeState,
+    pub(crate) summary: DiffSummaryPayload,
     pub(crate) review: CommitStepState,
     pub(crate) review_worktree: Option<DiffReviewWorktree>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffFilePatchState {
+    pub(crate) target_client_id: String,
+    pub(crate) diff_id: String,
+    pub(crate) scope: DiffScope,
+    pub(crate) comparison_key: String,
+    pub(crate) file: DiffFileSelector,
+    pub(crate) patch: String,
+    pub(crate) truncated: bool,
+    pub(crate) generated_at: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -504,39 +568,45 @@ pub(crate) enum ClientMessage {
         provider: String,
         model_id: String,
     },
-    #[serde(rename = "sessionChanges.open")]
-    SessionChangesOpen { session_id: String },
-    #[serde(rename = "sessionChanges.selectRepo")]
-    SessionChangesSelectRepo {
-        session_id: String,
-        repo_id: String,
-        payload_kind: DiffPayloadKind,
-        current_commit_oid: Option<String>,
-    },
-    #[serde(rename = "sessionChanges.refresh")]
-    SessionChangesRefresh {
+    #[serde(rename = "sessionChanges.request")]
+    SessionChangesRequest {
+        client_id: String,
+        diff_id: String,
         session_id: String,
         repo_id: Option<String>,
-        payload_kind: Option<DiffPayloadKind>,
+        detail_mode: DiffDetailMode,
         current_commit_oid: Option<String>,
+        selected_file: Option<DiffFileSelector>,
     },
     #[serde(rename = "sessionChanges.snapshot")]
     SessionChangesSnapshot {
+        client_id: String,
+        diff_id: String,
         session_id: String,
         repo_id: Option<String>,
         label: Option<String>,
-        payload_kind: Option<DiffPayloadKind>,
+        detail_mode: Option<DiffDetailMode>,
         current_commit_oid: Option<String>,
+        selected_file: Option<DiffFileSelector>,
     },
-    #[serde(rename = "compareDiff.run")]
-    CompareDiffRun {
-        request_id: Option<String>,
+    #[serde(rename = "compareDiff.request")]
+    CompareDiffRequest {
+        client_id: String,
+        diff_id: String,
         repo_root: String,
         base: DiffRefInput,
         head: DiffRefInput,
-        payload_kind: DiffPayloadKind,
+        detail_mode: DiffDetailMode,
         merge_base: Option<bool>,
         current_commit_oid: Option<String>,
+        selected_file: Option<DiffFileSelector>,
+    },
+    #[serde(rename = "diff.cancel")]
+    DiffCancel {
+        client_id: String,
+        diff_id: String,
+        scope: DiffScope,
+        reason: Option<String>,
     },
     #[serde(rename = "diff.reviewWorktree.ensure")]
     DiffReviewWorktreeEnsure {
@@ -687,12 +757,29 @@ pub(crate) enum ServerMessage {
         title: Option<String>,
         content: String,
     },
-    #[serde(rename = "sessionChanges.state")]
-    SessionChangesState { state: SessionChangesState },
-    #[serde(rename = "compareDiff.state")]
-    CompareDiffState { state: CompareDiffState },
+    #[serde(rename = "sessionChanges.summary")]
+    SessionChangesSummary { state: SessionChangesSummaryState },
+    #[serde(rename = "compareDiff.summary")]
+    CompareDiffSummary { state: CompareDiffSummaryState },
+    #[serde(rename = "diff.filePatch")]
+    DiffFilePatch { patch: DiffFilePatchState },
+    #[serde(rename = "diff.complete")]
+    DiffComplete {
+        target_client_id: String,
+        diff_id: String,
+        scope: DiffScope,
+    },
+    #[serde(rename = "diff.cancelled")]
+    DiffCancelled {
+        target_client_id: String,
+        diff_id: String,
+        scope: DiffScope,
+        reason: Option<String>,
+    },
     #[serde(rename = "diff.error")]
     DiffError {
+        target_client_id: Option<String>,
+        diff_id: Option<String>,
         scope: DiffErrorScope,
         session_id: Option<String>,
         repo_root: Option<String>,

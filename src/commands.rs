@@ -146,77 +146,81 @@ pub(crate) async fn handle_client_message(
             provider,
             model_id,
         } => handle_model_set_command(state, session_id, &provider, &model_id).await,
-        ClientMessage::SessionChangesOpen { session_id } => {
-            handle_session_changes_open(state, session_id).await
-        }
-        ClientMessage::SessionChangesSelectRepo {
+        ClientMessage::SessionChangesRequest {
+            client_id,
+            diff_id,
             session_id,
             repo_id,
-            payload_kind,
+            detail_mode,
             current_commit_oid,
+            selected_file,
         } => {
-            handle_session_changes_select_repo(
+            handle_session_changes_request(
                 state,
+                client_id,
+                diff_id,
                 session_id,
                 repo_id,
-                payload_kind,
+                detail_mode,
                 current_commit_oid,
-            )
-            .await
-        }
-        ClientMessage::SessionChangesRefresh {
-            session_id,
-            repo_id,
-            payload_kind,
-            current_commit_oid,
-        } => {
-            handle_session_changes_refresh(
-                state,
-                session_id,
-                repo_id,
-                payload_kind,
-                current_commit_oid,
+                selected_file,
             )
             .await
         }
         ClientMessage::SessionChangesSnapshot {
+            client_id,
+            diff_id,
             session_id,
             repo_id,
             label,
-            payload_kind,
+            detail_mode,
             current_commit_oid,
+            selected_file,
         } => {
             handle_session_changes_snapshot(
                 state,
+                client_id,
+                diff_id,
                 session_id,
                 repo_id,
                 label,
-                payload_kind.unwrap_or(DiffPayloadKind::StatOnly),
+                detail_mode.unwrap_or(DiffDetailMode::StatOnly),
                 current_commit_oid,
+                selected_file,
             )
             .await
         }
-        ClientMessage::CompareDiffRun {
-            request_id,
+        ClientMessage::CompareDiffRequest {
+            client_id,
+            diff_id,
             repo_root,
             base,
             head,
-            payload_kind,
+            detail_mode,
             merge_base,
             current_commit_oid,
+            selected_file,
         } => {
-            handle_compare_diff_run(
+            handle_compare_diff_request(
                 state,
-                request_id,
+                client_id,
+                diff_id,
                 repo_root,
                 base,
                 head,
-                payload_kind,
+                detail_mode,
                 merge_base,
                 current_commit_oid,
+                selected_file,
             )
             .await
         }
+        ClientMessage::DiffCancel {
+            client_id,
+            diff_id,
+            scope,
+            reason,
+        } => handle_diff_cancel(state, client_id, diff_id, scope, reason).await,
         ClientMessage::DiffReviewWorktreeEnsure {
             source_repo_root,
             target,

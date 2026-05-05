@@ -153,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
         model_catalog: Arc::new(RwLock::new(ModelCatalogState::default())),
         bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
         voice_sessions: Arc::new(RwLock::new(HashMap::new())),
+        diff_jobs: Arc::new(RwLock::new(DiffJobRegistry::default())),
         events,
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
@@ -678,6 +679,7 @@ pub(crate) mod tests {
             model_catalog: Arc::new(RwLock::new(ModelCatalogState::default())),
             bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
             voice_sessions: Arc::new(RwLock::new(HashMap::new())),
+            diff_jobs: Arc::new(RwLock::new(DiffJobRegistry::default())),
             events,
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),
@@ -2406,26 +2408,30 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn parses_typed_compare_diff_run_message() {
+    fn parses_typed_compare_diff_request_message() {
         let msg: ClientMessage = serde_json::from_str(
-            r#"{"type":"compareDiff.run","requestId":"req-1","repoRoot":"/repo","base":{"kind":"gitRef","value":"main"},"head":{"kind":"gitRef","value":"feature"},"payloadKind":"fullPatch","mergeBase":true,"currentCommitOid":"abc"}"#,
+            r#"{"type":"compareDiff.request","clientId":"client-1","diffId":"550e8400-e29b-41d4-a716-446655440000","repoRoot":"/repo","base":{"kind":"gitRef","value":"main"},"head":{"kind":"gitRef","value":"feature"},"detailMode":"filePatch","mergeBase":true,"currentCommitOid":"abc","selectedFile":{"newPath":"src/main.rs"}}"#,
         )
         .expect("parse failed");
         assert!(matches!(
             msg,
-            ClientMessage::CompareDiffRun {
-                ref request_id,
+            ClientMessage::CompareDiffRequest {
+                ref client_id,
+                ref diff_id,
                 ref repo_root,
                 base: DiffRefInput::GitRef { ref value },
                 head: DiffRefInput::GitRef { value: ref head_value },
-                payload_kind: DiffPayloadKind::FullPatch,
+                detail_mode: DiffDetailMode::FilePatch,
                 merge_base: Some(true),
                 current_commit_oid: Some(ref commit_oid),
-            } if request_id.as_deref() == Some("req-1")
+                selected_file: Some(ref selected_file),
+            } if client_id == "client-1"
+                && diff_id == "550e8400-e29b-41d4-a716-446655440000"
                 && repo_root == "/repo"
                 && value == "main"
                 && head_value == "feature"
                 && commit_oid == "abc"
+                && selected_file.new_path == "src/main.rs"
         ));
     }
 
