@@ -947,9 +947,15 @@ h2 {
 .compare-diff-controls select {
   width: 100%;
 }
+
 .diff-step-actions {
   justify-content: flex-start;
   flex-wrap: wrap;
+}
+
+.diff-commit-select {
+  min-width: 14rem;
+  max-width: 28rem;
 }
 .diff-stat-output {
   white-space: pre-wrap;
@@ -1078,7 +1084,7 @@ h2 {
 
 .diff-line {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: start;
   gap: 0.5rem;
   padding: 0.2rem 0.4rem;
@@ -1101,19 +1107,19 @@ h2 {
   background: rgba(248, 81, 73, 0.12);
 }
 
-.diff-line-file,
-.diff-line-hunk,
-.diff-line-meta {
-  grid-template-columns: auto minmax(0, 1fr);
-  color: #9edbff;
-}
-
 .diff-line-file {
+  grid-template-columns: auto minmax(0, 1fr) auto;
   position: sticky;
   top: 0;
   z-index: 1;
   background: #111318;
   color: #f4d35e;
+}
+
+.diff-line-hunk,
+.diff-line-meta {
+  grid-template-columns: auto minmax(0, 1fr);
+  color: #9edbff;
 }
 
 .diff-line-target {
@@ -1147,7 +1153,7 @@ h2 {
   color: #eef1f8;
 }
 
-.diff-line-code-btn,
+.diff-file-code-btn,
 .diff-question-btn {
   align-self: start;
   padding: 0.1rem 0.45rem;
@@ -1160,6 +1166,7 @@ h2 {
   color: #c7cedc;
   white-space: nowrap;
 }
+
 .diff-question-btn.has-questions {
   border-color: #6d7cff;
   background: rgba(109, 124, 255, 0.16);

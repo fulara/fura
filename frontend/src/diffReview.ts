@@ -241,6 +241,11 @@ export function checkoutTargetForDiffLocation(state: DiffReviewableState, locati
   return checkoutTargetForEndpoint(state.range.head);
 }
 
+export function checkoutTargetForDiffFile(state: DiffReviewableState): DiffCheckoutTarget {
+  if (state.review.currentCommitOid) return { kind: "commit", oid: state.review.currentCommitOid };
+  return checkoutTargetForEndpoint(state.range.head);
+}
+
 export function pathForDiffLocation(location: DiffLineLocation): string {
   return location.side === "left" ? location.oldPath ?? location.newPath : location.newPath;
 }

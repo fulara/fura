@@ -64,13 +64,12 @@ import {
   annotationsForDiffLocation,
   buildDiffCommentPrompt,
   buildDiffQuestionPrompt,
-  checkoutTargetForDiffLocation,
+  checkoutTargetForDiffFile,
   createDiffReviewAnnotation,
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
   formatDiffLineLocation,
   formatDiffLocation,
-  pathForDiffLocation,
   removeSelectedDiffComments,
   selectedDiffAnnotations,
   type DiffPreviewDraft,
@@ -2662,15 +2661,20 @@ function scheduleCodeSearch(): void {
   }, 120);
 }
 
-function ensureActiveCodeWorkspace(): void {
-  if (!desktopDockview?.isPanelActive("code")) return;
-  const sessionId = workspaceMode === "session" ? activeSessionId : null;
+function requestCodeWorkspaceForSession(sessionId: string): void {
   if (codeSessionId !== sessionId) resetCodeViewForSession(sessionId);
-  if (!sessionId || codeWorkspace || codeLoadingWorkspace) return;
+  if (codeWorkspace || codeLoadingWorkspace) return;
   codeLoadingWorkspace = true;
   codeError = null;
   markCodeViewDirty();
   send({ type: "code.workspace.open", sessionId });
+}
+
+function ensureActiveCodeWorkspace(): void {
+  if (!desktopDockview?.isPanelActive("code")) return;
+  const sessionId = workspaceMode === "session" ? activeSessionId : null;
+  if (!sessionId) return;
+  requestCodeWorkspaceForSession(sessionId);
 }
 
 function requestCodeTree(path: string): void {
@@ -2842,7 +2846,7 @@ function openCodeRequest(request: CodeOpenRequest): void {
       requestCodeTree(parentCodePath(request.path) ?? "");
       requestCodeFile(request.path);
     } else {
-      ensureActiveCodeWorkspace();
+      requestCodeWorkspaceForSession(request.sessionId);
       renderCodePanelIfNeeded(true);
     }
     return;
@@ -2870,16 +2874,15 @@ function ensureReviewWorktreeThenCheckout(state: DiffReviewableState, target: Di
   send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: target });
 }
 
-function openDiffLocationInCode(state: DiffReviewableState, location: DiffLineLocation): void {
-  const target = checkoutTargetForDiffLocation(state, location);
-  const path = pathForDiffLocation(location);
+function openDiffFileInCode(state: DiffReviewableState, filePath: string): void {
+  const target = checkoutTargetForDiffFile(state);
   if (target.kind === "workingTree") {
     const sessionId = workspaceMode === "session" ? activeSessionId : null;
     if (!sessionId) return;
-    openCodeRequest({ source: "sessionWorktree", sessionId, path });
+    openCodeRequest({ source: "sessionWorktree", sessionId, path: filePath });
     return;
   }
-  openCodeRequest({ source: "reviewCommit", repoRoot: state.range.repoRoot, target, path });
+  openCodeRequest({ source: "reviewCommit", repoRoot: state.range.repoRoot, target, path: filePath });
 }
 
 
@@ -3903,7 +3906,7 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesState
   const payload = mkEl("select");
   payload.className = "diff-payload-select";
   const currentPayload = state.status === "ready" ? state.range.payload.kind : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
-  for (const [value, text] of [["statOnly", "Stat"], ["fullPatch", "Full patch"]] as const) {
+  for (const [value, text] of [["fullPatch", "Full patch"], ["statOnly", "Stat"]] as const) {
     const option = mkEl("option");
     option.value = value;
     option.textContent = text;
@@ -4021,6 +4024,29 @@ function renderReviewableDiff(
     if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: selected });
     else requestSessionChangesRefresh(annotationKey, { currentCommitOid: selected });
   });
+  toolbar.append(stepBtn);
+  if (state.review.commits.length > 0) {
+    const commitSelect = mkEl("select");
+    commitSelect.className = "diff-commit-select";
+    const rangeOption = mkEl("option");
+    rangeOption.value = "";
+    rangeOption.textContent = "Full range";
+    rangeOption.selected = !state.review.currentCommitOid;
+    commitSelect.append(rangeOption);
+    for (const commit of state.review.commits) {
+      const option = mkEl("option");
+      option.value = commit.oid;
+      option.textContent = `${commit.shortOid} — ${commit.subject}`;
+      option.selected = state.review.currentCommitOid === commit.oid;
+      commitSelect.append(option);
+    }
+    commitSelect.addEventListener("change", () => {
+      const selected = commitSelect.value || null;
+      if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: selected });
+      else requestSessionChangesRefresh(annotationKey, { currentCommitOid: selected });
+    });
+    toolbar.append(commitSelect);
+  }
   const index = state.review.currentCommitIndex ?? null;
   const prev = mkEl("button");
   prev.type = "button";
@@ -4042,7 +4068,7 @@ function renderReviewableDiff(
     if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: oid });
     else requestSessionChangesRefresh(annotationKey, { currentCommitOid: oid });
   });
-  toolbar.append(stepBtn, prev, next);
+  toolbar.append(prev, next);
   if (state.review.currentCommitOid) {
     const checkout = mkEl("button");
     checkout.type = "button";
@@ -4119,32 +4145,6 @@ function renderDesktopModifiedFiles(
   sidebar.append(filesSection);
 }
 
-function renderDiffFileList(container: HTMLElement, files: ReturnType<typeof summarizeDiffFiles>): void {
-  if (files.length === 0) return;
-  const filesSection = mkEl("section");
-  filesSection.className = "diffs-files";
-  const filesTitle = mkEl("strong");
-  filesTitle.textContent = `Modified files (${files.length})`;
-  filesSection.append(filesTitle);
-  const filesList = mkEl("div");
-  filesList.className = "diffs-file-list";
-  for (const file of files) {
-    const item = mkEl("div");
-    item.className = "diffs-file-item";
-    const name = mkEl("code");
-    name.textContent = file.filePath;
-    const meta = mkEl("span");
-    const notes = [
-      file.commentCount > 0 ? `${file.commentCount} comment${file.commentCount === 1 ? "" : "s"}` : null,
-      file.questionCount > 0 ? `${file.questionCount} question${file.questionCount === 1 ? "" : "s"}` : null,
-    ].filter(Boolean).join(" · ");
-    meta.textContent = `+${file.added} -${file.removed}${notes ? ` · ${notes}` : ""}`;
-    item.append(name, meta);
-    filesList.append(item);
-  }
-  filesSection.append(filesList);
-  container.append(filesSection);
-}
 
 function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: ReturnType<typeof parseDiffRows>, annotations: DiffReviewAnnotation[], key: string, allowPromptActions: boolean): void {
   const diff = mkEl("div");
@@ -4173,11 +4173,6 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
       const text = mkEl("code");
       text.textContent = row.location.text;
       content.append(text);
-      const codeBtn = mkEl("button");
-      codeBtn.type = "button";
-      codeBtn.className = "diff-line-code-btn";
-      codeBtn.textContent = "Code";
-      codeBtn.addEventListener("click", () => openDiffLocationInCode(state, row.location));
       const questionBtn = mkEl("button");
       questionBtn.type = "button";
       questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
@@ -4185,7 +4180,7 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
       questionBtn.disabled = !allowPromptActions;
       questionBtn.title = allowPromptActions ? "Ask the agent about this diff line" : "Questions require a session changes review";
       questionBtn.addEventListener("click", () => askDiffQuestion(annotationKey, state, row.location));
-      line.append(commentBtn, gutter, content, codeBtn, questionBtn);
+      line.append(commentBtn, gutter, content, questionBtn);
       lineWrap.append(line);
       if (lineAnnotations.length > 0) {
         const thread = mkEl("div");
@@ -4204,6 +4199,14 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
     const text = mkEl("code");
     text.textContent = row.text;
     line.append(spacer, text);
+    if (row.type === "file") {
+      const codeBtn = mkEl("button");
+      codeBtn.type = "button";
+      codeBtn.className = "diff-file-code-btn";
+      codeBtn.textContent = "Code";
+      codeBtn.addEventListener("click", () => openDiffFileInCode(state, row.filePath));
+      line.append(codeBtn);
+    }
     diff.append(line);
   }
   container.append(diff);

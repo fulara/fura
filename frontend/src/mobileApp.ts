@@ -2324,7 +2324,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const payloadKind = state.status === "ready" ? state.range.payload.kind : diffPayloadKinds.get(sessionId) ?? "statOnly";
     fields.append(renderDiffSelect(
       "Payload",
-      [{ value: "statOnly", label: "Stat" }, { value: "fullPatch", label: "Full patch" }],
+      [{ value: "fullPatch", label: "Full patch" }, { value: "statOnly", label: "Stat" }],
       payloadKind,
       diffLoadingSessions.has(sessionId),
       value => requestMobileSessionChangesRepo(sessionId, selectedRepo, value as DiffPayloadKind),
