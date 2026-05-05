@@ -137,6 +137,7 @@ describe("renderMessage", () => {
 
     expect(node.className).toContain("message-reviewing");
     expect(node.querySelector(".text-block")).toBeNull();
+    expect(node.querySelector(".transcript-review-view-toggle")).toBeNull();
     expect(Array.from(node.querySelectorAll(".transcript-review-gutter")).map(el => el.textContent)).toEqual(["1", "2"]);
     expect(node.querySelector(".transcript-review-inline-comment")?.textContent).toContain("Explain this.");
 
@@ -153,7 +154,7 @@ describe("renderMessage", () => {
     expect(onFlush).toHaveBeenCalledWith(message);
   });
 
-  it("renders Markdown review blocks with comment buttons mapped to source lines", () => {
+  it("renders Markdown review blocks with toggle and granular comment buttons", () => {
     const onAddComment = vi.fn();
     const message: TranscriptMessage = {
       id: "m-markdown-review",
@@ -173,8 +174,15 @@ describe("renderMessage", () => {
 
     expect(node.querySelector(".transcript-review-markdown-preview")?.textContent).toContain("Rendered Markdown review");
     expect(node.querySelector(".transcript-review-markdown-preview h1")?.textContent).toBe("Heading");
-    node.querySelector<HTMLButtonElement>(".transcript-review-markdown-block .transcript-review-comment-btn")?.click();
-    expect(onAddComment).toHaveBeenCalledWith(message, { lineNumber: 1, text: "# Heading" });
+    expect(node.querySelector<HTMLDivElement>(".transcript-review-lines")?.hidden).toBe(true);
+    expect(node.querySelectorAll(".transcript-review-markdown-block .transcript-review-comment-btn")).toHaveLength(3);
+
+    node.querySelectorAll<HTMLButtonElement>(".transcript-review-markdown-block .transcript-review-comment-btn")[1]?.click();
+    expect(onAddComment).toHaveBeenCalledWith(message, { lineNumber: 3, text: "- first" });
+
+    node.querySelector<HTMLButtonElement>('.transcript-review-view-toggle button[data-review-view="source"]')?.click();
+    expect(node.querySelector<HTMLDivElement>(".transcript-review-lines")?.hidden).toBe(false);
+    expect(node.querySelector<HTMLElement>('.transcript-review-markdown-preview')?.hidden).toBe(true);
   });
 });
 

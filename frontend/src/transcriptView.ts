@@ -30,6 +30,8 @@ type RenderMessageOptions = {
   review?: RenderMessageReviewOptions;
 };
 
+type ReviewRenderView = "rendered" | "source";
+
 type RenderMessageReviewOptions = {
   active: boolean;
   comments: TranscriptReviewComment[];
@@ -105,14 +107,23 @@ function renderTranscriptReviewBody(message: TranscriptMessage, review: RenderMe
   wrapper.setAttribute("aria-label", "Transcript review lines");
 
   const reviewText = messageText(message);
-  if (shouldShowMarkdownReviewPreview(reviewText)) {
+  const hasMarkdownPreview = shouldShowMarkdownReviewPreview(reviewText);
+  const sourceLines = transcriptReviewLines(message);
+  let activeView: ReviewRenderView = hasMarkdownPreview ? "rendered" : "source";
+
+  if (hasMarkdownPreview) {
+    wrapper.append(renderReviewViewToggle(activeView, nextView => {
+      activeView = nextView;
+      syncReviewViewVisibility(wrapper, activeView);
+    }));
     wrapper.append(renderMarkdownReviewPreview(message, reviewText, review));
   }
 
-  const lines = transcriptReviewLines(message);
   const list = mkEl("div");
   list.className = "transcript-review-lines";
-  for (const line of lines) {
+  list.dataset.reviewView = "source";
+  list.hidden = activeView !== "source";
+  for (const line of sourceLines) {
     list.append(renderTranscriptReviewLine(message, line, review));
   }
   wrapper.append(list);
@@ -140,6 +151,48 @@ function renderTranscriptReviewBody(message: TranscriptMessage, review: RenderMe
   wrapper.append(footer);
   return wrapper;
 }
+function renderReviewViewToggle(
+  activeView: ReviewRenderView,
+  onChange: (view: ReviewRenderView) => void,
+): HTMLElement {
+  const controls = mkEl("div");
+  controls.className = "transcript-review-view-toggle";
+  const rendered = mkEl("button");
+  rendered.type = "button";
+  rendered.textContent = "Rendered";
+  rendered.dataset.reviewView = "rendered";
+  rendered.setAttribute("aria-pressed", String(activeView === "rendered"));
+  rendered.addEventListener("click", () => {
+    onChange("rendered");
+    syncReviewToggleButtons(controls, "rendered");
+  });
+  const source = mkEl("button");
+  source.type = "button";
+  source.textContent = "Source";
+  source.dataset.reviewView = "source";
+  source.setAttribute("aria-pressed", String(activeView === "source"));
+  source.addEventListener("click", () => {
+    onChange("source");
+    syncReviewToggleButtons(controls, "source");
+  });
+  controls.append(rendered, source);
+  return controls;
+}
+
+function syncReviewToggleButtons(root: ParentNode, activeView: ReviewRenderView): void {
+  root.querySelectorAll<HTMLButtonElement>("[data-review-view]").forEach(button => {
+    button.setAttribute("aria-pressed", String(button.dataset.reviewView === activeView));
+  });
+}
+
+function syncReviewViewVisibility(root: ParentNode, activeView: ReviewRenderView): void {
+  root.querySelectorAll<HTMLElement>("[data-review-view]").forEach(section => {
+    if (!(section instanceof HTMLButtonElement)) {
+      section.hidden = section.dataset.reviewView !== activeView;
+    }
+  });
+}
+
 
 function shouldShowMarkdownReviewPreview(text: string): boolean {
   const trimmed = text.trim();
@@ -156,13 +209,14 @@ function renderMarkdownReviewPreview(
   message: TranscriptMessage,
   text: string,
   review: RenderMessageReviewOptions,
-  ): HTMLElement {
+): HTMLElement {
   const section = mkEl("section");
   section.className = "transcript-review-markdown-preview";
+  section.dataset.reviewView = "rendered";
   const title = mkEl("h4");
   title.textContent = "Rendered Markdown review";
   const note = mkEl("p");
-  note.textContent = "Use the + buttons here for rendered blocks, or the source lines below for exact line-level comments.";
+  note.textContent = "Use the + buttons here for rendered fragments, or switch to Source for exact line-level comments.";
   section.append(title, note);
 
   const blocks = mkEl("div");
@@ -175,7 +229,7 @@ function renderMarkdownReviewPreview(
     button.type = "button";
     button.className = `transcript-review-comment-btn ${comments.length > 0 ? "has-comments" : ""}`;
     button.textContent = comments.length > 0 ? String(comments.length) : "+";
-    button.title = `Comment on rendered Markdown block starting at source line ${block.line.lineNumber}`;
+    button.title = `Comment on rendered Markdown fragment starting at source line ${block.line.lineNumber}`;
     button.addEventListener("click", () => review.onAddComment?.(message, block.line));
     const content = renderMarkdown(block.markdown);
     content.classList.add("transcript-review-markdown-block-content");
@@ -193,17 +247,49 @@ function markdownReviewBlocks(text: string): Array<{ line: TranscriptReviewLine;
   const blocks: Array<{ line: TranscriptReviewLine; markdown: string }> = [];
   let searchFrom = 0;
   for (const token of tokens) {
-    if (token.type === "space") continue;
-    const raw = token.raw?.trimEnd() ?? tokenText(token).trim();
-    if (!raw.trim()) continue;
-    const index = text.indexOf(raw, searchFrom);
-    const before = index >= 0 ? text.slice(0, index) : text.slice(0, searchFrom);
-    const lineNumber = before.split(/\r?\n/).length;
-    const line = lines[Math.max(0, Math.min(lines.length - 1, lineNumber - 1))] ?? { lineNumber: 1, text: raw.split(/\r?\n/)[0] ?? "" };
-    blocks.push({ line, markdown: raw });
-    searchFrom = index >= 0 ? index + raw.length : searchFrom;
+    searchFrom = collectMarkdownReviewBlocks(token, text, lines, searchFrom, blocks);
   }
   return blocks;
+}
+
+function collectMarkdownReviewBlocks(
+  token: Token,
+  sourceText: string,
+  lines: TranscriptReviewLine[],
+  searchFrom: number,
+  blocks: Array<{ line: TranscriptReviewLine; markdown: string }>,
+): number {
+  if (token.type === "space") return searchFrom;
+  if (token.type === "list") {
+    const list = token as Tokens.List;
+    for (const item of list.items) {
+      const raw = item.raw?.trimEnd() ?? "";
+      if (!raw.trim()) continue;
+      searchFrom = pushMarkdownReviewBlock(raw, sourceText, lines, searchFrom, blocks);
+    }
+    return searchFrom;
+  }
+  const raw = token.raw?.trimEnd() ?? tokenText(token).trim();
+  if (!raw.trim()) return searchFrom;
+  return pushMarkdownReviewBlock(raw, sourceText, lines, searchFrom, blocks);
+}
+
+function pushMarkdownReviewBlock(
+  raw: string,
+  sourceText: string,
+  lines: TranscriptReviewLine[],
+  searchFrom: number,
+  blocks: Array<{ line: TranscriptReviewLine; markdown: string }>,
+): number {
+  const index = sourceText.indexOf(raw, searchFrom);
+  const before = index >= 0 ? sourceText.slice(0, index) : sourceText.slice(0, searchFrom);
+  const lineNumber = before.split(/\r?\n/).length;
+  const line = lines[Math.max(0, Math.min(lines.length - 1, lineNumber - 1))] ?? {
+    lineNumber: 1,
+    text: raw.split(/\r?\n/)[0] ?? "",
+  };
+  blocks.push({ line, markdown: raw });
+  return index >= 0 ? index + raw.length : searchFrom;
 }
 
 function renderTranscriptReviewLine(
