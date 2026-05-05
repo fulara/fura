@@ -252,7 +252,7 @@ function ensureSessionChangesPanel(api: DockviewComponent): boolean {
   api.addPanel({
     id: "sessionChanges",
     component: "sessionChanges",
-    title: "Session changes",
+    title: "Diff",
     position: { referencePanel: "transcript", direction: "within", index: 0 },
     renderer: "always",
   });

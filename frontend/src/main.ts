@@ -1550,9 +1550,16 @@ function handleServerMessage(message: ServerMessage): void {
       diffFilePatchErrors.delete("compareDiff");
       if (state.reviewWorktree) diffReviewWorktrees.set(state.reviewWorktree.sourceRepoRoot, state.reviewWorktree);
       selectedDiffFilePath("compareDiff", state, state.summary.files.map(file => file.newPath));
+      const activeDiffReviewSessionId = activeSessionId && projections.get(activeSessionId)?.summary.sessionMode === "diffReview"
+        ? activeSessionId
+        : null;
+      if (activeDiffReviewSessionId) {
+        selectedDiffFilePath(activeDiffReviewSessionId, state, state.summary.files.map(file => file.newPath));
+      }
       pruneDiffPatchCache();
       markComparePanelDirty();
       renderComparePanelIfActive();
+      if (activeDiffReviewSessionId) renderDiffsViewIfActive(activeDiffReviewSessionId);
       break;
     }
     case "diff.filePatch": {
@@ -1563,8 +1570,16 @@ function handleServerMessage(message: ServerMessage): void {
         rememberDiffPatch(diffPatchCacheKey(patch.comparisonKey, patch.file.newPath), { patch: patch.patch, truncated: patch.truncated });
         clearPendingDiffFilePatch("compareDiff", patch.diffId);
         if (diffFilePatchErrors.get("compareDiff")?.filePath === patch.file.newPath) diffFilePatchErrors.delete("compareDiff");
+        const activeDiffReviewSessionId = activeSessionId && projections.get(activeSessionId)?.summary.sessionMode === "diffReview"
+          ? activeSessionId
+          : null;
+        if (activeDiffReviewSessionId) {
+          clearPendingDiffFilePatch(activeDiffReviewSessionId, patch.diffId);
+          if (diffFilePatchErrors.get(activeDiffReviewSessionId)?.filePath === patch.file.newPath) diffFilePatchErrors.delete(activeDiffReviewSessionId);
+        }
         markComparePanelDirty();
         renderComparePanelIfActive();
+        if (activeDiffReviewSessionId) renderDiffsViewIfActive(activeDiffReviewSessionId);
       } else {
         const sessionId = currentSessionChangesRequest?.sessionId;
         const state = sessionId ? sessionChangesStates.get(sessionId) : undefined;
@@ -1591,8 +1606,13 @@ function handleServerMessage(message: ServerMessage): void {
         if (compareDiffId !== message.diffId) break;
         compareDiffLoading = false;
         clearPendingDiffFilePatch("compareDiff", message.diffId);
+        const activeDiffReviewSessionId = activeSessionId && projections.get(activeSessionId)?.summary.sessionMode === "diffReview"
+          ? activeSessionId
+          : null;
+        if (activeDiffReviewSessionId) clearPendingDiffFilePatch(activeDiffReviewSessionId, message.diffId);
         markComparePanelDirty();
         renderComparePanelIfActive();
+        if (activeDiffReviewSessionId) renderDiffsViewIfActive(activeDiffReviewSessionId);
       } else {
         const currentRequest = currentSessionChangesRequest;
         if (currentRequest?.diffId !== message.diffId) break;
@@ -1607,19 +1627,32 @@ function handleServerMessage(message: ServerMessage): void {
       if (message.targetClientId && message.targetClientId !== diffClientId) break;
       if (message.scope === "compareDiff") {
         if (!message.diffId || compareDiffId !== message.diffId) break;
-        const pending = pendingDiffFilePatches.get("compareDiff");
-        if (pending && compareDiffState && pending.diffId === message.diffId && pending.comparisonKey === compareDiffState.comparison.comparisonKey) {
+        const activeDiffReviewSessionId = activeSessionId && projections.get(activeSessionId)?.summary.sessionMode === "diffReview"
+          ? activeSessionId
+          : null;
+        const pendingCompare = pendingDiffFilePatches.get("compareDiff");
+        const pendingDiffReview = activeDiffReviewSessionId ? pendingDiffFilePatches.get(activeDiffReviewSessionId) : undefined;
+        if (pendingCompare && compareDiffState && pendingCompare.diffId === message.diffId && pendingCompare.comparisonKey === compareDiffState.comparison.comparisonKey) {
           pendingDiffFilePatches.delete("compareDiff");
-          diffFilePatchErrors.set("compareDiff", { filePath: pending.filePath, message: message.message });
+          diffFilePatchErrors.set("compareDiff", { filePath: pendingCompare.filePath, message: message.message });
           compareDiffLoading = false;
           markComparePanelDirty();
           renderComparePanelIfActive();
+          if (activeDiffReviewSessionId) renderDiffsViewIfActive(activeDiffReviewSessionId);
+          break;
+        }
+        if (pendingDiffReview && compareDiffState && pendingDiffReview.diffId === message.diffId && pendingDiffReview.comparisonKey === compareDiffState.comparison.comparisonKey) {
+          pendingDiffFilePatches.delete(activeDiffReviewSessionId!);
+          diffFilePatchErrors.set(activeDiffReviewSessionId!, { filePath: pendingDiffReview.filePath, message: message.message });
+          compareDiffLoading = false;
+          if (activeDiffReviewSessionId) renderDiffsViewIfActive(activeDiffReviewSessionId);
           break;
         }
         compareDiffLoading = false;
         diffErrors.set("compareDiff", message.message);
         markComparePanelDirty();
         renderComparePanelIfActive();
+        if (activeDiffReviewSessionId) renderDiffsViewIfActive(activeDiffReviewSessionId);
         break;
       }
       if (message.scope === "sessionChanges") {
@@ -3953,6 +3986,60 @@ function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?
   renderComparePanelIfActive();
 }
 
+type DiffReviewRequest = {
+  repoRoot: string;
+  baseText: string;
+  headText: string;
+  payloadKind: DiffDetailMode;
+};
+
+function diffReviewRequestForSummary(summary: SessionSummary): DiffReviewRequest | null {
+  if (summary.sessionMode !== "diffReview") return null;
+  const repoRoot = summary.cwd?.trim();
+  const title = summary.title?.trim();
+  if (!repoRoot || !title?.startsWith("diff:")) return null;
+  const spec = title.slice("diff:".length).trim();
+  const lastSpace = spec.lastIndexOf(" ");
+  const range = lastSpace === -1 ? spec : spec.slice(lastSpace + 1);
+  const separator = range.indexOf("..");
+  if (separator <= 0) return null;
+  const baseText = range.slice(0, separator).trim();
+  const headText = range.slice(separator + 2).trim();
+  if (!baseText || !headText) return null;
+  return { repoRoot, baseText, headText, payloadKind: "filePatch" };
+}
+
+function compareStateMatchesDiffReview(request: DiffReviewRequest): boolean {
+  return Boolean(
+    compareDiffState &&
+      compareDiffState.request.scope === "compareDiff" &&
+      compareDiffState.request.repoRoot === request.repoRoot &&
+      diffRefInputText(compareDiffState.request.base) === request.baseText &&
+      diffRefInputText(compareDiffState.request.head) === request.headText,
+  );
+}
+
+function requestDiffReviewState(
+  sessionId: string,
+  summary: SessionSummary,
+  overrides: { payloadKind?: DiffDetailMode; currentCommitOid?: string | null } = {},
+): void {
+  const request = diffReviewRequestForSummary(summary);
+  if (!request) {
+    diffErrors.set(sessionId, "This diff session is missing its repository/ref configuration.");
+    markDiffsViewDirty();
+    renderDiffsViewIfActive(sessionId);
+    return;
+  }
+  requestCompareDiff({
+    repoRoot: request.repoRoot,
+    base: request.baseText,
+    head: request.headText,
+    payloadKind: overrides.payloadKind ?? (compareStateMatchesDiffReview(request) ? compareDiffState?.comparison.detailMode : request.payloadKind),
+    currentCommitOid: overrides.currentCommitOid ?? (compareStateMatchesDiffReview(request) ? compareDiffState?.review.currentCommitOid ?? null : null),
+  });
+}
+
 function renderDiffsViewIfActive(sessionId: string): void {
   if (desktopDockview?.isPanelActive("diffs")) {
     desktopDockview.withPanel("diffs", container => renderDiffsView(container, sessionId ? projections.get(sessionId) : undefined));
@@ -3990,7 +4077,12 @@ function isSessionChangesPanelActive(): boolean {
 
 function requestActiveDiffState(): void {
   if (!activeSessionId || !isSessionChangesPanelActive()) return;
-  if (!projections.has(activeSessionId) || diffLoadingSessions.has(activeSessionId)) return;
+  const projection = projections.get(activeSessionId);
+  if (!projection || diffLoadingSessions.has(activeSessionId)) return;
+  if (projection.summary.sessionMode === "diffReview") {
+    requestDiffReviewState(activeSessionId, projection.summary);
+    return;
+  }
   const state = sessionChangesStates.get(activeSessionId);
   if (!state) {
     requestSessionChanges(activeSessionId);
@@ -4458,6 +4550,11 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
 }
 
 function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, sidebar: HTMLElement, main: HTMLElement, container: HTMLElement): void {
+  const projection = projections.get(sessionId);
+  if (projection?.summary.sessionMode === "diffReview") {
+    renderDiffReviewSessionView(sessionId, projection.summary, sidebarTop, sidebar, main, container);
+    return;
+  }
   const state = sessionChangesStates.get(sessionId);
   const error = diffErrors.get(sessionId);
 
@@ -4500,7 +4597,39 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
     renderDiffMessage(main, state.reason, true);
     return;
   }
-  renderReviewableDiff(sessionId, state, sidebarTop, sidebar, main, container, true);
+  renderReviewableDiff(sessionId, state, sidebarTop, sidebar, main, container, true, "sessionChanges");
+}
+
+function renderDiffReviewSessionView(
+  sessionId: string,
+  summary: SessionSummary,
+  sidebarTop: HTMLElement,
+  sidebar: HTMLElement,
+  main: HTMLElement,
+  container: HTMLElement,
+): void {
+  const header = mkEl("div");
+  header.className = "diffs-toolbar";
+  const title = mkEl("strong");
+  title.textContent = "Diff";
+  header.append(title);
+  main.append(header);
+  const request = diffReviewRequestForSummary(summary);
+  if (!request) {
+    renderDiffMessage(main, "This diff session is missing its repository/ref configuration.", true);
+    return;
+  }
+  const error = diffErrors.get("compareDiff");
+  if (error) {
+    renderDiffMessage(main, error, true);
+    return;
+  }
+  if (!compareDiffState || !compareStateMatchesDiffReview(request)) {
+    renderDiffMessage(main, "Loading diff…", false);
+    if (!compareDiffLoading) requestDiffReviewState(sessionId, summary);
+    return;
+  }
+  renderReviewableDiff(sessionId, compareDiffState, sidebarTop, sidebar, main, container, true, "compareDiff");
 }
 
 function renderSessionRepoControls(sessionId: string, state: SessionChangesSummaryState, sidebar: HTMLElement): void {
@@ -4599,7 +4728,7 @@ function renderComparePanel(container: HTMLElement): void {
     renderDiffMessage(main, compareDiffLoading ? "Loading compare diff…" : "Run an explicit repository/ref comparison.", false);
     return;
   }
-  renderReviewableDiff("compareDiff", compareDiffState, sidebarTop, sidebar, main, null, false);
+  renderReviewableDiff("compareDiff", compareDiffState, sidebarTop, sidebar, main, null, false, "compareDiff");
 }
 
 function renderDiffMessage(main: HTMLElement, message: string, error: boolean): void {
@@ -4612,11 +4741,11 @@ function renderDiffMessage(main: HTMLElement, message: string, error: boolean): 
   main.append(body);
 }
 
-function requestSelectedFilePatch(annotationKey: string, state: DiffReviewableState, filePath: string): void {
+function requestSelectedFilePatch(annotationKey: string, state: DiffReviewableState, filePath: string, requestMode: "sessionChanges" | "compareDiff"): void {
   const file = state.summary.files.find(candidate => candidate.newPath === filePath);
   if (!file) return;
   const key = comparisonKey(state);
-  if (annotationKey === "compareDiff") {
+  if (requestMode === "compareDiff") {
     if (!compareDiffId || !compareDiffState || pendingDiffFilePatchMatches(annotationKey, compareDiffId, key, filePath)) return;
     pendingDiffFilePatches.set(annotationKey, { diffId: compareDiffId, comparisonKey: key, filePath });
     diffFilePatchErrors.delete(annotationKey);
@@ -4637,6 +4766,10 @@ function requestSelectedFilePatch(annotationKey: string, state: DiffReviewableSt
     diffFilePatchErrors.set(annotationKey, { filePath, message: "Not connected to the Fura bridge." });
     markComparePanelDirty();
     renderComparePanelIfActive();
+    if (annotationKey !== "compareDiff") {
+      markDiffsViewDirty();
+      renderDiffsViewIfActive(annotationKey);
+    }
     return;
   }
   const diffId = sessionChangesDiffIds.get(annotationKey);
@@ -4670,6 +4803,7 @@ function renderReviewableDiff(
   main: HTMLElement,
   jumpContainer: HTMLElement | null,
   allowPromptActions: boolean,
+  requestMode: "sessionChanges" | "compareDiff",
 ): void {
   const key = comparisonKey(state);
   const annotations = diffAnnotations.get(annotationKey) ?? [];
@@ -4693,8 +4827,15 @@ function renderReviewableDiff(
   payloadToggle.textContent = state.comparison.detailMode === "filePatch" ? "Show stat" : "Show file patch";
   payloadToggle.addEventListener("click", () => {
     const nextPayload: DiffDetailMode = state.comparison.detailMode === "filePatch" ? "statOnly" : "filePatch";
-    if (annotationKey === "compareDiff") requestCompareDiff({ payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
-    else requestSessionChangesRefresh(annotationKey, { payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
+    if (requestMode === "compareDiff") {
+      if (annotationKey === "compareDiff") requestCompareDiff({ payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
+      else {
+        const summary = projections.get(annotationKey)?.summary;
+        if (summary) requestDiffReviewState(annotationKey, summary, { payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
+      }
+    } else {
+      requestSessionChangesRefresh(annotationKey, { payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
+    }
   });
   toolbar.append(payloadToggle);
   const firstCommit = state.review.commits[0]?.oid ?? null;
@@ -4704,8 +4845,15 @@ function renderReviewableDiff(
   stepBtn.disabled = state.review.commits.length === 0;
   stepBtn.addEventListener("click", () => {
     const selected = state.review.currentCommitOid ? null : firstCommit;
-    if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: selected });
-    else requestSessionChangesRefresh(annotationKey, { currentCommitOid: selected });
+    if (requestMode === "compareDiff") {
+      if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: selected });
+      else {
+        const summary = projections.get(annotationKey)?.summary;
+        if (summary) requestDiffReviewState(annotationKey, summary, { currentCommitOid: selected });
+      }
+    } else {
+      requestSessionChangesRefresh(annotationKey, { currentCommitOid: selected });
+    }
   });
   toolbar.append(stepBtn);
   if (state.review.commits.length > 0) {
@@ -4725,8 +4873,15 @@ function renderReviewableDiff(
     }
     commitSelect.addEventListener("change", () => {
       const selected = commitSelect.value || null;
-      if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: selected });
-      else requestSessionChangesRefresh(annotationKey, { currentCommitOid: selected });
+      if (requestMode === "compareDiff") {
+        if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: selected });
+        else {
+          const summary = projections.get(annotationKey)?.summary;
+          if (summary) requestDiffReviewState(annotationKey, summary, { currentCommitOid: selected });
+        }
+      } else {
+        requestSessionChangesRefresh(annotationKey, { currentCommitOid: selected });
+      }
     });
     toolbar.append(commitSelect);
   }
@@ -4738,8 +4893,15 @@ function renderReviewableDiff(
   prev.addEventListener("click", () => {
     if (index === null) return;
     const oid = state.review.commits[index - 1]?.oid ?? null;
-    if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: oid });
-    else requestSessionChangesRefresh(annotationKey, { currentCommitOid: oid });
+    if (requestMode === "compareDiff") {
+      if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: oid });
+      else {
+        const summary = projections.get(annotationKey)?.summary;
+        if (summary) requestDiffReviewState(annotationKey, summary, { currentCommitOid: oid });
+      }
+    } else {
+      requestSessionChangesRefresh(annotationKey, { currentCommitOid: oid });
+    }
   });
   const next = mkEl("button");
   next.type = "button";
@@ -4748,8 +4910,15 @@ function renderReviewableDiff(
   next.addEventListener("click", () => {
     if (index === null) return;
     const oid = state.review.commits[index + 1]?.oid ?? null;
-    if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: oid });
-    else requestSessionChangesRefresh(annotationKey, { currentCommitOid: oid });
+    if (requestMode === "compareDiff") {
+      if (annotationKey === "compareDiff") requestCompareDiff({ currentCommitOid: oid });
+      else {
+        const summary = projections.get(annotationKey)?.summary;
+        if (summary) requestDiffReviewState(annotationKey, summary, { currentCommitOid: oid });
+      }
+    } else {
+      requestSessionChangesRefresh(annotationKey, { currentCommitOid: oid });
+    }
   });
   toolbar.append(prev, next);
   if (state.review.currentCommitOid) {
@@ -4793,7 +4962,7 @@ function renderReviewableDiff(
     pre.textContent = state.summary.stat ?? "";
     body.append(note, pre);
   } else if (!cachedPatch) {
-    if (!filePatchError) requestSelectedFilePatch(annotationKey, state, selectedFilePath);
+    if (!filePatchError) requestSelectedFilePatch(annotationKey, state, selectedFilePath, requestMode);
     const loading = mkEl("p");
     loading.className = `empty diffs-empty ${filePatchError ? "diffs-error" : ""}`;
     loading.textContent = filePatchError
