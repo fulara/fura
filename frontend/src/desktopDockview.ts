@@ -13,8 +13,7 @@ export type DesktopDockview = {
   ensureDiffsPanel(): boolean;
   ensureComparePanel(): boolean;
   closePanel(id: "sessionChanges" | "diffs" | "compare"): boolean;
-  snapshotLayout(): SerializedDockview;
-  restoreLayout(layout: SerializedDockview): void;
+  setPanelVisible(id: "sessionChanges" | "diffs" | "compare", visible: boolean): boolean;
 };
 
 type DesktopDockviewOptions = {
@@ -146,14 +145,11 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       options.onPanelClosed?.(id);
       return true;
     },
-    snapshotLayout() {
-      return api.toJSON();
-    },
-    restoreLayout(layout) {
-      panelEls.sessionChanges = undefined;
-      panelEls.diffs = undefined;
-      panelEls.compare = undefined;
-      api.fromJSON(layout);
+    setPanelVisible(id, visible) {
+      const panel = api.getGroupPanel(id);
+      if (!panel) return false;
+      api.setVisible(panel.group, visible);
+      return true;
     },
   };
 }

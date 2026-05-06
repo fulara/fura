@@ -942,7 +942,6 @@ type CodeOpenRequest =
 // --- Desktop workspace state ---
 
 let desktopDockview: DesktopDockview | null = null;
-let preDiffReviewLayout: import("dockview-core").SerializedDockview | null = null;
 let codePanelDirty = true;
 let codeSessionId: string | null = null;
 let codeWorkspace: CodeWorkspaceSummary | null = null;
@@ -4165,27 +4164,23 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
   if (!desktopDockview) return;
   const summary = (activeSessionId ? projections.get(activeSessionId)?.summary : undefined) ?? (activeSessionId ? currentSessionSummary(activeSessionId) : undefined);
   const isDiffReview = summary?.sessionMode === "diffReview";
+  desktopDockview.ensureDiffsPanel();
+  const wasDiffsActive = desktopDockview.isPanelActive("diffs");
+  const wasSessionChangesActive = desktopDockview.isPanelActive("sessionChanges");
   if (isDiffReview) {
-    if (!preDiffReviewLayout && desktopDockview.panelMounted("diffs")) {
-      preDiffReviewLayout = desktopDockview.snapshotLayout();
-    }
-    desktopDockview.closePanel("diffs");
     desktopDockview.ensureSessionChangesPanel();
+    desktopDockview.setPanelVisible("diffs", false);
+    desktopDockview.setPanelVisible("sessionChanges", true);
     markDiffsViewDirty();
-    if (activateCreatedDiffReview) desktopDockview.activatePanel("sessionChanges");
+    if (activateCreatedDiffReview || wasDiffsActive) desktopDockview.activatePanel("sessionChanges");
     renderDiffsViewIfActive(activeSessionId ?? "");
     requestActiveDiffState();
   } else {
     clearCurrentSessionChangesRequest("closed");
-    if (preDiffReviewLayout) {
-      desktopDockview.restoreLayout(preDiffReviewLayout);
-      preDiffReviewLayout = null;
-      markDiffsViewDirty();
-      if (activeSessionId) renderDiffsViewIfActive(activeSessionId);
-    } else {
-      desktopDockview.closePanel("sessionChanges");
-      desktopDockview.ensureDiffsPanel();
-    }
+    desktopDockview.setPanelVisible("sessionChanges", false);
+    desktopDockview.setPanelVisible("diffs", true);
+    if (wasSessionChangesActive) desktopDockview.activatePanel("diffs");
+    desktopDockview.closePanel("sessionChanges");
   }
 }
 
