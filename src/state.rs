@@ -16,8 +16,11 @@ use crate::{
 pub(crate) struct AppState {
     pub(crate) token: Arc<String>,
     pub(crate) auth_sessions: Arc<RwLock<HashMap<String, AuthSession>>>,
+    /// Owner for coupled session/runtime maps; top-level aliases below point to the same locks during the staged migration.
+    pub(crate) session_runtime: SessionRuntimeState,
     pub(crate) sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
     pub(crate) rpc_sessions: Arc<RwLock<HashMap<String, RpcSessionHandle>>>,
+    #[allow(dead_code)]
     pub(crate) rpc_session_targets: Arc<RwLock<HashMap<String, String>>>,
     /// Persisted Fura-owned session metadata, keyed by OMP session id.
     pub(crate) session_categories: Arc<RwLock<HashMap<String, String>>>,
@@ -55,6 +58,148 @@ pub(crate) struct AppState {
     pub(crate) thinking_visibility: Arc<RwLock<ThinkingVisibilityPreference>>,
     pub(crate) allowed_origins: Option<Arc<Vec<String>>>,
     pub(crate) secure_auth_cookie: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct SessionRuntimeState {
+    pub(crate) sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
+    pub(crate) rpc_sessions: Arc<RwLock<HashMap<String, RpcSessionHandle>>>,
+    pub(crate) rpc_session_targets: Arc<RwLock<HashMap<String, String>>>,
+    /// Persisted Fura-owned session metadata, keyed by OMP session id.
+    pub(crate) session_categories: Arc<RwLock<HashMap<String, String>>>,
+    pub(crate) session_modes: Arc<RwLock<HashMap<String, SessionMode>>>,
+    /// Metadata for a newly spawned RPC child before OMP reports its real session id.
+    pub(crate) pending_created_sessions: Arc<RwLock<HashMap<String, PendingCreatedSession>>>,
+    /// Name to apply to the next new session spawned by a fork or handoff on this transport.
+    pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
+    /// Approved plan metadata waiting for / attached to the execution session spawned by OMP.
+    pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,
+}
+
+pub(crate) struct RemovedRpcTransport {
+    pub(crate) handle: RpcSessionHandle,
+    pub(crate) target_session_id: String,
+}
+
+impl SessionRuntimeState {
+    pub(crate) fn new(
+        session_categories: HashMap<String, String>,
+        session_modes: HashMap<String, SessionMode>,
+    ) -> Self {
+        Self {
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
+            rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
+            session_categories: Arc::new(RwLock::new(session_categories)),
+            session_modes: Arc::new(RwLock::new(session_modes)),
+            pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
+            pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
+            plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) async fn register_transport(
+        &self,
+        transport_session_id: String,
+        handle: RpcSessionHandle,
+    ) {
+        self.rpc_sessions
+            .write()
+            .await
+            .insert(transport_session_id.clone(), handle);
+        self.rpc_session_targets
+            .write()
+            .await
+            .insert(transport_session_id.clone(), transport_session_id);
+    }
+
+    pub(crate) async fn map_transport_to_session(
+        &self,
+        transport_session_id: &str,
+        target_session_id: String,
+    ) {
+        self.rpc_session_targets
+            .write()
+            .await
+            .insert(transport_session_id.to_string(), target_session_id);
+    }
+
+    pub(crate) async fn remove_transport(
+        &self,
+        transport_session_id: &str,
+    ) -> Option<RemovedRpcTransport> {
+        let handle = self
+            .rpc_sessions
+            .write()
+            .await
+            .remove(transport_session_id)?;
+        let target_session_id = self
+            .rpc_session_targets
+            .write()
+            .await
+            .remove(transport_session_id)
+            .unwrap_or_else(|| transport_session_id.to_string());
+        Some(RemovedRpcTransport {
+            handle,
+            target_session_id,
+        })
+    }
+
+    pub(crate) async fn target_session_id_for_transport(
+        &self,
+        transport_session_id: &str,
+    ) -> String {
+        self.rpc_session_targets
+            .read()
+            .await
+            .get(transport_session_id)
+            .cloned()
+            .unwrap_or_else(|| transport_session_id.to_string())
+    }
+
+    pub(crate) async fn transport_session_id_for(&self, session_id: &str) -> Option<String> {
+        if self.rpc_sessions.read().await.contains_key(session_id) {
+            return Some(session_id.to_string());
+        }
+
+        let targets = self.rpc_session_targets.read().await;
+        if let Some((transport_id, _)) = targets
+            .iter()
+            .find(|(_, target_id)| target_id == &session_id)
+        {
+            return Some(transport_id.clone());
+        }
+
+        if !targets.contains_key(session_id) {
+            return Some(session_id.to_string());
+        }
+
+        None
+    }
+
+    pub(crate) async fn contains_transport(&self, transport_session_id: &str) -> bool {
+        self.rpc_sessions
+            .read()
+            .await
+            .contains_key(transport_session_id)
+    }
+
+    pub(crate) async fn stdin_for_transport(
+        &self,
+        transport_session_id: &str,
+    ) -> Option<mpsc::Sender<Value>> {
+        self.rpc_sessions
+            .read()
+            .await
+            .get(transport_session_id)
+            .map(|handle| handle.stdin.clone())
+    }
+}
+
+impl Default for SessionRuntimeState {
+    fn default() -> Self {
+        Self::new(HashMap::new(), HashMap::new())
+    }
 }
 
 #[derive(Debug, Clone)]

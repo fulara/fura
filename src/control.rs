@@ -273,10 +273,9 @@ pub(crate) async fn apply_controller_get_state(
 
     if let Some(session_id) = rpc_session_id {
         state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert(transport_session_id.to_string(), session_id.clone());
+            .session_runtime
+            .map_transport_to_session(transport_session_id, session_id.clone())
+            .await;
         info!(
             action = "control.session_mapped",
             transport_session_id = %transport_session_id,
@@ -350,7 +349,7 @@ async fn ensure_controller_session(state: &AppState) -> Result<String, String> {
         .transport_session_id
         .clone()
     {
-        if state.rpc_sessions.read().await.contains_key(&existing) {
+        if state.session_runtime.contains_transport(&existing).await {
             return Ok(existing);
         }
     }

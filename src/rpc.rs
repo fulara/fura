@@ -57,18 +57,12 @@ async fn complete_model_catalog_request(state: &AppState, session_id: &str) -> O
 }
 
 async fn stop_transport(state: &AppState, transport_session_id: &str) {
-    if let Some(handle) = state
-        .rpc_sessions
-        .write()
+    if let Some(removed) = state
+        .session_runtime
+        .remove_transport(transport_session_id)
         .await
-        .remove(transport_session_id)
     {
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .remove(transport_session_id);
-        let _ = handle.stop.send(());
+        let _ = removed.handle.stop.send(());
     }
 }
 
@@ -164,32 +158,16 @@ async fn fail_pending_create_initialization(
 
 pub(crate) async fn rpc_session_target_id(state: &AppState, transport_session_id: &str) -> String {
     state
-        .rpc_session_targets
-        .read()
+        .session_runtime
+        .target_session_id_for_transport(transport_session_id)
         .await
-        .get(transport_session_id)
-        .cloned()
-        .unwrap_or_else(|| transport_session_id.to_string())
 }
 
 pub(crate) async fn rpc_transport_session_id(state: &AppState, session_id: &str) -> Option<String> {
-    if state.rpc_sessions.read().await.contains_key(session_id) {
-        return Some(session_id.to_string());
-    }
-
-    let targets = state.rpc_session_targets.read().await;
-    if let Some((transport_id, _)) = targets
-        .iter()
-        .find(|(_, target_id)| target_id == &session_id)
-    {
-        return Some(transport_id.clone());
-    }
-
-    if !targets.contains_key(session_id) {
-        return Some(session_id.to_string());
-    }
-
-    None
+    state
+        .session_runtime
+        .transport_session_id_for(session_id)
+        .await
 }
 
 pub(crate) async fn send_rpc_command(
@@ -200,13 +178,11 @@ pub(crate) async fn send_rpc_command(
     let transport_session_id = rpc_transport_session_id(state, session_id)
         .await
         .ok_or_else(|| format!("session {session_id} has no live RPC child"))?;
-    let stdin = {
-        let rpc_sessions = state.rpc_sessions.read().await;
-        rpc_sessions
-            .get(&transport_session_id)
-            .map(|handle| handle.stdin.clone())
-            .ok_or_else(|| format!("session {session_id} has no live RPC child"))?
-    };
+    let stdin = state
+        .session_runtime
+        .stdin_for_transport(&transport_session_id)
+        .await
+        .ok_or_else(|| format!("session {session_id} has no live RPC child"))?;
 
     info!(
         direction = "bridge_to_rpc",
@@ -271,18 +247,16 @@ pub(crate) async fn spawn_rpc_child(
 
     let (stdin_tx, mut stdin_rx) = mpsc::channel::<Value>(128);
     let (stop_tx, stop_rx) = oneshot::channel::<()>();
-    state.rpc_sessions.write().await.insert(
-        session_id.clone(),
-        RpcSessionHandle {
-            stdin: stdin_tx,
-            stop: stop_tx,
-        },
-    );
     state
-        .rpc_session_targets
-        .write()
-        .await
-        .insert(session_id.clone(), session_id.clone());
+        .session_runtime
+        .register_transport(
+            session_id.clone(),
+            RpcSessionHandle {
+                stdin: stdin_tx,
+                stop: stop_tx,
+            },
+        )
+        .await;
 
     let write_session_id = session_id.clone();
     tokio::spawn(async move {
@@ -331,12 +305,11 @@ pub(crate) async fn spawn_rpc_child(
             status = child.wait() => status,
         };
 
-        state.rpc_sessions.write().await.remove(&session_id);
         let target_session_id = state
-            .rpc_session_targets
-            .write()
+            .session_runtime
+            .remove_transport(&session_id)
             .await
-            .remove(&session_id)
+            .map(|removed| removed.target_session_id)
             .unwrap_or_else(|| session_id.clone());
         let removed_review_contexts =
             remove_review_contexts_for_session(&state, &target_session_id).await;
@@ -1458,10 +1431,9 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             }
             if target_changed {
                 state
-                    .rpc_session_targets
-                    .write()
-                    .await
-                    .insert(session_id.to_string(), target_session_id.clone());
+                    .session_runtime
+                    .map_transport_to_session(session_id, target_session_id.clone())
+                    .await;
                 {
                     let mut categories = state.session_categories.write().await;
                     if let Some(category) = target_category {

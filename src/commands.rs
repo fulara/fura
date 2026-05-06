@@ -1102,8 +1102,11 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
 
     let session_id = discovered.id.clone();
     if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
-        let rpc_sessions = state.rpc_sessions.read().await;
-        if rpc_sessions.contains_key(&transport_session_id) {
+        if state
+            .session_runtime
+            .contains_transport(&transport_session_id)
+            .await
+        {
             let sessions = state.sessions.read().await;
             return match sessions.get(&session_id) {
                 Some(record) => vec![ServerMessage::SessionSnapshot {
@@ -1140,8 +1143,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
     };
 
     let transport_session_id = {
-        let rpc_sessions = state.rpc_sessions.read().await;
-        if rpc_sessions.contains_key(&session_id) {
+        if state.session_runtime.contains_transport(&session_id).await {
             Uuid::new_v4().to_string()
         } else {
             session_id.clone()
@@ -1159,10 +1161,9 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
 
     if spawn_result.is_ok() {
         state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert(transport_session_id, session_id.clone());
+            .session_runtime
+            .map_transport_to_session(&transport_session_id, session_id.clone())
+            .await;
     }
 
     if let Err(error) = spawn_result {
@@ -1193,18 +1194,12 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
     info!(action = "session.stop", session_id = %session_id);
     clear_review_contexts_for_session(state, &session_id).await;
     if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
-        if let Some(handle) = state
-            .rpc_sessions
-            .write()
+        if let Some(removed) = state
+            .session_runtime
+            .remove_transport(&transport_session_id)
             .await
-            .remove(&transport_session_id)
         {
-            state
-                .rpc_session_targets
-                .write()
-                .await
-                .remove(&transport_session_id);
-            let _ = handle.stop.send(());
+            let _ = removed.handle.stop.send(());
         }
     }
 
@@ -1239,18 +1234,12 @@ pub(crate) async fn delete_session(
 
     // Stop managed child if running.
     if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
-        if let Some(handle) = state
-            .rpc_sessions
-            .write()
+        if let Some(removed) = state
+            .session_runtime
+            .remove_transport(&transport_session_id)
             .await
-            .remove(&transport_session_id)
         {
-            state
-                .rpc_session_targets
-                .write()
-                .await
-                .remove(&transport_session_id);
-            let _ = handle.stop.send(());
+            let _ = removed.handle.stop.send(());
         }
     }
 

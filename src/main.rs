@@ -138,19 +138,21 @@ async fn main() -> anyhow::Result<()> {
     let review_comment_db_path = database_path_from_config(config_path.as_deref());
     initialize_database(&review_comment_db_path).map_err(anyhow::Error::msg)?;
     let (events, _) = broadcast::channel(512);
+    let session_runtime = SessionRuntimeState::new(session_categories, session_modes);
     let shared_state = AppState {
         token: Arc::new(token),
         auth_sessions: Arc::new(RwLock::new(HashMap::new())),
-        sessions: Arc::new(RwLock::new(HashMap::new())),
-        rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
-        rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
-        session_categories: Arc::new(RwLock::new(session_categories)),
-        session_modes: Arc::new(RwLock::new(session_modes)),
-        pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
-        pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
+        session_runtime: session_runtime.clone(),
+        sessions: session_runtime.sessions.clone(),
+        rpc_sessions: session_runtime.rpc_sessions.clone(),
+        rpc_session_targets: session_runtime.rpc_session_targets.clone(),
+        session_categories: session_runtime.session_categories.clone(),
+        session_modes: session_runtime.session_modes.clone(),
+        pending_created_sessions: session_runtime.pending_created_sessions.clone(),
+        pending_new_session_names: session_runtime.pending_new_session_names.clone(),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
         pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
-        plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
+        plan_execution_carryovers: session_runtime.plan_execution_carryovers.clone(),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
         proposed_models: Arc::new(RwLock::new(proposed_models)),
@@ -367,7 +369,7 @@ fn log_server_ready(
 }
 
 async fn broadcast_sessions_snapshot(state: &AppState) {
-    let sessions = state.sessions.read().await;
+    let sessions = state.session_runtime.sessions.read().await;
     let _ = state.events.send(sessions_snapshot_from_map(&sessions));
 }
 
@@ -667,19 +669,21 @@ pub(crate) mod tests {
         bridge_debug_file: Option<PathBuf>,
     ) -> AppState {
         let (events, _) = broadcast::channel(channel_capacity);
+        let session_runtime = SessionRuntimeState::default();
         AppState {
             token: Arc::new("test".into()),
             auth_sessions: Arc::new(RwLock::new(HashMap::new())),
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            rpc_sessions: Arc::new(RwLock::new(HashMap::new())),
-            rpc_session_targets: Arc::new(RwLock::new(HashMap::new())),
-            session_categories: Arc::new(RwLock::new(HashMap::new())),
-            session_modes: Arc::new(RwLock::new(HashMap::new())),
-            pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
-            pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
+            session_runtime: session_runtime.clone(),
+            sessions: session_runtime.sessions.clone(),
+            rpc_sessions: session_runtime.rpc_sessions.clone(),
+            rpc_session_targets: session_runtime.rpc_session_targets.clone(),
+            session_categories: session_runtime.session_categories.clone(),
+            session_modes: session_runtime.session_modes.clone(),
+            pending_created_sessions: session_runtime.pending_created_sessions.clone(),
+            pending_new_session_names: session_runtime.pending_new_session_names.clone(),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
             pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
-            plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
+            plan_execution_carryovers: session_runtime.plan_execution_carryovers.clone(),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
             proposed_models: Arc::new(RwLock::new(Vec::new())),
@@ -707,6 +711,51 @@ pub(crate) mod tests {
             allowed_origins: None,
             secure_auth_cookie: false,
         }
+    }
+
+    #[tokio::test]
+    async fn test_state_runtime_owner_shares_legacy_runtime_maps() {
+        let state = test_state(8, None);
+
+        state
+            .session_runtime
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        assert!(state.sessions.read().await.contains_key("s1"));
+
+        state
+            .session_runtime
+            .session_categories
+            .write()
+            .await
+            .insert("s1".to_string(), "infra".to_string());
+        assert_eq!(
+            state
+                .session_categories
+                .read()
+                .await
+                .get("s1")
+                .map(String::as_str),
+            Some("infra")
+        );
+
+        state
+            .pending_new_session_names
+            .write()
+            .await
+            .insert("transport".to_string(), "next".to_string());
+        assert_eq!(
+            state
+                .session_runtime
+                .pending_new_session_names
+                .read()
+                .await
+                .get("transport")
+                .map(String::as_str),
+            Some("next")
+        );
     }
 
     fn write_test_session(path: &Path, id: &str, title: &str, cwd: &str, text: &str) {
@@ -3699,6 +3748,25 @@ pub(crate) mod tests {
         );
         assert_eq!(
             state.session_modes.read().await.get("omp-session"),
+            Some(&SessionMode::DiffReview),
+        );
+        assert_eq!(
+            state
+                .session_runtime
+                .session_categories
+                .read()
+                .await
+                .get("omp-session")
+                .map(String::as_str),
+            Some("infra"),
+        );
+        assert_eq!(
+            state
+                .session_runtime
+                .session_modes
+                .read()
+                .await
+                .get("omp-session"),
             Some(&SessionMode::DiffReview),
         );
         assert!(
