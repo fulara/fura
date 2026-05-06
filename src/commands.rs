@@ -738,20 +738,23 @@ pub(crate) async fn create_session(
         arg_count = args.len(),
     );
 
-    state.pending_created_sessions.write().await.insert(
-        transport_id.clone(),
-        PendingCreatedSession {
-            cwd: Some(session_cwd.clone()),
-            args: args.clone(),
-            title: name.clone(),
-            request_id: request_id.clone(),
-            category: category.clone(),
-            created_at,
-            worktree: session_worktree,
-            session_mode,
-            proposed_model,
-        },
-    );
+    state
+        .session_runtime
+        .register_pending_create(
+            transport_id.clone(),
+            PendingCreatedSession {
+                cwd: Some(session_cwd.clone()),
+                args: args.clone(),
+                title: name.clone(),
+                request_id: request_id.clone(),
+                category: category.clone(),
+                created_at,
+                worktree: session_worktree,
+                session_mode,
+                proposed_model,
+            },
+        )
+        .await;
 
     if let Err(error) = spawn_rpc_child(
         state.clone(),
@@ -763,10 +766,9 @@ pub(crate) async fn create_session(
     .await
     {
         state
-            .pending_created_sessions
-            .write()
-            .await
-            .remove(&transport_id);
+            .session_runtime
+            .remove_pending_create(&transport_id)
+            .await;
         error!(transport_session_id = %transport_id, %error, "failed to start RPC child");
         return vec![ServerMessage::Error {
             request_id,

@@ -146,7 +146,6 @@ async fn main() -> anyhow::Result<()> {
         sessions: session_runtime.sessions.clone(),
         session_categories: session_runtime.session_categories.clone(),
         session_modes: session_runtime.session_modes.clone(),
-        pending_created_sessions: session_runtime.pending_created_sessions.clone(),
         pending_new_session_names: session_runtime.pending_new_session_names.clone(),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
         pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
@@ -675,7 +674,6 @@ pub(crate) mod tests {
             sessions: session_runtime.sessions.clone(),
             session_categories: session_runtime.session_categories.clone(),
             session_modes: session_runtime.session_modes.clone(),
-            pending_created_sessions: session_runtime.pending_created_sessions.clone(),
             pending_new_session_names: session_runtime.pending_new_session_names.clone(),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
             pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
@@ -786,6 +784,17 @@ pub(crate) mod tests {
         state
             .session_runtime
             .map_transport_to_session(transport_session_id, target_session_id.to_string())
+            .await;
+    }
+
+    async fn register_test_pending_create(
+        state: &AppState,
+        transport_session_id: &str,
+        pending: PendingCreatedSession,
+    ) {
+        state
+            .session_runtime
+            .register_pending_create(transport_session_id.to_string(), pending)
             .await;
     }
 
@@ -3273,8 +3282,9 @@ pub(crate) mod tests {
         let state = test_state(8, None);
         let mut stdin_rx =
             register_test_transport(&state, "transport-session", "transport-session", 8).await;
-        state.pending_created_sessions.write().await.insert(
-            "transport-session".to_string(),
+        register_test_pending_create(
+            &state,
+            "transport-session",
             PendingCreatedSession {
                 cwd: Some("/workspace/project".to_string()),
                 args: Vec::new(),
@@ -3293,7 +3303,8 @@ pub(crate) mod tests {
                     thinking_level: ProposedThinkingLevel::High,
                 }),
             },
-        );
+        )
+        .await;
 
         apply_rpc_frame(
             &state,
@@ -3325,8 +3336,9 @@ pub(crate) mod tests {
         let state = test_state(8, None);
         let mut stdin_rx =
             register_test_transport(&state, "transport-session", "transport-session", 8).await;
-        state.pending_created_sessions.write().await.insert(
-            "transport-session".to_string(),
+        register_test_pending_create(
+            &state,
+            "transport-session",
             PendingCreatedSession {
                 cwd: Some("/workspace/project".to_string()),
                 args: Vec::new(),
@@ -3338,7 +3350,8 @@ pub(crate) mod tests {
                 worktree: None,
                 proposed_model: None,
             },
-        );
+        )
+        .await;
 
         apply_rpc_frame(
             &state,
@@ -3368,8 +3381,9 @@ pub(crate) mod tests {
         let state = test_state(8, None);
         let _commands =
             register_test_transport(&state, "transport-session", "transport-session", 8).await;
-        state.pending_created_sessions.write().await.insert(
-            "transport-session".to_string(),
+        register_test_pending_create(
+            &state,
+            "transport-session",
             PendingCreatedSession {
                 cwd: Some("/workspace/project".to_string()),
                 args: Vec::new(),
@@ -3388,7 +3402,8 @@ pub(crate) mod tests {
                     thinking_level: ProposedThinkingLevel::Default,
                 }),
             },
-        );
+        )
+        .await;
         let mut events = state.events.subscribe();
 
         apply_rpc_response(
@@ -3421,12 +3436,10 @@ pub(crate) mod tests {
             "unexpected extra event after set_model failure"
         );
         assert!(
-            state
-                .pending_created_sessions
-                .read()
+            !state
+                .session_runtime
+                .has_pending_create("transport-session")
                 .await
-                .get("transport-session")
-                .is_none()
         );
         assert!(
             !state
@@ -3441,8 +3454,9 @@ pub(crate) mod tests {
         let state = test_state(8, None);
         let _commands =
             register_test_transport(&state, "transport-session", "transport-session", 8).await;
-        state.pending_created_sessions.write().await.insert(
-            "transport-session".to_string(),
+        register_test_pending_create(
+            &state,
+            "transport-session",
             PendingCreatedSession {
                 cwd: Some("/workspace/project".to_string()),
                 args: Vec::new(),
@@ -3461,7 +3475,8 @@ pub(crate) mod tests {
                     thinking_level: ProposedThinkingLevel::High,
                 }),
             },
-        );
+        )
+        .await;
         let mut events = state.events.subscribe();
 
         apply_rpc_response(
@@ -3494,12 +3509,10 @@ pub(crate) mod tests {
             "unexpected extra event after set_thinking_level failure"
         );
         assert!(
-            state
-                .pending_created_sessions
-                .read()
+            !state
+                .session_runtime
+                .has_pending_create("transport-session")
                 .await
-                .get("transport-session")
-                .is_none()
         );
         assert!(
             !state
@@ -3554,8 +3567,9 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn pending_created_session_becomes_visible_only_after_rpc_state() {
         let state = test_state(8, None);
-        state.pending_created_sessions.write().await.insert(
-            "transport-session".to_string(),
+        register_test_pending_create(
+            &state,
+            "transport-session",
             PendingCreatedSession {
                 cwd: Some("/workspace/project".to_string()),
                 args: vec!["--debug".to_string()],
@@ -3568,7 +3582,8 @@ pub(crate) mod tests {
                     .expect("valid test timestamp"),
                 proposed_model: None,
             },
-        );
+        )
+        .await;
         map_test_transport(&state, "transport-session", "transport-session").await;
         let mut events = state.events.subscribe();
 
@@ -3607,12 +3622,10 @@ pub(crate) mod tests {
         }
 
         assert!(
-            state
-                .pending_created_sessions
-                .read()
-                .await
-                .get("transport-session")
-                .is_none(),
+            !state
+                .session_runtime
+                .has_pending_create("transport-session")
+                .await,
             "pending create metadata should be consumed once OMP reports the real session id"
         );
         assert_eq!(

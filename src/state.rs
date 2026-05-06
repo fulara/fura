@@ -22,8 +22,6 @@ pub(crate) struct AppState {
     /// Persisted Fura-owned session metadata, keyed by OMP session id.
     pub(crate) session_categories: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) session_modes: Arc<RwLock<HashMap<String, SessionMode>>>,
-    /// Metadata for a newly spawned RPC child before OMP reports its real session id.
-    pub(crate) pending_created_sessions: Arc<RwLock<HashMap<String, PendingCreatedSession>>>,
     /// Name to apply to the next new session spawned by a fork or handoff on this transport.
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
@@ -197,6 +195,46 @@ impl SessionRuntimeState {
             .await
             .get(transport_session_id)
             .map(|handle| handle.stdin.clone())
+    }
+
+    pub(crate) async fn register_pending_create(
+        &self,
+        transport_session_id: String,
+        pending: PendingCreatedSession,
+    ) {
+        self.pending_created_sessions
+            .write()
+            .await
+            .insert(transport_session_id, pending);
+    }
+
+    pub(crate) async fn pending_create(
+        &self,
+        transport_session_id: &str,
+    ) -> Option<PendingCreatedSession> {
+        self.pending_created_sessions
+            .read()
+            .await
+            .get(transport_session_id)
+            .cloned()
+    }
+
+    pub(crate) async fn remove_pending_create(
+        &self,
+        transport_session_id: &str,
+    ) -> Option<PendingCreatedSession> {
+        self.pending_created_sessions
+            .write()
+            .await
+            .remove(transport_session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_pending_create(&self, transport_session_id: &str) -> bool {
+        self.pending_created_sessions
+            .read()
+            .await
+            .contains_key(transport_session_id)
     }
 }
 

@@ -68,11 +68,9 @@ async fn stop_transport(state: &AppState, transport_session_id: &str) {
 
 async fn initialize_pending_created_session(state: &AppState, transport_session_id: &str) -> bool {
     let pending = state
-        .pending_created_sessions
-        .read()
-        .await
-        .get(transport_session_id)
-        .cloned();
+        .session_runtime
+        .pending_create(transport_session_id)
+        .await;
     let Some(pending) = pending else {
         return false;
     };
@@ -145,10 +143,9 @@ async fn fail_pending_create_initialization(
     message: String,
 ) {
     state
-        .pending_created_sessions
-        .write()
-        .await
-        .remove(transport_session_id);
+        .session_runtime
+        .remove_pending_create(transport_session_id)
+        .await;
     let _ = state.events.send(ServerMessage::Error {
         request_id,
         message,
@@ -324,10 +321,9 @@ pub(crate) async fn spawn_rpc_child(
             return;
         }
         let pending_create = state
-            .pending_created_sessions
-            .write()
-            .await
-            .remove(&session_id);
+            .session_runtime
+            .remove_pending_create(&session_id)
+            .await;
         match status {
             Ok(status) => {
                 let code = status.code();
@@ -944,14 +940,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             });
             return;
         }
-        let pending_create = {
-            state
-                .pending_created_sessions
-                .read()
-                .await
-                .get(session_id)
-                .cloned()
-        };
+        let pending_create = state.session_runtime.pending_create(session_id).await;
         if let Some(pending) = pending_create {
             let label = pending
                 .proposed_model
@@ -1229,10 +1218,9 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let target_changed = target_session_id != current_session_id;
             let pending_create = if target_changed {
                 state
-                    .pending_created_sessions
-                    .write()
+                    .session_runtime
+                    .remove_pending_create(&current_session_id)
                     .await
-                    .remove(&current_session_id)
             } else {
                 None
             };
