@@ -99,27 +99,20 @@ body {
   text-align: left;
 }
 
-.mobile-options-section,
 .mobile-proposed-model-form,
 .mobile-proposed-models-list {
   display: grid;
   gap: 0.4rem;
 }
 
-.mobile-options-section {
-  min-width: 18rem;
-  padding-top: 0.35rem;
-  border-top: 1px solid #252a35;
+.mobile-proposed-model-form input,
+.mobile-proposed-model-form select {
+  width: 100%;
 }
 
-.mobile-options-heading {
-  color: #eef1f8;
-  font-size: 0.74rem;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+.mobile-proposed-model-dialog {
+  width: min(100%, 34rem);
 }
-
 .mobile-proposed-model-row {
   display: grid;
   grid-template-columns: 1fr auto;

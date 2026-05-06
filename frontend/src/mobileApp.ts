@@ -170,25 +170,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
               <div id="mobileOptionsMenu" class="mobile-options-menu" role="menu" hidden>
                 <button id="mobileToolVisibilityToggle" class="mobile-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
                 <button id="mobileThinkingVisibilityToggle" class="mobile-option-item" type="button" role="menuitem">Thinking: auto</button>
-                <div class="mobile-options-section">
-                  <div class="mobile-options-heading">Proposed models</div>
-                  <div id="mobileProposedModelsList" class="mobile-proposed-models-list"></div>
-                  <div class="mobile-proposed-model-form">
-                    <input id="mobileProposedModelName" autocomplete="off" spellcheck="false" placeholder="Custom name" />
-                    <input id="mobileProposedModelSearch" autocomplete="off" spellcheck="false" placeholder="Search runtime models" />
-                    <select id="mobileProposedModelCatalog"></select>
-                    <select id="mobileProposedModelThinking">
-                      <option value="default">Default</option>
-                      <option value="off">Off</option>
-                      <option value="minimal">Minimal</option>
-                      <option value="low">Low</option>
-                      <option value="medium">Medium</option>
-                      <option value="high">High</option>
-                    </select>
-                    <button id="mobileProposedModelAdd" type="button">Add proposed model</button>
-                  </div>
-                  <p id="mobileProposedModelStatus" class="mobile-dialog-status" aria-live="polite"></p>
-                </div>
+                <button id="mobileModelTemplatesOpen" class="mobile-option-item" type="button" role="menuitem">Model templates</button>
               </div>
             </div>
           </div>
@@ -324,6 +306,41 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </section>
+      <section id="mobileProposedModelsOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-proposed-model-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileProposedModelsTitle">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Configuration</p>
+              <h2 id="mobileProposedModelsTitle">Model templates</h2>
+            </div>
+          </header>
+          <div class="mobile-dialog-form">
+            <div id="mobileProposedModelsList" class="mobile-proposed-models-list"></div>
+            <div class="mobile-proposed-model-form">
+              <label class="mobile-dialog-field" for="mobileProposedModelName">Template name</label>
+              <input id="mobileProposedModelName" autocomplete="off" spellcheck="false" placeholder="Custom name" />
+              <label class="mobile-dialog-field" for="mobileProposedModelSearch">Runtime model search</label>
+              <input id="mobileProposedModelSearch" autocomplete="off" spellcheck="false" placeholder="Search runtime models" />
+              <label class="mobile-dialog-field" for="mobileProposedModelCatalog">Runtime model</label>
+              <select id="mobileProposedModelCatalog"></select>
+              <label class="mobile-dialog-field" for="mobileProposedModelThinking">Thinking level</label>
+              <select id="mobileProposedModelThinking">
+                <option value="default">Default</option>
+                <option value="off">Off</option>
+                <option value="minimal">Minimal</option>
+                <option value="low">Low</option>
+                <option value="medium">Medium</option>
+                <option value="high">High</option>
+              </select>
+              <button id="mobileProposedModelAdd" type="button">Add proposed model</button>
+            </div>
+            <p id="mobileProposedModelStatus" class="mobile-dialog-status" aria-live="polite"></p>
+            <div class="mobile-dialog-actions">
+              <button id="mobileProposedModelsClose" type="button">Close</button>
+            </div>
+          </div>
+        </div>
+      </section>
       <section id="mobileDiffCommentOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog mobile-diff-comment-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileDiffCommentTitle" aria-describedby="mobileDiffCommentBody">
           <header class="mobile-dialog-header">
@@ -414,12 +431,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const optionsMenu = requireElement<HTMLDivElement>(document, "mobileOptionsMenu");
   const toolVisibilityToggle = requireElement<HTMLButtonElement>(document, "mobileToolVisibilityToggle");
   const thinkingVisibilityToggle = requireElement<HTMLButtonElement>(document, "mobileThinkingVisibilityToggle");
+  const modelTemplatesOpen = requireElement<HTMLButtonElement>(document, "mobileModelTemplatesOpen");
+  const proposedModelsOverlay = requireElement<HTMLElement>(document, "mobileProposedModelsOverlay");
   const proposedModelsList = requireElement<HTMLDivElement>(document, "mobileProposedModelsList");
   const proposedModelName = requireElement<HTMLInputElement>(document, "mobileProposedModelName");
   const proposedModelSearch = requireElement<HTMLInputElement>(document, "mobileProposedModelSearch");
   const proposedModelCatalog = requireElement<HTMLSelectElement>(document, "mobileProposedModelCatalog");
   const proposedModelThinking = requireElement<HTMLSelectElement>(document, "mobileProposedModelThinking");
   const proposedModelAdd = requireElement<HTMLButtonElement>(document, "mobileProposedModelAdd");
+  const proposedModelsClose = requireElement<HTMLButtonElement>(document, "mobileProposedModelsClose");
   const proposedModelStatus = requireElement<HTMLParagraphElement>(document, "mobileProposedModelStatus");
   const sessionsDrawer = requireElement<HTMLElement>(document, "mobileSessionsDrawer");
   const sessionsList = requireElement<HTMLElement>(document, "mobileSessionsList");
@@ -507,6 +527,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let proposedModelCatalogModels: ModelSummary[] = [];
   let proposedModelCatalogRequestId: string | null = null;
   let proposedModelEditingId: string | null = null;
+  let proposedModelSavePending: ProposedModelConfig[] | null = null;
   let sessions: SessionSummary[] = [];
   let activeSessionId: string | null = readStoredActiveSessionId(window.sessionStorage);
   let projections = new Map<string, SessionProjection>();
@@ -706,13 +727,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const nextShowTools = !showToolBubbles;
     if (!send({ type: "config.set", showTools: nextShowTools })) return;
     applyVisibilityPreferences(nextShowTools, thinkingVisibilityMode);
-    setOptionsMenuOpen(false);
   });
   thinkingVisibilityToggle.addEventListener("click", () => {
     const nextMode = nextThinkingVisibilityMode(thinkingVisibilityMode);
     if (!send({ type: "config.set", thinkingVisibility: nextMode })) return;
     applyVisibilityPreferences(showToolBubbles, nextMode);
-    setOptionsMenuOpen(false);
+  });
+  modelTemplatesOpen.addEventListener("click", () => openMobileProposedModelsDialog());
+  proposedModelsClose.addEventListener("click", () => closeMobileProposedModelsDialog());
+  proposedModelsOverlay.addEventListener("click", event => {
+    if (event.target === proposedModelsOverlay) closeMobileProposedModelsDialog();
   });
   proposedModelAdd.addEventListener("click", addMobileProposedModel);
   proposedModelSearch.addEventListener("input", syncMobileProposedModelsUi);
@@ -725,7 +749,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     setOptionsMenuOpen(false);
   });
   document.addEventListener("keydown", event => {
-    if (event.key === "Escape" && optionsMenuOpen) setOptionsMenuOpen(false);
+    if (event.key !== "Escape") return;
+    if (!proposedModelsOverlay.hidden) {
+      closeMobileProposedModelsDialog();
+    } else if (optionsMenuOpen) {
+      setOptionsMenuOpen(false);
+    }
   });
 
   createClose.addEventListener("click", () => setCreateDrawerOpen(false));
@@ -1021,7 +1050,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
     proposedModelStatus.textContent = "Saving proposed models…";
+    proposedModelSavePending = models;
     if (!send({ type: "config.set", proposedModels: models })) {
+      proposedModelSavePending = null;
       proposedModelStatus.textContent = "Not connected to the Fura bridge.";
     }
   }
@@ -1029,7 +1060,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function setOptionsMenuOpen(open: boolean): void {
     optionsMenuOpen = open;
     syncOptionsMenu();
-    if (open) requestMobileModelCatalog();
+  }
+
+  function openMobileProposedModelsDialog(): void {
+    proposedModelsOverlay.hidden = false;
+    setOptionsMenuOpen(false);
+    requestMobileModelCatalog();
+    proposedModelName.focus();
+  }
+
+  function closeMobileProposedModelsDialog(): void {
+    proposedModelsOverlay.hidden = true;
   }
 
   function applyVisibilityPreferences(
@@ -2025,10 +2066,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         );
         syncCreateCwdDefault();
         syncMobileProposedModelsUi();
-        proposedModelName.value = "";
-        proposedModelEditingId = null;
-        proposedModelSearch.value = "";
-        proposedModelStatus.textContent = "Saved.";
+        if (proposedModelSavePending && JSON.stringify(message.config.proposedModels) === JSON.stringify(proposedModelSavePending)) {
+          proposedModelSavePending = null;
+          proposedModelName.value = "";
+          proposedModelEditingId = null;
+          proposedModelSearch.value = "";
+          proposedModelStatus.textContent = "Saved.";
+        }
         break;
       case "sessions.snapshot":
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));

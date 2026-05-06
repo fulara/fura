@@ -231,25 +231,7 @@ app.innerHTML = `
             <div id="workspaceOptionsMenu" class="workspace-options-menu" role="menu" hidden>
               <button id="toolVisibilityToggle" class="workspace-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
               <button id="thinkingVisibilityToggle" class="workspace-option-item" type="button" role="menuitem">Thinking: auto</button>
-              <div class="workspace-options-section">
-                <div class="workspace-options-heading">Proposed models</div>
-                <div id="proposedModelsList" class="proposed-models-list"></div>
-                <button id="proposedModelAdd" class="workspace-option-item" type="button">Add proposed model</button>
-                <div id="proposedModelForm" class="proposed-model-form" hidden>
-                  <label for="proposedModelNameInput">Name</label>
-                  <input id="proposedModelNameInput" autocomplete="off" spellcheck="false" placeholder="Fast review" />
-                  <label for="proposedModelSearchInput">Runtime model</label>
-                  <input id="proposedModelSearchInput" autocomplete="off" spellcheck="false" placeholder="Search OMP models" />
-                  <div id="proposedModelCatalogList" class="proposed-model-catalog" role="listbox"></div>
-                  <label for="proposedModelThinkingSelect">Thinking</label>
-                  <select id="proposedModelThinkingSelect"></select>
-                  <div class="proposed-model-actions">
-                    <button id="proposedModelSave" type="button">Save</button>
-                    <button id="proposedModelCancel" type="button">Cancel</button>
-                  </div>
-                </div>
-                <p id="proposedModelStatus" class="workspace-option-status" aria-live="polite"></p>
-              </div>
+              <button id="proposedModelsOpen" class="workspace-option-item" type="button" role="menuitem">Model templates</button>
             </div>
           </div>
           <button id="abortButton" type="button">Abort</button>
@@ -374,6 +356,41 @@ app.innerHTML = `
         <div class="modal-actions">
           <button id="modelPickerCancel" type="button">Cancel</button>
           <button id="modelPickerSelect" type="button">Use selected model</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <div id="proposedModelsOverlay" class="modal-overlay" hidden>
+    <section class="proposed-model-dialog modal-panel" role="dialog" aria-modal="true" aria-labelledby="proposedModelsTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="proposedModelsTitle">Model templates</h2>
+          <p>Configure reusable model presets for new sessions.</p>
+        </div>
+        <button id="proposedModelsClose" class="modal-close" type="button" aria-label="Close model templates">×</button>
+      </header>
+      <div class="proposed-model-dialog-body">
+        <div id="proposedModelsList" class="proposed-models-list"></div>
+        <button id="proposedModelAdd" type="button">Add model template</button>
+        <div id="proposedModelForm" class="proposed-model-form" hidden>
+          <label for="proposedModelNameInput">Template name</label>
+          <input id="proposedModelNameInput" autocomplete="off" spellcheck="false" placeholder="Fast review" />
+          <label for="proposedModelSearchInput">Runtime model</label>
+          <input id="proposedModelSearchInput" autocomplete="off" spellcheck="false" placeholder="Search OMP models" />
+          <div id="proposedModelCatalogList" class="proposed-model-catalog" role="listbox"></div>
+          <label for="proposedModelThinkingSelect">Thinking</label>
+          <select id="proposedModelThinkingSelect"></select>
+          <div class="proposed-model-actions">
+            <button id="proposedModelSave" type="button">Save</button>
+            <button id="proposedModelCancel" type="button">Cancel</button>
+          </div>
+        </div>
+      </div>
+      <footer class="modal-footer">
+        <span id="proposedModelStatus" class="workspace-option-status" aria-live="polite"></span>
+        <div class="modal-actions">
+          <button id="proposedModelsDone" type="button">Done</button>
         </div>
       </footer>
     </section>
@@ -564,6 +581,10 @@ const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
 const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
 const thinkingVisibilityToggle = requireElement<HTMLButtonElement>("thinkingVisibilityToggle");
+const proposedModelsOpen = requireElement<HTMLButtonElement>("proposedModelsOpen");
+const proposedModelsOverlay = requireElement<HTMLDivElement>("proposedModelsOverlay");
+const proposedModelsClose = requireElement<HTMLButtonElement>("proposedModelsClose");
+const proposedModelsDone = requireElement<HTMLButtonElement>("proposedModelsDone");
 const proposedModelsList = requireElement<HTMLDivElement>("proposedModelsList");
 const proposedModelAdd = requireElement<HTMLButtonElement>("proposedModelAdd");
 const proposedModelForm = requireElement<HTMLDivElement>("proposedModelForm");
@@ -573,7 +594,7 @@ const proposedModelCatalogList = requireElement<HTMLDivElement>("proposedModelCa
 const proposedModelThinkingSelect = requireElement<HTMLSelectElement>("proposedModelThinkingSelect");
 const proposedModelSave = requireElement<HTMLButtonElement>("proposedModelSave");
 const proposedModelCancel = requireElement<HTMLButtonElement>("proposedModelCancel");
-const proposedModelStatus = requireElement<HTMLParagraphElement>("proposedModelStatus");
+const proposedModelStatus = requireElement<HTMLSpanElement>("proposedModelStatus");
 const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const deleteSessionButton = requireElement<HTMLButtonElement>("deleteSessionButton");
@@ -1033,16 +1054,20 @@ toolVisibilityToggle.addEventListener("click", () => {
   const nextShowTools = !showToolBubbles;
   if (!send({ type: "config.set", showTools: nextShowTools })) return;
   applyVisibilityPreferences(nextShowTools, thinkingVisibilityMode);
-  setWorkspaceOptionsOpen(false);
 });
 thinkingVisibilityToggle.addEventListener("click", () => {
   const nextMode = nextThinkingVisibilityMode(thinkingVisibilityMode);
   if (!send({ type: "config.set", thinkingVisibility: nextMode })) return;
   applyVisibilityPreferences(showToolBubbles, nextMode);
-  setWorkspaceOptionsOpen(false);
 });
+proposedModelsOpen.addEventListener("click", openProposedModelsDialog);
 proposedModelAdd.addEventListener("click", () => openProposedModelForm());
 proposedModelCancel.addEventListener("click", () => closeProposedModelForm());
+proposedModelsClose.addEventListener("click", closeProposedModelsDialog);
+proposedModelsDone.addEventListener("click", closeProposedModelsDialog);
+proposedModelsOverlay.addEventListener("mousedown", event => {
+  if (event.target === proposedModelsOverlay) closeProposedModelsDialog();
+});
 proposedModelSearchInput.addEventListener("input", () => {
   proposedModelCatalogSelectedIndex = 0;
   renderProposedModelCatalog();
@@ -1095,8 +1120,15 @@ window.addEventListener("keydown", event => {
     openCodeSearch();
     return;
   }
-  if (workspaceOptionsOpen && event.key === "Escape") {
-    setWorkspaceOptionsOpen(false);
+  if (event.key === "Escape") {
+    if (!proposedModelsOverlay.hidden) {
+      closeProposedModelsDialog();
+      return;
+    }
+    if (workspaceOptionsOpen) {
+      setWorkspaceOptionsOpen(false);
+      return;
+    }
   }
   if (event.altKey && event.key.toLowerCase() === "m" && !event.repeat && !voiceHotkeyActive) {
     event.preventDefault();
@@ -1511,10 +1543,12 @@ function handleServerMessage(message: ServerMessage): void {
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
       );
       syncProposedModelsUi();
-      proposedModelSavePending = false;
-      if (proposedModelFormOpen) {
-        proposedModelStatus.textContent = "Saved.";
-        closeProposedModelForm();
+      if (proposedModelSavePending) {
+        proposedModelSavePending = false;
+        if (proposedModelFormOpen) {
+          closeProposedModelForm({ preserveStatus: true });
+          proposedModelStatus.textContent = "Saved.";
+        }
       }
       break;
     case "sessions.snapshot":
@@ -2980,6 +3014,31 @@ function renderCwdProposedModelOptions(): void {
   cwdPickerProposedModel.value = normalizedSelection;
 }
 
+function openProposedModelsDialog(): void {
+  proposedModelsOverlay.hidden = false;
+  setWorkspaceOptionsOpen(false);
+  syncProposedModelsUi();
+  requestProposedModelCatalog();
+  window.setTimeout(() => proposedModelAdd.focus(), 0);
+}
+
+function closeProposedModelsDialog(): void {
+  if (proposedModelSavePending) return;
+  proposedModelsOverlay.hidden = true;
+  closeProposedModelForm();
+}
+
+function requestProposedModelCatalog(): void {
+  if (proposedModelCatalog.length > 0 || proposedModelCatalogLoading) return;
+  proposedModelCatalogLoading = true;
+  proposedModelCatalogRequestId = nextClientRequestId("model-catalog");
+  proposedModelStatus.textContent = "Loading runtime models…";
+  if (!send({ type: "config.modelCatalog.list", requestId: proposedModelCatalogRequestId })) {
+    proposedModelCatalogLoading = false;
+    proposedModelStatus.textContent = "Not connected to the Fura bridge.";
+  }
+}
+
 function openProposedModelForm(model: ProposedModelConfig | null = null): void {
   proposedModelFormOpen = true;
   proposedModelEditingId = model?.id ?? null;
@@ -2993,24 +3052,16 @@ function openProposedModelForm(model: ProposedModelConfig | null = null): void {
   if (model && proposedModelCatalog.length > 0) {
     selectProposedCatalogModel(model.provider, model.modelId);
   }
-  if (proposedModelCatalog.length === 0 && !proposedModelCatalogLoading) {
-    proposedModelCatalogLoading = true;
-    proposedModelCatalogRequestId = nextClientRequestId("model-catalog");
-    proposedModelStatus.textContent = "Loading runtime models…";
-    if (!send({ type: "config.modelCatalog.list", requestId: proposedModelCatalogRequestId })) {
-      proposedModelCatalogLoading = false;
-      proposedModelStatus.textContent = "Not connected to the Fura bridge.";
-    }
-  }
+  requestProposedModelCatalog();
   window.setTimeout(() => proposedModelNameInput.focus(), 0);
 }
 
-function closeProposedModelForm(): void {
+function closeProposedModelForm(options: { preserveStatus?: boolean } = {}): void {
   if (proposedModelSavePending) return;
   proposedModelFormOpen = false;
   proposedModelEditingId = null;
   proposedModelForm.hidden = true;
-  proposedModelStatus.textContent = "";
+  if (!options.preserveStatus) proposedModelStatus.textContent = "";
 }
 
 function renderProposedModelCatalog(): void {

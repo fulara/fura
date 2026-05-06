@@ -470,22 +470,18 @@ h2 {
   color: #9ba4b5;
 }
 
-.workspace-options-section {
+
+.proposed-model-dialog.modal-panel {
+  width: min(720px, 100%);
+}
+
+.proposed-model-dialog-body {
   display: grid;
-  gap: 0.45rem;
-  min-width: 24rem;
-  padding-top: 0.35rem;
-  border-top: 1px solid #252a35;
+  gap: 0.65rem;
+  min-height: 320px;
+  overflow: auto;
+  padding: 0.75rem;
 }
-
-.workspace-options-heading {
-  color: #eef1f8;
-  font-size: 0.78rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-
 .proposed-models-list,
 .proposed-model-form {
   display: grid;

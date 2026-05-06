@@ -314,18 +314,19 @@ describe("mountMobileApp", () => {
     expect(connection.sent).toContainEqual({ type: "session.attach", sessionId: "live" });
   });
 
-  it("sends config.set when mobile visibility toggles are changed", () => {
+  it("keeps the mobile options menu open when visibility toggles are changed", () => {
     const { connection } = createHarness();
 
     document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
     document.querySelector<HTMLButtonElement>("#mobileToolVisibilityToggle")?.click();
 
     expect(connection.sent).toContainEqual({ type: "config.set", showTools: false });
+    expect(document.querySelector("#mobileOptionsMenu")?.hasAttribute("hidden")).toBe(false);
 
-    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
     document.querySelector<HTMLButtonElement>("#mobileThinkingVisibilityToggle")?.click();
 
     expect(connection.sent).toContainEqual({ type: "config.set", thinkingVisibility: "shown" });
+    expect(document.querySelector("#mobileOptionsMenu")?.hasAttribute("hidden")).toBe(false);
   });
 
   it("applies config visibility updates to the mobile transcript", () => {
@@ -1037,12 +1038,18 @@ describe("mountMobileApp", () => {
     });
     expect(select.value).toBe("default");
   });
-  it("sends config.set when adding a mobile proposed model", () => {
+  it("opens model templates in a dialog, requests the runtime catalog, and sends config.set when adding a mobile proposed model", () => {
     const { connection } = createHarness();
     document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    expect(connection.sent.some(message => message.type === "config.modelCatalog.list")).toBe(false);
+    document.querySelector<HTMLButtonElement>("#mobileModelTemplatesOpen")?.click();
+    expect(document.querySelector("#mobileOptionsMenu")?.hasAttribute("hidden")).toBe(true);
+    expect(document.querySelector("#mobileProposedModelsOverlay")?.hasAttribute("hidden")).toBe(false);
+    const catalogRequest = connection.sent.find(message => message.type === "config.modelCatalog.list");
+    expect(catalogRequest).toBeTruthy();
     connection.emit({
       type: "config.modelCatalog.list",
-      requestId: connection.sent.find(message => message.type === "config.modelCatalog.list")?.requestId,
+      requestId: catalogRequest?.requestId,
       models: [{ provider: "mock", id: "mock-reasoner", name: "Mock Reasoner", contextWindow: 1000000, thinking: true }],
     });
     const search = document.querySelector<HTMLInputElement>("#mobileProposedModelSearch");
