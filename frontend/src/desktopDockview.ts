@@ -13,6 +13,8 @@ export type DesktopDockview = {
   ensureDiffsPanel(): boolean;
   ensureComparePanel(): boolean;
   closePanel(id: "sessionChanges" | "diffs" | "compare"): boolean;
+  snapshotLayout(): SerializedDockview;
+  restoreLayout(layout: SerializedDockview): void;
 };
 
 type DesktopDockviewOptions = {
@@ -143,6 +145,15 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       api.removePanel(panel);
       options.onPanelClosed?.(id);
       return true;
+    },
+    snapshotLayout() {
+      return api.toJSON();
+    },
+    restoreLayout(layout) {
+      panelEls.sessionChanges = undefined;
+      panelEls.diffs = undefined;
+      panelEls.compare = undefined;
+      api.fromJSON(layout);
     },
   };
 }

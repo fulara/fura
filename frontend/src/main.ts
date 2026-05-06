@@ -750,6 +750,8 @@ const diffFileFilters = new Map<string, string>();
 const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
 const reviewComments = new Map<string, ReviewComment[]>();
 const reviewCommentsRequested = new Set<string>();
+const reviewCommentsLoadInFlight = new Set<string>();
+const reviewCommentsResyncNeeded = new Set<string>();
 const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
@@ -940,6 +942,7 @@ type CodeOpenRequest =
 // --- Desktop workspace state ---
 
 let desktopDockview: DesktopDockview | null = null;
+let preDiffReviewLayout: import("dockview-core").SerializedDockview | null = null;
 let codePanelDirty = true;
 let codeSessionId: string | null = null;
 let codeWorkspace: CodeWorkspaceSummary | null = null;
@@ -1474,6 +1477,8 @@ function handleServerMessage(message: ServerMessage): void {
       );
       syncProposedModelsUi();
       reviewCommentsRequested.clear();
+      reviewCommentsLoadInFlight.clear();
+      reviewCommentsResyncNeeded.clear();
       markDiffsViewDirty();
       if (activeSessionId) renderDiffsViewIfActive(activeSessionId);
       break;
@@ -1730,6 +1735,13 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     }
     case "review.comments.snapshot": {
+      reviewCommentsLoadInFlight.delete(message.sessionId);
+      if (reviewCommentsResyncNeeded.has(message.sessionId)) {
+        reviewCommentsResyncNeeded.delete(message.sessionId);
+        reviewCommentsRequested.delete(message.sessionId);
+        ensureReviewCommentsLoaded(message.sessionId);
+        break;
+      }
       reviewComments.set(message.sessionId, message.comments);
       reviewCommentsRequested.add(message.sessionId);
       markDiffsViewDirty();
@@ -1737,6 +1749,9 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     }
     case "review.comment.upserted": {
+      if (reviewCommentsLoadInFlight.has(message.comment.sessionId)) {
+        reviewCommentsResyncNeeded.add(message.comment.sessionId);
+      }
       const existing = reviewComments.get(message.comment.sessionId) ?? [];
       reviewComments.set(
         message.comment.sessionId,
@@ -1747,6 +1762,9 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     }
     case "review.comment.deleted": {
+      if (reviewCommentsLoadInFlight.has(message.sessionId)) {
+        reviewCommentsResyncNeeded.add(message.sessionId);
+      }
       reviewComments.set(
         message.sessionId,
         (reviewComments.get(message.sessionId) ?? []).filter(comment => comment.id !== message.id),
@@ -4148,6 +4166,9 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
   const summary = (activeSessionId ? projections.get(activeSessionId)?.summary : undefined) ?? (activeSessionId ? currentSessionSummary(activeSessionId) : undefined);
   const isDiffReview = summary?.sessionMode === "diffReview";
   if (isDiffReview) {
+    if (!preDiffReviewLayout && desktopDockview.panelMounted("diffs")) {
+      preDiffReviewLayout = desktopDockview.snapshotLayout();
+    }
     desktopDockview.closePanel("diffs");
     desktopDockview.ensureSessionChangesPanel();
     markDiffsViewDirty();
@@ -4156,8 +4177,15 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
     requestActiveDiffState();
   } else {
     clearCurrentSessionChangesRequest("closed");
-    desktopDockview.closePanel("sessionChanges");
-    desktopDockview.ensureDiffsPanel();
+    if (preDiffReviewLayout) {
+      desktopDockview.restoreLayout(preDiffReviewLayout);
+      preDiffReviewLayout = null;
+      markDiffsViewDirty();
+      if (activeSessionId) renderDiffsViewIfActive(activeSessionId);
+    } else {
+      desktopDockview.closePanel("sessionChanges");
+      desktopDockview.ensureDiffsPanel();
+    }
   }
 }
 
@@ -4355,9 +4383,15 @@ function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
 }
 
 function ensureReviewCommentsLoaded(sessionId: string): void {
-  if (!sessionId || reviewCommentsRequested.has(sessionId)) return;
+  if (!sessionId || reviewCommentsRequested.has(sessionId) || reviewCommentsLoadInFlight.has(sessionId)) return;
   if (send({ type: "review.comments.list", sessionId })) {
-    reviewCommentsRequested.add(sessionId);
+    reviewCommentsLoadInFlight.add(sessionId);
+  }
+}
+
+function markReviewCommentsDirty(sessionId: string): void {
+  if (reviewCommentsLoadInFlight.has(sessionId)) {
+    reviewCommentsResyncNeeded.add(sessionId);
   }
 }
 
@@ -4423,10 +4457,12 @@ function editReviewComment(comment: ReviewComment): void {
   if (next === null) return;
   const body = next.trim();
   if (!body || body === comment.body) return;
+  markReviewCommentsDirty(comment.sessionId);
   send({ type: "review.comment.update", id: comment.id, body });
 }
 
 function deleteReviewComment(comment: ReviewComment): void {
+  markReviewCommentsDirty(comment.sessionId);
   send({ type: "review.comment.delete", id: comment.id });
 }
 
@@ -4457,6 +4493,7 @@ function addDiffComment(
 ): void {
   const comment = window.prompt("Comment on this diff line");
   if (!comment?.trim()) return;
+  markReviewCommentsDirty(sessionId);
   send({
     type: "review.comment.create",
     sessionId,

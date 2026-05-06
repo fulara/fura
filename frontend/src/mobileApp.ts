@@ -626,11 +626,20 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
   const reviewComments = new Map<string, ReviewComment[]>();
   const reviewCommentsRequested = new Set<string>();
+  const reviewCommentsLoadInFlight = new Set<string>();
+
+  const reviewCommentsResyncNeeded = new Set<string>();
 
   function ensureReviewCommentsLoaded(sessionId: string): void {
-    if (!sessionId || reviewCommentsRequested.has(sessionId)) return;
+    if (!sessionId || reviewCommentsRequested.has(sessionId) || reviewCommentsLoadInFlight.has(sessionId)) return;
     if (send({ type: "review.comments.list", sessionId })) {
-      reviewCommentsRequested.add(sessionId);
+      reviewCommentsLoadInFlight.add(sessionId);
+    }
+  }
+
+  function markReviewCommentsDirty(sessionId: string): void {
+    if (reviewCommentsLoadInFlight.has(sessionId)) {
+      reviewCommentsResyncNeeded.add(sessionId);
     }
   }
 
@@ -1260,6 +1269,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     if (pending.kind === "comment") {
+      markReviewCommentsDirty(pending.sessionId);
       send({
         type: "review.comment.create",
         sessionId: pending.sessionId,
@@ -2008,6 +2018,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         syncCreateCwdDefault();
         syncMobileProposedModelsUi();
         reviewCommentsRequested.clear();
+        reviewCommentsLoadInFlight.clear();
+        reviewCommentsResyncNeeded.clear();
         if (activeMobileView === "diff" && activeSessionId) renderActiveSession();
         console.debug(`[fura-mobile] Connected to fura ${message.serverVersion}.`);
         break;
@@ -2185,11 +2197,21 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "diff.reviewWorktree.state":
         break;
       case "review.comments.snapshot":
+        reviewCommentsLoadInFlight.delete(message.sessionId);
+        if (reviewCommentsResyncNeeded.has(message.sessionId)) {
+          reviewCommentsResyncNeeded.delete(message.sessionId);
+          reviewCommentsRequested.delete(message.sessionId);
+          ensureReviewCommentsLoaded(message.sessionId);
+          break;
+        }
         reviewComments.set(message.sessionId, message.comments);
         reviewCommentsRequested.add(message.sessionId);
         if (message.sessionId === activeSessionId && activeMobileView === "diff") renderActiveSession();
         break;
       case "review.comment.upserted": {
+        if (reviewCommentsLoadInFlight.has(message.comment.sessionId)) {
+          reviewCommentsResyncNeeded.add(message.comment.sessionId);
+        }
         const existing = reviewComments.get(message.comment.sessionId) ?? [];
         reviewComments.set(
           message.comment.sessionId,
@@ -2199,6 +2221,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       }
       case "review.comment.deleted":
+        if (reviewCommentsLoadInFlight.has(message.sessionId)) {
+          reviewCommentsResyncNeeded.add(message.sessionId);
+        }
         reviewComments.set(
           message.sessionId,
           (reviewComments.get(message.sessionId) ?? []).filter(comment => comment.id !== message.id),
@@ -3087,12 +3112,18 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         edit.textContent = "Edit";
         edit.addEventListener("click", () => {
           const next = window.prompt("Edit comment", comment.body);
-          if (next?.trim()) send({ type: "review.comment.update", id: comment.id, body: next.trim() });
+          if (next?.trim()) {
+            markReviewCommentsDirty(comment.sessionId);
+            send({ type: "review.comment.update", id: comment.id, body: next.trim() });
+          }
         });
         const remove = diffView.ownerDocument.createElement("button");
         remove.type = "button";
         remove.textContent = "Remove";
-        remove.addEventListener("click", () => send({ type: "review.comment.delete", id: comment.id }));
+        remove.addEventListener("click", () => {
+          markReviewCommentsDirty(comment.sessionId);
+          send({ type: "review.comment.delete", id: comment.id });
+        });
         actions.append(edit, remove);
         item.append(location, body, actions);
         section.append(item);
