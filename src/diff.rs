@@ -892,6 +892,7 @@ async fn session_repo_candidates(
     for snapshot in snapshots.iter() {
         add_snapshot_candidate(&mut candidates, snapshot);
     }
+    hide_path_candidates_shadowed_by_snapshot_candidates(&mut candidates);
 
     Ok(candidates)
 }
@@ -925,6 +926,32 @@ fn add_snapshot_candidate(
         source: SessionRepoSource::Snapshot,
         has_session_start_snapshot: snapshot.kind == "session-start",
         session_start_snapshot: Some(snapshot.summary()),
+    });
+}
+
+fn hide_path_candidates_shadowed_by_snapshot_candidates(
+    candidates: &mut Vec<SessionRepoCandidate>,
+) {
+    let snapshot_entry_ids: Vec<String> = candidates
+        .iter()
+        .filter(|candidate| candidate.source == SessionRepoSource::Snapshot)
+        .filter_map(|candidate| {
+            candidate
+                .session_start_snapshot
+                .as_ref()
+                .map(|snapshot| snapshot.entry_id.clone())
+        })
+        .collect();
+    candidates.retain(|candidate| {
+        if candidate.source == SessionRepoSource::Snapshot {
+            return true;
+        }
+        let Some(snapshot) = candidate.session_start_snapshot.as_ref() else {
+            return true;
+        };
+        !snapshot_entry_ids
+            .iter()
+            .any(|entry_id| entry_id == &snapshot.entry_id)
     });
 }
 
@@ -2580,18 +2607,14 @@ mod tests {
         else {
             panic!("expected ready session changes state: {:?}", state);
         };
-        assert_eq!(repos.len(), 2);
-        assert_eq!(repos[0].source, SessionRepoSource::Cwd);
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].source, SessionRepoSource::Snapshot);
+        assert_eq!(repos[0].id, snapshot_candidate_id("snapshot-entry"));
         assert_eq!(
             repos[0].repo_root,
             repo.canonicalize().unwrap().display().to_string()
         );
         assert!(repos[0].has_session_start_snapshot);
-        assert!(
-            repos
-                .iter()
-                .any(|repo| repo.source == SessionRepoSource::Snapshot)
-        );
         assert!(matches!(comparison.head, DiffEndpoint::WorkingTree));
         assert!(
             matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == snapshot_ref)
