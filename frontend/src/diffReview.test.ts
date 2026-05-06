@@ -121,6 +121,24 @@ describe("diffReview", () => {
     expect(isReviewCommentMatched(rows, comparisonKey(state), stale)).toBe(false);
   });
 
+  it("treats null and undefined missing line numbers as equivalent", () => {
+    const persisted: ReviewComment = {
+      id: "nullish",
+      sessionId: "s1",
+      repoRoot: "/repo",
+      comparisonKey: comparisonKey(state),
+      author: "user",
+      body: "Missing old line is still same add line.",
+      stale: false,
+      staleReason: null,
+      anchor: { ...addLocation, oldLine: null, newLine: addLocation.newLine ?? null },
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    expect(reviewCommentsForDiffLocation([persisted], comparisonKey(state), addLocation)).toEqual([persisted]);
+    expect(isReviewCommentMatched(parseDiffRows(patch), comparisonKey(state), persisted)).toBe(true);
+  });
+
   it("formats labels and exposes implementation boundary guidance", () => {
     expect(diffCommentFlushEditorText(1)).toBe("Flush 1 diff comment");
     expect(diffCommentFlushEditorText(2)).toBe("Flush 2 diff comments");

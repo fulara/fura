@@ -34,6 +34,10 @@ export function createDiffReviewAnnotation(input: {
   };
 }
 
+function sameOptionalNumber(left: number | null | undefined, right: number | null | undefined): boolean {
+  return (left ?? undefined) === (right ?? undefined);
+}
+
 export function annotationsForDiffLocation(
   annotations: DiffReviewAnnotation[],
   key: string,
@@ -47,8 +51,8 @@ export function annotationsForDiffLocation(
       annotation.anchor.hunk === location.hunk &&
       annotation.anchor.side === location.side &&
       annotation.anchor.kind === location.kind &&
-      annotation.anchor.oldLine === location.oldLine &&
-      annotation.anchor.newLine === location.newLine &&
+      sameOptionalNumber(annotation.anchor.oldLine, location.oldLine) &&
+      sameOptionalNumber(annotation.anchor.newLine, location.newLine) &&
       annotation.anchor.text === location.text,
   );
 }
@@ -73,8 +77,8 @@ export function isReviewCommentForLocation(
     comment.anchor.hunk === location.hunk &&
     comment.anchor.side === location.side &&
     comment.anchor.kind === location.kind &&
-    comment.anchor.oldLine === location.oldLine &&
-    comment.anchor.newLine === location.newLine &&
+    sameOptionalNumber(comment.anchor.oldLine, location.oldLine) &&
+    sameOptionalNumber(comment.anchor.newLine, location.newLine) &&
     comment.anchor.text === location.text
   );
 }
@@ -115,8 +119,8 @@ export function formatReviewCommentLocation(comment: ReviewComment): string {
 export function formatDiffLineLocation(location: DiffLineLocation): string {
   const path = location.side === "left" ? location.oldPath ?? location.newPath : location.newPath;
   const parts = [path || "unknown file", location.side.toUpperCase()];
-  if (location.oldLine !== undefined) parts.push(`old:${location.oldLine}`);
-  if (location.newLine !== undefined) parts.push(`new:${location.newLine}`);
+  if (location.oldLine != null) parts.push(`old:${location.oldLine}`);
+  if (location.newLine != null) parts.push(`new:${location.newLine}`);
   return parts.join(" ");
 }
 
@@ -132,8 +136,8 @@ function isAnnotationLocation(row: ParsedDiffRow, annotation: DiffReviewAnnotati
     row.location.hunk === annotation.anchor.hunk &&
     row.location.side === annotation.anchor.side &&
     row.location.kind === annotation.anchor.kind &&
-    row.location.oldLine === annotation.anchor.oldLine &&
-    row.location.newLine === annotation.anchor.newLine &&
+    sameOptionalNumber(row.location.oldLine, annotation.anchor.oldLine) &&
+    sameOptionalNumber(row.location.newLine, annotation.anchor.newLine) &&
     row.location.text === annotation.anchor.text
   );
 }

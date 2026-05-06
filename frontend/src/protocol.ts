@@ -360,8 +360,8 @@ export type DiffLineLocation = {
   hunk: string | null;
   side: DiffSide;
   kind: "add" | "remove" | "context";
-  oldLine?: number;
-  newLine?: number;
+  oldLine?: number | null;
+  newLine?: number | null;
   text: string;
 };
 
