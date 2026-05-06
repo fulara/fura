@@ -281,8 +281,7 @@ pub(crate) async fn handle_diff_review_worktree_checkout(
 
 fn is_expected_missing_session_changes(error: &anyhow::Error) -> bool {
     let text = error.to_string();
-    text == "missing repository for session changes"
-        || text == "missing session-start diff snapshot"
+    text == "missing repository for session changes" || text == "missing repository diff snapshot"
 }
 
 #[derive(Clone)]
@@ -837,7 +836,19 @@ fn select_session_repo(
     }
     candidates
         .iter()
-        .find(|candidate| candidate.has_session_start_snapshot)
+        .find(|candidate| {
+            candidate.source != SessionRepoSource::Snapshot && candidate.has_session_start_snapshot
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.source == SessionRepoSource::Snapshot)
+        })
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.session_start_snapshot.is_some())
+        })
         .or_else(|| candidates.first())
         .cloned()
 }
@@ -878,10 +889,7 @@ async fn session_repo_candidates(
     if let Some(path) = cwd.as_deref() {
         add_path_candidate(&mut candidates, path, SessionRepoSource::Cwd, &snapshots);
     }
-    for snapshot in snapshots
-        .iter()
-        .filter(|snapshot| snapshot.kind == "session-start")
-    {
+    for snapshot in snapshots.iter() {
         add_snapshot_candidate(&mut candidates, snapshot);
     }
 
@@ -910,12 +918,14 @@ fn add_snapshot_candidate(
         return;
     };
     let repo_root = root.display().to_string();
-    upsert_candidate(
-        candidates,
-        repo_root,
-        SessionRepoSource::Snapshot,
-        Some(snapshot.summary()),
-    );
+    candidates.push(SessionRepoCandidate {
+        id: snapshot_candidate_id(&snapshot.entry_id),
+        repo_root: repo_root.clone(),
+        label: format_diff_snapshot_label(&repo_root, snapshot),
+        source: SessionRepoSource::Snapshot,
+        has_session_start_snapshot: snapshot.kind == "session-start",
+        session_start_snapshot: Some(snapshot.summary()),
+    });
 }
 
 fn upsert_candidate(
@@ -956,6 +966,18 @@ fn format_diff_repo_label(repo_root: &str, source: SessionRepoSource) -> String 
         .and_then(|name| name.to_str())
         .unwrap_or(repo_root);
     format!("{name} · {source_label}")
+}
+
+fn format_diff_snapshot_label(repo_root: &str, snapshot: &SessionDiffSnapshot) -> String {
+    let name = Path::new(repo_root)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(repo_root);
+    format!("{name} · {} snapshot · {}", snapshot.kind, snapshot.label)
+}
+
+fn snapshot_candidate_id(entry_id: &str) -> String {
+    format!("snapshot:{entry_id}")
 }
 
 fn latest_session_start_snapshot_for_repo(
@@ -1170,13 +1192,12 @@ async fn prepare_session_changes_diff(
                 request,
                 session_id,
                 repo_root: Some(repo_root_text),
-                reason:
-                    "This session has no session-start diff snapshot for the selected repository."
-                        .to_string(),
+                reason: "This session has no repository diff snapshot for the selected repository."
+                    .to_string(),
                 repos: candidates,
             },
         });
-        bail!("missing session-start diff snapshot");
+        bail!("missing repository diff snapshot");
     };
     let repo_root = discover_repo_root(&repo_root_text)?;
     let base_resolved = resolve_git_ref(&repo_root, &snapshot.ref_name).await?;
@@ -2559,13 +2580,18 @@ mod tests {
         else {
             panic!("expected ready session changes state: {:?}", state);
         };
-        assert_eq!(repos.len(), 1);
+        assert_eq!(repos.len(), 2);
         assert_eq!(repos[0].source, SessionRepoSource::Cwd);
         assert_eq!(
             repos[0].repo_root,
             repo.canonicalize().unwrap().display().to_string()
         );
         assert!(repos[0].has_session_start_snapshot);
+        assert!(
+            repos
+                .iter()
+                .any(|repo| repo.source == SessionRepoSource::Snapshot)
+        );
         assert!(matches!(comparison.head, DiffEndpoint::WorkingTree));
         assert!(
             matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == snapshot_ref)
@@ -2697,20 +2723,67 @@ mod tests {
         });
         fs::write(&session_file, format!("{}\n{}\n", session_start, manual)).expect("session file");
 
-        let state = crate::tests::test_state(8, None);
-        state.sessions.write().await.insert(
+        let app_state = crate::tests::test_state(8, None);
+        app_state.sessions.write().await.insert(
             "manual".into(),
             diff_test_record("manual", &repo, &session_file),
         );
-        let response = session_changes_response(&state, "manual").await;
+        let response = session_changes_response(&app_state, "manual").await;
         let ServerMessage::SessionChangesSummary { state } = &response else {
             panic!("expected session changes state: {:?}", response);
         };
-        let SessionChangesSummaryState::Ready { comparison, .. } = state else {
+        let SessionChangesSummaryState::Ready {
+            comparison, repos, ..
+        } = state
+        else {
             panic!("expected ready state: {:?}", state);
         };
         assert!(
             matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == session_start_ref)
+        );
+        assert!(repos.iter().any(|repo| {
+            repo.id == snapshot_candidate_id("manual-entry")
+                && repo.source == SessionRepoSource::Snapshot
+                && repo.label.contains("manual snapshot · manual")
+        }));
+
+        let mut events = app_state.events.subscribe();
+        let responses = handle_session_changes_request(
+            &app_state,
+            "test-client".into(),
+            test_diff_id(),
+            "manual".into(),
+            Some(snapshot_candidate_id("manual-entry")),
+            DiffDetailMode::StatOnly,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            responses.is_empty(),
+            "unexpected direct responses: {responses:?}"
+        );
+        let selected_response = events.recv().await.expect("manual snapshot response");
+        let ServerMessage::SessionChangesSummary {
+            state: selected_state,
+        } = &selected_response
+        else {
+            panic!("expected manual snapshot state: {:?}", selected_response);
+        };
+        let SessionChangesSummaryState::Ready {
+            comparison,
+            selected_repo_id,
+            ..
+        } = selected_state
+        else {
+            panic!(
+                "expected selected manual snapshot state: {:?}",
+                selected_state
+            );
+        };
+        assert_eq!(selected_repo_id.as_str(), "snapshot:manual-entry");
+        assert!(
+            matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == manual_ref)
         );
     }
 
