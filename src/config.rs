@@ -566,8 +566,8 @@ pub(crate) async fn save_fura_config(state: &AppState) -> anyhow::Result<()> {
         voice_language: state.voice_language.read().await.clone(),
         show_tools: *state.show_tools.read().await,
         thinking_visibility: *state.thinking_visibility.read().await,
-        session_categories: state.session_categories.read().await.clone(),
-        session_modes: state.session_modes.read().await.clone(),
+        session_categories: state.session_runtime.session_categories_snapshot().await,
+        session_modes: state.session_runtime.session_modes_snapshot().await,
         proposed_models: state.proposed_models.read().await.clone(),
     };
     let text =

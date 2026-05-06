@@ -10,8 +10,8 @@ use tracing::warn;
 
 use crate::{
     AppState, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader, SessionKind,
-    SessionMode, SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard,
-    TranscriptMessage, is_controller_session_record, project_omp_transcript, save_fura_config,
+    SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard, TranscriptMessage,
+    is_controller_session_record, project_omp_transcript, save_fura_config,
 };
 
 #[derive(Debug)]
@@ -32,8 +32,8 @@ pub(crate) struct DiscoveredSession {
 pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
     let discovered = discover_sessions(&state.session_root);
     let mut discovered_ids = HashSet::new();
-    let categories = state.session_categories.read().await.clone();
-    let modes = state.session_modes.read().await.clone();
+    let categories = state.session_runtime.session_categories_snapshot().await;
+    let modes = state.session_runtime.session_modes_snapshot().await;
     let mut sessions = state.sessions.write().await;
     let before = session_summaries_from_map(&sessions);
 
@@ -127,24 +127,10 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
     let sessions_changed = before != session_summaries_from_map(&sessions);
     drop(sessions);
 
-    let metadata_pruned = {
-        let mut changed = false;
-        {
-            let mut categories = state.session_categories.write().await;
-            let before_len = categories.len();
-            categories.retain(|session_id, _| retained_session_ids.contains(session_id));
-            changed |= categories.len() != before_len;
-        }
-        {
-            let mut modes = state.session_modes.write().await;
-            let before_len = modes.len();
-            modes.retain(|session_id, mode| {
-                retained_session_ids.contains(session_id) && *mode != SessionMode::Standard
-            });
-            changed |= modes.len() != before_len;
-        }
-        changed
-    };
+    let metadata_pruned = state
+        .session_runtime
+        .prune_session_metadata(&retained_session_ids)
+        .await;
     if metadata_pruned {
         if let Err(error) = save_fura_config(state).await {
             warn!(%error, "failed to save pruned session metadata");

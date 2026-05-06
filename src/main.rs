@@ -144,8 +144,6 @@ async fn main() -> anyhow::Result<()> {
         auth_sessions: Arc::new(RwLock::new(HashMap::new())),
         session_runtime: session_runtime.clone(),
         sessions: session_runtime.sessions.clone(),
-        session_categories: session_runtime.session_categories.clone(),
-        session_modes: session_runtime.session_modes.clone(),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
         pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
@@ -670,8 +668,6 @@ pub(crate) mod tests {
             auth_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_runtime: session_runtime.clone(),
             sessions: session_runtime.sessions.clone(),
-            session_categories: session_runtime.session_categories.clone(),
-            session_modes: session_runtime.session_modes.clone(),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
             pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
@@ -717,17 +713,14 @@ pub(crate) mod tests {
 
         state
             .session_runtime
-            .session_categories
-            .write()
-            .await
-            .insert("s1".to_string(), "infra".to_string());
+            .set_session_category("s1".to_string(), Some("infra".to_string()))
+            .await;
         assert_eq!(
             state
-                .session_categories
-                .read()
+                .session_runtime
+                .session_category("s1")
                 .await
-                .get("s1")
-                .map(String::as_str),
+                .as_deref(),
             Some("infra")
         );
 
@@ -785,6 +778,78 @@ pub(crate) mod tests {
                 .await
                 .map(|carryover| carryover.final_plan_file_path),
             Some("local://APPROVED.md".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn get_state_update_helper_consumes_pending_create_and_remaps_transport() {
+        let state = test_state(8, None);
+        register_test_pending_create(
+            &state,
+            "transport-session",
+            PendingCreatedSession {
+                cwd: Some("/workspace/project".to_string()),
+                args: vec!["--debug".to_string()],
+                title: Some("Created session".to_string()),
+                request_id: Some("create-1".to_string()),
+                category: Some("infra".to_string()),
+                created_at: Timestamp::from_rpc(&serde_json::json!(123_000))
+                    .expect("valid test timestamp"),
+                session_mode: SessionMode::DiffReview,
+                worktree: None,
+                proposed_model: None,
+            },
+        )
+        .await;
+        map_test_transport(&state, "transport-session", "transport-session").await;
+
+        let outcome = apply_get_state_update(
+            &state,
+            "transport-session",
+            RpcStateUpdate {
+                current_session_id: "transport-session".to_string(),
+                target_session_id: "real-session".to_string(),
+                session_name: Some("Real session".to_string()),
+                model: Some("Mock Model".to_string()),
+                thinking_level: Some("high".to_string()),
+                session_file: Some("/tmp/real-session.jsonl".to_string()),
+                context_tokens: Some(10),
+                context_window: Some(100),
+                context_percent: Some(10.0),
+                plan_mode: None,
+                todo_phases: None,
+            },
+        )
+        .await;
+
+        assert!(outcome.previous_snapshot.is_none());
+        assert!(matches!(
+            outcome.target_snapshot,
+            Some(ServerMessage::SessionSnapshot { ref session_id, .. }) if session_id == "real-session"
+        ));
+        assert!(
+            !state
+                .session_runtime
+                .has_pending_create("transport-session")
+                .await
+        );
+        assert_eq!(
+            rpc_transport_session_id(&state, "real-session")
+                .await
+                .as_deref(),
+            Some("transport-session")
+        );
+        assert_eq!(
+            state.session_runtime.session_mode("real-session").await,
+            Some(SessionMode::DiffReview),
+        );
+        assert_eq!(
+            state
+                .session_runtime
+                .session_category("real-session")
+                .await
+                .as_deref(),
+            Some("infra")
         );
     }
 
@@ -1018,14 +1083,19 @@ pub(crate) mod tests {
         let mut state = test_state(8, None);
         state.session_root = root.clone();
         state.config_path = Some(root.join("config.yaml"));
-        state.session_categories.write().await.extend([
-            ("s1".to_string(), "infra".to_string()),
-            ("missing-session".to_string(), "stale".to_string()),
-        ]);
-        state.session_modes.write().await.extend([
-            ("s1".to_string(), SessionMode::DiffReview),
-            ("missing-session".to_string(), SessionMode::DiffReview),
-        ]);
+        state
+            .session_runtime
+            .extend_session_metadata(
+                [
+                    ("s1".to_string(), "infra".to_string()),
+                    ("missing-session".to_string(), "stale".to_string()),
+                ],
+                [
+                    ("s1".to_string(), SessionMode::DiffReview),
+                    ("missing-session".to_string(), SessionMode::DiffReview),
+                ],
+            )
+            .await;
 
         assert!(refresh_session_catalog(&state).await);
         let sessions = state.sessions.read().await;
@@ -1042,14 +1112,12 @@ pub(crate) mod tests {
             Some(session_path.to_string_lossy().as_ref())
         );
         drop(sessions);
-        let categories = state.session_categories.read().await;
+        let categories = state.session_runtime.session_categories_snapshot().await;
         assert_eq!(categories.get("s1").map(String::as_str), Some("infra"));
         assert!(!categories.contains_key("missing-session"));
-        drop(categories);
-        let modes = state.session_modes.read().await;
+        let modes = state.session_runtime.session_modes_snapshot().await;
         assert_eq!(modes.get("s1"), Some(&SessionMode::DiffReview));
         assert!(!modes.contains_key("missing-session"));
-        drop(modes);
         let saved_config_text = fs::read_to_string(root.join("config.yaml"))
             .expect("category pruning should save Fura config");
         let saved_config: FuraConfig =
@@ -1213,11 +1281,10 @@ pub(crate) mod tests {
         drop(sessions);
         assert_eq!(
             state
-                .session_categories
-                .read()
+                .session_runtime
+                .session_category("s1")
                 .await
-                .get("s1")
-                .map(String::as_str),
+                .as_deref(),
             Some("infra"),
         );
 
@@ -1232,7 +1299,7 @@ pub(crate) mod tests {
             None
         );
         drop(sessions);
-        assert!(!state.session_categories.read().await.contains_key("s1"));
+        assert!(!state.session_runtime.has_session_category("s1").await);
     }
 
     #[tokio::test]
@@ -3672,35 +3739,15 @@ pub(crate) mod tests {
         );
         assert_eq!(
             state
-                .session_categories
-                .read()
+                .session_runtime
+                .session_category("omp-session")
                 .await
-                .get("omp-session")
-                .map(String::as_str),
+                .as_deref(),
             Some("infra"),
         );
         assert_eq!(
-            state.session_modes.read().await.get("omp-session"),
-            Some(&SessionMode::DiffReview),
-        );
-        assert_eq!(
-            state
-                .session_runtime
-                .session_categories
-                .read()
-                .await
-                .get("omp-session")
-                .map(String::as_str),
-            Some("infra"),
-        );
-        assert_eq!(
-            state
-                .session_runtime
-                .session_modes
-                .read()
-                .await
-                .get("omp-session"),
-            Some(&SessionMode::DiffReview),
+            state.session_runtime.session_mode("omp-session").await,
+            Some(SessionMode::DiffReview),
         );
         assert!(
             rpc_transport_session_id(&state, "transport-session")

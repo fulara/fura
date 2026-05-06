@@ -1,16 +1,22 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Instant,
+};
 
 use serde_json::Value;
 use tokio::{
     sync::{RwLock, broadcast, mpsc, oneshot},
     task::JoinHandle,
 };
+use tracing::warn;
 
 use crate::{
     CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode, DiffFileSelector,
-    DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, PreparedDiff, ProposedModelConfig,
-    ServerMessage, SessionMode, SessionRecord, ThinkingVisibilityPreference, Timestamp,
-    VoiceCommand,
+    DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, PlanModeProjection, PreparedDiff,
+    ProposedModelConfig, ServerMessage, SessionKind, SessionMode, SessionRecord, SessionStatus,
+    ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand, save_fura_config,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -19,9 +25,6 @@ pub(crate) struct AppState {
     /// Owner for coupled session/runtime maps; selected top-level aliases below point to the same locks during the staged migration.
     pub(crate) session_runtime: SessionRuntimeState,
     pub(crate) sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
-    /// Persisted Fura-owned session metadata, keyed by OMP session id.
-    pub(crate) session_categories: Arc<RwLock<HashMap<String, String>>>,
-    pub(crate) session_modes: Arc<RwLock<HashMap<String, SessionMode>>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
     pub(crate) pending_session_change_snapshots:
@@ -300,6 +303,377 @@ impl SessionRuntimeState {
             .write()
             .await
             .remove(session_id)
+    }
+
+    pub(crate) async fn session_categories_snapshot(&self) -> HashMap<String, String> {
+        self.session_categories.read().await.clone()
+    }
+
+    pub(crate) async fn session_modes_snapshot(&self) -> HashMap<String, SessionMode> {
+        self.session_modes.read().await.clone()
+    }
+
+    pub(crate) async fn session_category(&self, session_id: &str) -> Option<String> {
+        self.session_categories
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+    }
+
+    pub(crate) async fn set_session_category(&self, session_id: String, category: Option<String>) {
+        let mut categories = self.session_categories.write().await;
+        if let Some(category) = category {
+            categories.insert(session_id, category);
+        } else {
+            categories.remove(&session_id);
+        }
+    }
+
+    pub(crate) async fn set_remapped_session_metadata(
+        &self,
+        session_id: String,
+        category: Option<String>,
+        session_mode: SessionMode,
+    ) {
+        self.set_session_category(session_id.clone(), category)
+            .await;
+        let mut modes = self.session_modes.write().await;
+        if session_mode == SessionMode::Standard {
+            modes.remove(&session_id);
+        } else {
+            modes.insert(session_id, session_mode);
+        }
+    }
+
+    pub(crate) async fn prune_session_metadata(
+        &self,
+        retained_session_ids: &std::collections::HashSet<String>,
+    ) -> bool {
+        let mut changed = false;
+        {
+            let mut categories = self.session_categories.write().await;
+            let before_len = categories.len();
+            categories.retain(|session_id, _| retained_session_ids.contains(session_id));
+            changed |= categories.len() != before_len;
+        }
+        {
+            let mut modes = self.session_modes.write().await;
+            let before_len = modes.len();
+            modes.retain(|session_id, mode| {
+                retained_session_ids.contains(session_id) && *mode != SessionMode::Standard
+            });
+            changed |= modes.len() != before_len;
+        }
+        changed
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn extend_session_metadata(
+        &self,
+        categories: impl IntoIterator<Item = (String, String)>,
+        modes: impl IntoIterator<Item = (String, SessionMode)>,
+    ) {
+        self.session_categories.write().await.extend(categories);
+        self.session_modes.write().await.extend(modes);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_session_category(&self, session_id: &str) -> bool {
+        self.session_categories
+            .read()
+            .await
+            .contains_key(session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn session_mode(&self, session_id: &str) -> Option<SessionMode> {
+        self.session_modes.read().await.get(session_id).copied()
+    }
+}
+
+pub(crate) fn apply_rpc_state_to_record(
+    record: &mut SessionRecord,
+    session_name: Option<String>,
+    model: Option<String>,
+    thinking_level: Option<String>,
+    session_file: Option<String>,
+    context_tokens: Option<u64>,
+    context_window: Option<u64>,
+    context_percent: Option<f64>,
+    plan_mode: Option<Option<PlanModeProjection>>,
+    todo_phases: Option<Vec<TodoPhaseProjection>>,
+) {
+    record.status = SessionStatus::Idle;
+    if let Some(name) = session_name {
+        if record.title.is_none() || record.title.as_deref() != Some(&name) {
+            record.title = Some(name);
+        }
+    }
+    if let Some(model) = model {
+        record.model = Some(model);
+    }
+    if let Some(thinking_level) = thinking_level {
+        record.thinking_level = Some(thinking_level);
+    }
+    if let Some(session_file) = session_file {
+        record.session_file = Some(session_file);
+    }
+    record.context_tokens = context_tokens;
+    record.context_window = context_window;
+    record.context_percent = context_percent;
+    if let Some(plan_mode) = plan_mode {
+        let keep_pending_plan = plan_mode
+            .as_ref()
+            .is_some_and(|mode| mode.enabled && !mode.discussion);
+        record.plan_mode = plan_mode;
+        if !keep_pending_plan {
+            record.pending_plan_review = None;
+        }
+    }
+    if let Some(todo_phases) = todo_phases {
+        record.todo_phases = Some(todo_phases);
+    }
+}
+
+pub(crate) struct RpcStateUpdate {
+    pub(crate) current_session_id: String,
+    pub(crate) target_session_id: String,
+    pub(crate) session_name: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) thinking_level: Option<String>,
+    pub(crate) session_file: Option<String>,
+    pub(crate) context_tokens: Option<u64>,
+    pub(crate) context_window: Option<u64>,
+    pub(crate) context_percent: Option<f64>,
+    pub(crate) plan_mode: Option<Option<PlanModeProjection>>,
+    pub(crate) todo_phases: Option<Vec<TodoPhaseProjection>>,
+}
+
+pub(crate) struct GetStateApplyOutcome {
+    pub(crate) previous_snapshot: Option<ServerMessage>,
+    pub(crate) target_snapshot: Option<ServerMessage>,
+}
+
+pub(crate) async fn apply_get_state_update(
+    state: &AppState,
+    transport_session_id: &str,
+    update: RpcStateUpdate,
+) -> GetStateApplyOutcome {
+    let target_changed = update.target_session_id != update.current_session_id;
+    let pending_create = if target_changed {
+        state
+            .session_runtime
+            .remove_pending_create(&update.current_session_id)
+            .await
+    } else {
+        None
+    };
+    let pending_switch_name = if target_changed {
+        state
+            .session_runtime
+            .remove_pending_session_name(&update.current_session_id)
+            .await
+    } else {
+        None
+    };
+    let pending_plan_execution = if target_changed {
+        state
+            .session_runtime
+            .remove_plan_execution_carryover(&update.current_session_id)
+            .await
+    } else {
+        None
+    };
+    let effective_session_name = pending_switch_name.clone().or(update.session_name);
+
+    let (previous_snapshot, target_snapshot) = {
+        let mut sessions = state.sessions.write().await;
+
+        if target_changed {
+            let source = sessions.get(&update.current_session_id).cloned();
+            let previous_snapshot = sessions.get_mut(&update.current_session_id).map(|record| {
+                record.status = SessionStatus::Available;
+                record.kind = SessionKind::Available;
+                record.streaming_message = None;
+                record.live_message_ids.clear();
+                ServerMessage::SessionSnapshot {
+                    session_id: update.current_session_id.clone(),
+                    state: record.projection(),
+                }
+            });
+
+            sessions
+                .entry(update.target_session_id.clone())
+                .and_modify(|record| {
+                    record.status = SessionStatus::Idle;
+                    record.kind = SessionKind::Managed;
+                    record.streaming_message = None;
+                    record.live_message_ids.clear();
+                    if record.worktree.is_none() {
+                        record.worktree = pending_create
+                            .as_ref()
+                            .and_then(|pending| pending.worktree.clone());
+                    }
+                    if let Some(pending) = pending_create.as_ref() {
+                        record.session_mode = pending.session_mode;
+                    }
+                })
+                .or_insert_with(|| {
+                    let now = Timestamp::now();
+                    let created_at = source
+                        .as_ref()
+                        .map(|record| record.created_at)
+                        .or_else(|| pending_create.as_ref().map(|pending| pending.created_at))
+                        .unwrap_or(now);
+                    SessionRecord {
+                        id: update.target_session_id.clone(),
+                        cwd: source
+                            .as_ref()
+                            .and_then(|record| record.cwd.clone())
+                            .or_else(|| {
+                                pending_create
+                                    .as_ref()
+                                    .and_then(|pending| pending.cwd.clone())
+                            }),
+                        args: source
+                            .as_ref()
+                            .map(|record| record.args.clone())
+                            .or_else(|| pending_create.as_ref().map(|pending| pending.args.clone()))
+                            .unwrap_or_default(),
+                        status: SessionStatus::Idle,
+                        created_at,
+                        updated_at: now,
+                        messages: Vec::new(),
+                        live_message_ids: HashSet::new(),
+                        streaming_message: None,
+                        tool_cards: Vec::new(),
+                        active_tool_calls: Vec::new(),
+                        todo_phases: None,
+                        kind: SessionKind::Managed,
+                        session_mode: source
+                            .as_ref()
+                            .map(|record| record.session_mode)
+                            .or_else(|| pending_create.as_ref().map(|pending| pending.session_mode))
+                            .unwrap_or_default(),
+                        session_file: None,
+                        title: pending_create
+                            .as_ref()
+                            .and_then(|pending| pending.title.clone())
+                            .or_else(|| pending_switch_name.clone()),
+                        timestamp: None,
+                        category: source
+                            .as_ref()
+                            .and_then(|record| record.category.clone())
+                            .or_else(|| {
+                                pending_create
+                                    .as_ref()
+                                    .and_then(|pending| pending.category.clone())
+                            }),
+                        worktree: source
+                            .as_ref()
+                            .and_then(|record| record.worktree.clone())
+                            .or_else(|| {
+                                pending_create
+                                    .as_ref()
+                                    .and_then(|pending| pending.worktree.clone())
+                            }),
+                        model: None,
+                        thinking_level: None,
+                        tokens_total: 0,
+                        cost_usd: 0.0,
+                        context_tokens: None,
+                        context_window: None,
+                        context_percent: None,
+                        plan_mode: None,
+                        pending_plan_review: None,
+                    }
+                });
+
+            if let Some(record) = sessions.get_mut(&update.target_session_id) {
+                record.updated_at = Timestamp::now();
+                apply_rpc_state_to_record(
+                    record,
+                    effective_session_name,
+                    update.model,
+                    update.thinking_level,
+                    update.session_file,
+                    update.context_tokens,
+                    update.context_window,
+                    update.context_percent,
+                    update.plan_mode.clone(),
+                    update.todo_phases.clone(),
+                );
+            }
+
+            let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
+                ServerMessage::SessionSnapshot {
+                    session_id: update.target_session_id.clone(),
+                    state: record.projection(),
+                }
+            });
+            (previous_snapshot, target_snapshot)
+        } else {
+            if let Some(record) = sessions.get_mut(&update.target_session_id) {
+                apply_rpc_state_to_record(
+                    record,
+                    effective_session_name,
+                    update.model,
+                    update.thinking_level,
+                    update.session_file,
+                    update.context_tokens,
+                    update.context_window,
+                    update.context_percent,
+                    update.plan_mode,
+                    update.todo_phases,
+                );
+            }
+            let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
+                ServerMessage::SessionSnapshot {
+                    session_id: update.target_session_id.clone(),
+                    state: record.projection(),
+                }
+            });
+            (None, target_snapshot)
+        }
+    };
+
+    let (target_category, target_mode) = if target_changed {
+        let sessions = state.sessions.read().await;
+        sessions
+            .get(&update.target_session_id)
+            .map(|record| (record.category.clone(), record.session_mode))
+            .unwrap_or((None, SessionMode::Standard))
+    } else {
+        (None, SessionMode::Standard)
+    };
+    if let Some(plan_execution) = pending_plan_execution {
+        state
+            .session_runtime
+            .set_plan_execution_carryover(update.target_session_id.clone(), plan_execution)
+            .await;
+    }
+    if target_changed {
+        state
+            .session_runtime
+            .map_transport_to_session(transport_session_id, update.target_session_id.clone())
+            .await;
+        state
+            .session_runtime
+            .set_remapped_session_metadata(
+                update.target_session_id.clone(),
+                target_category,
+                target_mode,
+            )
+            .await;
+        if let Err(error) = save_fura_config(state).await {
+            warn!(%error, "failed to save remapped session metadata");
+        }
+    }
+
+    GetStateApplyOutcome {
+        previous_snapshot,
+        target_snapshot,
     }
 }
 

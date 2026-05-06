@@ -897,14 +897,10 @@ pub(crate) async fn set_session_category(
         )
     };
 
-    {
-        let mut categories = state.session_categories.write().await;
-        if let Some(category) = category {
-            categories.insert(session_id, category);
-        } else {
-            categories.remove(&session_id);
-        }
-    }
+    state
+        .session_runtime
+        .set_session_category(session_id, category)
+        .await;
     if let Err(error) = save_fura_config(state).await {
         warn!(%error, "failed to save session category");
     }
@@ -1124,12 +1120,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
         }
     }
 
-    let category = state
-        .session_categories
-        .read()
-        .await
-        .get(&session_id)
-        .cloned();
+    let category = state.session_runtime.session_category(&session_id).await;
     let (projection, sessions_snapshot) = {
         let mut sessions = state.sessions.write().await;
         let record = opened_session_record(
