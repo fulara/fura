@@ -544,6 +544,29 @@ app.innerHTML = `
     </section>
   </div>
 
+  <div id="snapshotLabelOverlay" class="modal-overlay" hidden>
+    <section class="snapshot-label-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="snapshotLabelTitle" aria-describedby="snapshotLabelDescription">
+      <header class="modal-header">
+        <div>
+          <h2 id="snapshotLabelTitle">Name diff snapshot</h2>
+          <p id="snapshotLabelDescription">Edit the label before Fura records this repository diff snapshot.</p>
+        </div>
+        <button id="snapshotLabelClose" class="modal-close" type="button" aria-label="Close snapshot label dialog">×</button>
+      </header>
+      <div class="cwd-picker-body">
+        <label for="snapshotLabelInput">Snapshot label</label>
+        <input id="snapshotLabelInput" autocomplete="off" spellcheck="false" />
+      </div>
+      <footer class="modal-footer">
+        <span></span>
+        <div class="modal-actions">
+          <button id="snapshotLabelCancel" type="button">Cancel</button>
+          <button id="snapshotLabelCreate" type="button">Create snapshot</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
   <div id="diffPreviewOverlay" class="modal-overlay" hidden>
     <section class="diff-preview modal-panel" role="dialog" aria-modal="true" aria-labelledby="diffPreviewTitle">
       <header class="modal-header">
@@ -687,6 +710,11 @@ const diffPreviewText = requireElement<HTMLTextAreaElement>("diffPreviewText");
 const diffPreviewStatus = requireElement<HTMLSpanElement>("diffPreviewStatus");
 const diffPreviewCancel = requireElement<HTMLButtonElement>("diffPreviewCancel");
 const diffPreviewSend = requireElement<HTMLButtonElement>("diffPreviewSend");
+const snapshotLabelOverlay = requireElement<HTMLDivElement>("snapshotLabelOverlay");
+const snapshotLabelClose = requireElement<HTMLButtonElement>("snapshotLabelClose");
+const snapshotLabelInput = requireElement<HTMLInputElement>("snapshotLabelInput");
+const snapshotLabelCancel = requireElement<HTMLButtonElement>("snapshotLabelCancel");
+const snapshotLabelCreate = requireElement<HTMLButtonElement>("snapshotLabelCreate");
 
 type TranscriptPreviewDraft = {
   sessionId: string;
@@ -765,6 +793,7 @@ const sessionChangesDiffIds = new Map<string, string>();
 const sessionChangesSelectedFiles = new Map<string, string>();
 let currentSessionChangesRequest: { sessionId: string; diffId: string } | null = null;
 let compareDiffState: CompareDiffSummaryState | null = null;
+let snapshotLabelSessionId: string | null = null;
 let compareDiffId: string | null = null;
 let compareDiffLoading = false;
 let compareRepoRoot = "";
@@ -1273,6 +1302,16 @@ handoffPickerInstructions.addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); closeHandoffPicker(); }
 });
 diffPreviewClose.addEventListener("click", closeDiffPreview);
+snapshotLabelClose.addEventListener("click", closeSnapshotLabelPicker);
+snapshotLabelCancel.addEventListener("click", closeSnapshotLabelPicker);
+snapshotLabelCreate.addEventListener("click", submitSnapshotLabelPicker);
+snapshotLabelOverlay.addEventListener("mousedown", event => {
+  if (event.target === snapshotLabelOverlay) closeSnapshotLabelPicker();
+});
+snapshotLabelInput.addEventListener("keydown", event => {
+  if (event.key === "Enter") { event.preventDefault(); submitSnapshotLabelPicker(); }
+  if (event.key === "Escape") { event.preventDefault(); closeSnapshotLabelPicker(); }
+});
 diffPreviewCancel.addEventListener("click", closeDiffPreview);
 diffPreviewSend.addEventListener("click", sendPromptPreviewDraft);
 diffPreviewOverlay.addEventListener("mousedown", event => {
@@ -4072,7 +4111,40 @@ function requestSessionChangesRepo(sessionId: string, repoId: string, payloadKin
   renderDiffsViewIfActive(sessionId);
 }
 
-function requestSessionChangesSnapshot(sessionId: string): void {
+function defaultSnapshotLabel(now = new Date()): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "medium",
+  }).format(now);
+}
+
+function openSnapshotLabelPicker(sessionId: string): void {
+  if (diffLoadingSessions.has(sessionId)) return;
+  snapshotLabelSessionId = sessionId;
+  snapshotLabelInput.value = defaultSnapshotLabel();
+  snapshotLabelOverlay.hidden = false;
+  window.setTimeout(() => {
+    snapshotLabelInput.focus();
+    snapshotLabelInput.select();
+  }, 0);
+}
+
+function closeSnapshotLabelPicker(): void {
+  snapshotLabelSessionId = null;
+  snapshotLabelOverlay.hidden = true;
+  promptInput.focus();
+}
+
+function submitSnapshotLabelPicker(): void {
+  const sessionId = snapshotLabelSessionId;
+  if (!sessionId) return;
+  const label = snapshotLabelInput.value.trim() || defaultSnapshotLabel();
+  snapshotLabelSessionId = null;
+  snapshotLabelOverlay.hidden = true;
+  requestSessionChangesSnapshot(sessionId, label);
+}
+
+function requestSessionChangesSnapshot(sessionId: string, label: string): void {
   if (diffLoadingSessions.has(sessionId)) return;
   const state = sessionChangesStates.get(sessionId);
   const repoId = state?.status === "ready" ? state.selectedRepoId : null;
@@ -4084,7 +4156,7 @@ function requestSessionChangesSnapshot(sessionId: string): void {
   const diffId = newDiffId();
   sessionChangesDiffIds.set(sessionId, diffId);
   setCurrentSessionChangesRequest(sessionId, diffId, "refreshed");
-  const sent = send({ type: "sessionChanges.snapshot", clientId: diffClientId, diffId, sessionId, repoId, detailMode: payloadKind, currentCommitOid, selectedFile: null });
+  const sent = send({ type: "sessionChanges.snapshot", clientId: diffClientId, diffId, sessionId, repoId, label, detailMode: payloadKind, currentCommitOid, selectedFile: null });
   if (!sent) {
     diffLoadingSessions.delete(sessionId);
     diffErrors.set(sessionId, "Not connected to the Fura bridge.");
@@ -5006,7 +5078,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   snapshot.type = "button";
   snapshot.textContent = "Snapshot now";
   snapshot.disabled = diffLoadingSessions.has(sessionId);
-  snapshot.addEventListener("click", () => requestSessionChangesSnapshot(sessionId));
+  snapshot.addEventListener("click", () => openSnapshotLabelPicker(sessionId));
   actions.append(snapshot);
   header.append(title, actions);
   main.append(header);
