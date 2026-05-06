@@ -34,14 +34,13 @@ import {
 } from "./promptBusy";
 import {
   annotationsForDiffLocation,
-  buildDiffQuestionPrompt,
   createDiffReviewAnnotation,
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
   formatDiffLineLocation,
   formatDiffLocation,
-  prepareDiffCommentPrompt,
-  removeSelectedDiffComments,
+  prepareDiffAnnotationPrompt,
+  removeSelectedDiffAnnotations,
   selectedDiffAnnotations,
   type DiffPreviewDraft,
 } from "./diffReview";
@@ -1241,26 +1240,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       state: pending.state,
       location: pending.location,
       text,
-      status: pending.kind === "question" ? "sent" : "draft",
+      status: "draft",
     });
     annotations.push(annotation);
     diffAnnotations.set(pending.sessionId, annotations);
     closeDiffCommentEditor();
-    if (pending.kind === "question") {
-      const promptText = buildDiffQuestionPrompt(pending.state, annotation);
-      if (projections.get(pending.sessionId)?.isBusy) {
-        busyPromptDraft = createBusyPromptDraft({
-          sessionId: pending.sessionId,
-          text: promptText,
-          editorText: `Question about ${formatDiffLineLocation(pending.location)}`,
-          images: [],
-          onSend: renderActiveSession,
-        });
-        renderBusyPromptChoice();
-      } else {
-        send(createPromptSendMessage(pending.sessionId, promptText, []));
-      }
-    }
     renderActiveSession();
   }
 
@@ -1273,14 +1257,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     state: DiffReviewableState,
   ): void {
     const key = comparisonKey(state);
-    const comments = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, "comment");
-    if (comments.length === 0) return;
-    const prompt = prepareDiffCommentPrompt(state, comments, comment => cachedMobileDiffPatchForAnnotation(state, comment));
+    const annotationsToFlush = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key);
+    if (annotationsToFlush.length === 0) return;
+    const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedMobileDiffPatchForAnnotation(state, annotation));
     if (prompt.ok) {
-      diffPreviewDraft = { sessionId, state, comparisonKey: key, comments };
+      diffPreviewDraft = { sessionId, state, comparisonKey: key, annotations: annotationsToFlush };
       diffPreviewSend.disabled = false;
       diffPreviewText.value = prompt.prompt;
-      diffPreviewStatus.textContent = diffCommentPreviewStatus(comments.length);
+      diffPreviewStatus.textContent = diffCommentPreviewStatus(annotationsToFlush.length);
       diffPreviewOverlay.hidden = false;
       diffPreviewText.scrollTop = 0;
       window.setTimeout(() => diffPreviewSend.focus(), 0);
@@ -1303,28 +1287,28 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     diffPreviewStatus.textContent = "";
   }
 
-  function clearFlushedDiffComments(
+  function clearFlushedDiffAnnotations(
     sessionId: string,
     key: string,
   ): void {
-    diffAnnotations.set(sessionId, removeSelectedDiffComments(diffAnnotations.get(sessionId) ?? [], key));
+    diffAnnotations.set(sessionId, removeSelectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key));
     renderActiveSession();
   }
 
   function sendDiffPreviewDraft(): void {
     const draft = diffPreviewDraft;
     if (!draft) return;
-    const prompt = prepareDiffCommentPrompt(draft.state, draft.comments, comment => cachedMobileDiffPatchForAnnotation(draft.state, comment));
+    const prompt = prepareDiffAnnotationPrompt(draft.state, draft.annotations, annotation => cachedMobileDiffPatchForAnnotation(draft.state, annotation));
     if (!prompt.ok) {
       diffPreviewStatus.textContent = "message" in prompt ? prompt.message : "";
       return;
     }
-    const clearComments = () => clearFlushedDiffComments(draft.sessionId, draft.comparisonKey);
+    const clearComments = () => clearFlushedDiffAnnotations(draft.sessionId, draft.comparisonKey);
     if (projections.get(draft.sessionId)?.isBusy) {
       busyPromptDraft = createBusyPromptDraft({
         sessionId: draft.sessionId,
         text: prompt.prompt,
-        editorText: diffCommentFlushEditorText(draft.comments.length),
+        editorText: diffCommentFlushEditorText(draft.annotations.length),
         images: [],
         onSend: clearComments,
       });
@@ -2710,13 +2694,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       diffLoadingSessions.has(sessionId),
       () => requestMobileSessionChangesRefresh(sessionId),
     );
-    const selectedComments = state.status === "ready"
-      ? selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], comparisonKey(state), "comment")
+    const queuedAnnotations = state.status === "ready"
+      ? selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], comparisonKey(state))
       : [];
     const flushButton = renderDiffAction(
-      `Preview & flush (${selectedComments.length})`,
+      `Preview & flush (${queuedAnnotations.length})`,
       false,
-      diffLoadingSessions.has(sessionId) || selectedComments.length === 0,
+      diffLoadingSessions.has(sessionId) || queuedAnnotations.length === 0,
       () => { if (state.status === "ready") openDiffPreview(sessionId, state); },
     );
     actions.append(refreshButton, flushButton);

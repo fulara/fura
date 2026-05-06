@@ -5,10 +5,10 @@ export type DiffPreviewDraft = {
   sessionId: string;
   state: DiffReviewableState;
   comparisonKey: string;
-  comments: DiffReviewAnnotation[];
+  annotations: DiffReviewAnnotation[];
 };
 
-export type DiffCommentPromptResult =
+export type DiffAnnotationPromptResult =
   | { ok: true; prompt: string }
   | { ok: false; message: string; missingFiles: string[] };
 
@@ -59,6 +59,10 @@ export function selectedDiffAnnotations(
   kind?: "comment" | "question",
 ): DiffReviewAnnotation[] {
   return annotations.filter(annotation => annotation.comparisonKey === key && (!kind || annotation.kind === kind));
+}
+
+export function removeSelectedDiffAnnotations(annotations: DiffReviewAnnotation[], key: string): DiffReviewAnnotation[] {
+  return annotations.filter(annotation => annotation.comparisonKey !== key);
 }
 
 export function removeSelectedDiffComments(annotations: DiffReviewAnnotation[], key: string): DiffReviewAnnotation[] {
@@ -164,39 +168,40 @@ const reviewHelperInstruction = [
   "Do not edit files, generate patches, or modify a checkout from this review prompt. If implementation changes are needed, say that they should be handled in a separate coding session/worktree.",
 ].join(" ");
 
-function buildCommentSection(comment: DiffReviewAnnotation, index: number, rows: ParsedDiffRow[]): string {
+function buildAnnotationSection(annotation: DiffReviewAnnotation, index: number, rows: ParsedDiffRow[]): string {
+  const label = annotation.kind === "question" ? "Question" : "Comment";
   return [
-    `### Comment ${index + 1}`,
-    `Location: ${formatDiffLocation(comment)}`,
-    comment.anchor.hunk ? `Hunk: ${comment.anchor.hunk}` : undefined,
-    `Diff line: ${comment.anchor.text}`,
-    `Comment: ${comment.text}`,
+    `### ${label} ${index + 1}`,
+    `Location: ${formatDiffLocation(annotation)}`,
+    annotation.anchor.hunk ? `Hunk: ${annotation.anchor.hunk}` : undefined,
+    `Diff line: ${annotation.anchor.text}`,
+    `${label}: ${annotation.text}`,
     "",
     "Relevant diff context:",
     "```diff",
-    buildDiffAnnotationContext(rows, comment),
+    buildDiffAnnotationContext(rows, annotation),
     "```",
   ]
     .filter(Boolean)
     .join("\n");
 }
 
-export function prepareDiffCommentPrompt(
+export function prepareDiffAnnotationPrompt(
   state: DiffReviewableState,
-  comments: DiffReviewAnnotation[],
-  patchForComment?: (comment: DiffReviewAnnotation) => string | null,
-): DiffCommentPromptResult {
+  annotations: DiffReviewAnnotation[],
+  patchForAnnotation?: (annotation: DiffReviewAnnotation) => string | null,
+): DiffAnnotationPromptResult {
   const key = comparisonKey(state);
-  const selectedComments = comments.filter(annotation => annotation.kind === "comment" && annotation.comparisonKey === key);
+  const selectedAnnotations = annotations.filter(annotation => annotation.comparisonKey === key);
   const missingFiles = new Set<string>();
-  const commentSections = selectedComments
-    .map((comment, index) => {
-      const patch = patchForComment?.(comment) ?? reviewPatchText(state);
+  const sections = selectedAnnotations
+    .map((annotation, index) => {
+      const patch = patchForAnnotation?.(annotation) ?? reviewPatchText(state);
       if (!patch) {
-        missingFiles.add(pathForDiffLocation(comment.anchor));
+        missingFiles.add(pathForDiffLocation(annotation.anchor));
         return null;
       }
-      return buildCommentSection(comment, index, parseDiffRows(patch));
+      return buildAnnotationSection(annotation, index, parseDiffRows(patch));
     })
     .filter((section): section is string => Boolean(section))
     .join("\n\n");
@@ -205,25 +210,37 @@ export function prepareDiffCommentPrompt(
     return {
       ok: false,
       message: files.length === 1
-        ? `Load patch for ${files[0]} before flushing comments.`
-        : `Load patches for ${files.join(", ")} before flushing comments.`,
+        ? `Load patch for ${files[0]} before flushing review notes.`
+        : `Load patches for ${files.join(", ")} before flushing review notes.`,
       missingFiles: files,
     };
   }
   return {
     ok: true,
     prompt: [
-      "I reviewed a repository diff in Fura and left comments on specific diff lines.",
+      "I reviewed a repository diff in Fura and left comments/questions on specific diff lines.",
       reviewHelperInstruction,
       ...comparisonLines(state),
       "",
-      "Only the diff context around commented lines is included below; the full diff is intentionally omitted.",
+      "Only the diff context around annotated lines is included below; the full diff is intentionally omitted.",
       "",
-      commentSections,
+      sections,
       "",
-      "Please respond to these review comments using the path, side, and old/new diff line metadata to locate each comment precisely.",
+      "Please respond to these review notes using the path, side, and old/new diff line metadata to locate each item precisely.",
     ].join("\n"),
   };
+}
+
+export function prepareDiffCommentPrompt(
+  state: DiffReviewableState,
+  comments: DiffReviewAnnotation[],
+  patchForComment?: (comment: DiffReviewAnnotation) => string | null,
+): DiffAnnotationPromptResult {
+  return prepareDiffAnnotationPrompt(
+    state,
+    comments.filter(annotation => annotation.kind === "comment"),
+    patchForComment,
+  );
 }
 
 export function buildDiffCommentPrompt(state: DiffReviewableState, comments: DiffReviewAnnotation[]): string {
