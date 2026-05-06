@@ -81,6 +81,14 @@ function success(command, data = {}) {
   write({ id: command.id, type: "response", command: command.type, success: true, data });
 }
 
+function stats() {
+  return {
+    tokens: { total: Math.max(1, messages.reduce((sum, message) => sum + JSON.stringify(message).length, 0)) },
+    cost: { total: 0 },
+    messages: { total: messages.length },
+  };
+}
+
 function error(command, message) {
   write({ id: command.id, type: "response", command: command.type, success: false, error: message });
 }
@@ -134,6 +142,10 @@ for await (const line of rl) {
     }
     case "get_messages": {
       success(command, { messages });
+      break;
+    }
+    case "get_session_stats": {
+      success(command, stats());
       break;
     }
     case "get_available_models": {
@@ -256,6 +268,22 @@ for await (const line of rl) {
         content: userContent,
         timestamp: now,
       };
+      if (planMode?.enabled && promptText.toLowerCase().includes("smoke plan")) {
+        messages.push(user);
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({
+          type: "plan_review",
+          sessionId: currentSessionId,
+          planFilePath: planMode.planFilePath ?? "local://PLAN.md",
+          finalPlanFilePath: "local://SMOKE_PLAN.md",
+          title: "SMOKE_PLAN",
+          content: "# Smoke Plan\n\n- Verify browser smoke plan review.",
+        });
+        write({ type: "agent_end", timestamp: now + 1 });
+        break;
+      }
+
       if (promptText.toLowerCase().includes("generate_image") || promptText.toLowerCase().includes("mock image")) {
         const toolCallId = `mock-generate-image-${now}`;
         const assistant = {
@@ -386,11 +414,9 @@ for await (const line of rl) {
     }
 
     default: {
-      if (command.type) {
-        success(command, { echoedType: command.type });
-      } else {
-        error(command, "command is missing type");
-      }
+      const type = command.type ? String(command.type) : "<missing>";
+      stderr.write(`unsupported mock rpc command: ${type}\n`);
+      error(command, `Unsupported mock RPC command: ${type}`);
       break;
     }
   }

@@ -8,9 +8,11 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:watch": "vitest",
+    "smoke": "npm run build && playwright test --config playwright.config.ts",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.59.1",
     "jsdom": "^29.1.1",
     "typescript": "^5.8.3",
     "vite": "^6.3.2",
