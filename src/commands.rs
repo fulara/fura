@@ -799,21 +799,23 @@ async fn handle_plan_approve(
             .unwrap_or_else(|| format!("Session {}", short_session_id(&session_id)))
     };
     let execution_title = format!("Execution - {source_title}");
-    state.plan_execution_carryovers.write().await.insert(
-        session_id.clone(),
-        PlanExecutionCarryover {
-            execution_title: execution_title.clone(),
-            plan_title: title,
-            plan_file_path: plan_file_path.clone(),
-            final_plan_file_path: final_plan_file_path.clone(),
-            content,
-        },
-    );
     state
-        .pending_new_session_names
-        .write()
-        .await
-        .insert(session_id.clone(), execution_title);
+        .session_runtime
+        .set_plan_execution_carryover(
+            session_id.clone(),
+            PlanExecutionCarryover {
+                execution_title: execution_title.clone(),
+                plan_title: title,
+                plan_file_path: plan_file_path.clone(),
+                final_plan_file_path: final_plan_file_path.clone(),
+                content,
+            },
+        )
+        .await;
+    state
+        .session_runtime
+        .set_pending_session_name(session_id.clone(), execution_title)
+        .await;
     let command = serde_json::json!({
         "id": next_rpc_id(),
         "type": "approve_plan_mode",
@@ -1444,10 +1446,9 @@ pub(crate) async fn handle_session_fork(
     name: String,
 ) -> Vec<ServerMessage> {
     state
-        .pending_new_session_names
-        .write()
-        .await
-        .insert(session_id.clone(), name);
+        .session_runtime
+        .set_pending_session_name(session_id.clone(), name)
+        .await;
     match send_rpc_command(
         state,
         &session_id,
@@ -1467,10 +1468,9 @@ pub(crate) async fn handle_session_handoff(
     custom_instructions: Option<String>,
 ) -> Vec<ServerMessage> {
     state
-        .pending_new_session_names
-        .write()
-        .await
-        .insert(session_id.clone(), name);
+        .session_runtime
+        .set_pending_session_name(session_id.clone(), name)
+        .await;
     let mut command = serde_json::json!({ "id": next_rpc_id(), "type": "handoff" });
     if let Some(instructions) = custom_instructions {
         command["customInstructions"] = Value::String(instructions);

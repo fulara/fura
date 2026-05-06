@@ -836,17 +836,264 @@ pub(crate) fn apply_rpc_state_to_record(
     }
 }
 
+struct RpcStateUpdate {
+    current_session_id: String,
+    target_session_id: String,
+    session_name: Option<String>,
+    model: Option<String>,
+    thinking_level: Option<String>,
+    session_file: Option<String>,
+    context_tokens: Option<u64>,
+    context_window: Option<u64>,
+    context_percent: Option<f64>,
+    plan_mode: Option<Option<PlanModeProjection>>,
+    todo_phases: Option<Vec<TodoPhaseProjection>>,
+}
+
+struct GetStateApplyOutcome {
+    previous_snapshot: Option<ServerMessage>,
+    target_snapshot: Option<ServerMessage>,
+}
+
+async fn apply_get_state_update(
+    state: &AppState,
+    transport_session_id: &str,
+    update: RpcStateUpdate,
+) -> GetStateApplyOutcome {
+    let target_changed = update.target_session_id != update.current_session_id;
+    let pending_create = if target_changed {
+        state
+            .session_runtime
+            .remove_pending_create(&update.current_session_id)
+            .await
+    } else {
+        None
+    };
+    let pending_switch_name = if target_changed {
+        state
+            .session_runtime
+            .remove_pending_session_name(&update.current_session_id)
+            .await
+    } else {
+        None
+    };
+    let pending_plan_execution = if target_changed {
+        state
+            .session_runtime
+            .remove_plan_execution_carryover(&update.current_session_id)
+            .await
+    } else {
+        None
+    };
+    let effective_session_name = pending_switch_name.clone().or(update.session_name);
+
+    let (previous_snapshot, target_snapshot) = {
+        let mut sessions = state.sessions.write().await;
+
+        if target_changed {
+            let source = sessions.get(&update.current_session_id).cloned();
+            let previous_snapshot = sessions.get_mut(&update.current_session_id).map(|record| {
+                record.status = SessionStatus::Available;
+                record.kind = SessionKind::Available;
+                record.streaming_message = None;
+                record.live_message_ids.clear();
+                ServerMessage::SessionSnapshot {
+                    session_id: update.current_session_id.clone(),
+                    state: record.projection(),
+                }
+            });
+
+            sessions
+                .entry(update.target_session_id.clone())
+                .and_modify(|record| {
+                    record.status = SessionStatus::Idle;
+                    record.kind = SessionKind::Managed;
+                    record.streaming_message = None;
+                    record.live_message_ids.clear();
+                    if record.worktree.is_none() {
+                        record.worktree = pending_create
+                            .as_ref()
+                            .and_then(|pending| pending.worktree.clone());
+                    }
+                    if let Some(pending) = pending_create.as_ref() {
+                        record.session_mode = pending.session_mode;
+                    }
+                })
+                .or_insert_with(|| {
+                    let now = Timestamp::now();
+                    let created_at = source
+                        .as_ref()
+                        .map(|record| record.created_at)
+                        .or_else(|| pending_create.as_ref().map(|pending| pending.created_at))
+                        .unwrap_or(now);
+                    SessionRecord {
+                        id: update.target_session_id.clone(),
+                        cwd: source
+                            .as_ref()
+                            .and_then(|record| record.cwd.clone())
+                            .or_else(|| {
+                                pending_create
+                                    .as_ref()
+                                    .and_then(|pending| pending.cwd.clone())
+                            }),
+                        args: source
+                            .as_ref()
+                            .map(|record| record.args.clone())
+                            .or_else(|| pending_create.as_ref().map(|pending| pending.args.clone()))
+                            .unwrap_or_default(),
+                        status: SessionStatus::Idle,
+                        created_at,
+                        updated_at: now,
+                        messages: Vec::new(),
+                        live_message_ids: HashSet::new(),
+                        streaming_message: None,
+                        tool_cards: Vec::new(),
+                        active_tool_calls: Vec::new(),
+                        todo_phases: None,
+                        kind: SessionKind::Managed,
+                        session_mode: source
+                            .as_ref()
+                            .map(|record| record.session_mode)
+                            .or_else(|| pending_create.as_ref().map(|pending| pending.session_mode))
+                            .unwrap_or_default(),
+                        session_file: None,
+                        title: pending_create
+                            .as_ref()
+                            .and_then(|pending| pending.title.clone())
+                            .or_else(|| pending_switch_name.clone()),
+                        timestamp: None,
+                        category: source
+                            .as_ref()
+                            .and_then(|record| record.category.clone())
+                            .or_else(|| {
+                                pending_create
+                                    .as_ref()
+                                    .and_then(|pending| pending.category.clone())
+                            }),
+                        worktree: source
+                            .as_ref()
+                            .and_then(|record| record.worktree.clone())
+                            .or_else(|| {
+                                pending_create
+                                    .as_ref()
+                                    .and_then(|pending| pending.worktree.clone())
+                            }),
+                        model: None,
+                        thinking_level: None,
+                        tokens_total: 0,
+                        cost_usd: 0.0,
+                        context_tokens: None,
+                        context_window: None,
+                        context_percent: None,
+                        plan_mode: None,
+                        pending_plan_review: None,
+                    }
+                });
+
+            if let Some(record) = sessions.get_mut(&update.target_session_id) {
+                record.updated_at = Timestamp::now();
+                apply_rpc_state_to_record(
+                    record,
+                    effective_session_name,
+                    update.model,
+                    update.thinking_level,
+                    update.session_file,
+                    update.context_tokens,
+                    update.context_window,
+                    update.context_percent,
+                    update.plan_mode.clone(),
+                    update.todo_phases.clone(),
+                );
+            }
+
+            let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
+                ServerMessage::SessionSnapshot {
+                    session_id: update.target_session_id.clone(),
+                    state: record.projection(),
+                }
+            });
+            (previous_snapshot, target_snapshot)
+        } else {
+            if let Some(record) = sessions.get_mut(&update.target_session_id) {
+                apply_rpc_state_to_record(
+                    record,
+                    effective_session_name,
+                    update.model,
+                    update.thinking_level,
+                    update.session_file,
+                    update.context_tokens,
+                    update.context_window,
+                    update.context_percent,
+                    update.plan_mode,
+                    update.todo_phases,
+                );
+            }
+            let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
+                ServerMessage::SessionSnapshot {
+                    session_id: update.target_session_id.clone(),
+                    state: record.projection(),
+                }
+            });
+            (None, target_snapshot)
+        }
+    };
+
+    let (target_category, target_mode) = if target_changed {
+        let sessions = state.sessions.read().await;
+        sessions
+            .get(&update.target_session_id)
+            .map(|record| (record.category.clone(), record.session_mode))
+            .unwrap_or((None, SessionMode::Standard))
+    } else {
+        (None, SessionMode::Standard)
+    };
+    if let Some(plan_execution) = pending_plan_execution {
+        state
+            .session_runtime
+            .set_plan_execution_carryover(update.target_session_id.clone(), plan_execution)
+            .await;
+    }
+    if target_changed {
+        state
+            .session_runtime
+            .map_transport_to_session(transport_session_id, update.target_session_id.clone())
+            .await;
+        {
+            let mut categories = state.session_categories.write().await;
+            if let Some(category) = target_category {
+                categories.insert(update.target_session_id.clone(), category);
+            } else {
+                categories.remove(&update.target_session_id);
+            }
+        }
+        {
+            let mut modes = state.session_modes.write().await;
+            if target_mode == SessionMode::Standard {
+                modes.remove(&update.target_session_id);
+            } else {
+                modes.insert(update.target_session_id.clone(), target_mode);
+            }
+        }
+        if let Err(error) = save_fura_config(state).await {
+            warn!(%error, "failed to save remapped session metadata");
+        }
+    }
+
+    GetStateApplyOutcome {
+        previous_snapshot,
+        target_snapshot,
+    }
+}
+
 async fn prepend_plan_execution_carryover(
     state: &AppState,
     session_id: &str,
     messages: &mut Vec<TranscriptMessage>,
 ) {
     let Some(carryover) = state
-        .plan_execution_carryovers
-        .read()
+        .session_runtime
+        .plan_execution_carryover(session_id)
         .await
-        .get(session_id)
-        .cloned()
     else {
         return;
     };
@@ -1075,11 +1322,9 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         }
         Some("approve_plan_mode") => {
             let pending_name = state
-                .pending_new_session_names
-                .read()
-                .await
-                .get(&current_session_id)
-                .cloned();
+                .session_runtime
+                .pending_session_name(&current_session_id)
+                .await;
             if let Some(ref name) = pending_name {
                 let cmd = serde_json::json!({
                     "id": next_rpc_id(),
@@ -1215,233 +1460,27 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     Vec::new()
                 })
             });
-            let target_changed = target_session_id != current_session_id;
-            let pending_create = if target_changed {
-                state
-                    .session_runtime
-                    .remove_pending_create(&current_session_id)
-                    .await
-            } else {
-                None
-            };
-            let pending_switch_name = if target_changed {
-                state
-                    .pending_new_session_names
-                    .write()
-                    .await
-                    .remove(&current_session_id)
-            } else {
-                None
-            };
-            let pending_plan_execution = if target_changed {
-                state
-                    .plan_execution_carryovers
-                    .write()
-                    .await
-                    .remove(&current_session_id)
-            } else {
-                None
-            };
-            let effective_session_name = pending_switch_name.clone().or(session_name);
+            let outcome = apply_get_state_update(
+                state,
+                session_id,
+                RpcStateUpdate {
+                    current_session_id: current_session_id.clone(),
+                    target_session_id: target_session_id.clone(),
+                    session_name,
+                    model,
+                    thinking_level,
+                    session_file,
+                    context_tokens,
+                    context_window,
+                    context_percent,
+                    plan_mode,
+                    todo_phases,
+                },
+            )
+            .await;
 
-            let (previous_snapshot, target_snapshot) = {
-                let mut sessions = state.sessions.write().await;
-
-                if target_changed {
-                    let source = sessions.get(&current_session_id).cloned();
-                    let previous_snapshot = sessions.get_mut(&current_session_id).map(|record| {
-                        record.status = SessionStatus::Available;
-                        record.kind = SessionKind::Available;
-                        record.streaming_message = None;
-                        record.live_message_ids.clear();
-                        ServerMessage::SessionSnapshot {
-                            session_id: current_session_id.clone(),
-                            state: record.projection(),
-                        }
-                    });
-
-                    sessions
-                        .entry(target_session_id.clone())
-                        .and_modify(|record| {
-                            record.status = SessionStatus::Idle;
-                            record.kind = SessionKind::Managed;
-                            record.streaming_message = None;
-                            record.live_message_ids.clear();
-                            if record.worktree.is_none() {
-                                record.worktree = pending_create
-                                    .as_ref()
-                                    .and_then(|pending| pending.worktree.clone());
-                            }
-                            if let Some(pending) = pending_create.as_ref() {
-                                record.session_mode = pending.session_mode;
-                            }
-                        })
-                        .or_insert_with(|| {
-                            let now = Timestamp::now();
-                            let created_at = source
-                                .as_ref()
-                                .map(|record| record.created_at)
-                                .or_else(|| {
-                                    pending_create.as_ref().map(|pending| pending.created_at)
-                                })
-                                .unwrap_or(now);
-                            SessionRecord {
-                                id: target_session_id.clone(),
-                                cwd: source
-                                    .as_ref()
-                                    .and_then(|record| record.cwd.clone())
-                                    .or_else(|| {
-                                        pending_create
-                                            .as_ref()
-                                            .and_then(|pending| pending.cwd.clone())
-                                    }),
-                                args: source
-                                    .as_ref()
-                                    .map(|record| record.args.clone())
-                                    .or_else(|| {
-                                        pending_create.as_ref().map(|pending| pending.args.clone())
-                                    })
-                                    .unwrap_or_default(),
-                                status: SessionStatus::Idle,
-                                created_at,
-                                updated_at: now,
-                                messages: Vec::new(),
-                                live_message_ids: HashSet::new(),
-                                streaming_message: None,
-                                tool_cards: Vec::new(),
-                                active_tool_calls: Vec::new(),
-                                todo_phases: None,
-                                kind: SessionKind::Managed,
-                                session_mode: source
-                                    .as_ref()
-                                    .map(|record| record.session_mode)
-                                    .or_else(|| {
-                                        pending_create.as_ref().map(|pending| pending.session_mode)
-                                    })
-                                    .unwrap_or_default(),
-                                session_file: None,
-                                title: pending_create
-                                    .as_ref()
-                                    .and_then(|pending| pending.title.clone())
-                                    .or_else(|| pending_switch_name.clone()),
-                                timestamp: None,
-                                category: source
-                                    .as_ref()
-                                    .and_then(|record| record.category.clone())
-                                    .or_else(|| {
-                                        pending_create
-                                            .as_ref()
-                                            .and_then(|pending| pending.category.clone())
-                                    }),
-                                worktree: source
-                                    .as_ref()
-                                    .and_then(|record| record.worktree.clone())
-                                    .or_else(|| {
-                                        pending_create
-                                            .as_ref()
-                                            .and_then(|pending| pending.worktree.clone())
-                                    }),
-                                model: None,
-                                thinking_level: None,
-                                tokens_total: 0,
-                                cost_usd: 0.0,
-                                context_tokens: None,
-                                context_window: None,
-                                context_percent: None,
-                                plan_mode: None,
-                                pending_plan_review: None,
-                            }
-                        });
-
-                    if let Some(record) = sessions.get_mut(&target_session_id) {
-                        record.updated_at = Timestamp::now();
-                        apply_rpc_state_to_record(
-                            record,
-                            effective_session_name,
-                            model,
-                            thinking_level,
-                            session_file,
-                            context_tokens,
-                            context_window,
-                            context_percent,
-                            plan_mode.clone(),
-                            todo_phases.clone(),
-                        );
-                    }
-
-                    let target_snapshot = sessions.get(&target_session_id).map(|record| {
-                        ServerMessage::SessionSnapshot {
-                            session_id: target_session_id.clone(),
-                            state: record.projection(),
-                        }
-                    });
-                    (previous_snapshot, target_snapshot)
-                } else {
-                    if let Some(record) = sessions.get_mut(&target_session_id) {
-                        apply_rpc_state_to_record(
-                            record,
-                            effective_session_name,
-                            model,
-                            thinking_level,
-                            session_file,
-                            context_tokens,
-                            context_window,
-                            context_percent,
-                            plan_mode,
-                            todo_phases,
-                        );
-                    }
-                    let target_snapshot = sessions.get(&target_session_id).map(|record| {
-                        ServerMessage::SessionSnapshot {
-                            session_id: target_session_id.clone(),
-                            state: record.projection(),
-                        }
-                    });
-                    (None, target_snapshot)
-                }
-            };
-
-            let (target_category, target_mode) = if target_changed {
-                let sessions = state.sessions.read().await;
-                sessions
-                    .get(&target_session_id)
-                    .map(|record| (record.category.clone(), record.session_mode))
-                    .unwrap_or((None, SessionMode::Standard))
-            } else {
-                (None, SessionMode::Standard)
-            };
-            if let Some(plan_execution) = pending_plan_execution {
-                state
-                    .plan_execution_carryovers
-                    .write()
-                    .await
-                    .insert(target_session_id.clone(), plan_execution);
-            }
-            if target_changed {
-                state
-                    .session_runtime
-                    .map_transport_to_session(session_id, target_session_id.clone())
-                    .await;
-                {
-                    let mut categories = state.session_categories.write().await;
-                    if let Some(category) = target_category {
-                        categories.insert(target_session_id.clone(), category);
-                    } else {
-                        categories.remove(&target_session_id);
-                    }
-                }
-                {
-                    let mut modes = state.session_modes.write().await;
-                    if target_mode == SessionMode::Standard {
-                        modes.remove(&target_session_id);
-                    } else {
-                        modes.insert(target_session_id.clone(), target_mode);
-                    }
-                }
-                if let Err(error) = save_fura_config(state).await {
-                    warn!(%error, "failed to save remapped session metadata");
-                }
-            }
+            let previous_snapshot = outcome.previous_snapshot;
+            let target_snapshot = outcome.target_snapshot;
 
             if let Some(snapshot) = previous_snapshot {
                 let _ = state.events.send(snapshot);
@@ -1469,12 +1508,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             }
             // Queue the requested name before refresh so set_session_name reaches OMP before get_state.
             // Keep the pending name until get_state reports the new OMP session id, then apply it to that target.
-            let pending_name = state
-                .pending_new_session_names
-                .read()
-                .await
-                .get(session_id)
-                .cloned();
+            let pending_name = state.session_runtime.pending_session_name(session_id).await;
             if let Some(ref name) = pending_name {
                 let cmd = serde_json::json!({
                     "id": next_rpc_id(),
@@ -1502,10 +1536,9 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 .unwrap_or(false);
             if cancelled {
                 state
-                    .pending_new_session_names
-                    .write()
-                    .await
-                    .remove(session_id);
+                    .session_runtime
+                    .remove_pending_session_name(session_id)
+                    .await;
                 let _ = state.events.send(notice(
                     current_session_id,
                     NoticeLevel::Warning,
@@ -1514,12 +1547,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             } else {
                 // Queue the requested name before refresh so set_session_name reaches OMP before get_state.
                 // Keep the pending name until get_state reports the new OMP session id, then apply it to that target.
-                let pending_name = state
-                    .pending_new_session_names
-                    .read()
-                    .await
-                    .get(session_id)
-                    .cloned();
+                let pending_name = state.session_runtime.pending_session_name(session_id).await;
                 if let Some(ref name) = pending_name {
                     let cmd = serde_json::json!({
                         "id": next_rpc_id(),

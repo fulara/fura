@@ -146,10 +146,8 @@ async fn main() -> anyhow::Result<()> {
         sessions: session_runtime.sessions.clone(),
         session_categories: session_runtime.session_categories.clone(),
         session_modes: session_runtime.session_modes.clone(),
-        pending_new_session_names: session_runtime.pending_new_session_names.clone(),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
         pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
-        plan_execution_carryovers: session_runtime.plan_execution_carryovers.clone(),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
         proposed_models: Arc::new(RwLock::new(proposed_models)),
@@ -674,10 +672,8 @@ pub(crate) mod tests {
             sessions: session_runtime.sessions.clone(),
             session_categories: session_runtime.session_categories.clone(),
             session_modes: session_runtime.session_modes.clone(),
-            pending_new_session_names: session_runtime.pending_new_session_names.clone(),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
             pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
-            plan_execution_carryovers: session_runtime.plan_execution_carryovers.clone(),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
             proposed_models: Arc::new(RwLock::new(Vec::new())),
@@ -736,19 +732,59 @@ pub(crate) mod tests {
         );
 
         state
-            .pending_new_session_names
-            .write()
-            .await
-            .insert("transport".to_string(), "next".to_string());
+            .session_runtime
+            .set_pending_session_name("transport".to_string(), "next".to_string())
+            .await;
         assert_eq!(
             state
                 .session_runtime
-                .pending_new_session_names
-                .read()
+                .pending_session_name("transport")
                 .await
-                .get("transport")
-                .map(String::as_str),
+                .as_deref(),
             Some("next")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_runtime_moves_pending_name_and_plan_carryover() {
+        let state = test_state(8, None);
+        state
+            .session_runtime
+            .set_pending_session_name("transport".to_string(), "new-name".to_string())
+            .await;
+        assert_eq!(
+            state
+                .session_runtime
+                .remove_pending_session_name("transport")
+                .await
+                .as_deref(),
+            Some("new-name")
+        );
+        assert!(
+            !state
+                .session_runtime
+                .has_pending_session_name("transport")
+                .await
+        );
+
+        let carryover = PlanExecutionCarryover {
+            execution_title: "Execution - Plan".to_string(),
+            plan_title: Some("Plan".to_string()),
+            plan_file_path: "local://PLAN.md".to_string(),
+            final_plan_file_path: "local://APPROVED.md".to_string(),
+            content: "# Plan".to_string(),
+        };
+        state
+            .session_runtime
+            .set_plan_execution_carryover("source-session".to_string(), carryover.clone())
+            .await;
+        assert_eq!(
+            state
+                .session_runtime
+                .remove_plan_execution_carryover("source-session")
+                .await
+                .map(|carryover| carryover.final_plan_file_path),
+            Some("local://APPROVED.md".to_string())
         );
     }
 
@@ -3739,10 +3775,13 @@ pub(crate) mod tests {
             .await
             .insert("old-session".to_string(), previous);
         map_test_transport(&state, "old-session", "old-session").await;
-        state.pending_new_session_names.write().await.insert(
-            "old-session".to_string(),
-            "Requested handoff name".to_string(),
-        );
+        state
+            .session_runtime
+            .set_pending_session_name(
+                "old-session".to_string(),
+                "Requested handoff name".to_string(),
+            )
+            .await;
 
         apply_rpc_response(
             &state,
@@ -3797,12 +3836,10 @@ pub(crate) mod tests {
             Some("old-session")
         );
         assert!(
-            state
-                .pending_new_session_names
-                .read()
-                .await
-                .get("old-session")
-                .is_none(),
+            !state
+                .session_runtime
+                .has_pending_session_name("old-session")
+                .await,
             "pending handoff name should be consumed once the new session id is known"
         );
         assert!(

@@ -22,14 +22,10 @@ pub(crate) struct AppState {
     /// Persisted Fura-owned session metadata, keyed by OMP session id.
     pub(crate) session_categories: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) session_modes: Arc<RwLock<HashMap<String, SessionMode>>>,
-    /// Name to apply to the next new session spawned by a fork or handoff on this transport.
-    pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
     pub(crate) pending_session_change_snapshots:
         Arc<RwLock<HashMap<String, PendingSessionChangesSnapshot>>>,
-    /// Approved plan metadata waiting for / attached to the execution session spawned by OMP.
-    pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,
     pub(crate) code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>,
     pub(crate) review_worktrees: Arc<RwLock<DiffReviewWorktreeRegistry>>,
     pub(crate) proposed_models: Arc<RwLock<Vec<ProposedModelConfig>>>,
@@ -235,6 +231,75 @@ impl SessionRuntimeState {
             .read()
             .await
             .contains_key(transport_session_id)
+    }
+
+    pub(crate) async fn set_pending_session_name(
+        &self,
+        transport_session_id: String,
+        name: String,
+    ) {
+        self.pending_new_session_names
+            .write()
+            .await
+            .insert(transport_session_id, name);
+    }
+
+    pub(crate) async fn pending_session_name(&self, transport_session_id: &str) -> Option<String> {
+        self.pending_new_session_names
+            .read()
+            .await
+            .get(transport_session_id)
+            .cloned()
+    }
+
+    pub(crate) async fn remove_pending_session_name(
+        &self,
+        transport_session_id: &str,
+    ) -> Option<String> {
+        self.pending_new_session_names
+            .write()
+            .await
+            .remove(transport_session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_pending_session_name(&self, transport_session_id: &str) -> bool {
+        self.pending_new_session_names
+            .read()
+            .await
+            .contains_key(transport_session_id)
+    }
+
+    pub(crate) async fn set_plan_execution_carryover(
+        &self,
+        session_id: String,
+        carryover: PlanExecutionCarryover,
+    ) {
+        self.plan_execution_carryovers
+            .write()
+            .await
+            .insert(session_id, carryover);
+    }
+
+    pub(crate) async fn plan_execution_carryover(
+        &self,
+        session_id: &str,
+    ) -> Option<PlanExecutionCarryover> {
+        self.plan_execution_carryovers
+            .read()
+            .await
+            .get(session_id)
+            .cloned()
+    }
+
+    pub(crate) async fn remove_plan_execution_carryover(
+        &self,
+        session_id: &str,
+    ) -> Option<PlanExecutionCarryover> {
+        self.plan_execution_carryovers
+            .write()
+            .await
+            .remove(session_id)
     }
 }
 
