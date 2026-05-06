@@ -67,7 +67,6 @@ import {
   prepareDiffAnnotationPrompt,
   isReviewCommentMatched,
   isSameDiffLineLocation,
-  removeSelectedDiffAnnotations,
   selectedDiffAnnotations,
   reviewCommentsForComparison,
   reviewCommentsForDiffLocation,
@@ -4219,7 +4218,7 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
   if (!setActiveDesktopDockviewMode(isDiffReview ? "diffReview" : "normal")) return;
   if (isDiffReview) {
     desktopDockview?.ensureSessionChangesPanel();
-    if (activateCreatedDiffReview || !desktopDockview?.isPanelActive("sessionChanges")) {
+    if (activateCreatedDiffReview) {
       desktopDockview?.activatePanel("sessionChanges");
     }
     markDiffsViewDirty();
@@ -4707,12 +4706,25 @@ function askDiffQuestion(
   });
   annotations.push(annotation);
   diffAnnotations.set(sessionId, annotations);
+
   markDiffsViewDirty();
   rerenderDiffsViewPreservingScroll(sessionId);
 }
 
 function cachedDiffPatchForAnnotation(state: DiffReviewableState, annotation: DiffReviewAnnotation): string | null {
   return diffPatchCache.get(diffPatchCacheKey(comparisonKey(state), annotation.anchor.newPath))?.patch ?? null;
+}
+
+function diffAnnotationFlushEditorText(annotations: DiffReviewAnnotation[]): string {
+  const allQuestions = annotations.every(annotation => annotation.kind === "question");
+  if (allQuestions) return `Flush ${annotations.length} diff question${annotations.length === 1 ? "" : "s"}`;
+  return diffCommentFlushEditorText(annotations.length);
+}
+
+function diffAnnotationPreviewStatus(annotations: DiffReviewAnnotation[]): string {
+  const allQuestions = annotations.every(annotation => annotation.kind === "question");
+  if (allQuestions) return `${annotations.length} question${annotations.length === 1 ? "" : "s"} ready to send`;
+  return diffCommentPreviewStatus(annotations.length);
 }
 
 function sendDiffAnnotations(
@@ -4723,9 +4735,12 @@ function sendDiffAnnotations(
   if (annotationsToFlush.length === 0) return;
   const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffPatchForAnnotation(state, annotation));
   if (prompt.ok) {
-    const key = comparisonKey(state);
+    const flushedIds = new Set(annotationsToFlush.map(annotation => annotation.id));
     const clearFlushedAnnotations = () => {
-      diffAnnotations.set(sessionId, removeSelectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key));
+      diffAnnotations.set(
+        sessionId,
+        (diffAnnotations.get(sessionId) ?? []).filter(annotation => !flushedIds.has(annotation.id)),
+      );
       markDiffsViewDirty();
       rerenderDiffsViewPreservingScroll(sessionId);
     };
@@ -4733,7 +4748,7 @@ function sendDiffAnnotations(
     sendPromptWithBusyHandling({
       sessionId,
       text: prompt.prompt,
-      editorText: diffCommentFlushEditorText(annotationsToFlush.length),
+      editorText: diffAnnotationFlushEditorText(annotationsToFlush),
       images: [],
       onSend: clearFlushedAnnotations,
     });
@@ -4745,21 +4760,23 @@ function sendDiffAnnotations(
 function previewDiffAnnotations(
   sessionId: string,
   state: DiffReviewableState,
+  kind?: "comment" | "question",
 ): void {
   const key = comparisonKey(state);
-  const annotationsToFlush = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key);
+  const annotationsToFlush = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, kind);
   if (annotationsToFlush.length === 0) return;
   const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffPatchForAnnotation(state, annotation));
+  const isQuestionPreview = annotationsToFlush.every(annotation => annotation.kind === "question");
   if (prompt.ok) {
     diffPreviewDraft = { sessionId, state, comparisonKey: key, annotations: annotationsToFlush };
     transcriptPreviewDraft = null;
-    diffPreviewTitle.textContent = "Preview diff notes";
+    diffPreviewTitle.textContent = isQuestionPreview ? "Preview diff questions" : "Preview diff notes";
     diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
-    diffPreviewSend.textContent = "Send notes";
+    diffPreviewSend.textContent = isQuestionPreview ? "Send questions" : "Send notes";
     diffPreviewSend.disabled = false;
     diffPreviewText.readOnly = true;
     diffPreviewText.value = prompt.prompt;
-    diffPreviewStatus.textContent = diffCommentPreviewStatus(annotationsToFlush.length);
+    diffPreviewStatus.textContent = diffAnnotationPreviewStatus(annotationsToFlush);
     diffPreviewOverlay.hidden = false;
     diffPreviewText.scrollTop = 0;
     diffPreviewSend.focus();
@@ -4767,9 +4784,9 @@ function previewDiffAnnotations(
   }
   diffPreviewDraft = null;
   transcriptPreviewDraft = null;
-  diffPreviewTitle.textContent = "Diff notes blocked";
+  diffPreviewTitle.textContent = isQuestionPreview ? "Diff questions blocked" : "Diff notes blocked";
   diffPreviewSubtitle.textContent = "message" in prompt ? prompt.message : "";
-  diffPreviewSend.textContent = "Send notes";
+  diffPreviewSend.textContent = isQuestionPreview ? "Send questions" : "Send notes";
   diffPreviewSend.disabled = true;
   diffPreviewText.value = "";
   diffPreviewText.readOnly = true;
@@ -4833,8 +4850,9 @@ function sendPromptPreviewDraft(): void {
 function flushDiffAnnotations(
   sessionId: string,
   state: DiffReviewableState,
+  kind?: "comment" | "question",
 ): void {
-  previewDiffAnnotations(sessionId, state);
+  previewDiffAnnotations(sessionId, state, kind);
 }
 
 function diffTargetOffsetTop(container: HTMLElement, target: HTMLElement): number {
@@ -5270,21 +5288,29 @@ function renderReviewableDiff(
     toolbar.append(code);
   }
   if (allowPromptActions) {
-    const queuedAnnotations = selectedDiffAnnotations(annotations, key);
-    const flush = mkEl("button");
-    flush.type = "button";
-    flush.textContent = `Preview & flush (${queuedAnnotations.length})`;
-    flush.disabled = queuedAnnotations.length === 0;
-    flush.addEventListener("click", () => flushDiffAnnotations(annotationKey, state));
-    toolbar.append(flush);
+    const queuedComments = selectedDiffAnnotations(annotations, key, "comment");
+    const queuedQuestions = selectedDiffAnnotations(annotations, key, "question");
+    if (queuedComments.length > 0) {
+      const flushComments = mkEl("button");
+      flushComments.type = "button";
+      flushComments.textContent = `Preview notes (${queuedComments.length})`;
+      flushComments.addEventListener("click", () => flushDiffAnnotations(annotationKey, state, "comment"));
+      toolbar.append(flushComments);
+    }
+    const flushQuestions = mkEl("button");
+    flushQuestions.type = "button";
+    flushQuestions.textContent = `Preview questions (${queuedQuestions.length})`;
+    flushQuestions.disabled = queuedQuestions.length === 0;
+    flushQuestions.addEventListener("click", () => flushDiffAnnotations(annotationKey, state, "question"));
+    toolbar.append(flushQuestions);
     const review = mkEl("button");
     review.type = "button";
     review.textContent = "Review this diff";
-    review.disabled = !cachedPatch?.patch;
-    review.title = cachedPatch?.patch ? "Ask the agent to review this loaded diff patch" : "Load a file patch before starting agent review";
+    review.disabled = state.summary.files.length === 0;
+    review.title = state.summary.files.length > 0 ? "Ask the agent to review the full diff" : "No changed files to review";
     review.addEventListener("click", () => {
-      if (!cachedPatch?.patch) return;
-      previewAgentDiffReview(annotationKey, { ...state, patch: cachedPatch.patch });
+      if (state.summary.files.length === 0) return;
+      previewAgentDiffReview(annotationKey, { ...state, patch: null });
     });
     toolbar.append(review);
   }

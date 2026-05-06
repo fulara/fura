@@ -1578,7 +1578,7 @@ async fn send_file_patch_for_prepared(
     }
 }
 
-async fn generate_file_patch(
+pub(crate) async fn generate_file_patch(
     repo_root: &Path,
     left_tree_or_commit: &str,
     right_tree_or_commit: &str,

@@ -1998,16 +1998,10 @@ pub(crate) async fn handle_review_agent_review_start(
     review_state: DiffReviewableState,
     instructions: String,
 ) -> Vec<ServerMessage> {
-    let Some(patch) = review_state
+    let patch_override = review_state
         .patch
         .clone()
-        .filter(|patch| !patch.trim().is_empty())
-    else {
-        return vec![ServerMessage::Error {
-            request_id: None,
-            message: "Cannot start agent diff review before a file patch is loaded.".to_string(),
-        }];
-    };
+        .filter(|patch| !patch.trim().is_empty());
     {
         let mut sessions = state.sessions.write().await;
         let Some(record) = sessions.get_mut(&session_id) else {
@@ -2040,7 +2034,10 @@ pub(crate) async fn handle_review_agent_review_start(
         session_id: session_id.clone(),
         repo_root: review_state.comparison.repo_root.clone(),
         comparison_key: review_state.comparison.comparison_key.clone(),
-        patch,
+        left_tree_or_commit: review_state.comparison.left_tree_or_commit.clone(),
+        right_tree_or_commit: review_state.comparison.right_tree_or_commit.clone(),
+        patch_override,
+
         previous_host_tools: previous_host_tools.clone(),
         set_host_tools_command_id: set_host_tools_command_id.clone(),
         prompt_command_id: prompt_command_id.clone(),
@@ -2210,12 +2207,51 @@ async fn add_agent_review_comment(
             context.session_id, target_session_id
         ));
     }
-    let anchor = find_patch_location(&context.patch, &path, side, line).ok_or_else(|| {
-        format!(
-            "could not map review comment to {path}:{line} on {:?} side",
-            side
-        )
-    })?;
+    let selector = DiffFileSelector {
+        old_path: if side == DiffSide::Left {
+            Some(path.clone())
+        } else {
+            None
+        },
+        new_path: path.clone(),
+    };
+    let anchor = match generate_file_patch(
+        Path::new(&context.repo_root),
+        &context.left_tree_or_commit,
+        &context.right_tree_or_commit,
+        &selector,
+    )
+    .await
+    {
+        Ok((patch, truncated)) => {
+            if truncated {
+                return Err(format!(
+                    "review patch for {path} is too large to map comments safely"
+                ));
+            }
+            if patch.trim().is_empty() {
+                return Err(format!("{path} is not present in this review diff"));
+            }
+            find_patch_location(&patch, &path, side, line).ok_or_else(|| {
+                format!(
+                    "could not map review comment to {path}:{line} on {:?} side",
+                    side
+                )
+            })?
+        }
+        Err(error) => {
+            let fallback_patch = context
+                .patch_override
+                .clone()
+                .ok_or_else(|| format!("could not generate review patch for {path}: {error}"))?;
+            find_patch_location(&fallback_patch, &path, side, line).ok_or_else(|| {
+                format!(
+                    "could not map review comment to {path}:{line} on {:?} side",
+                    side
+                )
+            })?
+        }
+    };
     let comment = create_review_comment_with_author(
         state,
         context.session_id.clone(),
@@ -2440,7 +2476,7 @@ fn review_tool_definition() -> Value {
     json!({
         "name": "fura_add_review_comment",
         "label": "Add Fura diff review comment",
-        "description": "Persist an inline review comment on the explicit Fura diff review currently in progress.",
+        "description": "Persist an inline review comment on the explicit Fura diff review currently in progress. Fura resolves the exact diff anchor from the review refs/context.",
         "parameters": {
             "type": "object",
             "properties": {
@@ -2457,6 +2493,35 @@ fn review_tool_definition() -> Value {
     })
 }
 
+fn review_endpoint_label(endpoint: &DiffEndpoint) -> String {
+    match endpoint {
+        DiffEndpoint::SessionStartSnapshot { snapshot } => {
+            format!(
+                "session snapshot {} ({})",
+                snapshot.ref_name, snapshot.commit
+            )
+        }
+        DiffEndpoint::WorkingTree => "working tree".to_string(),
+        DiffEndpoint::GitRef {
+            input,
+            ref_kind,
+            oid,
+            display,
+        } => format!("{display} ({ref_kind:?}, input {input}, {oid})"),
+        DiffEndpoint::Commit {
+            oid,
+            short_oid,
+            subject,
+        } => format!(
+            "{short_oid} ({oid}){}",
+            subject
+                .as_ref()
+                .map(|value| format!(" — {value}"))
+                .unwrap_or_default()
+        ),
+    }
+}
+
 fn review_prompt(context_id: &str, state: &DiffReviewableState, instructions: &str) -> String {
     let instructions = instructions.trim();
     let instructions = if instructions.is_empty() {
@@ -2470,14 +2535,17 @@ fn review_prompt(context_id: &str, state: &DiffReviewableState, instructions: &s
         .map(|worktree| format!("{:?}", worktree.status))
         .unwrap_or_else(|| "none".to_string());
     format!(
-        "You are reviewing the currently open Fura diff.\n\nReview context id: {context_id}\nRepository: {}\nComparison key: {}\nFiles in summary: {}\nCurrent commit: {}\nReview worktree status: {}\nReview instructions:\n{}\n\nReviewable diff patch:\n```diff\n{}\n```\n\nUse the fura_add_review_comment host tool for every inline review comment you want to persist. Do not invent line numbers; only comment on lines present in the diff patch.",
+        "You are reviewing the full Fura diff comparison, not just the currently selected file.\n\nReview context id: {context_id}\nRepository: {}\nComparison key: {}\nBase ref: {}\nHead ref: {}\nLeft tree/commit: {}\nRight tree/commit: {}\nFiles in summary: {}\nCurrent commit: {}\nReview worktree status: {}\nReview instructions:\n{}\n\nInspect the repository and compare the supplied refs/trees yourself before commenting. When you find an issue, call fura_add_review_comment with this reviewContextId, the repo-relative path, side, line, and comment body. Fura will resolve the exact diff anchor from the refs; do not invent line numbers.",
         state.comparison.repo_root,
         state.comparison.comparison_key,
+        review_endpoint_label(&state.comparison.base),
+        review_endpoint_label(&state.comparison.head),
+        state.comparison.left_tree_or_commit,
+        state.comparison.right_tree_or_commit,
         state.summary.files.len(),
         state.review.current_commit_oid.as_deref().unwrap_or("none"),
         worktree_status,
         instructions,
-        state.patch.as_deref().unwrap_or(""),
     )
 }
 
@@ -2771,8 +2839,15 @@ mod review_comment_tests {
         let prompt = stdin_rx.recv().await.expect("prompt command");
         assert_eq!(prompt["type"], "prompt");
         let text = prompt["message"].as_str().expect("prompt text");
-        assert!(text.contains("Reviewable diff patch:"));
-        assert!(text.contains(patch));
+        assert!(text.contains("full Fura diff comparison, not just the currently selected file"));
+        assert!(text.contains("Base ref: working tree"));
+        assert!(text.contains("Left tree/commit: base"));
+        assert!(text.contains("Right tree/commit: head"));
+        assert!(
+            text.contains("Inspect the repository and compare the supplied refs/trees yourself")
+        );
+        assert!(!text.contains("Reviewable full diff patch:"));
+        assert!(!text.contains(patch));
         assert!(text.contains("Review this diff carefully."));
         assert_eq!(state.active_review_contexts.read().await.len(), 1);
         let second = handle_client_message(
@@ -2868,7 +2943,9 @@ mod review_comment_tests {
                 session_id: "s1".to_string(),
                 repo_root: "/repo".to_string(),
                 comparison_key: "cmp".to_string(),
-                patch: patch.to_string(),
+                left_tree_or_commit: "base".to_string(),
+                right_tree_or_commit: "head".to_string(),
+                patch_override: Some(patch.to_string()),
                 previous_host_tools: Vec::new(),
                 set_host_tools_command_id: "set-host".to_string(),
                 prompt_command_id: "prompt".to_string(),
@@ -2921,7 +2998,9 @@ mod review_comment_tests {
                 session_id: "s1".to_string(),
                 repo_root: "/repo".to_string(),
                 comparison_key: "cmp".to_string(),
-                patch: patch.to_string(),
+                left_tree_or_commit: "base".to_string(),
+                right_tree_or_commit: "head".to_string(),
+                patch_override: Some(patch.to_string()),
                 previous_host_tools: Vec::new(),
                 set_host_tools_command_id: "set-host".to_string(),
                 prompt_command_id: "prompt".to_string(),
@@ -2965,7 +3044,9 @@ mod review_comment_tests {
                 session_id: "s1".to_string(),
                 repo_root: "/repo".to_string(),
                 comparison_key: "cmp".to_string(),
-                patch: patch.to_string(),
+                left_tree_or_commit: "base".to_string(),
+                right_tree_or_commit: "head".to_string(),
+                patch_override: Some(patch.to_string()),
                 previous_host_tools: Vec::new(),
                 set_host_tools_command_id: "set-host".to_string(),
                 prompt_command_id: "prompt".to_string(),
@@ -3006,7 +3087,9 @@ mod review_comment_tests {
                 session_id: "s1".to_string(),
                 repo_root: "/repo".to_string(),
                 comparison_key: "cmp".to_string(),
-                patch: patch.to_string(),
+                left_tree_or_commit: "base".to_string(),
+                right_tree_or_commit: "head".to_string(),
+                patch_override: Some(patch.to_string()),
                 previous_host_tools: Vec::new(),
                 set_host_tools_command_id: "set-host".to_string(),
                 prompt_command_id: "prompt".to_string(),
