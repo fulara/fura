@@ -1384,7 +1384,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     diffPreviewSend.disabled = false;
     diffPreviewSend.textContent = "Start review";
     diffPreviewText.readOnly = false;
-    diffPreviewText.value = "Review this diff for correctness, reliability, maintainability, and edge cases.";
+    diffPreviewText.value = "Review the full change for correctness, reliability, maintainability, and edge cases.";
     diffPreviewStatus.textContent = "Agent review comments will appear after the bridge stores and broadcasts them.";
     diffPreviewOverlay.hidden = false;
     diffPreviewText.scrollTop = 0;
@@ -2856,22 +2856,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       diffLoadingSessions.has(sessionId) || queuedAnnotations.length === 0,
       () => { if (state.status === "ready") openDiffPreview(sessionId, state); },
     );
-    const selectedFilePath = state.status === "ready"
-      ? selectedMobileDiffFilePath(state, sessionId, state.summary.files.map(file => file.newPath))
-      : null;
-    const selectedPatch = state.status === "ready" && selectedFilePath
-      ? mobileDiffPatchCache.get(`${comparisonKey(state)}\0${selectedFilePath}`)?.patch ?? (state as { patch?: string | null }).patch ?? null
-      : null;
-    const reviewState = state.status === "ready" && selectedPatch ? { ...state, patch: selectedPatch } : null;
+    const reviewState = state.status === "ready" && state.summary.files.length > 0 ? { ...state, patch: null } : null;
     const reviewButton = renderDiffAction(
-      "Review this diff",
+      "Request agent review",
       false,
       diffLoadingSessions.has(sessionId) || !reviewState,
       () => {
         if (reviewState) openAgentDiffReview(sessionId, reviewState);
       },
     );
-    reviewButton.title = reviewState?.patch ? "Ask the agent to review this loaded diff patch" : "Load a file patch before starting agent review";
+    reviewButton.title = reviewState ? "Ask the agent to review the full diff" : "No changed files to review";
     actions.append(refreshButton, flushButton, reviewButton);
     controls.append(fields, actions);
     diffView.append(controls);

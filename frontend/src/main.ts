@@ -118,6 +118,7 @@ import {
   type ExtensionDialogRequest,
 } from "./extensionDialog";
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
+import { captureDiffFilterFocus, restoreDiffFilterFocus } from "./diffViewDom";
 import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
 import {
   buildTranscriptReviewPrompt,
@@ -4279,7 +4280,9 @@ function setActiveDesktopDockviewMode(mode: "normal" | "diffReview"): boolean {
 
 function syncSessionModePanels(activateCreatedDiffReview = false): void {
   const isDiffReview = activeSessionUsesDiffReviewWorkspace();
-  if (!setActiveDesktopDockviewMode(isDiffReview ? "diffReview" : "normal")) return;
+  const nextMode = isDiffReview ? "diffReview" : "normal";
+  const modeChanged = activeDesktopDockviewMode !== nextMode;
+  if (!setActiveDesktopDockviewMode(nextMode)) return;
   if (isDiffReview) {
     desktopDockview?.ensureSessionChangesPanel();
     if (activateCreatedDiffReview) {
@@ -4287,7 +4290,7 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
     }
     markDiffsViewDirty();
     renderDiffsViewIfActive(activeSessionId ?? "");
-    requestActiveDiffState();
+    if (modeChanged || activateCreatedDiffReview) requestActiveDiffState({ refreshExisting: true });
   }
 }
 
@@ -4304,6 +4307,7 @@ function rerenderDiffsViewPreservingScroll(sessionId: string): void {
     const sidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
     const mainScrollTop = mainBody?.scrollTop ?? 0;
     const sidebarScrollTop = sidebarScroll?.scrollTop ?? 0;
+    const filterFocus = captureDiffFilterFocus(container);
 
     renderDiffsView(container, projections.get(sessionId));
 
@@ -4311,6 +4315,7 @@ function rerenderDiffsViewPreservingScroll(sessionId: string): void {
     const nextSidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
     if (nextMainBody) nextMainBody.scrollTop = mainScrollTop;
     if (nextSidebarScroll) nextSidebarScroll.scrollTop = sidebarScrollTop;
+    restoreDiffFilterFocus(container, filterFocus);
   });
 }
 
@@ -4321,6 +4326,7 @@ function rerenderComparePanelPreservingScroll(): void {
     const sidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
     const mainScrollTop = mainBody?.scrollTop ?? 0;
     const sidebarScrollTop = sidebarScroll?.scrollTop ?? 0;
+    const filterFocus = captureDiffFilterFocus(container);
 
     renderComparePanel(container);
 
@@ -4328,6 +4334,7 @@ function rerenderComparePanelPreservingScroll(): void {
     const nextSidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
     if (nextMainBody) nextMainBody.scrollTop = mainScrollTop;
     if (nextSidebarScroll) nextSidebarScroll.scrollTop = sidebarScrollTop;
+    restoreDiffFilterFocus(container, filterFocus);
   });
 }
 
@@ -4865,9 +4872,9 @@ function previewAgentDiffReview(sessionId: string, state: DiffReviewableState): 
   diffPreviewDraft = null;
   transcriptPreviewDraft = null;
   codePreviewDraft = null;
-  diffPreviewTitle.textContent = "Review this diff";
+  diffPreviewTitle.textContent = "Request agent review";
   diffPreviewSubtitle.textContent = "Tell the agent how to review. Agent comments will persist after bridge broadcast.";
-  diffPreviewText.value = "Review this diff for correctness, reliability, maintainability, and edge cases.";
+  diffPreviewText.value = "Review the full change for correctness, reliability, maintainability, and edge cases.";
   diffPreviewText.readOnly = false;
   diffPreviewStatus.textContent = "Agent review comments will appear after the bridge stores and broadcasts them.";
   diffPreviewSend.textContent = "Start review";
@@ -5369,7 +5376,7 @@ function renderReviewableDiff(
     toolbar.append(flushQuestions);
     const review = mkEl("button");
     review.type = "button";
-    review.textContent = "Review this diff";
+    review.textContent = "Request agent review";
     review.disabled = state.summary.files.length === 0;
     review.title = state.summary.files.length > 0 ? "Ask the agent to review the full diff" : "No changed files to review";
     review.addEventListener("click", () => {
@@ -5426,6 +5433,32 @@ function renderReviewableDiff(
   main.append(body);
 }
 
+function stateForDiffFileFilter(annotationKey: string): DiffReviewableState | null {
+  if (annotationKey === "compareDiff") return compareDiffState;
+  const projection = projections.get(annotationKey);
+  if (projection?.summary.sessionMode === "diffReview") {
+    const request = diffReviewRequestForSummary(projection.summary);
+    return request && compareDiffState && compareStateMatchesDiffReview(request) ? compareDiffState : null;
+  }
+  const state = sessionChangesStates.get(annotationKey);
+  return state?.status === "ready" ? state : null;
+}
+
+function rerenderDesktopModifiedFilesOnly(annotationKey: string, sidebarTop: HTMLElement): boolean {
+  const root = sidebarTop.closest<HTMLElement>(".diffs-view");
+  const sidebar = root?.querySelector<HTMLElement>(".diffs-sidebar-scroll");
+  const state = stateForDiffFileFilter(annotationKey);
+  if (!root || !sidebar || !state) return false;
+  const key = comparisonKey(state);
+  const annotations = diffAnnotations.get(annotationKey) ?? [];
+  const comments = reviewCommentsForComparison(reviewComments.get(annotationKey) ?? [], key);
+  const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
+  const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
+  sidebar.replaceChildren();
+  renderDesktopModifiedFiles(sidebar, state, fileSummaries, selectedFilePath, annotationKey, root);
+  return true;
+}
+
 function renderDiffFileFilter(sidebarTop: HTMLElement, annotationKey: string): void {
   const section = mkEl("section");
   section.className = "diffs-file-filter";
@@ -5441,8 +5474,10 @@ function renderDiffFileFilter(sidebarTop: HTMLElement, annotationKey: string): v
     const nextValue = input.value;
     if (nextValue) diffFileFilters.set(annotationKey, nextValue);
     else diffFileFilters.delete(annotationKey);
-    if (annotationKey === "compareDiff") rerenderComparePanelPreservingScroll();
-    else rerenderDiffsViewPreservingScroll(annotationKey);
+    if (!rerenderDesktopModifiedFilesOnly(annotationKey, sidebarTop)) {
+      if (annotationKey === "compareDiff") rerenderComparePanelPreservingScroll();
+      else rerenderDiffsViewPreservingScroll(annotationKey);
+    }
   });
   section.append(label, input);
   sidebarTop.append(section);
@@ -5748,7 +5783,7 @@ function initDesktopWorkspace(): void {
   });
   syncSessionModePanels();
   renderActiveDockviewPanel(activeSessionId ? projections.get(activeSessionId) : undefined);
-  if (isSessionChangesPanelActive()) requestActiveDiffState();
+  if (isSessionChangesPanelActive()) requestActiveDiffState({ refreshExisting: true });
 }
 
 // --- Status bar ---

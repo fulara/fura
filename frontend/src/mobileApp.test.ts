@@ -1449,7 +1449,7 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileDiff")?.textContent).not.toContain("Edited after broadcast");
   });
 
-  it("starts mobile agent review with editable instructions and the loaded patch", () => {
+  it("starts mobile agent review with editable instructions for the full diff", () => {
     const { connection } = createHarness();
     const patch = [
       "diff --git a/src/main.ts b/src/main.ts",
@@ -1464,7 +1464,7 @@ describe("mountMobileApp", () => {
     connection.emit({ type: "sessionChanges.summary", state: diffState(patch, "filePatch") });
 
     const reviewButton = [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
-      .find(button => button.textContent === "Review this diff");
+      .find(button => button.textContent === "Request agent review");
     expect(reviewButton?.disabled).toBe(false);
     reviewButton?.click();
     const preview = document.querySelector<HTMLTextAreaElement>("#mobileDiffPreviewText");
@@ -1476,6 +1476,6 @@ describe("mountMobileApp", () => {
     const reviewMessage = connection.sent.find(message => message.type === "review.agentReview.start");
     expect(reviewMessage).toMatchObject({ type: "review.agentReview.start", sessionId: "live", instructions: "Focus on regressions." });
     if (!reviewMessage || reviewMessage.type !== "review.agentReview.start") throw new Error("agent review message missing");
-    expect(reviewMessage.state.patch).toBe(patch);
+    expect(reviewMessage.state.patch).toBeNull();
   });
 });
