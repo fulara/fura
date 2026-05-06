@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
@@ -61,6 +62,7 @@ pub(crate) fn database_path_from_config(config_path: Option<&Path>) -> PathBuf {
 }
 
 pub(crate) fn initialize_database(path: &Path) -> Result<(), String> {
+    debug!(action = "review.comments.db.init", db_path = %path.display());
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -107,6 +109,18 @@ pub(crate) fn create_comment(
         updated_at: now,
     };
 
+    debug!(
+        action = "review.comments.db.insert",
+        db_path = %path.display(),
+        session_id = %comment.session_id,
+        comparison_key = %comment.comparison_key,
+        comment_id = %comment.id,
+        author = %comment.author.as_str(),
+        new_path = %comment.anchor.new_path,
+        side = %comment.anchor.side.as_str(),
+        old_line = ?comment.anchor.old_line,
+        new_line = ?comment.anchor.new_line
+    );
     let conn = connection(path)?;
     conn.execute(
         r#"
@@ -149,6 +163,12 @@ pub(crate) fn list_comments(
     comparison_key: Option<&str>,
 ) -> Result<Vec<ReviewComment>, String> {
     validate_required("session id", session_id)?;
+    debug!(
+        action = "review.comments.db.list",
+        db_path = %path.display(),
+        session_id = %session_id,
+        comparison_key = ?comparison_key
+    );
     let conn = connection(path)?;
     let sql = if comparison_key.is_some() {
         r#"
@@ -185,6 +205,11 @@ pub(crate) fn list_comments(
 }
 
 pub(crate) fn update_comment(path: &Path, id: &str, body: String) -> Result<ReviewComment, String> {
+    debug!(
+        action = "review.comments.db.update",
+        db_path = %path.display(),
+        comment_id = %id
+    );
     validate_required("comment id", id)?;
     let body = validate_body(body)?;
     let updated_at = Timestamp::now().millis().to_string();
@@ -202,6 +227,11 @@ pub(crate) fn update_comment(path: &Path, id: &str, body: String) -> Result<Revi
 }
 
 pub(crate) fn delete_comment(path: &Path, id: &str) -> Result<(String, String), String> {
+    debug!(
+        action = "review.comments.db.delete",
+        db_path = %path.display(),
+        comment_id = %id
+    );
     validate_required("comment id", id)?;
     let conn = connection(path)?;
     let session_and_comparison = conn

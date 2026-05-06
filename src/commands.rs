@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context, anyhow};
 use git2::{Branch, BranchType, Repository, Worktree, WorktreeAddOptions, WorktreePruneOptions};
 use serde_json::{Value, json};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::*;
 
@@ -1795,19 +1795,41 @@ pub(crate) async fn handle_review_comments_list(
     session_id: String,
     comparison_key: Option<String>,
 ) -> Vec<ServerMessage> {
+    debug!(
+        action = "review.comments.list",
+        session_id = %session_id,
+        comparison_key = ?comparison_key,
+        db_path = %state.review_comment_db_path.display()
+    );
     match list_comments(
         &state.review_comment_db_path,
         &session_id,
         comparison_key.as_deref(),
     ) {
-        Ok(comments) => vec![ServerMessage::ReviewCommentsSnapshot {
-            session_id,
-            comments,
-        }],
-        Err(message) => vec![ServerMessage::Error {
-            request_id: None,
-            message,
-        }],
+        Ok(comments) => {
+            debug!(
+                action = "review.comments.list.ok",
+                session_id = %session_id,
+                comparison_key = ?comparison_key,
+                comment_count = comments.len()
+            );
+            vec![ServerMessage::ReviewCommentsSnapshot {
+                session_id,
+                comments,
+            }]
+        }
+        Err(message) => {
+            debug!(
+                action = "review.comments.list.err",
+                session_id = %session_id,
+                comparison_key = ?comparison_key,
+                error = %message
+            );
+            vec![ServerMessage::Error {
+                request_id: None,
+                message,
+            }]
+        }
     }
 }
 
@@ -1822,12 +1844,24 @@ pub(crate) async fn handle_review_comment_create(
     if !state.sessions.read().await.contains_key(&session_id) {
         return vec![unknown_session_error(session_id)];
     }
+    debug!(
+        action = "review.comment.create",
+        session_id = %session_id,
+        repo_root = %repo_root,
+        comparison_key = %comparison_key,
+        new_path = %anchor.new_path,
+        side = ?anchor.side,
+        old_line = ?anchor.old_line,
+        new_line = ?anchor.new_line,
+        body_chars = body.chars().count(),
+        db_path = %state.review_comment_db_path.display()
+    );
     match create_comment(
         &state.review_comment_db_path,
         NewReviewComment {
-            session_id,
+            session_id: session_id.clone(),
             repo_root,
-            comparison_key,
+            comparison_key: comparison_key.clone(),
             author: ReviewCommentAuthor::User,
             body,
             anchor,
@@ -1836,15 +1870,29 @@ pub(crate) async fn handle_review_comment_create(
         },
     ) {
         Ok(comment) => {
+            debug!(
+                action = "review.comment.create.ok",
+                session_id = %comment.session_id,
+                comment_id = %comment.id,
+                comparison_key = %comment.comparison_key
+            );
             let _ = state
                 .events
                 .send(ServerMessage::ReviewCommentUpserted { comment });
             Vec::new()
         }
-        Err(message) => vec![ServerMessage::Error {
-            request_id: None,
-            message,
-        }],
+        Err(message) => {
+            debug!(
+                action = "review.comment.create.err",
+                session_id = %session_id,
+                comparison_key = %comparison_key,
+                error = %message
+            );
+            vec![ServerMessage::Error {
+                request_id: None,
+                message,
+            }]
+        }
     }
 }
 
@@ -1853,17 +1901,31 @@ pub(crate) async fn handle_review_comment_update(
     id: String,
     body: String,
 ) -> Vec<ServerMessage> {
+    debug!(
+        action = "review.comment.update",
+        comment_id = %id,
+        body_chars = body.chars().count(),
+        db_path = %state.review_comment_db_path.display()
+    );
     match update_comment(&state.review_comment_db_path, &id, body) {
         Ok(comment) => {
+            debug!(
+                action = "review.comment.update.ok",
+                session_id = %comment.session_id,
+                comment_id = %comment.id
+            );
             let _ = state
                 .events
                 .send(ServerMessage::ReviewCommentUpserted { comment });
             Vec::new()
         }
-        Err(message) => vec![ServerMessage::Error {
-            request_id: None,
-            message,
-        }],
+        Err(message) => {
+            debug!(action = "review.comment.update.err", comment_id = %id, error = %message);
+            vec![ServerMessage::Error {
+                request_id: None,
+                message,
+            }]
+        }
     }
 }
 
@@ -1871,8 +1933,19 @@ pub(crate) async fn handle_review_comment_delete(
     state: &AppState,
     id: String,
 ) -> Vec<ServerMessage> {
+    debug!(
+        action = "review.comment.delete",
+        comment_id = %id,
+        db_path = %state.review_comment_db_path.display()
+    );
     match delete_comment(&state.review_comment_db_path, &id) {
         Ok((session_id, comparison_key)) => {
+            debug!(
+                action = "review.comment.delete.ok",
+                session_id = %session_id,
+                comment_id = %id,
+                comparison_key = %comparison_key
+            );
             let _ = state.events.send(ServerMessage::ReviewCommentDeleted {
                 session_id,
                 comparison_key,
@@ -1880,10 +1953,13 @@ pub(crate) async fn handle_review_comment_delete(
             });
             Vec::new()
         }
-        Err(message) => vec![ServerMessage::Error {
-            request_id: None,
-            message,
-        }],
+        Err(message) => {
+            debug!(action = "review.comment.delete.err", comment_id = %id, error = %message);
+            vec![ServerMessage::Error {
+                request_id: None,
+                message,
+            }]
+        }
     }
 }
 
