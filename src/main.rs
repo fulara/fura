@@ -144,8 +144,6 @@ async fn main() -> anyhow::Result<()> {
         auth_sessions: Arc::new(RwLock::new(HashMap::new())),
         session_runtime: session_runtime.clone(),
         sessions: session_runtime.sessions.clone(),
-        rpc_sessions: session_runtime.rpc_sessions.clone(),
-        rpc_session_targets: session_runtime.rpc_session_targets.clone(),
         session_categories: session_runtime.session_categories.clone(),
         session_modes: session_runtime.session_modes.clone(),
         pending_created_sessions: session_runtime.pending_created_sessions.clone(),
@@ -675,8 +673,6 @@ pub(crate) mod tests {
             auth_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_runtime: session_runtime.clone(),
             sessions: session_runtime.sessions.clone(),
-            rpc_sessions: session_runtime.rpc_sessions.clone(),
-            rpc_session_targets: session_runtime.rpc_session_targets.clone(),
             session_categories: session_runtime.session_categories.clone(),
             session_modes: session_runtime.session_modes.clone(),
             pending_created_sessions: session_runtime.pending_created_sessions.clone(),
@@ -756,6 +752,41 @@ pub(crate) mod tests {
                 .map(String::as_str),
             Some("next")
         );
+    }
+
+    pub(crate) async fn register_test_transport(
+        state: &AppState,
+        transport_session_id: &str,
+        target_session_id: &str,
+        channel_capacity: usize,
+    ) -> mpsc::Receiver<Value> {
+        let (stdin, commands) = mpsc::channel(channel_capacity);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .session_runtime
+            .register_transport(
+                transport_session_id.to_string(),
+                RpcSessionHandle { stdin, stop },
+            )
+            .await;
+        if transport_session_id != target_session_id {
+            state
+                .session_runtime
+                .map_transport_to_session(transport_session_id, target_session_id.to_string())
+                .await;
+        }
+        commands
+    }
+
+    pub(crate) async fn map_test_transport(
+        state: &AppState,
+        transport_session_id: &str,
+        target_session_id: &str,
+    ) {
+        state
+            .session_runtime
+            .map_transport_to_session(transport_session_id, target_session_id.to_string())
+            .await;
     }
 
     fn write_test_session(path: &Path, id: &str, title: &str, cwd: &str, text: &str) {
@@ -1167,18 +1198,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
-        let (stdin, mut commands) = mpsc::channel(4);
-        let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("s1".to_string(), "s1".to_string());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
 
         let responses =
             send_prompt(&state, "s1".to_string(), "/fork".to_string(), None, None).await;
@@ -1202,18 +1222,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
-        let (stdin, mut commands) = mpsc::channel(4);
-        let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("s1".to_string(), "s1".to_string());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
 
         let responses = send_prompt(
             &state,
@@ -1275,18 +1284,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), record);
-        let (stdin, mut commands) = mpsc::channel(4);
-        let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("s1".to_string(), "s1".to_string());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
 
         let responses =
             send_prompt(&state, "s1".to_string(), "/plan".to_string(), None, None).await;
@@ -1315,11 +1313,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("transport-1".to_string(), "s1".to_string());
+        map_test_transport(&state, "transport-1", "s1").await;
         let mut events = state.events.subscribe();
 
         apply_rpc_frame(
@@ -1379,18 +1373,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), record);
-        let (stdin, mut commands) = mpsc::channel(16);
-        let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("transport-1".to_string(), RpcSessionHandle { stdin, stop });
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("transport-1".to_string(), "s1".to_string());
+        let mut commands = register_test_transport(&state, "transport-1", "s1", 16).await;
 
         let responses = handle_client_message(
             &state,
@@ -1509,11 +1492,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("transport-1".to_string(), "s1".to_string());
+        map_test_transport(&state, "transport-1", "s1").await;
         let mut events = state.events.subscribe();
 
         apply_rpc_frame(
@@ -1552,18 +1531,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
-        let (stdin, mut commands) = mpsc::channel(4);
-        let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("transport-1".to_string(), RpcSessionHandle { stdin, stop });
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("transport-1".to_string(), "s1".to_string());
+        let mut commands = register_test_transport(&state, "transport-1", "s1", 4).await;
 
         apply_rpc_frame(
             &state,
@@ -1598,18 +1566,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("transport-1".to_string(), test_record());
-        let (stdin, mut commands) = mpsc::channel(8);
-        let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("transport-1".to_string(), RpcSessionHandle { stdin, stop });
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("transport-1".to_string(), "transport-1".to_string());
+        let mut commands = register_test_transport(&state, "transport-1", "transport-1", 8).await;
 
         apply_rpc_response(
             &state,
@@ -1646,12 +1603,11 @@ pub(crate) mod tests {
         );
         assert_eq!(
             state
-                .rpc_session_targets
-                .read()
+                .session_runtime
+                .target_session_id_for_transport("transport-1")
                 .await
-                .get("transport-1")
-                .map(String::as_str),
-            Some("real-s1")
+                .as_str(),
+            "real-s1"
         );
     }
 
@@ -1666,11 +1622,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), record);
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("transport-1".to_string(), "s1".to_string());
+        map_test_transport(&state, "transport-1", "s1").await;
         let mut events = state.events.subscribe();
 
         apply_rpc_response(
@@ -1727,18 +1679,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
-        let (stdin, mut commands) = mpsc::channel(4);
-        let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("s1".to_string(), "s1".to_string());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
 
         let responses = send_prompt(
             &state,
@@ -2182,13 +2123,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn dialog_respond_sends_rpc_extension_ui_response() {
         let state = test_state(8, None);
-        let (stdin, mut commands) = mpsc::channel(4);
-        let (stop, _stop_rx) = oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
 
         let responses = handle_client_message(
             &state,
@@ -3336,19 +3271,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn pending_create_ready_queues_model_thinking_then_refresh() {
         let state = test_state(8, None);
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Value>(8);
-        let (stop_tx, _stop_rx) = oneshot::channel();
-        state.rpc_sessions.write().await.insert(
-            "transport-session".to_string(),
-            RpcSessionHandle {
-                stdin: stdin_tx,
-                stop: stop_tx,
-            },
-        );
-        state.rpc_session_targets.write().await.insert(
-            "transport-session".to_string(),
-            "transport-session".to_string(),
-        );
+        let mut stdin_rx =
+            register_test_transport(&state, "transport-session", "transport-session", 8).await;
         state.pending_created_sessions.write().await.insert(
             "transport-session".to_string(),
             PendingCreatedSession {
@@ -3399,19 +3323,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn pending_create_default_model_skips_model_and_thinking_commands() {
         let state = test_state(8, None);
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Value>(8);
-        let (stop_tx, _stop_rx) = oneshot::channel();
-        state.rpc_sessions.write().await.insert(
-            "transport-session".to_string(),
-            RpcSessionHandle {
-                stdin: stdin_tx,
-                stop: stop_tx,
-            },
-        );
-        state.rpc_session_targets.write().await.insert(
-            "transport-session".to_string(),
-            "transport-session".to_string(),
-        );
+        let mut stdin_rx =
+            register_test_transport(&state, "transport-session", "transport-session", 8).await;
         state.pending_created_sessions.write().await.insert(
             "transport-session".to_string(),
             PendingCreatedSession {
@@ -3453,19 +3366,8 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn pending_create_set_model_error_returns_request_scoped_error_and_stops_transport() {
         let state = test_state(8, None);
-        let (stdin_tx, _stdin_rx) = mpsc::channel::<Value>(8);
-        let (stop_tx, _stop_rx) = oneshot::channel();
-        state.rpc_sessions.write().await.insert(
-            "transport-session".to_string(),
-            RpcSessionHandle {
-                stdin: stdin_tx,
-                stop: stop_tx,
-            },
-        );
-        state.rpc_session_targets.write().await.insert(
-            "transport-session".to_string(),
-            "transport-session".to_string(),
-        );
+        let _commands =
+            register_test_transport(&state, "transport-session", "transport-session", 8).await;
         state.pending_created_sessions.write().await.insert(
             "transport-session".to_string(),
             PendingCreatedSession {
@@ -3527,31 +3429,18 @@ pub(crate) mod tests {
                 .is_none()
         );
         assert!(
-            state
-                .rpc_sessions
-                .read()
+            !state
+                .session_runtime
+                .contains_transport("transport-session")
                 .await
-                .get("transport-session")
-                .is_none()
         );
     }
 
     #[tokio::test]
     async fn pending_create_set_thinking_error_returns_request_scoped_error_and_stops_transport() {
         let state = test_state(8, None);
-        let (stdin_tx, _stdin_rx) = mpsc::channel::<Value>(8);
-        let (stop_tx, _stop_rx) = oneshot::channel();
-        state.rpc_sessions.write().await.insert(
-            "transport-session".to_string(),
-            RpcSessionHandle {
-                stdin: stdin_tx,
-                stop: stop_tx,
-            },
-        );
-        state.rpc_session_targets.write().await.insert(
-            "transport-session".to_string(),
-            "transport-session".to_string(),
-        );
+        let _commands =
+            register_test_transport(&state, "transport-session", "transport-session", 8).await;
         state.pending_created_sessions.write().await.insert(
             "transport-session".to_string(),
             PendingCreatedSession {
@@ -3613,12 +3502,10 @@ pub(crate) mod tests {
                 .is_none()
         );
         assert!(
-            state
-                .rpc_sessions
-                .read()
+            !state
+                .session_runtime
+                .contains_transport("transport-session")
                 .await
-                .get("transport-session")
-                .is_none()
         );
     }
     #[tokio::test]
@@ -3682,10 +3569,7 @@ pub(crate) mod tests {
                 proposed_model: None,
             },
         );
-        state.rpc_session_targets.write().await.insert(
-            "transport-session".to_string(),
-            "transport-session".to_string(),
-        );
+        map_test_transport(&state, "transport-session", "transport-session").await;
         let mut events = state.events.subscribe();
 
         apply_rpc_response(
@@ -3807,17 +3691,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn rpc_transport_session_id_accepts_live_transport_id() {
         let state = test_state(8, None);
-        let (stdin, _commands) = mpsc::channel(1);
-        let (stop, _stop_rx) = oneshot::channel();
-        state.rpc_sessions.write().await.insert(
-            "transport-live".to_string(),
-            RpcSessionHandle { stdin, stop },
-        );
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("transport-live".to_string(), "real-session".to_string());
+        let _commands = register_test_transport(&state, "transport-live", "real-session", 1).await;
 
         assert_eq!(
             rpc_transport_session_id(&state, "transport-live")
@@ -3851,11 +3725,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("old-session".to_string(), previous);
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("old-session".to_string(), "old-session".to_string());
+        map_test_transport(&state, "old-session", "old-session").await;
         state.pending_new_session_names.write().await.insert(
             "old-session".to_string(),
             "Requested handoff name".to_string(),
@@ -3901,12 +3771,11 @@ pub(crate) mod tests {
 
         assert_eq!(
             state
-                .rpc_session_targets
-                .read()
+                .session_runtime
+                .target_session_id_for_transport("old-session")
                 .await
-                .get("old-session")
-                .map(String::as_str),
-            Some("new-session")
+                .as_str(),
+            "new-session"
         );
         assert_eq!(
             rpc_transport_session_id(&state, "new-session")

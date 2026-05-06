@@ -2725,18 +2725,7 @@ mod tests {
             .write()
             .await
             .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
-        let (stdin, mut commands) = tokio::sync::mpsc::channel(4);
-        let (stop, _stop_rx) = tokio::sync::oneshot::channel();
-        state
-            .rpc_sessions
-            .write()
-            .await
-            .insert("s1".to_string(), RpcSessionHandle { stdin, stop });
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("s1".to_string(), "s1".to_string());
+        let mut commands = crate::tests::register_test_transport(&state, "s1", "s1", 4).await;
 
         let responses = handle_session_changes_snapshot(
             &state,

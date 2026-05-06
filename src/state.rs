@@ -16,12 +16,9 @@ use crate::{
 pub(crate) struct AppState {
     pub(crate) token: Arc<String>,
     pub(crate) auth_sessions: Arc<RwLock<HashMap<String, AuthSession>>>,
-    /// Owner for coupled session/runtime maps; top-level aliases below point to the same locks during the staged migration.
+    /// Owner for coupled session/runtime maps; selected top-level aliases below point to the same locks during the staged migration.
     pub(crate) session_runtime: SessionRuntimeState,
     pub(crate) sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
-    pub(crate) rpc_sessions: Arc<RwLock<HashMap<String, RpcSessionHandle>>>,
-    #[allow(dead_code)]
-    pub(crate) rpc_session_targets: Arc<RwLock<HashMap<String, String>>>,
     /// Persisted Fura-owned session metadata, keyed by OMP session id.
     pub(crate) session_categories: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) session_modes: Arc<RwLock<HashMap<String, SessionMode>>>,
@@ -182,6 +179,13 @@ impl SessionRuntimeState {
             .read()
             .await
             .contains_key(transport_session_id)
+    }
+
+    pub(crate) fn try_contains_transport(&self, transport_session_id: &str) -> bool {
+        self.rpc_sessions
+            .try_read()
+            .map(|sessions| sessions.contains_key(transport_session_id))
+            .unwrap_or(false)
     }
 
     pub(crate) async fn stdin_for_transport(

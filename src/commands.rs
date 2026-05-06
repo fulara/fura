@@ -979,13 +979,10 @@ pub(crate) async fn handle_model_catalog_list_command(
                 message: "Model catalog request already in progress".to_string(),
             }];
         }
-        let existing = catalog.transport_session_id.clone().filter(|transport_id| {
-            state
-                .rpc_sessions
-                .try_read()
-                .map(|sessions| sessions.contains_key(transport_id))
-                .unwrap_or(false)
-        });
+        let existing = catalog
+            .transport_session_id
+            .clone()
+            .filter(|transport_id| state.session_runtime.try_contains_transport(transport_id));
         if existing.is_none() {
             catalog.transport_session_id = None;
         }
@@ -2581,7 +2578,6 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
 mod review_comment_tests {
     use super::*;
     use std::collections::HashSet;
-    use tokio::sync::{mpsc, oneshot};
 
     fn test_session_record(id: &str) -> SessionRecord {
         SessionRecord {
@@ -2792,20 +2788,7 @@ mod review_comment_tests {
             .write()
             .await
             .insert("s1".to_string(), test_session_record("s1"));
-        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Value>(8);
-        let (stop_tx, _stop_rx) = oneshot::channel();
-        state.rpc_sessions.write().await.insert(
-            "s1".to_string(),
-            RpcSessionHandle {
-                stdin: stdin_tx,
-                stop: stop_tx,
-            },
-        );
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("s1".to_string(), "s1".to_string());
+        let mut stdin_rx = crate::tests::register_test_transport(&state, "s1", "s1", 8).await;
         let patch = "diff --git a/src/new.ts b/src/new.ts\n--- a/src/new.ts\n+++ b/src/new.ts\n@@ -1,1 +1,2 @@\n const old = true;\n+const next = true;\n";
 
         let responses = handle_client_message(
@@ -3084,11 +3067,7 @@ mod review_comment_tests {
                 prompt_command_id: "prompt".to_string(),
             },
         );
-        state
-            .rpc_session_targets
-            .write()
-            .await
-            .insert("transport-2".to_string(), "s2".to_string());
+        crate::tests::map_test_transport(&state, "transport-2", "s2").await;
 
         let error = dispatch_review_host_tool(
             &state,
