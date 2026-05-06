@@ -123,17 +123,10 @@ export function summarizeWireDiffFiles(
   }
   for (const annotation of annotations) {
     if (key && !isSameDiffComparison(annotation, key)) continue;
-    const existing = byPath.get(annotation.anchor.newPath) ?? {
-      filePath: annotation.anchor.newPath,
-      oldPath: annotation.anchor.oldPath,
-      added: 0,
-      removed: 0,
-      commentCount: 0,
-      questionCount: 0,
-    };
+    const existing = byPath.get(annotation.anchor.newPath);
+    if (!existing) continue;
     if (annotation.kind === "comment") existing.commentCount += 1;
     if (annotation.kind === "question") existing.questionCount += 1;
-    byPath.set(annotation.anchor.newPath, existing);
   }
   return [...byPath.values()];
 }

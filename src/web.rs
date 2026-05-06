@@ -628,6 +628,28 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             target_client_id = %target_client_id,
             bytes = message.len()
         ),
+        ServerMessage::ReviewCommentsSnapshot {
+            session_id,
+            comments,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "review.comments.snapshot",
+            session_id = %session_id,
+            comment_count = comments.len()
+        ),
+        ServerMessage::ReviewCommentUpserted { comment } => info!(
+            direction = "bridge_to_client",
+            message_type = "review.comment.upserted",
+            session_id = %comment.session_id,
+            comment_id = %comment.id,
+            author = ?comment.author
+        ),
+        ServerMessage::ReviewCommentDeleted { session_id, id, .. } => info!(
+            direction = "bridge_to_client",
+            message_type = "review.comment.deleted",
+            session_id = %session_id,
+            comment_id = %id
+        ),
         ServerMessage::Error { message, .. } => warn!(
             direction = "bridge_to_client",
             message_type = "error",

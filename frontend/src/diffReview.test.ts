@@ -8,11 +8,14 @@ import {
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
   implementationChangeGuidance,
+  isReviewCommentMatched,
   pathForDiffLocation,
   removeSelectedDiffComments,
   selectedDiffAnnotations,
+  reviewCommentsForDiffLocation,
+  reviewCommentsForComparison,
 } from "./diffReview";
-import type { DiffLineLocation, DiffReviewableState } from "./protocol";
+import type { DiffLineLocation, DiffReviewableState, ReviewComment } from "./protocol";
 
 const patch = [
   "diff --git a/src/main.ts b/src/main.ts",
@@ -89,6 +92,33 @@ describe("diffReview", () => {
     expect(checkoutTargetForDiffLocation(state, removeLocation)).toEqual({ kind: "commit", oid: "a".repeat(40) });
     expect(checkoutTargetForDiffLocation(state, addLocation)).toEqual({ kind: "commit", oid: "b".repeat(40) });
     expect(pathForDiffLocation(removeLocation)).toBe("src/main.ts");
+  });
+
+  it("matches persisted review comments and identifies stale unmatched anchors", () => {
+    const comment: ReviewComment = {
+      id: "persisted",
+      sessionId: "s1",
+      repoRoot: "/repo",
+      comparisonKey: comparisonKey(state),
+      author: "agent",
+      body: "This changes the exported value.",
+      stale: false,
+      staleReason: null,
+      anchor: addLocation,
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    const stale: ReviewComment = {
+      ...comment,
+      id: "stale",
+      anchor: { ...addLocation, text: "+const value = 'other';" },
+    };
+
+    const rows = parseDiffRows(patch);
+    expect(reviewCommentsForComparison([comment, stale], comparisonKey(state))).toEqual([comment, stale]);
+    expect(reviewCommentsForDiffLocation([comment, stale], comparisonKey(state), addLocation)).toEqual([comment]);
+    expect(isReviewCommentMatched(rows, comparisonKey(state), comment)).toBe(true);
+    expect(isReviewCommentMatched(rows, comparisonKey(state), stale)).toBe(false);
   });
 
   it("formats labels and exposes implementation boundary guidance", () => {

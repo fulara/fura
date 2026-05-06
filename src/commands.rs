@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context, anyhow};
 use git2::{Branch, BranchType, Repository, Worktree, WorktreeAddOptions, WorktreePruneOptions};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracing::{error, info, warn};
 
 use crate::*;
@@ -288,6 +288,29 @@ pub(crate) async fn handle_client_message(
                 }],
             }
         }
+        ClientMessage::ReviewCommentsList {
+            session_id,
+            comparison_key,
+        } => handle_review_comments_list(state, session_id, comparison_key).await,
+        ClientMessage::ReviewCommentCreate {
+            session_id,
+            repo_root,
+            comparison_key,
+            anchor,
+            body,
+        } => {
+            handle_review_comment_create(state, session_id, repo_root, comparison_key, anchor, body)
+                .await
+        }
+        ClientMessage::ReviewCommentUpdate { id, body } => {
+            handle_review_comment_update(state, id, body).await
+        }
+        ClientMessage::ReviewCommentDelete { id } => handle_review_comment_delete(state, id).await,
+        ClientMessage::ReviewAgentReviewStart {
+            session_id,
+            state: review_state,
+            instructions,
+        } => handle_review_agent_review_start(state, session_id, review_state, instructions).await,
         ClientMessage::SessionFork { session_id, name } => {
             handle_session_fork(state, session_id, name).await
         }
@@ -1168,6 +1191,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
 
 pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<ServerMessage> {
     info!(action = "session.stop", session_id = %session_id);
+    clear_review_contexts_for_session(state, &session_id).await;
     if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
         if let Some(handle) = state
             .rpc_sessions
@@ -1211,6 +1235,7 @@ pub(crate) async fn delete_session(
     delete_worktree: bool,
 ) -> Vec<ServerMessage> {
     info!(action = "session.delete", session_id = %session_id, delete_worktree);
+    clear_review_contexts_for_session(state, &session_id).await;
 
     // Stop managed child if running.
     if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
@@ -1765,10 +1790,616 @@ pub(crate) async fn send_prompt(
     }
 }
 
+pub(crate) async fn handle_review_comments_list(
+    state: &AppState,
+    session_id: String,
+    comparison_key: Option<String>,
+) -> Vec<ServerMessage> {
+    match list_comments(
+        &state.review_comment_db_path,
+        &session_id,
+        comparison_key.as_deref(),
+    ) {
+        Ok(comments) => vec![ServerMessage::ReviewCommentsSnapshot {
+            session_id,
+            comments,
+        }],
+        Err(message) => vec![ServerMessage::Error {
+            request_id: None,
+            message,
+        }],
+    }
+}
+
+pub(crate) async fn handle_review_comment_create(
+    state: &AppState,
+    session_id: String,
+    repo_root: String,
+    comparison_key: String,
+    anchor: DiffLineLocation,
+    body: String,
+) -> Vec<ServerMessage> {
+    if !state.sessions.read().await.contains_key(&session_id) {
+        return vec![unknown_session_error(session_id)];
+    }
+    match create_comment(
+        &state.review_comment_db_path,
+        NewReviewComment {
+            session_id,
+            repo_root,
+            comparison_key,
+            author: ReviewCommentAuthor::User,
+            body,
+            anchor,
+            stale: false,
+            stale_reason: None,
+        },
+    ) {
+        Ok(comment) => {
+            let _ = state
+                .events
+                .send(ServerMessage::ReviewCommentUpserted { comment });
+            Vec::new()
+        }
+        Err(message) => vec![ServerMessage::Error {
+            request_id: None,
+            message,
+        }],
+    }
+}
+
+pub(crate) async fn handle_review_comment_update(
+    state: &AppState,
+    id: String,
+    body: String,
+) -> Vec<ServerMessage> {
+    match update_comment(&state.review_comment_db_path, &id, body) {
+        Ok(comment) => {
+            let _ = state
+                .events
+                .send(ServerMessage::ReviewCommentUpserted { comment });
+            Vec::new()
+        }
+        Err(message) => vec![ServerMessage::Error {
+            request_id: None,
+            message,
+        }],
+    }
+}
+
+pub(crate) async fn handle_review_comment_delete(
+    state: &AppState,
+    id: String,
+) -> Vec<ServerMessage> {
+    match delete_comment(&state.review_comment_db_path, &id) {
+        Ok((session_id, comparison_key)) => {
+            let _ = state.events.send(ServerMessage::ReviewCommentDeleted {
+                session_id,
+                comparison_key,
+                id,
+            });
+            Vec::new()
+        }
+        Err(message) => vec![ServerMessage::Error {
+            request_id: None,
+            message,
+        }],
+    }
+}
+
+pub(crate) async fn handle_review_agent_review_start(
+    state: &AppState,
+    session_id: String,
+    review_state: DiffReviewableState,
+    instructions: String,
+) -> Vec<ServerMessage> {
+    let Some(patch) = review_state
+        .patch
+        .clone()
+        .filter(|patch| !patch.trim().is_empty())
+    else {
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: "Cannot start agent diff review before a file patch is loaded.".to_string(),
+        }];
+    };
+    {
+        let mut sessions = state.sessions.write().await;
+        let Some(record) = sessions.get_mut(&session_id) else {
+            return vec![unknown_session_error(session_id)];
+        };
+        if matches!(
+            record.effective_status(),
+            SessionStatus::Starting | SessionStatus::Busy
+        ) {
+            return vec![ServerMessage::Error {
+                request_id: None,
+                message: "Cannot start agent diff review while the session is busy.".to_string(),
+            }];
+        }
+        record.status = SessionStatus::Busy;
+    }
+    let context_id = uuid::Uuid::new_v4().to_string();
+    let previous_host_tools = state
+        .session_host_tools
+        .read()
+        .await
+        .get(&session_id)
+        .cloned()
+        .unwrap_or_default();
+    let next_host_tools = review_host_tools_with_comment_tool(&previous_host_tools);
+    let set_host_tools_command_id = next_rpc_id();
+    let prompt_command_id = next_rpc_id();
+    let context = ActiveReviewContext {
+        id: context_id.clone(),
+        session_id: session_id.clone(),
+        repo_root: review_state.comparison.repo_root.clone(),
+        comparison_key: review_state.comparison.comparison_key.clone(),
+        patch,
+        previous_host_tools: previous_host_tools.clone(),
+        set_host_tools_command_id: set_host_tools_command_id.clone(),
+        prompt_command_id: prompt_command_id.clone(),
+    };
+    state
+        .active_review_contexts
+        .write()
+        .await
+        .insert(context_id.clone(), context);
+
+    let setup_result = async {
+        send_rpc_command(
+            state,
+            &session_id,
+            review_set_host_tools_command(set_host_tools_command_id, next_host_tools.clone()),
+        )
+        .await?;
+        send_rpc_command(
+            state,
+            &session_id,
+            prompt_command(
+                prompt_command_id,
+                review_prompt(&context_id, &review_state, &instructions),
+                None,
+                None,
+            ),
+        )
+        .await
+    }
+    .await;
+
+    match setup_result {
+        Ok(()) => {
+            remember_session_host_tools(state, &session_id, next_host_tools).await;
+            Vec::new()
+        }
+        Err(message) => {
+            state
+                .active_review_contexts
+                .write()
+                .await
+                .remove(&context_id);
+            remember_session_host_tools(state, &session_id, previous_host_tools).await;
+            if let Some(record) = state.sessions.write().await.get_mut(&session_id) {
+                record.status = SessionStatus::Idle;
+            }
+            vec![ServerMessage::Error {
+                request_id: None,
+                message,
+            }]
+        }
+    }
+}
+
+pub(crate) async fn remove_review_contexts_for_session(
+    state: &AppState,
+    session_id: &str,
+) -> Vec<ActiveReviewContext> {
+    let mut contexts = state.active_review_contexts.write().await;
+    let mut removed = Vec::new();
+    contexts.retain(|_, context| {
+        if context.session_id == session_id {
+            removed.push(context.clone());
+            false
+        } else {
+            true
+        }
+    });
+    removed
+}
+
+pub(crate) async fn clear_review_contexts_for_session(state: &AppState, session_id: &str) {
+    let removed = remove_review_contexts_for_session(state, session_id).await;
+    if let Some(context) = removed.into_iter().last() {
+        restore_session_host_tools(state, session_id, context.previous_host_tools).await;
+    }
+}
+
+pub(crate) async fn clear_review_context_for_command(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+) -> bool {
+    let mut contexts = state.active_review_contexts.write().await;
+    let mut restored_tools: Option<Vec<Value>> = None;
+    contexts.retain(|_, context| {
+        let matches_session = context.session_id == session_id;
+        let matches_command = context.set_host_tools_command_id == command_id
+            || context.prompt_command_id == command_id;
+        if matches_session && matches_command {
+            restored_tools = Some(context.previous_host_tools.clone());
+            false
+        } else {
+            true
+        }
+    });
+    drop(contexts);
+    if let Some(previous_host_tools) = restored_tools {
+        restore_session_host_tools(state, session_id, previous_host_tools).await;
+        return true;
+    }
+    false
+}
+
+pub(crate) async fn handle_review_host_tool_call(
+    state: &AppState,
+    transport_session_id: &str,
+    frame_id: String,
+    tool_call_id: String,
+    tool_name: String,
+    arguments: Value,
+) {
+    let result =
+        match dispatch_review_host_tool(state, transport_session_id, &tool_name, arguments).await {
+            Ok(text) => review_host_tool_result_frame(frame_id, text, false),
+            Err(message) => review_host_tool_result_frame(frame_id, message, true),
+        };
+    if let Err(message) = send_rpc_command(state, transport_session_id, result).await {
+        warn!(tool_call_id = %tool_call_id, tool_name = %tool_name, %message, "failed to send review host tool result");
+    }
+}
+
+async fn dispatch_review_host_tool(
+    state: &AppState,
+    transport_session_id: &str,
+    tool_name: &str,
+    arguments: Value,
+) -> Result<String, String> {
+    match tool_name {
+        "fura_add_review_comment" => {
+            add_agent_review_comment(state, transport_session_id, arguments).await
+        }
+        _ => Err(format!("unknown Fura review tool: {tool_name}")),
+    }
+}
+
+async fn add_agent_review_comment(
+    state: &AppState,
+    transport_session_id: &str,
+    arguments: Value,
+) -> Result<String, String> {
+    let context_id = required_string(&arguments, "reviewContextId")?;
+    let path = required_string(&arguments, "path")?;
+    let side = match required_string(&arguments, "side")?.as_str() {
+        "left" => DiffSide::Left,
+        "right" => DiffSide::Right,
+        value => return Err(format!("side must be left or right, got {value}")),
+    };
+    let line = arguments
+        .get("line")
+        .and_then(Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "line must be a positive integer".to_string())?;
+    let body = required_string(&arguments, "body")?;
+
+    let context = state
+        .active_review_contexts
+        .read()
+        .await
+        .get(&context_id)
+        .cloned()
+        .ok_or_else(|| "review context is not active".to_string())?;
+    let target_session_id = rpc_session_target_id(state, transport_session_id).await;
+    if target_session_id != context.session_id {
+        return Err(format!(
+            "review context belongs to session {}, but host tool call came from session {}",
+            context.session_id, target_session_id
+        ));
+    }
+    let anchor = find_patch_location(&context.patch, &path, side, line).ok_or_else(|| {
+        format!(
+            "could not map review comment to {path}:{line} on {:?} side",
+            side
+        )
+    })?;
+    let comment = create_comment(
+        &state.review_comment_db_path,
+        NewReviewComment {
+            session_id: context.session_id.clone(),
+            repo_root: context.repo_root.clone(),
+            comparison_key: context.comparison_key.clone(),
+            author: ReviewCommentAuthor::Agent,
+            body,
+            anchor: anchor.clone(),
+            stale: false,
+            stale_reason: None,
+        },
+    )?;
+    let _ = state.events.send(ServerMessage::ReviewCommentUpserted {
+        comment: comment.clone(),
+    });
+    Ok(format!(
+        "Created review comment {} at {}:{} for review context {}.",
+        comment.id,
+        path_for_anchor(&anchor),
+        line,
+        context.id
+    ))
+}
+
+fn required_string(arguments: &Value, key: &str) -> Result<String, String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| format!("{key} is required"))
+}
+
+fn path_for_anchor(anchor: &DiffLineLocation) -> String {
+    if anchor.side == DiffSide::Left {
+        anchor
+            .old_path
+            .clone()
+            .unwrap_or_else(|| anchor.new_path.clone())
+    } else {
+        anchor.new_path.clone()
+    }
+}
+
+fn find_patch_location(
+    patch: &str,
+    requested_path: &str,
+    requested_side: DiffSide,
+    requested_line: u32,
+) -> Option<DiffLineLocation> {
+    let mut old_path: Option<String> = None;
+    let mut new_path = String::new();
+    let mut hunk: Option<String> = None;
+    let mut old_line = 0_u32;
+    let mut new_line = 0_u32;
+    let mut pending_rename_from: Option<String> = None;
+
+    for text in patch.lines() {
+        if let Some(rest) = text.strip_prefix("diff --git ") {
+            let (parsed_old, parsed_new) = parse_diff_git_paths(rest);
+            old_path = parsed_old;
+            new_path = parsed_new.unwrap_or_default();
+            hunk = None;
+            pending_rename_from = None;
+            continue;
+        }
+        if let Some(path) = text.strip_prefix("rename from ") {
+            pending_rename_from = Some(path.to_string());
+            continue;
+        }
+        if let Some(path) = text.strip_prefix("rename to ") {
+            old_path = pending_rename_from.clone();
+            new_path = path.to_string();
+            continue;
+        }
+        if let Some(path) = text.strip_prefix("--- a/") {
+            old_path = Some(path.to_string());
+            continue;
+        }
+        if let Some(path) = text.strip_prefix("+++ b/") {
+            new_path = path.to_string();
+            continue;
+        }
+        if text == "--- /dev/null" {
+            old_path = None;
+            continue;
+        }
+        if text == "+++ /dev/null" {
+            continue;
+        }
+        if let Some((old_start, new_start)) = parse_hunk_header(text) {
+            old_line = old_start;
+            new_line = new_start;
+            hunk = Some(text.to_string());
+            continue;
+        }
+        if text.starts_with('+') && !text.starts_with("+++") {
+            let location = DiffLineLocation {
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                hunk: hunk.clone(),
+                side: DiffSide::Right,
+                kind: DiffLineKind::Add,
+                old_line: None,
+                new_line: Some(new_line),
+                text: text.to_string(),
+            };
+            if requested_side == DiffSide::Right
+                && requested_line == new_line
+                && path_matches(&location, requested_path)
+            {
+                return Some(location);
+            }
+            new_line = new_line.saturating_add(1);
+            continue;
+        }
+        if text.starts_with('-') && !text.starts_with("---") {
+            let location = DiffLineLocation {
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                hunk: hunk.clone(),
+                side: DiffSide::Left,
+                kind: DiffLineKind::Remove,
+                old_line: Some(old_line),
+                new_line: None,
+                text: text.to_string(),
+            };
+            if requested_side == DiffSide::Left
+                && requested_line == old_line
+                && path_matches(&location, requested_path)
+            {
+                return Some(location);
+            }
+            old_line = old_line.saturating_add(1);
+            continue;
+        }
+        if text.starts_with(' ') {
+            let location = DiffLineLocation {
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                hunk: hunk.clone(),
+                side: DiffSide::Right,
+                kind: DiffLineKind::Context,
+                old_line: Some(old_line),
+                new_line: Some(new_line),
+                text: text.to_string(),
+            };
+            let line_matches = match requested_side {
+                DiffSide::Left => requested_line == old_line,
+                DiffSide::Right => requested_line == new_line,
+            };
+            if line_matches && path_matches(&location, requested_path) {
+                return Some(location);
+            }
+            old_line = old_line.saturating_add(1);
+            new_line = new_line.saturating_add(1);
+        }
+    }
+    None
+}
+
+fn path_matches(location: &DiffLineLocation, requested_path: &str) -> bool {
+    location.new_path == requested_path || location.old_path.as_deref() == Some(requested_path)
+}
+
+fn parse_diff_git_paths(rest: &str) -> (Option<String>, Option<String>) {
+    let mut parts = rest.split_whitespace();
+    let old_path = parts.next().and_then(|value| value.strip_prefix("a/"));
+    let new_path = parts.next().and_then(|value| value.strip_prefix("b/"));
+    (old_path.map(str::to_string), new_path.map(str::to_string))
+}
+
+fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once(" +")?;
+    let (new_part, _) = rest.split_once(" @@")?;
+    Some((parse_hunk_start(old_part)?, parse_hunk_start(new_part)?))
+}
+
+fn parse_hunk_start(part: &str) -> Option<u32> {
+    part.split(',').next()?.parse().ok()
+}
+
+fn review_set_host_tools_command(id: String, tools: Vec<Value>) -> Value {
+    json!({
+        "id": id,
+        "type": "set_host_tools",
+        "tools": tools,
+    })
+}
+
+pub(crate) async fn remember_session_host_tools(
+    state: &AppState,
+    session_id: &str,
+    tools: Vec<Value>,
+) {
+    let mut session_host_tools = state.session_host_tools.write().await;
+    if tools.is_empty() {
+        session_host_tools.remove(session_id);
+    } else {
+        session_host_tools.insert(session_id.to_string(), tools);
+    }
+}
+
+async fn restore_session_host_tools(state: &AppState, session_id: &str, tools: Vec<Value>) {
+    remember_session_host_tools(state, session_id, tools.clone()).await;
+    let _ = send_rpc_command(
+        state,
+        session_id,
+        review_set_host_tools_command(next_rpc_id(), tools),
+    )
+    .await;
+}
+
+fn review_host_tools_with_comment_tool(previous_host_tools: &[Value]) -> Vec<Value> {
+    let mut tools = previous_host_tools
+        .iter()
+        .filter(|tool| tool.get("name").and_then(Value::as_str) != Some("fura_add_review_comment"))
+        .cloned()
+        .collect::<Vec<_>>();
+    tools.push(review_tool_definition());
+    tools
+}
+
+fn review_tool_definition() -> Value {
+    json!({
+        "name": "fura_add_review_comment",
+        "label": "Add Fura diff review comment",
+        "description": "Persist an inline review comment on the explicit Fura diff review currently in progress.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reviewContextId": { "type": "string", "description": "The review context id supplied in the review prompt." },
+                "path": { "type": "string", "description": "Repo-relative file path shown in the diff." },
+                "side": { "type": "string", "enum": ["left", "right"], "description": "Use right for added/current lines and left for removed/base lines." },
+                "line": { "type": "integer", "minimum": 1, "description": "Line number on the selected side." },
+                "body": { "type": "string", "description": "Review comment body." },
+                "severity": { "type": "string", "description": "Optional severity label." }
+            },
+            "required": ["reviewContextId", "path", "side", "line", "body"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn review_prompt(context_id: &str, state: &DiffReviewableState, instructions: &str) -> String {
+    let instructions = instructions.trim();
+    let instructions = if instructions.is_empty() {
+        "Review this diff for correctness, reliability, maintainability, and user-visible regressions."
+    } else {
+        instructions
+    };
+    let worktree_status = state
+        .review_worktree
+        .as_ref()
+        .map(|worktree| format!("{:?}", worktree.status))
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "You are reviewing the currently open Fura diff.\n\nReview context id: {context_id}\nRepository: {}\nComparison key: {}\nFiles in summary: {}\nCurrent commit: {}\nReview worktree status: {}\nReview instructions:\n{}\n\nReviewable diff patch:\n```diff\n{}\n```\n\nUse the fura_add_review_comment host tool for every inline review comment you want to persist. Do not invent line numbers; only comment on lines present in the diff patch.",
+        state.comparison.repo_root,
+        state.comparison.comparison_key,
+        state.summary.files.len(),
+        state.review.current_commit_oid.as_deref().unwrap_or("none"),
+        worktree_status,
+        instructions,
+        state.patch.as_deref().unwrap_or(""),
+    )
+}
+
+fn review_host_tool_result_frame(id: String, text: String, is_error: bool) -> Value {
+    json!({
+        "id": id,
+        "type": "host_tool_result",
+        "result": {
+            "content": [
+                { "type": "text", "text": text }
+            ]
+        },
+        "isError": is_error,
+    })
+}
+
 pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<ServerMessage> {
     info!(action = "prompt.abort", session_id = %session_id);
     let command = abort_command(next_rpc_id());
     let send_result = send_rpc_command(state, &session_id, command).await;
+    clear_review_contexts_for_session(state, &session_id).await;
 
     let mut sessions = state.sessions.write().await;
     match sessions.get_mut(&session_id) {
@@ -1787,5 +2418,517 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
             responses
         }
         None => vec![unknown_session_error(session_id)],
+    }
+}
+
+#[cfg(test)]
+mod review_comment_tests {
+    use super::*;
+    use std::collections::HashSet;
+    use tokio::sync::{mpsc, oneshot};
+
+    fn test_session_record(id: &str) -> SessionRecord {
+        SessionRecord {
+            id: id.to_string(),
+            cwd: Some("/repo".to_string()),
+            args: Vec::new(),
+            status: SessionStatus::Idle,
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            session_mode: SessionMode::Standard,
+            messages: Vec::new(),
+            live_message_ids: HashSet::new(),
+            streaming_message: None,
+            tool_cards: Vec::new(),
+            active_tool_calls: Vec::new(),
+            todo_phases: Some(Vec::new()),
+            kind: SessionKind::Managed,
+            session_file: None,
+            title: None,
+            timestamp: None,
+            category: None,
+            worktree: None,
+            model: None,
+            thinking_level: None,
+            tokens_total: 0,
+            cost_usd: 0.0,
+            context_tokens: None,
+            context_window: None,
+            context_percent: None,
+            plan_mode: None,
+            pending_plan_review: None,
+        }
+    }
+
+    fn anchor() -> DiffLineLocation {
+        DiffLineLocation {
+            old_path: Some("src/old.ts".to_string()),
+            new_path: "src/new.ts".to_string(),
+            hunk: Some("@@ -1,1 +1,1 @@".to_string()),
+            side: DiffSide::Right,
+            kind: DiffLineKind::Add,
+            old_line: None,
+            new_line: Some(1),
+            text: "+const next = true;".to_string(),
+        }
+    }
+
+    fn reviewable_state(patch: &str) -> DiffReviewableState {
+        DiffReviewableState {
+            comparison: DiffComparisonIdentity {
+                repo_root: "/repo".to_string(),
+                base: DiffEndpoint::WorkingTree,
+                head: DiffEndpoint::WorkingTree,
+                left_tree_or_commit: "base".to_string(),
+                right_tree_or_commit: "head".to_string(),
+                detail_mode: DiffDetailMode::FilePatch,
+                current_commit_oid: Some("abc123".to_string()),
+                selected_file: Some(DiffFileSelector {
+                    old_path: None,
+                    new_path: "src/new.ts".to_string(),
+                }),
+                generated_at: "2026-05-06T00:00:00Z".to_string(),
+                comparison_key: "cmp".to_string(),
+            },
+            summary: DiffSummaryPayload {
+                files: vec![DiffFileSummary {
+                    old_path: None,
+                    new_path: "src/new.ts".to_string(),
+                    status: DiffFileStatus::Modified,
+                    added: 1,
+                    removed: 0,
+                }],
+                stat: None,
+                truncated: false,
+                file_limit_reached: None,
+            },
+            review: CommitStepState {
+                commits: Vec::new(),
+                current_commit_oid: Some("abc123".to_string()),
+                current_commit_index: Some(0),
+                previous_commit_oid: None,
+            },
+            patch: Some(patch.to_string()),
+            review_worktree: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn review_comment_create_persists_and_broadcasts_without_direct_success() {
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_session_record("s1"));
+        let mut events = state.events.subscribe();
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::ReviewCommentCreate {
+                session_id: "s1".to_string(),
+                repo_root: "/repo".to_string(),
+                comparison_key: "cmp".to_string(),
+                anchor: anchor(),
+                body: "Persist this".to_string(),
+            },
+        )
+        .await;
+
+        assert!(responses.is_empty());
+        let event = events.recv().await.expect("broadcast event");
+        let ServerMessage::ReviewCommentUpserted { comment } = event else {
+            panic!("expected upsert broadcast");
+        };
+        assert_eq!(comment.session_id, "s1");
+        assert_eq!(comment.author, ReviewCommentAuthor::User);
+        assert_eq!(comment.body, "Persist this");
+        let listed = list_comments(&state.review_comment_db_path, "s1", Some("cmp"))
+            .expect("comment persisted");
+        assert_eq!(listed, vec![comment]);
+    }
+
+    #[tokio::test]
+    async fn review_comment_list_update_and_delete_round_trip() {
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_session_record("s1"));
+        let created = create_comment(
+            &state.review_comment_db_path,
+            NewReviewComment {
+                session_id: "s1".to_string(),
+                repo_root: "/repo".to_string(),
+                comparison_key: "cmp".to_string(),
+                author: ReviewCommentAuthor::User,
+                body: "Original".to_string(),
+                anchor: anchor(),
+                stale: false,
+                stale_reason: None,
+            },
+        )
+        .expect("created");
+
+        let list_response = handle_client_message(
+            &state,
+            ClientMessage::ReviewCommentsList {
+                session_id: "s1".to_string(),
+                comparison_key: Some("cmp".to_string()),
+            },
+        )
+        .await;
+        let [ServerMessage::ReviewCommentsSnapshot { comments, .. }] = list_response.as_slice()
+        else {
+            panic!("expected comments snapshot");
+        };
+        assert_eq!(comments, &vec![created.clone()]);
+
+        let mut events = state.events.subscribe();
+        let update_responses = handle_client_message(
+            &state,
+            ClientMessage::ReviewCommentUpdate {
+                id: created.id.clone(),
+                body: "Updated".to_string(),
+            },
+        )
+        .await;
+        assert!(update_responses.is_empty());
+        let ServerMessage::ReviewCommentUpserted { comment: updated } =
+            events.recv().await.expect("update broadcast")
+        else {
+            panic!("expected update broadcast");
+        };
+        assert_eq!(updated.body, "Updated");
+
+        let delete_responses = handle_client_message(
+            &state,
+            ClientMessage::ReviewCommentDelete {
+                id: created.id.clone(),
+            },
+        )
+        .await;
+        assert!(delete_responses.is_empty());
+        let ServerMessage::ReviewCommentDeleted {
+            session_id,
+            comparison_key,
+            id,
+        } = events.recv().await.expect("delete broadcast")
+        else {
+            panic!("expected delete broadcast");
+        };
+        assert_eq!(session_id, "s1");
+        assert_eq!(comparison_key, "cmp");
+        assert_eq!(id, created.id);
+        assert!(
+            list_comments(&state.review_comment_db_path, "s1", None)
+                .expect("listed")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn review_agent_review_start_sets_tools_and_prompts_with_patch() {
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_session_record("s1"));
+        let (stdin_tx, mut stdin_rx) = mpsc::channel::<Value>(8);
+        let (stop_tx, _stop_rx) = oneshot::channel();
+        state.rpc_sessions.write().await.insert(
+            "s1".to_string(),
+            RpcSessionHandle {
+                stdin: stdin_tx,
+                stop: stop_tx,
+            },
+        );
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("s1".to_string(), "s1".to_string());
+        let patch = "diff --git a/src/new.ts b/src/new.ts\n--- a/src/new.ts\n+++ b/src/new.ts\n@@ -1,1 +1,2 @@\n const old = true;\n+const next = true;\n";
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::ReviewAgentReviewStart {
+                session_id: "s1".to_string(),
+                state: reviewable_state(patch),
+                instructions: "Review this diff carefully.".to_string(),
+            },
+        )
+        .await;
+
+        assert!(responses.is_empty());
+        let set_host_tools = stdin_rx.recv().await.expect("set_host_tools command");
+        assert_eq!(set_host_tools["type"], "set_host_tools");
+        assert_eq!(
+            set_host_tools["tools"][0]["name"],
+            "fura_add_review_comment"
+        );
+        let prompt = stdin_rx.recv().await.expect("prompt command");
+        assert_eq!(prompt["type"], "prompt");
+        let text = prompt["message"].as_str().expect("prompt text");
+        assert!(text.contains("Reviewable diff patch:"));
+        assert!(text.contains(patch));
+        assert!(text.contains("Review this diff carefully."));
+        assert_eq!(state.active_review_contexts.read().await.len(), 1);
+        let second = handle_client_message(
+            &state,
+            ClientMessage::ReviewAgentReviewStart {
+                session_id: "s1".to_string(),
+                state: reviewable_state(patch),
+                instructions: "Start a second review".to_string(),
+            },
+        )
+        .await;
+        let [ServerMessage::Error { message, .. }] = second.as_slice() else {
+            panic!("expected busy rejection for second review");
+        };
+        assert!(message.contains("session is busy"));
+    }
+
+    #[tokio::test]
+    async fn review_agent_review_start_rejects_busy_session_without_enabling_tools() {
+        let state = crate::tests::test_state(8, None);
+        let mut record = test_session_record("s1");
+        record.status = SessionStatus::Busy;
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::ReviewAgentReviewStart {
+                session_id: "s1".to_string(),
+                state: reviewable_state("+change"),
+                instructions: "Review while busy".to_string(),
+            },
+        )
+        .await;
+
+        let [ServerMessage::Error { message, .. }] = responses.as_slice() else {
+            panic!("expected busy error");
+        };
+        assert!(message.contains("session is busy"));
+        assert!(state.active_review_contexts.read().await.is_empty());
+        assert!(
+            state
+                .sessions
+                .read()
+                .await
+                .get("s1")
+                .is_some_and(|record| matches!(record.status, SessionStatus::Busy))
+        );
+    }
+    #[tokio::test]
+    async fn review_host_tool_requires_active_context() {
+        let state = crate::tests::test_state(8, None);
+
+        let error = dispatch_review_host_tool(
+            &state,
+            "s1",
+            "fura_add_review_comment",
+            json!({
+                "reviewContextId": "missing",
+                "path": "src/new.ts",
+                "side": "right",
+                "line": 1,
+                "body": "Agent comment"
+            }),
+        )
+        .await
+        .expect_err("inactive context rejected");
+
+        assert!(error.contains("not active"));
+        assert!(
+            list_comments(&state.review_comment_db_path, "s1", None)
+                .expect("listed")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn review_host_tool_active_context_creates_agent_comment() {
+        let state = crate::tests::test_state(8, None);
+        let patch = "diff --git a/src/new.ts b/src/new.ts\n--- a/src/new.ts\n+++ b/src/new.ts\n@@ -1,1 +1,2 @@\n const old = true;\n+const next = true;\n";
+        state.active_review_contexts.write().await.insert(
+            "ctx".to_string(),
+            ActiveReviewContext {
+                id: "ctx".to_string(),
+                session_id: "s1".to_string(),
+                repo_root: "/repo".to_string(),
+                comparison_key: "cmp".to_string(),
+                patch: patch.to_string(),
+                previous_host_tools: Vec::new(),
+                set_host_tools_command_id: "set-host".to_string(),
+                prompt_command_id: "prompt".to_string(),
+            },
+        );
+        let mut events = state.events.subscribe();
+
+        let result = dispatch_review_host_tool(
+            &state,
+            "s1",
+            "fura_add_review_comment",
+            json!({
+                "reviewContextId": "ctx",
+                "path": "src/new.ts",
+                "side": "right",
+                "line": 2,
+                "body": "Agent comment"
+            }),
+        )
+        .await
+        .expect("comment created");
+
+        assert!(result.contains("Created review comment"));
+        let ServerMessage::ReviewCommentUpserted { comment } =
+            events.recv().await.expect("agent comment broadcast")
+        else {
+            panic!("expected agent comment broadcast");
+        };
+        assert_eq!(comment.author, ReviewCommentAuthor::Agent);
+        assert_eq!(comment.anchor.new_line, Some(2));
+        assert_eq!(comment.body, "Agent comment");
+        let listed = list_comments(&state.review_comment_db_path, "s1", Some("cmp"))
+            .expect("comment persisted");
+        assert_eq!(listed, vec![comment]);
+    }
+
+    #[tokio::test]
+    async fn review_host_tool_new_file_comment_uses_null_old_path() {
+        let state = crate::tests::test_state(8, None);
+        let patch = "diff --git a/src/new-file.ts b/src/new-file.ts\n--- /dev/null\n+++ b/src/new-file.ts\n@@ -0,0 +1,1 @@\n+const next = true;\n";
+        state.active_review_contexts.write().await.insert(
+            "ctx".to_string(),
+            ActiveReviewContext {
+                id: "ctx".to_string(),
+                session_id: "s1".to_string(),
+                repo_root: "/repo".to_string(),
+                comparison_key: "cmp".to_string(),
+                patch: patch.to_string(),
+                previous_host_tools: Vec::new(),
+                set_host_tools_command_id: "set-host".to_string(),
+                prompt_command_id: "prompt".to_string(),
+            },
+        );
+        let mut events = state.events.subscribe();
+
+        let result = dispatch_review_host_tool(
+            &state,
+            "s1",
+            "fura_add_review_comment",
+            json!({
+                "reviewContextId": "ctx",
+                "path": "src/new-file.ts",
+                "side": "right",
+                "line": 1,
+                "body": "New file comment"
+            }),
+        )
+        .await
+        .expect("comment created");
+
+        assert!(result.contains("Created review comment"));
+        let ServerMessage::ReviewCommentUpserted { comment } =
+            events.recv().await.expect("agent comment broadcast")
+        else {
+            panic!("expected agent comment broadcast");
+        };
+        assert_eq!(comment.anchor.old_path, None);
+        assert_eq!(comment.anchor.new_path, "src/new-file.ts");
+    }
+
+    #[tokio::test]
+    async fn review_host_tool_rejects_unmapped_path_without_persisting() {
+        let state = crate::tests::test_state(8, None);
+        let patch = "diff --git a/src/new.ts b/src/new.ts\n--- a/src/new.ts\n+++ b/src/new.ts\n@@ -1,1 +1,2 @@\n const old = true;\n+const next = true;\n";
+        state.active_review_contexts.write().await.insert(
+            "ctx".to_string(),
+            ActiveReviewContext {
+                id: "ctx".to_string(),
+                session_id: "s1".to_string(),
+                repo_root: "/repo".to_string(),
+                comparison_key: "cmp".to_string(),
+                patch: patch.to_string(),
+                previous_host_tools: Vec::new(),
+                set_host_tools_command_id: "set-host".to_string(),
+                prompt_command_id: "prompt".to_string(),
+            },
+        );
+
+        let error = dispatch_review_host_tool(
+            &state,
+            "s1",
+            "fura_add_review_comment",
+            json!({
+                "reviewContextId": "ctx",
+                "path": "src/missing.ts",
+                "side": "right",
+                "line": 2,
+                "body": "Agent comment"
+            }),
+        )
+        .await
+        .expect_err("unmapped location rejected");
+
+        assert!(error.contains("could not map review comment"));
+        assert!(
+            list_comments(&state.review_comment_db_path, "s1", None)
+                .expect("listed")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn review_host_tool_rejects_mismatched_transport_session() {
+        let state = crate::tests::test_state(8, None);
+        let patch = "diff --git a/src/new.ts b/src/new.ts\n--- a/src/new.ts\n+++ b/src/new.ts\n@@ -1,1 +1,2 @@\n const old = true;\n+const next = true;\n";
+        state.active_review_contexts.write().await.insert(
+            "ctx".to_string(),
+            ActiveReviewContext {
+                id: "ctx".to_string(),
+                session_id: "s1".to_string(),
+                repo_root: "/repo".to_string(),
+                comparison_key: "cmp".to_string(),
+                patch: patch.to_string(),
+                previous_host_tools: Vec::new(),
+                set_host_tools_command_id: "set-host".to_string(),
+                prompt_command_id: "prompt".to_string(),
+            },
+        );
+        state
+            .rpc_session_targets
+            .write()
+            .await
+            .insert("transport-2".to_string(), "s2".to_string());
+
+        let error = dispatch_review_host_tool(
+            &state,
+            "transport-2",
+            "fura_add_review_comment",
+            json!({
+                "reviewContextId": "ctx",
+                "path": "src/new.ts",
+                "side": "right",
+                "line": 2,
+                "body": "Agent comment"
+            }),
+        )
+        .await
+        .expect_err("mismatched transport rejected");
+
+        assert!(error.contains("review context belongs to session s1"));
+        assert!(
+            list_comments(&state.review_comment_db_path, "s1", None)
+                .expect("listed")
+                .is_empty()
+        );
     }
 }

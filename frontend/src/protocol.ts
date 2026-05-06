@@ -376,6 +376,20 @@ export type DiffReviewAnnotation = {
   external?: { provider: "github"; owner: string; repo: string; pullNumber: number; commentId?: string | null };
 };
 
+export type ReviewComment = {
+  id: string;
+  sessionId: string;
+  repoRoot: string;
+  comparisonKey: string;
+  author: "user" | "agent";
+  body: string;
+  stale: boolean;
+  staleReason?: string | null;
+  anchor: DiffLineLocation;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type ModelSummary = {
   provider: string;
   id: string;
@@ -507,6 +521,9 @@ export type ServerMessage =
   | { type: "voice.delta"; targetClientId: string; itemId: string; text: string }
   | { type: "voice.final"; targetClientId: string; itemId: string; text: string }
   | { type: "voice.error"; targetClientId: string; message: string }
+  | { type: "review.comments.snapshot"; sessionId: string; comments: ReviewComment[] }
+  | { type: "review.comment.upserted"; comment: ReviewComment }
+  | { type: "review.comment.deleted"; sessionId: string; comparisonKey: string; id: string }
   | { type: "error"; requestId?: string | null; message: string };
 
 export type WorktreeCreateOptions = {
@@ -561,6 +578,11 @@ export type ClientMessage =
     }
   | { type: "plan.discuss"; sessionId: string }
   | { type: "raw.rpc"; sessionId: string; command: unknown }
+  | { type: "review.comments.list"; sessionId: string; comparisonKey?: string | null }
+  | { type: "review.comment.create"; sessionId: string; repoRoot: string; comparisonKey: string; anchor: DiffLineLocation; body: string }
+  | { type: "review.comment.update"; id: string; body: string }
+  | { type: "review.comment.delete"; id: string }
+  | { type: "review.agentReview.start"; sessionId: string; state: DiffReviewableState; instructions: string }
   | { type: "session.fork"; sessionId: string; name: string }
   | { type: "control.prompt"; clientId: string; conversationId?: string; text: string; uiSnapshot: FrontendUiSnapshot }
   | { type: "control.abort"; clientId: string; conversationId?: string }

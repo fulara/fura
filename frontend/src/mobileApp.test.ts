@@ -1232,7 +1232,7 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileTranscript")?.hasAttribute("hidden")).toBe(true);
   });
 
-  it("adds, previews, and flushes mobile diff comments", () => {
+  it("creates mobile diff comments only after bridge broadcast", () => {
     const { connection } = createHarness();
     const patch = [
       "diff --git a/src/main.ts b/src/main.ts",
@@ -1250,29 +1250,35 @@ describe("mountMobileApp", () => {
     const commentText = document.querySelector<HTMLTextAreaElement>("#mobileDiffCommentText");
     if (!commentText) throw new Error("comment textarea missing");
     commentText.value = "Please avoid console logging.";
-    commentText.dispatchEvent(new Event("input", { bubbles: true }));
     document.querySelector<HTMLFormElement>("#mobileDiffCommentForm")?.requestSubmit();
+
+    const createMessage = connection.sent.find(message => message.type === "review.comment.create");
+    expect(createMessage).toMatchObject({ type: "review.comment.create", sessionId: "live", body: "Please avoid console logging." });
+    expect(document.querySelector("#mobileDiff")?.textContent).not.toContain("Please avoid console logging.");
+
+    if (!createMessage || createMessage.type !== "review.comment.create") throw new Error("create message missing");
+    connection.emit({
+      type: "review.comment.upserted",
+      comment: {
+        id: "c1",
+        sessionId: "live",
+        repoRoot: createMessage.repoRoot,
+        comparisonKey: createMessage.comparisonKey,
+        author: "user",
+        body: createMessage.body,
+        stale: false,
+        staleReason: null,
+        anchor: createMessage.anchor,
+        createdAt: "now",
+        updatedAt: "now",
+      },
+    });
 
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Please avoid console logging.");
     expect(document.querySelector(".mobile-diff-file-item")?.textContent).toContain("1 comment");
-    const flushButton = [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
-      .find(button => button.textContent === "Preview & flush (1)");
-    expect(flushButton?.disabled).toBe(false);
-    flushButton?.click();
-
-    const preview = document.querySelector<HTMLTextAreaElement>("#mobileDiffPreviewText");
-    expect(preview?.value).toContain("Comment: Please avoid console logging.");
-    expect(document.querySelector("#mobileDiffPreviewStatus")?.textContent).toBe("1 comment ready to send");
-
-    document.querySelector<HTMLButtonElement>("#mobileDiffPreviewSend")?.click();
-
-    const promptMessage = connection.sent.filter(message => message.type === "prompt.send").at(-1);
-    expect(promptMessage).toMatchObject({ type: "prompt.send", sessionId: "live" });
-    expect(promptMessage && "text" in promptMessage ? promptMessage.text : "").toContain("Please avoid console logging.");
-    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No annotations on this diff yet.");
   });
 
-  it("keeps mobile diff comments queued until busy prompt follow-up is sent", () => {
+  it("keeps mobile diff questions queued until busy prompt follow-up is sent", () => {
     const { connection } = createHarness();
     const patch = [
       "diff --git a/src/main.ts b/src/main.ts",
@@ -1286,7 +1292,7 @@ describe("mountMobileApp", () => {
     document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
     connection.emit({ type: "sessionChanges.summary", state: diffState(patch, "filePatch") });
 
-    document.querySelector<HTMLButtonElement>(".mobile-diff-line-add .mobile-diff-comment-button")?.click();
+    document.querySelector<HTMLButtonElement>(".mobile-diff-line-add .mobile-diff-question-button")?.click();
     const commentText = document.querySelector<HTMLTextAreaElement>("#mobileDiffCommentText");
     if (!commentText) throw new Error("comment textarea missing");
     commentText.value = "Queue this while busy.";
@@ -1304,6 +1310,165 @@ describe("mountMobileApp", () => {
 
     const promptMessage = connection.sent.filter(message => message.type === "prompt.send").at(-1);
     expect(promptMessage).toMatchObject({ type: "prompt.send", sessionId: "live", behavior: "followUp" });
-    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No annotations on this diff yet.");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("No persisted review comments on this diff yet.");
+  });
+
+  it("renders stale agent persisted comments even while the selected patch is unavailable", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    connection.emit({ type: "sessionChanges.summary", state: diffState("", "filePatch", { patch: null }) });
+
+    connection.emit({
+      type: "review.comments.snapshot",
+      sessionId: "live",
+      comments: [{
+        id: "agent-stale",
+        sessionId: "live",
+        repoRoot: "/repo",
+        comparisonKey: "/repo|tree",
+        author: "agent",
+        body: "This persisted agent comment survived restart.",
+        stale: true,
+        staleReason: "file changed",
+        anchor: { oldPath: null, newPath: "src/main.ts", hunk: null, side: "right", kind: "add", newLine: 1, text: "console.log('new')" },
+        createdAt: "now",
+        updatedAt: "now",
+      }],
+    });
+
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Loading patch for src/main.ts");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Agent: This persisted agent comment survived restart.");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("stale/unmatched");
+  });
+
+  it("defers review comment broadcast rendering and patch requests while diff is hidden", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    connection.emit({ type: "sessionChanges.summary", state: diffState("src/main.ts | 2 ++", "statOnly") });
+    document.querySelector<HTMLButtonElement>("#mobileTranscriptTab")?.click();
+    connection.sent.length = 0;
+
+    connection.emit({
+      type: "review.comment.upserted",
+      comment: {
+        id: "hidden",
+        sessionId: "live",
+        repoRoot: "/repo",
+        comparisonKey: "/repo|tree",
+        author: "user",
+        body: "Hidden diff comment.",
+        stale: false,
+        staleReason: null,
+        anchor: { oldPath: null, newPath: "src/hidden.ts", hunk: null, side: "right", kind: "add", newLine: 7, text: "hidden" },
+        createdAt: "now",
+        updatedAt: "now",
+      },
+    });
+
+    expect(document.querySelector("#mobileTranscript")?.hasAttribute("hidden")).toBe(false);
+    expect(connection.sent.some(message => message.type === "sessionChanges.request")).toBe(false);
+    expect(document.querySelector("#mobileDiff")?.textContent).not.toContain("Hidden diff comment.");
+
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Hidden diff comment.");
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Review comments (1)");
+  });
+
+  it("keeps mobile persisted comment edit and delete broadcast-only", () => {
+    const { connection } = createHarness();
+    const editPrompt = vi.spyOn(window, "prompt").mockReturnValue("Edited after broadcast");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    connection.emit({ type: "sessionChanges.summary", state: diffState("src/main.ts | 2 ++", "statOnly") });
+    connection.emit({
+      type: "review.comments.snapshot",
+      sessionId: "live",
+      comments: [{
+        id: "editable",
+        sessionId: "live",
+        repoRoot: "/repo",
+        comparisonKey: "/repo|tree",
+        author: "user",
+        body: "Original persisted comment.",
+        stale: false,
+        staleReason: null,
+        anchor: { oldPath: null, newPath: "src/main.ts", hunk: null, side: "right", kind: "add", newLine: 1, text: "line" },
+        createdAt: "now",
+        updatedAt: "now",
+      }],
+    });
+
+    [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-comment-actions button")]
+      .find(button => button.textContent === "Edit")
+      ?.click();
+    expect(editPrompt).toHaveBeenCalledWith("Edit comment", "Original persisted comment.");
+    expect(connection.sent.at(-1)).toMatchObject({ type: "review.comment.update", id: "editable", body: "Edited after broadcast" });
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Original persisted comment.");
+    expect(document.querySelector("#mobileDiff")?.textContent).not.toContain("Edited after broadcast");
+
+    connection.emit({
+      type: "review.comment.upserted",
+      comment: {
+        id: "editable",
+        sessionId: "live",
+        repoRoot: "/repo",
+        comparisonKey: "/repo|tree",
+        author: "user",
+        body: "Edited after broadcast",
+        stale: false,
+        staleReason: null,
+        anchor: { oldPath: null, newPath: "src/main.ts", hunk: null, side: "right", kind: "add", newLine: 1, text: "line" },
+        createdAt: "now",
+        updatedAt: "later",
+      },
+    });
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Edited after broadcast");
+
+    [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-comment-actions button")]
+      .find(button => button.textContent === "Remove")
+      ?.click();
+    expect(connection.sent.at(-1)).toMatchObject({ type: "review.comment.delete", id: "editable" });
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("Edited after broadcast");
+
+    connection.emit({ type: "review.comment.deleted", sessionId: "live", comparisonKey: "/repo|tree", id: "editable" });
+    expect(document.querySelector("#mobileDiff")?.textContent).not.toContain("Edited after broadcast");
+  });
+
+  it("starts mobile agent review with editable instructions and the loaded patch", () => {
+    const { connection } = createHarness();
+    const patch = [
+      "diff --git a/src/main.ts b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-console.log('old')",
+      "+console.log('new')",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    document.querySelector<HTMLButtonElement>("#mobileDiffTab")?.click();
+    connection.emit({ type: "sessionChanges.summary", state: diffState(patch, "filePatch") });
+
+    const reviewButton = [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
+      .find(button => button.textContent === "Review this diff");
+    expect(reviewButton?.disabled).toBe(false);
+    reviewButton?.click();
+    const preview = document.querySelector<HTMLTextAreaElement>("#mobileDiffPreviewText");
+    expect(preview?.readOnly).toBe(false);
+    if (!preview) throw new Error("diff preview missing");
+    preview.value = "Focus on regressions.";
+    document.querySelector<HTMLButtonElement>("#mobileDiffPreviewSend")?.click();
+
+    const reviewMessage = connection.sent.find(message => message.type === "review.agentReview.start");
+    expect(reviewMessage).toMatchObject({ type: "review.agentReview.start", sessionId: "live", instructions: "Focus on regressions." });
+    if (!reviewMessage || reviewMessage.type !== "review.agentReview.start") throw new Error("agent review message missing");
+    expect(reviewMessage.state.patch).toBe(patch);
   });
 });

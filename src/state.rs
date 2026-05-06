@@ -8,9 +8,9 @@ use tokio::{
 
 use crate::{
     CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode, DiffFileSelector,
-    DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, PreparedDiff,
-    ProposedModelConfig, ServerMessage, SessionMode, SessionRecord,
-    ThinkingVisibilityPreference, Timestamp, VoiceCommand,
+    DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, PreparedDiff, ProposedModelConfig,
+    ServerMessage, SessionMode, SessionRecord, ThinkingVisibilityPreference, Timestamp,
+    VoiceCommand,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -39,7 +39,10 @@ pub(crate) struct AppState {
     pub(crate) bridge_controller: Arc<RwLock<BridgeControllerState>>,
     pub(crate) voice_sessions: Arc<RwLock<HashMap<String, VoiceSessionHandle>>>,
     pub(crate) diff_jobs: Arc<RwLock<DiffJobRegistry>>,
+    pub(crate) review_comment_db_path: PathBuf,
+    pub(crate) active_review_contexts: Arc<RwLock<HashMap<String, ActiveReviewContext>>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,
+    pub(crate) session_host_tools: Arc<RwLock<HashMap<String, Vec<Value>>>>,
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
     pub(crate) bridge_debug_file: Option<PathBuf>,
@@ -158,6 +161,17 @@ pub(crate) struct ControlConversationState {
     pub(crate) last_ui_snapshot: FrontendUiSnapshot,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveReviewContext {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) repo_root: String,
+    pub(crate) comparison_key: String,
+    pub(crate) patch: String,
+    pub(crate) previous_host_tools: Vec<Value>,
+    pub(crate) set_host_tools_command_id: String,
+    pub(crate) prompt_command_id: String,
+}
 #[derive(Debug)]
 pub(crate) struct RpcConfig {
     pub(crate) program: String,

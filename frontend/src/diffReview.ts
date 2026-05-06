@@ -1,5 +1,5 @@
 import { comparisonKey, parseDiffRows, resolvedRefLabel, type ParsedDiffRow } from "./diffState";
-import type { DiffCheckoutTarget, DiffEndpoint, DiffLineLocation, DiffReviewAnnotation, DiffReviewableState } from "./protocol";
+import type { DiffCheckoutTarget, DiffEndpoint, DiffLineLocation, DiffReviewAnnotation, DiffReviewableState, ReviewComment } from "./protocol";
 
 export type DiffPreviewDraft = {
   sessionId: string;
@@ -53,6 +53,41 @@ export function annotationsForDiffLocation(
   );
 }
 
+export function reviewCommentsForDiffLocation(
+  comments: ReviewComment[],
+  key: string,
+  location: DiffLineLocation,
+): ReviewComment[] {
+  return comments.filter(comment => isReviewCommentForLocation(comment, key, location));
+}
+
+export function isReviewCommentForLocation(
+  comment: ReviewComment,
+  key: string,
+  location: DiffLineLocation,
+): boolean {
+  return (
+    comment.comparisonKey === key &&
+    comment.anchor.oldPath === location.oldPath &&
+    comment.anchor.newPath === location.newPath &&
+    comment.anchor.hunk === location.hunk &&
+    comment.anchor.side === location.side &&
+    comment.anchor.kind === location.kind &&
+    comment.anchor.oldLine === location.oldLine &&
+    comment.anchor.newLine === location.newLine &&
+    comment.anchor.text === location.text
+  );
+}
+
+export function reviewCommentsForComparison(comments: ReviewComment[], key: string): ReviewComment[] {
+  return comments.filter(comment => comment.comparisonKey === key);
+}
+
+export function isReviewCommentMatched(rows: ParsedDiffRow[], key: string, comment: ReviewComment): boolean {
+  return rows.some(row => row.type === "line" && isReviewCommentForLocation(comment, key, row.location));
+}
+
+
 export function selectedDiffAnnotations(
   annotations: DiffReviewAnnotation[],
   key: string,
@@ -71,6 +106,10 @@ export function removeSelectedDiffComments(annotations: DiffReviewAnnotation[], 
 
 export function formatDiffLocation(annotation: DiffReviewAnnotation): string {
   return formatDiffLineLocation(annotation.anchor);
+}
+
+export function formatReviewCommentLocation(comment: ReviewComment): string {
+  return formatDiffLineLocation(comment.anchor);
 }
 
 export function formatDiffLineLocation(location: DiffLineLocation): string {

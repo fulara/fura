@@ -63,6 +63,63 @@ pub(crate) enum DiffSide {
     Right,
 }
 
+impl DiffSide {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    pub(crate) fn from_db(value: &str) -> Result<Self, String> {
+        match value {
+            "left" => Ok(Self::Left),
+            "right" => Ok(Self::Right),
+            _ => Err(format!("unknown diff side: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum DiffLineKind {
+    Add,
+    Remove,
+    Context,
+}
+
+impl DiffLineKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Remove => "remove",
+            Self::Context => "context",
+        }
+    }
+
+    pub(crate) fn from_db(value: &str) -> Result<Self, String> {
+        match value {
+            "add" => Ok(Self::Add),
+            "remove" => Ok(Self::Remove),
+            "context" => Ok(Self::Context),
+            _ => Err(format!("unknown diff line kind: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffLineLocation {
+    pub(crate) old_path: Option<String>,
+    pub(crate) new_path: String,
+    pub(crate) hunk: Option<String>,
+    pub(crate) side: DiffSide,
+    pub(crate) kind: DiffLineKind,
+    pub(crate) old_line: Option<u32>,
+    pub(crate) new_line: Option<u32>,
+    pub(crate) text: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DiffRefKind {
@@ -120,7 +177,7 @@ pub(crate) enum SessionRepoSource {
     Snapshot,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionDiffSnapshotSummary {
     pub(crate) entry_id: String,
@@ -129,6 +186,56 @@ pub(crate) struct SessionDiffSnapshotSummary {
     pub(crate) ref_name: String,
     pub(crate) tree: String,
     pub(crate) commit: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffReviewableState {
+    pub(crate) comparison: DiffComparisonIdentity,
+    pub(crate) summary: DiffSummaryPayload,
+    pub(crate) review: CommitStepState,
+    pub(crate) patch: Option<String>,
+    pub(crate) review_worktree: Option<DiffReviewWorktree>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ReviewCommentAuthor {
+    User,
+    Agent,
+}
+
+impl ReviewCommentAuthor {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+        }
+    }
+
+    pub(crate) fn from_db(value: &str) -> Result<Self, String> {
+        match value {
+            "user" => Ok(Self::User),
+            "agent" => Ok(Self::Agent),
+            _ => Err(format!("unknown review comment author: {value}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewComment {
+    pub(crate) id: String,
+    pub(crate) session_id: String,
+    pub(crate) repo_root: String,
+    pub(crate) comparison_key: String,
+    pub(crate) author: ReviewCommentAuthor,
+    pub(crate) body: String,
+    pub(crate) stale: bool,
+    pub(crate) stale_reason: Option<String>,
+    pub(crate) anchor: DiffLineLocation,
+    pub(crate) created_at: String,
+    pub(crate) updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,7 +249,7 @@ pub(crate) struct SessionRepoCandidate {
     pub(crate) session_start_snapshot: Option<SessionDiffSnapshotSummary>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(
     tag = "kind",
     rename_all = "camelCase",
@@ -217,14 +324,14 @@ pub(crate) struct DiffCommitSummary {
     pub(crate) is_merge: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DisplayedPatchRange {
     pub(crate) base: DiffEndpoint,
     pub(crate) head: DiffEndpoint,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CommitStepState {
     pub(crate) commits: Vec<DiffCommitSummary>,
@@ -269,7 +376,7 @@ pub(crate) enum DiffRequestIdentity {
     },
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DiffComparisonIdentity {
     pub(crate) repo_root: String,
@@ -284,7 +391,7 @@ pub(crate) struct DiffComparisonIdentity {
     pub(crate) comparison_key: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DiffSummaryPayload {
     pub(crate) files: Vec<DiffFileSummary>,
@@ -663,6 +770,29 @@ pub(crate) enum ClientMessage {
     PlanDiscuss { session_id: String },
     #[serde(rename = "raw.rpc")]
     RawRpc { session_id: String, command: Value },
+    #[serde(rename = "review.comments.list")]
+    ReviewCommentsList {
+        session_id: String,
+        comparison_key: Option<String>,
+    },
+    #[serde(rename = "review.comment.create")]
+    ReviewCommentCreate {
+        session_id: String,
+        repo_root: String,
+        comparison_key: String,
+        anchor: DiffLineLocation,
+        body: String,
+    },
+    #[serde(rename = "review.comment.update")]
+    ReviewCommentUpdate { id: String, body: String },
+    #[serde(rename = "review.comment.delete")]
+    ReviewCommentDelete { id: String },
+    #[serde(rename = "review.agentReview.start")]
+    ReviewAgentReviewStart {
+        session_id: String,
+        state: DiffReviewableState,
+        instructions: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -857,6 +987,19 @@ pub(crate) enum ServerMessage {
     VoiceError {
         target_client_id: String,
         message: String,
+    },
+    #[serde(rename = "review.comments.snapshot")]
+    ReviewCommentsSnapshot {
+        session_id: String,
+        comments: Vec<ReviewComment>,
+    },
+    #[serde(rename = "review.comment.upserted")]
+    ReviewCommentUpserted { comment: ReviewComment },
+    #[serde(rename = "review.comment.deleted")]
+    ReviewCommentDeleted {
+        session_id: String,
+        comparison_key: String,
+        id: String,
     },
     #[serde(rename = "error")]
     Error {

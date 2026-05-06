@@ -26,6 +26,7 @@ mod diff;
 mod omp_rpc;
 mod projection;
 mod protocol;
+mod review_comments;
 mod rpc;
 mod session;
 mod state;
@@ -42,6 +43,7 @@ use diff::*;
 use omp_rpc::*;
 use projection::*;
 use protocol::*;
+use review_comments::*;
 use rpc::*;
 use session::*;
 use state::*;
@@ -133,6 +135,8 @@ async fn main() -> anyhow::Result<()> {
         .into_iter()
         .filter(|(_, mode)| *mode != SessionMode::Standard)
         .collect();
+    let review_comment_db_path = database_path_from_config(config_path.as_deref());
+    initialize_database(&review_comment_db_path).map_err(anyhow::Error::msg)?;
     let (events, _) = broadcast::channel(512);
     let shared_state = AppState {
         token: Arc::new(token),
@@ -154,6 +158,9 @@ async fn main() -> anyhow::Result<()> {
         bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
         voice_sessions: Arc::new(RwLock::new(HashMap::new())),
         diff_jobs: Arc::new(RwLock::new(DiffJobRegistry::default())),
+        session_host_tools: Arc::new(RwLock::new(HashMap::new())),
+        review_comment_db_path,
+        active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
         events,
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
@@ -680,7 +687,10 @@ pub(crate) mod tests {
             bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
             voice_sessions: Arc::new(RwLock::new(HashMap::new())),
             diff_jobs: Arc::new(RwLock::new(DiffJobRegistry::default())),
+            review_comment_db_path: database_path_from_config(None),
+            active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
             events,
+            session_host_tools: Arc::new(RwLock::new(HashMap::new())),
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),
                 args: Vec::new(),

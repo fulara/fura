@@ -338,6 +338,12 @@ pub(crate) async fn spawn_rpc_child(
             .await
             .remove(&session_id)
             .unwrap_or_else(|| session_id.clone());
+        let removed_review_contexts =
+            remove_review_contexts_for_session(&state, &target_session_id).await;
+        if let Some(context) = removed_review_contexts.into_iter().last() {
+            remember_session_host_tools(&state, &target_session_id, context.previous_host_tools)
+                .await;
+        }
         if reset_controller_if_transport_exited(&state, &session_id).await {
             return;
         }
@@ -521,6 +527,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Busy).await
         }
         OmpRpcFrame::AgentEnd { .. } => {
+            clear_review_contexts_for_session(state, &target_session_id).await;
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
             if let Err(message) = send_rpc_command(
                 state,
@@ -781,9 +788,18 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 dialog: Value::Object(dialog),
             });
         }
-        OmpRpcFrame::HostToolCall { .. }
-        | OmpRpcFrame::HostToolCancel { .. }
-        | OmpRpcFrame::Unknown => apply_rpc_response(state, session_id, frame).await,
+        OmpRpcFrame::HostToolCall {
+            id,
+            tool_call_id,
+            tool_name,
+            arguments,
+        } => {
+            handle_review_host_tool_call(state, session_id, id, tool_call_id, tool_name, arguments)
+                .await
+        }
+        OmpRpcFrame::HostToolCancel { .. } | OmpRpcFrame::Unknown => {
+            apply_rpc_response(state, session_id, frame).await
+        }
     }
 }
 
@@ -991,6 +1007,25 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             if let Some(prompt_busy) = take_pending_prompt_busy_message(state, frame).await {
                 let _ = state.events.send(prompt_busy);
                 return;
+            }
+            if command == Some("prompt") {
+                if let Some(command_id) = value_str(frame, "id") {
+                    let cleared =
+                        clear_review_context_for_command(state, &current_session_id, command_id)
+                            .await;
+                    if cleared {
+                        let _ = refresh_rpc_state(state, &current_session_id).await;
+                    }
+                }
+            }
+        }
+        if matches!(command, Some("prompt" | "set_host_tools")) {
+            if let Some(command_id) = value_str(frame, "id") {
+                let cleared =
+                    clear_review_context_for_command(state, &current_session_id, command_id).await;
+                if cleared && command == Some("set_host_tools") {
+                    settle_prompt_error_and_broadcast(state, &current_session_id).await;
+                }
             }
         }
         if command == Some("repo_diff_snapshot") {

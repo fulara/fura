@@ -596,6 +596,17 @@ body {
   padding: 0.55rem;
 }
 
+.mobile-diff-inline-agent,
+.mobile-diff-agent {
+  border-color: rgba(126, 214, 255, 0.38);
+  background: rgba(126, 214, 255, 0.1);
+}
+
+.mobile-diff-comment.is-stale {
+  border-color: rgba(244, 211, 94, 0.5);
+  background: rgba(244, 211, 94, 0.08);
+}
+
 .mobile-diff-comments {
   display: grid;
   gap: 0.55rem;
@@ -618,6 +629,12 @@ body {
 
 .mobile-diff-comment p {
   margin: 0;
+}
+
+.mobile-diff-comment-actions {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
 }
 .mobile-composer {
   display: grid;

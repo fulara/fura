@@ -62,9 +62,13 @@ import {
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
   formatDiffLocation,
+  formatReviewCommentLocation,
   prepareDiffAnnotationPrompt,
+  isReviewCommentMatched,
   removeSelectedDiffAnnotations,
   selectedDiffAnnotations,
+  reviewCommentsForComparison,
+  reviewCommentsForDiffLocation,
   type DiffPreviewDraft,
 } from "./diffReview";
 import {
@@ -155,6 +159,7 @@ import type {
   ProposedThinkingLevel,
   ServerConfig,
   ServerMessage,
+  ReviewComment,
   SessionChangesSummaryState,
   SessionProjection,
   SessionStatus,
@@ -743,6 +748,8 @@ let comparePayloadKind: DiffDetailMode = "filePatch";
 let comparePanelDirty = true;
 const diffFileFilters = new Map<string, string>();
 const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
+const reviewComments = new Map<string, ReviewComment[]>();
+const reviewCommentsRequested = new Set<string>();
 const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
@@ -878,6 +885,7 @@ let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
+let agentReviewDraft: { sessionId: string; state: DiffReviewableState } | null = null;
 const codeComments = new Map<string, SessionCodeComments>();
 let codePreviewDraft: CodePreviewDraft | null = null;
 let transcriptPreviewDraft: TranscriptPreviewDraft | null = null;
@@ -1465,6 +1473,9 @@ function handleServerMessage(message: ServerMessage): void {
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
       );
       syncProposedModelsUi();
+      reviewCommentsRequested.clear();
+      markDiffsViewDirty();
+      if (activeSessionId) renderDiffsViewIfActive(activeSessionId);
       break;
     case "config.updated":
       serverConfig = message.config;
@@ -1716,6 +1727,32 @@ function handleServerMessage(message: ServerMessage): void {
         markDiffsViewDirty();
         renderDiffsViewIfActive(sessionId);
       }
+      break;
+    }
+    case "review.comments.snapshot": {
+      reviewComments.set(message.sessionId, message.comments);
+      reviewCommentsRequested.add(message.sessionId);
+      markDiffsViewDirty();
+      if (message.sessionId === activeSessionId) renderDiffsViewIfActive(message.sessionId);
+      break;
+    }
+    case "review.comment.upserted": {
+      const existing = reviewComments.get(message.comment.sessionId) ?? [];
+      reviewComments.set(
+        message.comment.sessionId,
+        [...existing.filter(comment => comment.id !== message.comment.id), message.comment],
+      );
+      markDiffsViewDirty();
+      if (message.comment.sessionId === activeSessionId) renderDiffsViewIfActive(message.comment.sessionId);
+      break;
+    }
+    case "review.comment.deleted": {
+      reviewComments.set(
+        message.sessionId,
+        (reviewComments.get(message.sessionId) ?? []).filter(comment => comment.id !== message.id),
+      );
+      markDiffsViewDirty();
+      if (message.sessionId === activeSessionId) renderDiffsViewIfActive(message.sessionId);
       break;
     }
     case "code.workspace.ready":
@@ -4317,6 +4354,26 @@ function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
   };
 }
 
+function ensureReviewCommentsLoaded(sessionId: string): void {
+  if (!sessionId || reviewCommentsRequested.has(sessionId)) return;
+  if (send({ type: "review.comments.list", sessionId })) {
+    reviewCommentsRequested.add(sessionId);
+  }
+}
+
+function reviewCommentAsAnnotation(comment: ReviewComment): DiffReviewAnnotation {
+  return {
+    id: comment.id,
+    kind: "comment",
+    comparisonKey: comment.comparisonKey,
+    anchor: comment.anchor,
+    text: comment.body,
+    status: "sent",
+    createdAt: comment.createdAt,
+  };
+}
+
+
 function editDiffAnnotation(sessionId: string, annotation: DiffReviewAnnotation): void {
   const next = window.prompt(annotation.kind === "question" ? "Edit question" : "Edit comment", annotation.text);
   if (next === null) return;
@@ -4360,6 +4417,39 @@ function renderDiffAnnotationItem(sessionId: string, annotation: DiffReviewAnnot
   item.append(body, controls);
   return item;
 }
+
+function editReviewComment(comment: ReviewComment): void {
+  const next = window.prompt("Edit comment", comment.body);
+  if (next === null) return;
+  const body = next.trim();
+  if (!body || body === comment.body) return;
+  send({ type: "review.comment.update", id: comment.id, body });
+}
+
+function deleteReviewComment(comment: ReviewComment): void {
+  send({ type: "review.comment.delete", id: comment.id });
+}
+
+function renderReviewCommentItem(comment: ReviewComment, stale: boolean): HTMLElement {
+  const item = mkEl("div");
+  item.className = `diff-inline-comment review-comment-item review-comment-${comment.author}${stale ? " is-stale" : ""}`;
+  const body = mkEl("span");
+  const label = comment.author === "agent" ? "Agent" : "You";
+  body.textContent = `${label}: ${comment.body}`;
+  const controls = mkEl("span");
+  controls.className = "review-comment-actions";
+  const edit = mkEl("button");
+  edit.type = "button";
+  edit.textContent = "Edit";
+  edit.addEventListener("click", () => editReviewComment(comment));
+  const remove = mkEl("button");
+  remove.type = "button";
+  remove.textContent = "Remove";
+  remove.addEventListener("click", () => deleteReviewComment(comment));
+  controls.append(edit, remove);
+  item.append(body, controls);
+  return item;
+}
 function addDiffComment(
   sessionId: string,
   state: DiffReviewableState,
@@ -4367,17 +4457,14 @@ function addDiffComment(
 ): void {
   const comment = window.prompt("Comment on this diff line");
   if (!comment?.trim()) return;
-  const annotations = diffAnnotations.get(sessionId) ?? [];
-  annotations.push(createDiffReviewAnnotation({
-    id: `${Date.now()}-${annotations.length}`,
-    kind: "comment",
-    state,
-    location,
-    text: comment,
-  }));
-  diffAnnotations.set(sessionId, annotations);
-  markDiffsViewDirty();
-  rerenderDiffsViewPreservingScroll(sessionId);
+  send({
+    type: "review.comment.create",
+    sessionId,
+    repoRoot: state.comparison.repoRoot,
+    comparisonKey: comparisonKey(state),
+    anchor: location,
+    body: comment.trim(),
+  });
 }
 
 function askDiffQuestion(
@@ -4447,6 +4534,7 @@ function previewDiffAnnotations(
     diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
     diffPreviewSend.textContent = "Send notes";
     diffPreviewSend.disabled = false;
+    diffPreviewText.readOnly = true;
     diffPreviewText.value = prompt.prompt;
     diffPreviewStatus.textContent = diffCommentPreviewStatus(annotationsToFlush.length);
     diffPreviewOverlay.hidden = false;
@@ -4461,10 +4549,28 @@ function previewDiffAnnotations(
   diffPreviewSend.textContent = "Send notes";
   diffPreviewSend.disabled = true;
   diffPreviewText.value = "";
+  diffPreviewText.readOnly = true;
   diffPreviewStatus.textContent = "message" in prompt ? prompt.message : "";
   diffPreviewOverlay.hidden = false;
   diffPreviewText.scrollTop = 0;
   diffPreviewSend.focus();
+}
+
+function previewAgentDiffReview(sessionId: string, state: DiffReviewableState): void {
+  agentReviewDraft = { sessionId, state };
+  diffPreviewDraft = null;
+  transcriptPreviewDraft = null;
+  codePreviewDraft = null;
+  diffPreviewTitle.textContent = "Review this diff";
+  diffPreviewSubtitle.textContent = "Tell the agent how to review. Agent comments will persist after bridge broadcast.";
+  diffPreviewText.value = "Review this diff for correctness, reliability, maintainability, and edge cases.";
+  diffPreviewText.readOnly = false;
+  diffPreviewStatus.textContent = "Agent review comments will appear after the bridge stores and broadcasts them.";
+  diffPreviewSend.textContent = "Start review";
+  diffPreviewSend.disabled = false;
+  diffPreviewOverlay.hidden = false;
+  diffPreviewText.scrollTop = 0;
+  diffPreviewText.focus();
 }
 
 function closeDiffPreview(): void {
@@ -4475,13 +4581,22 @@ function closeDiffPreview(): void {
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewSend.textContent = "Send notes";
   diffPreviewSend.disabled = false;
+  diffPreviewText.readOnly = true;
   diffPreviewDraft = null;
+  agentReviewDraft = null;
   transcriptPreviewDraft = null;
 }
 
 function sendPromptPreviewDraft(): void {
   const diffDraft = diffPreviewDraft;
   const transcriptDraft = transcriptPreviewDraft;
+  const agentDraft = agentReviewDraft;
+  if (agentDraft) {
+    const instructions = diffPreviewText.value.trim();
+    closeDiffPreview();
+    send({ type: "review.agentReview.start", sessionId: agentDraft.sessionId, state: agentDraft.state, instructions });
+    return;
+  }
   if (diffDraft) {
     sendDiffAnnotations(diffDraft.sessionId, diffDraft.state, diffDraft.annotations);
     return;
@@ -4798,9 +4913,12 @@ function renderReviewableDiff(
   requestMode: "sessionChanges" | "compareDiff",
 ): void {
   const key = comparisonKey(state);
+  if (annotationKey !== "compareDiff") ensureReviewCommentsLoaded(annotationKey);
   const annotations = diffAnnotations.get(annotationKey) ?? [];
-  const fileSummaries = summarizeWireDiffFiles(state.summary.files, annotations, key);
+  const comments = reviewCommentsForComparison(reviewComments.get(annotationKey) ?? [], key);
+  const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
   const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
+  const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
   renderDiffFileFilter(sidebarTop, annotationKey);
   renderDesktopModifiedFiles(sidebar, state, fileSummaries, selectedFilePath, annotationKey, jumpContainer);
   const summary = mkEl("section");
@@ -4936,13 +5054,23 @@ function renderReviewableDiff(
     flush.disabled = queuedAnnotations.length === 0;
     flush.addEventListener("click", () => flushDiffAnnotations(annotationKey, state));
     toolbar.append(flush);
+    const review = mkEl("button");
+    review.type = "button";
+    review.textContent = "Review this diff";
+    review.disabled = !cachedPatch?.patch;
+    review.title = cachedPatch?.patch ? "Ask the agent to review this loaded diff patch" : "Load a file patch before starting agent review";
+    review.addEventListener("click", () => {
+      if (!cachedPatch?.patch) return;
+      previewAgentDiffReview(annotationKey, { ...state, patch: cachedPatch.patch });
+    });
+    toolbar.append(review);
   }
   main.append(toolbar);
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
-  const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
   const filePatchError = selectedFilePath ? selectedDiffFilePatchError(annotationKey, selectedFilePath) : null;
+  const selectedRows = cachedPatch?.patch ? parseDiffRows(cachedPatch.patch) : [];
   if (cachedPatch?.truncated) {
     const warning = mkEl("p");
     warning.className = "diffs-warning";
@@ -4972,8 +5100,16 @@ function renderReviewableDiff(
     body.append(loading);
   } else {
     const reviewState = { ...state, patch: cachedPatch.patch };
-    renderDiffRows(body, annotationKey, reviewState, parseDiffRows(cachedPatch.patch), annotations, key, allowPromptActions);
+    renderDiffRows(body, annotationKey, reviewState, selectedRows, annotations, comments, key, allowPromptActions);
   }
+  renderReviewCommentsSection(
+    body,
+    comments,
+    selectedRows,
+    key,
+    selectedFilePath,
+    new Set(state.summary.files.map(file => file.newPath)),
+  );
   main.append(body);
 }
 
@@ -5085,8 +5221,48 @@ function renderDesktopModifiedFiles(
   sidebar.append(filesSection);
 }
 
+function renderReviewCommentsSection(
+  container: HTMLElement,
+  comments: ReviewComment[],
+  rows: ReturnType<typeof parseDiffRows>,
+  key: string,
+  selectedFilePath: string | null,
+  currentFilePaths: Set<string>,
+): void {
+  const section = mkEl("section");
+  section.className = "diff-review-comments-section";
+  const title = mkEl("h3");
+  title.textContent = `Review comments (${comments.length})`;
+  section.append(title);
+  if (comments.length === 0) {
+    const empty = mkEl("p");
+    empty.className = "empty";
+    empty.textContent = "No persisted review comments for this comparison.";
+    section.append(empty);
+    container.append(section);
+    return;
+  }
+  const list = mkEl("div");
+  list.className = "diff-review-comments-list";
+  for (const comment of comments) {
+    const missingFromCurrentDiff = !currentFilePaths.has(comment.anchor.newPath);
+    const selectedFileMismatch = selectedFilePath !== comment.anchor.newPath;
+    const stale = comment.stale
+      || missingFromCurrentDiff
+      || (!selectedFileMismatch && rows.length > 0 && !isReviewCommentMatched(rows, key, comment));
+    const item = renderReviewCommentItem(comment, stale);
+    const meta = mkEl("small");
+    meta.className = "review-comment-meta";
+    meta.textContent = `${formatReviewCommentLocation(comment)}${stale ? " · stale/unmatched" : ""}`;
+    item.prepend(meta);
+    list.append(item);
+  }
+  section.append(list);
+  container.append(section);
+}
 
-function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: ReturnType<typeof parseDiffRows>, annotations: DiffReviewAnnotation[], key: string, allowPromptActions: boolean): void {
+
+function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: ReturnType<typeof parseDiffRows>, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean): void {
   const revision = ++diffRowsRenderRevision;
   const diff = mkEl("div");
   diff.className = "diff-lines";
@@ -5098,7 +5274,7 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
     const started = performance.now();
     let count = 0;
     while (index < rows.length && count < 150 && performance.now() - started < 8) {
-      appendDiffRow(fragment, rows[index++]!, annotationKey, state, annotations, key, allowPromptActions);
+      appendDiffRow(fragment, rows[index++]!, annotationKey, state, annotations, comments, key, allowPromptActions);
       count += 1;
     }
     diff.append(fragment);
@@ -5107,11 +5283,10 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
   renderBatch();
 }
 
-function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typeof parseDiffRows>[number], annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], key: string, allowPromptActions: boolean): void {
+function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typeof parseDiffRows>[number], annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean): void {
   if (row.type === "line") {
-    const lineAnnotations = annotationsForDiffLocation(annotations, key, row.location);
-    const lineComments = lineAnnotations.filter(annotation => annotation.kind === "comment");
-    const lineQuestions = lineAnnotations.filter(annotation => annotation.kind === "question");
+    const lineComments = reviewCommentsForDiffLocation(comments, key, row.location);
+    const lineQuestions = annotationsForDiffLocation(annotations, key, row.location).filter(annotation => annotation.kind === "question");
     const lineWrap = mkEl("div");
     lineWrap.className = "diff-line-wrap";
     const line = mkEl("div");
@@ -5140,10 +5315,11 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typ
     questionBtn.addEventListener("click", () => askDiffQuestion(annotationKey, state, row.location));
     line.append(commentBtn, gutter, content, questionBtn);
     lineWrap.append(line);
-    if (lineAnnotations.length > 0) {
+    if (lineComments.length > 0 || lineQuestions.length > 0) {
       const thread = mkEl("div");
       thread.className = "diff-inline-comments";
-      for (const annotation of lineAnnotations) thread.append(renderDiffAnnotationItem(annotationKey, annotation));
+      for (const comment of lineComments) thread.append(renderReviewCommentItem(comment, false));
+      for (const annotation of lineQuestions) thread.append(renderDiffAnnotationItem(annotationKey, annotation));
       lineWrap.append(thread);
     }
     diff.append(lineWrap);
