@@ -1,6 +1,7 @@
 import { shortPath } from "./format";
-import type { DiffEndpoint, DiffPayload, DiffRefInput, DiffReviewAnnotation, DiffReviewableState, DiffLineLocation, ResolvedDiffRef, DiffFileSummary as WireDiffFileSummary } from "./protocol";
+import type { DiffDetailMode, DiffEndpoint, DiffPayload, DiffRefInput, DiffReviewAnnotation, DiffReviewableState, DiffLineLocation, ResolvedDiffRef, SessionChangesSummaryState, DiffFileSummary as WireDiffFileSummary } from "./protocol";
 
+export const DEFAULT_SESSION_CHANGES_DETAIL_MODE: DiffDetailMode = "filePatch";
 export const WORKING_TREE_DIFF_REF_TEXT = "WORKTREE";
 
 const WORKING_TREE_REF_ALIASES = new Set([
@@ -59,6 +60,24 @@ export function diffEndpointInput(ref: DiffEndpoint | undefined, fallback: DiffR
 
 export function diffEndpointInputText(ref: DiffEndpoint | undefined, fallback: DiffRefInput): string {
   return diffRefInputText(diffEndpointInput(ref, fallback));
+}
+
+export type SessionChangesRefreshOptions = {
+  repoId?: string | null;
+  payloadKind?: DiffDetailMode | null;
+  currentCommitOid?: string | null;
+};
+
+export function sessionChangesRefreshOptions(
+  state: SessionChangesSummaryState | undefined,
+  fallbackPayloadKind: DiffDetailMode,
+): SessionChangesRefreshOptions {
+  if (state?.status !== "ready") return { payloadKind: fallbackPayloadKind };
+  return {
+    repoId: state.selectedRepoId,
+    payloadKind: state.comparison.detailMode,
+    currentCommitOid: state.review.currentCommitOid ?? null,
+  };
 }
 
 export function formatDiffRepoLabel(repoRoot: string): string {

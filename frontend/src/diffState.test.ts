@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { comparisonKey, diffRefInputFromText, diffRefInputText, parseDiffRows, resolvedDiffRefInputText, summarizeDiffFiles } from "./diffState";
-import type { DiffReviewableState } from "./protocol";
+import { comparisonKey, DEFAULT_SESSION_CHANGES_DETAIL_MODE, diffRefInputFromText, diffRefInputText, parseDiffRows, resolvedDiffRefInputText, sessionChangesRefreshOptions, summarizeDiffFiles } from "./diffState";
+import type { DiffReviewableState, SessionChangesSummaryState } from "./protocol";
 
 const patch = [
   "diff --git a/src/old.ts b/src/new.ts",
@@ -16,6 +16,18 @@ const patch = [
   "+const added = true;",
   "+const another = true;",
 ].join("\n");
+
+const sessionStartEndpoint = {
+  kind: "sessionStartSnapshot" as const,
+  snapshot: {
+    entryId: "snapshot-1",
+    label: "session-start",
+    createdAt: "now",
+    refName: "refs/omp/diff-snapshots/start",
+    tree: "a".repeat(40),
+    commit: "a".repeat(40),
+  },
+};
 
 const state = (selectedCommitOid: string | null = null): DiffReviewableState => ({
   comparison: {
@@ -93,5 +105,45 @@ describe("diffState", () => {
     expect(diffRefInputText({ kind: "workingTree" })).toBe("WORKTREE");
     expect(resolvedDiffRefInputText({ kind: "workingTree" }, { kind: "gitRef", value: "HEAD" })).toBe("WORKTREE");
     expect(diffRefInputFromText("feature", { kind: "workingTree" })).toEqual({ kind: "gitRef", value: "feature" });
+  });
+
+  it("builds focus-refresh options from the visible session changes state", () => {
+    const readyState: SessionChangesSummaryState = {
+      status: "ready",
+      targetClientId: "client",
+      diffId: "diff-1",
+      request: {
+        scope: "sessionChanges",
+        clientId: "client",
+        diffId: "diff-1",
+        sessionId: "session-1",
+        repoId: "repo-2",
+        detailMode: "filePatch",
+        currentCommitOid: null,
+      },
+      comparison: {
+        repoRoot: "/repo",
+        base: sessionStartEndpoint,
+        head: { kind: "workingTree" },
+        leftTreeOrCommit: "a".repeat(40),
+        rightTreeOrCommit: "b".repeat(40),
+        detailMode: "filePatch",
+        currentCommitOid: "c".repeat(40),
+        generatedAt: "now",
+        comparisonKey: "key",
+      },
+      sessionId: "session-1",
+      repos: [],
+      selectedRepoId: "repo-2",
+      summary: { files: [], stat: null, truncated: false },
+      review: { commits: [], currentCommitOid: "d".repeat(40) },
+    };
+
+    expect(sessionChangesRefreshOptions(readyState, "statOnly")).toEqual({
+      repoId: "repo-2",
+      payloadKind: "filePatch",
+      currentCommitOid: "d".repeat(40),
+    });
+    expect(sessionChangesRefreshOptions(undefined, DEFAULT_SESSION_CHANGES_DETAIL_MODE)).toEqual({ payloadKind: "filePatch" });
   });
 });

@@ -47,10 +47,12 @@ import {
 import { applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   comparisonKey,
+  DEFAULT_SESSION_CHANGES_DETAIL_MODE,
   diffEndpointInputText,
   diffRefInputFromText,
   diffRefInputText,
   formatDiffRepoLabel,
+  sessionChangesRefreshOptions,
   parseDiffRows,
   resolvedRefLabel,
   summarizeWireDiffFiles,
@@ -4013,7 +4015,7 @@ function requestSessionChanges(sessionId: string): void {
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
-  const sent = send({ type: "sessionChanges.request", clientId: diffClientId, diffId, sessionId, repoId: null, detailMode: "statOnly", currentCommitOid: null, selectedFile: null });
+  const sent = send({ type: "sessionChanges.request", clientId: diffClientId, diffId, sessionId, repoId: null, detailMode: DEFAULT_SESSION_CHANGES_DETAIL_MODE, currentCommitOid: null, selectedFile: null });
   if (!sent) {
     if (currentSessionChangesRequest?.diffId === diffId) currentSessionChangesRequest = null;
     diffLoadingSessions.delete(sessionId);
@@ -4039,7 +4041,7 @@ function requestSessionChangesRefresh(
     diffId,
     sessionId,
     repoId: options.repoId ?? null,
-    detailMode: options.payloadKind ?? sessionChangesPayloadKinds.get(sessionId) ?? "statOnly",
+    detailMode: options.payloadKind ?? sessionChangesPayloadKinds.get(sessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE,
     currentCommitOid: options.currentCommitOid ?? null,
     selectedFile: null,
   });
@@ -4073,7 +4075,7 @@ function requestSessionChangesSnapshot(sessionId: string): void {
   if (diffLoadingSessions.has(sessionId)) return;
   const state = sessionChangesStates.get(sessionId);
   const repoId = state?.status === "ready" ? state.selectedRepoId : null;
-  const payloadKind = state?.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
+  const payloadKind = state?.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE;
   const currentCommitOid = state?.status === "ready" ? state.review.currentCommitOid ?? null : null;
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
@@ -4217,19 +4219,30 @@ function isSessionChangesPanelActive(): boolean {
   return (desktopDockview?.isPanelActive("diffs") ?? false) || (desktopDockview?.isPanelActive("sessionChanges") ?? false);
 }
 
-function requestActiveDiffState(): void {
+function requestActiveDiffState(options: { refreshExisting?: boolean } = {}): void {
   if (!activeSessionId || !isSessionChangesPanelActive()) return;
   const projection = projections.get(activeSessionId);
   if (!projection || diffLoadingSessions.has(activeSessionId)) return;
   if (projection.summary.sessionMode === "diffReview") {
     const request = diffReviewRequestForSummary(projection.summary);
-    if (!request || compareDiffLoading || compareStateMatchesDiffReview(request)) return;
+    if (!request || compareDiffLoading) return;
+    if (!options.refreshExisting && compareStateMatchesDiffReview(request)) return;
     requestDiffReviewState(activeSessionId, projection.summary);
     return;
   }
   const state = sessionChangesStates.get(activeSessionId);
   if (!state) {
     requestSessionChanges(activeSessionId);
+    return;
+  }
+  if (options.refreshExisting) {
+    requestSessionChangesRefresh(
+      activeSessionId,
+      sessionChangesRefreshOptions(
+        state,
+        sessionChangesPayloadKinds.get(activeSessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE,
+      ),
+    );
     return;
   }
   if (currentSessionChangesRequest?.sessionId !== activeSessionId || currentSessionChangesRequest?.diffId !== state.diffId) {
@@ -5059,7 +5072,7 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesSumma
     option.selected = state.status === "ready" ? repo.id === state.selectedRepoId : repo.repoRoot === (state.status === "missingSnapshot" ? state.repoRoot : "");
     select.append(option);
   }
-  const currentPayload = state.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? "statOnly";
+  const currentPayload = state.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE;
   select.addEventListener("change", () => requestSessionChangesRepo(sessionId, select.value, currentPayload));
   section.append(label, select);
   sidebar.append(section);
@@ -5686,7 +5699,7 @@ function initDesktopWorkspace(): void {
       }
       if (id === "diffs" || id === "sessionChanges") {
         desktopDockview?.withPanel(id, container => renderDiffsView(container, projection));
-        requestActiveDiffState();
+        requestActiveDiffState({ refreshExisting: true });
       }
       if (id === "compare") {
         normalDesktopDockview?.withPanel("compare", container => renderComparePanel(container));
