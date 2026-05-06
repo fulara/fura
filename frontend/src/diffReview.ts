@@ -1,5 +1,5 @@
 import { comparisonKey, parseDiffRows, resolvedRefLabel, type ParsedDiffRow } from "./diffState";
-import type { DiffCheckoutTarget, DiffEndpoint, DiffLineLocation, DiffReviewAnnotation, DiffReviewableState, ReviewComment } from "./protocol";
+import type { ClientMessage, DiffCheckoutTarget, DiffEndpoint, DiffLineLocation, DiffReviewAnnotation, DiffReviewableState, ReviewComment } from "./protocol";
 
 export type DiffPreviewDraft = {
   sessionId: string;
@@ -34,8 +34,40 @@ export function createDiffReviewAnnotation(input: {
   };
 }
 
-function sameOptionalNumber(left: number | null | undefined, right: number | null | undefined): boolean {
-  return (left ?? undefined) === (right ?? undefined);
+export function createReviewCommentCreateMessage(
+  sessionId: string,
+  state: DiffReviewableState,
+  location: DiffLineLocation,
+  body: string,
+): Extract<ClientMessage, { type: "review.comment.create" }> {
+  return {
+    type: "review.comment.create",
+    sessionId,
+    repoRoot: state.comparison.repoRoot,
+    comparisonKey: comparisonKey(state),
+    anchor: location,
+    body: body.trim(),
+  };
+}
+
+function normalizedLineNumber(value: number | null | undefined): number | null {
+  return value ?? null;
+}
+
+function diffLocationIdentity(location: DiffLineLocation): string {
+  return [
+    location.oldPath ?? "",
+    location.newPath,
+    location.side,
+    location.kind,
+    normalizedLineNumber(location.oldLine),
+    normalizedLineNumber(location.newLine),
+    location.text,
+  ].join("\u0000");
+}
+
+export function isSameDiffLineLocation(left: DiffLineLocation, right: DiffLineLocation): boolean {
+  return diffLocationIdentity(left) === diffLocationIdentity(right);
 }
 
 export function annotationsForDiffLocation(
@@ -43,17 +75,11 @@ export function annotationsForDiffLocation(
   key: string,
   location: DiffLineLocation,
 ): DiffReviewAnnotation[] {
+  const identity = diffLocationIdentity(location);
   return annotations.filter(
     annotation =>
       annotation.comparisonKey === key &&
-      annotation.anchor.oldPath === location.oldPath &&
-      annotation.anchor.newPath === location.newPath &&
-      annotation.anchor.hunk === location.hunk &&
-      annotation.anchor.side === location.side &&
-      annotation.anchor.kind === location.kind &&
-      sameOptionalNumber(annotation.anchor.oldLine, location.oldLine) &&
-      sameOptionalNumber(annotation.anchor.newLine, location.newLine) &&
-      annotation.anchor.text === location.text,
+      diffLocationIdentity(annotation.anchor) === identity,
   );
 }
 
@@ -72,14 +98,7 @@ export function isReviewCommentForLocation(
 ): boolean {
   return (
     comment.comparisonKey === key &&
-    comment.anchor.oldPath === location.oldPath &&
-    comment.anchor.newPath === location.newPath &&
-    comment.anchor.hunk === location.hunk &&
-    comment.anchor.side === location.side &&
-    comment.anchor.kind === location.kind &&
-    sameOptionalNumber(comment.anchor.oldLine, location.oldLine) &&
-    sameOptionalNumber(comment.anchor.newLine, location.newLine) &&
-    comment.anchor.text === location.text
+    diffLocationIdentity(comment.anchor) === diffLocationIdentity(location)
   );
 }
 
@@ -129,17 +148,7 @@ function diffRowText(row: ParsedDiffRow): string {
 }
 
 function isAnnotationLocation(row: ParsedDiffRow, annotation: DiffReviewAnnotation): boolean {
-  return (
-    row.type === "line" &&
-    row.location.oldPath === annotation.anchor.oldPath &&
-    row.location.newPath === annotation.anchor.newPath &&
-    row.location.hunk === annotation.anchor.hunk &&
-    row.location.side === annotation.anchor.side &&
-    row.location.kind === annotation.anchor.kind &&
-    sameOptionalNumber(row.location.oldLine, annotation.anchor.oldLine) &&
-    sameOptionalNumber(row.location.newLine, annotation.anchor.newLine) &&
-    row.location.text === annotation.anchor.text
-  );
+  return row.type === "line" && diffLocationIdentity(row.location) === diffLocationIdentity(annotation.anchor);
 }
 
 function buildDiffAnnotationContext(rows: ParsedDiffRow[], annotation: DiffReviewAnnotation): string {

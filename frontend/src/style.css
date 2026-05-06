@@ -555,11 +555,21 @@ h2 {
   color: #ffaaa6;
 }
 
-/* Dockview panel host — replaces the old fixed #transcript section */
-.workspace-panel-host {
-  position: relative; /* required by Dockview */
+/* Dockview panel hosts */
+.workspace-panel-stack {
+  position: relative;
   min-height: 0;
   overflow: hidden;
+}
+
+.workspace-panel-host {
+  position: absolute; /* required by Dockview while allowing two independent workspaces */
+  inset: 0;
+  min-height: 0;
+  overflow: hidden;
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
   /* Match Fura dark theme via dockview CSS variables */
   --dv-group-view-background-color: #111318;
   --dv-tabs-and-actions-container-background-color: #151922;
@@ -577,6 +587,12 @@ h2 {
   --dv-active-sash-color: #6d7cff;
   --dv-tabs-and-actions-container-height: 32px;
   --dv-tabs-and-actions-container-font-size: 0.82rem;
+}
+
+.workspace-panel-host-active {
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
 }
 
 /* Panel content wrapper — fills the panel area, stacks toolbar + scroll */
@@ -1299,8 +1315,9 @@ h2 {
 
 .diff-inline-comments {
   display: grid;
-  gap: 0.15rem;
+  gap: 0.45rem;
   margin-left: calc(1.5rem + 3.5rem + 0.35rem);
+  padding: 0.2rem 0 0.25rem;
 }
 
 .diff-inline-comment {
@@ -1313,44 +1330,156 @@ h2 {
   line-height: 1.3;
 }
 
+.review-comment-card {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.65rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(109, 124, 255, 0.24);
+  background: #151922;
+  color: #d7deea;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.18);
+}
+
+.diff-inline-comments .review-comment-card {
+  max-width: min(56rem, calc(100vw - 16rem));
+}
+
+.review-comment-summary-card {
+  background: linear-gradient(180deg, rgba(24, 29, 39, 0.98), rgba(17, 20, 28, 0.98));
+}
+
 .review-comment-agent {
-  border-color: rgba(126, 214, 255, 0.35);
-  background: rgba(126, 214, 255, 0.1);
+  border-color: rgba(126, 214, 255, 0.34);
 }
 
 .review-comment-user {
-  border-color: rgba(109, 124, 255, 0.28);
+  border-color: rgba(109, 124, 255, 0.32);
 }
 
+.review-comment-card.is-stale,
 .review-comment-item.is-stale {
-  border-color: rgba(244, 211, 94, 0.45);
+  border-color: rgba(244, 211, 94, 0.48);
   background: rgba(244, 211, 94, 0.08);
+}
+
+.review-comment-card-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.review-comment-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: max-content;
+  color: #eef1f8;
+}
+
+.review-comment-avatar {
+  display: inline-grid;
+  place-items: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #263043;
+  color: #eef1f8;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.review-comment-avatar-agent {
+  background: rgba(126, 214, 255, 0.18);
+  color: #bfefff;
+}
+
+.review-comment-avatar-user {
+  background: rgba(109, 124, 255, 0.2);
+  color: #eef1ff;
 }
 
 .diff-review-comments-section {
   display: grid;
-  gap: 0.5rem;
+  gap: 0.65rem;
   margin-top: 1rem;
   padding-top: 0.85rem;
   border-top: 1px solid #252a35;
 }
 
+.diff-review-comments-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
 .diff-review-comments-section h3 {
   margin: 0;
   color: #dce5f5;
-  font-size: 0.9rem;
+  font-size: 0.95rem;
+}
+
+.diff-review-comments-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 1.35rem;
+  height: 1.35rem;
+  padding: 0 0.35rem;
+  border-radius: 999px;
+  border: 1px solid #343a46;
+  background: #171b24;
+  color: #c7cedc;
+  font-size: 0.72rem;
 }
 
 .diff-review-comments-list {
   display: grid;
-  gap: 0.4rem;
+  gap: 0.65rem;
 }
 
 .review-comment-meta {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  min-width: 0;
   color: #9ba4b5;
+  font-size: 0.7rem;
+}
+
+.review-comment-location {
+  min-width: 0;
+  max-width: 100%;
+  padding: 0.12rem 0.35rem;
+  border-radius: 0.35rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: #b8c2d8;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.68rem;
+  overflow-wrap: anywhere;
+}
+
+.review-comment-stale-badge {
+  flex-shrink: 0;
+  padding: 0.1rem 0.35rem;
+  border-radius: 999px;
+  border: 1px solid rgba(244, 211, 94, 0.42);
+  color: #f4d35e;
+  background: rgba(244, 211, 94, 0.08);
+  font-size: 0.68rem;
+}
+
+.review-comment-body {
+  margin: 0;
+  color: #d7deea;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .diff-gutter {
@@ -1640,6 +1769,59 @@ h2 {
 .review-comment-actions button {
   padding: 0.12rem 0.35rem;
   font-size: 0.72rem;
+}
+
+.review-comment-composer {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+  padding: 0.65rem;
+  border-radius: 0.55rem;
+  border: 1px solid rgba(109, 124, 255, 0.28);
+  background: rgba(13, 17, 23, 0.92);
+}
+
+.review-comment-card .review-comment-composer {
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.review-comment-composer-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: #eef1f8;
+}
+
+.review-comment-composer-input {
+  width: 100%;
+  min-height: 6rem;
+  resize: vertical;
+  padding: 0.65rem;
+  border-radius: 0.45rem;
+  border: 1px solid #343a46;
+  background: #0d1117;
+  color: #eef1f8;
+  font: inherit;
+  line-height: 1.45;
+}
+
+.review-comment-composer-input:focus {
+  outline: 2px solid rgba(109, 124, 255, 0.6);
+  outline-offset: 1px;
+}
+
+.review-comment-composer-actions {
+  display: inline-flex;
+  justify-content: flex-end;
+  gap: 0.45rem;
+}
+
+.review-comment-composer-actions .secondary {
+  background: #171b24;
+  color: #c7cedc;
+  border-color: #343a46;
 }
 
 .transcript-review-footer {

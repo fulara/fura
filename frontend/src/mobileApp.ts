@@ -35,6 +35,7 @@ import {
 import {
   annotationsForDiffLocation,
   createDiffReviewAnnotation,
+  createReviewCommentCreateMessage,
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
   formatDiffLineLocation,
@@ -1270,14 +1271,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
     if (pending.kind === "comment") {
       markReviewCommentsDirty(pending.sessionId);
-      send({
-        type: "review.comment.create",
-        sessionId: pending.sessionId,
-        repoRoot: pending.state.comparison.repoRoot,
-        comparisonKey: comparisonKey(pending.state),
-        anchor: pending.location,
-        body: text,
-      });
+      send(createReviewCommentCreateMessage(pending.sessionId, pending.state, pending.location, text));
       closeDiffCommentEditor();
       return;
     }

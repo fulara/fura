@@ -5,6 +5,7 @@ import {
   buildDiffQuestionPrompt,
   checkoutTargetForDiffLocation,
   createDiffReviewAnnotation,
+  createReviewCommentCreateMessage,
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
   implementationChangeGuidance,
@@ -60,6 +61,17 @@ describe("diffReview", () => {
     expect(question.status).toBe("sent");
     expect(selectedDiffAnnotations([comment, question], comparisonKey(state), "comment")).toEqual([comment]);
     expect(removeSelectedDiffComments([comment, question], comparisonKey(state))).toEqual([question]);
+  });
+
+  it("builds persisted human review comment create messages from the shared diff state", () => {
+    expect(createReviewCommentCreateMessage("s1", state, addLocation, "  Keep this API stable.  ")).toEqual({
+      type: "review.comment.create",
+      sessionId: "s1",
+      repoRoot: "/repo",
+      comparisonKey: comparisonKey(state),
+      anchor: addLocation,
+      body: "Keep this API stable.",
+    });
   });
 
   it("builds comment prompts with review helper boundaries and selected commit", () => {
@@ -132,6 +144,24 @@ describe("diffReview", () => {
       stale: false,
       staleReason: null,
       anchor: { ...addLocation, oldLine: null, newLine: addLocation.newLine ?? null },
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    expect(reviewCommentsForDiffLocation([persisted], comparisonKey(state), addLocation)).toEqual([persisted]);
+    expect(isReviewCommentMatched(parseDiffRows(patch), comparisonKey(state), persisted)).toBe(true);
+  });
+
+  it("matches persisted comments even if hunk metadata differs", () => {
+    const persisted: ReviewComment = {
+      id: "hunkless",
+      sessionId: "s1",
+      repoRoot: "/repo",
+      comparisonKey: comparisonKey(state),
+      author: "user",
+      body: "Same line, different hunk metadata.",
+      stale: false,
+      staleReason: null,
+      anchor: { ...addLocation, hunk: "@@ different @@" },
       createdAt: "now",
       updatedAt: "now",
     };

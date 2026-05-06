@@ -3,6 +3,8 @@ import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-
 
 export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "code" | "tools" | "diffs" | "compare";
 
+export type DesktopDockviewLayoutMode = "normal" | "diffReview";
+
 export type DesktopDockview = {
   panelMounted(id: DesktopDockviewPanelId): boolean;
   panelContains(id: DesktopDockviewPanelId, element: Element): boolean;
@@ -13,11 +15,12 @@ export type DesktopDockview = {
   ensureDiffsPanel(): boolean;
   ensureComparePanel(): boolean;
   closePanel(id: "sessionChanges" | "diffs" | "compare"): boolean;
-  setPanelVisible(id: "sessionChanges" | "diffs" | "compare", visible: boolean): boolean;
 };
 
 type DesktopDockviewOptions = {
   host: HTMLDivElement;
+  layoutMode: DesktopDockviewLayoutMode;
+  storageKey: string;
   onPanelReady(id: DesktopDockviewPanelId, container: HTMLElement): void;
   onPanelActivated(id: DesktopDockviewPanelId): void;
   onPanelClosed?(id: "sessionChanges" | "diffs" | "compare"): void;
@@ -34,7 +37,6 @@ type DesktopPanelShell = {
   scroll: HTMLDivElement;
 };
 
-const DOCKVIEW_LAYOUT_STORAGE_KEY = "fura.dockview.layout";
 
 export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDockview {
   const panelEls: Partial<Record<DesktopDockviewPanelId, HTMLElement>> = {};
@@ -84,16 +86,15 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   });
   api.onDidOpenPopoutWindowFail(options.onPopoutBlocked);
 
-  restoreOrCreateLayout(api, storage(win));
-  ensureCodePanel(api);
-  ensureDiffsPanel(api);
+  restoreOrCreateLayout(api, storage(win), options.storageKey, options.layoutMode);
+  ensureRequiredPanels(api, options.layoutMode);
 
   let layoutSaveTimer: number | undefined;
   api.onDidLayoutChange(() => {
     win.clearTimeout(layoutSaveTimer);
     layoutSaveTimer = win.setTimeout(() => {
       const data: PersistedDockviewLayout = { version: 1, layout: api.toJSON() };
-      storage(win).setItem(DOCKVIEW_LAYOUT_STORAGE_KEY, JSON.stringify(data));
+      storage(win).setItem(options.storageKey, JSON.stringify(data));
     }, 300);
   });
 
@@ -145,12 +146,6 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       options.onPanelClosed?.(id);
       return true;
     },
-    setPanelVisible(id, visible) {
-      const panel = api.getGroupPanel(id);
-      if (!panel) return false;
-      api.setVisible(panel.group, visible);
-      return true;
-    },
   };
 }
 
@@ -183,8 +178,13 @@ function createPanelToolbar(owner: Document, onPopout: () => void): HTMLElement 
   return toolbar;
 }
 
-function restoreOrCreateLayout(api: DockviewComponent, store: Storage): void {
-  const stored = store.getItem(DOCKVIEW_LAYOUT_STORAGE_KEY);
+function restoreOrCreateLayout(
+  api: DockviewComponent,
+  store: Storage,
+  storageKey: string,
+  layoutMode: DesktopDockviewLayoutMode,
+): void {
+  const stored = store.getItem(storageKey);
   let layoutRestored = false;
 
   if (stored) {
@@ -199,10 +199,42 @@ function restoreOrCreateLayout(api: DockviewComponent, store: Storage): void {
     }
   }
 
-  if (!layoutRestored) loadDefaultLayout(api);
+  if (!layoutRestored) loadDefaultLayout(api, layoutMode);
 }
 
-function loadDefaultLayout(api: DockviewComponent): void {
+function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLayoutMode): void {
+  if (layoutMode === "diffReview") {
+    api.addPanel({
+      id: "sessionChanges",
+      component: "sessionChanges",
+      title: "Diff",
+      renderer: "always",
+    });
+    api.addPanel({
+      id: "transcript",
+      component: "transcript",
+      title: "Transcript",
+      position: { referencePanel: "sessionChanges", direction: "right" },
+      renderer: "always",
+    });
+    api.addPanel({
+      id: "code",
+      component: "code",
+      title: "Code",
+      position: { referencePanel: "transcript", direction: "within" },
+      inactive: true,
+      renderer: "always",
+    });
+    api.addPanel({
+      id: "tools",
+      component: "tools",
+      title: "Tools",
+      position: { referencePanel: "transcript", direction: "below" },
+      renderer: "always",
+    });
+    return;
+  }
+
   api.addPanel({
     id: "transcript",
     component: "transcript",
@@ -229,6 +261,48 @@ function loadDefaultLayout(api: DockviewComponent): void {
     component: "diffs",
     title: "Diffs",
     position: { referencePanel: "tools", direction: "below" },
+    renderer: "always",
+  });
+}
+
+function ensureRequiredPanels(api: DockviewComponent, layoutMode: DesktopDockviewLayoutMode): void {
+  ensureTranscriptPanel(api);
+  ensureCodePanel(api);
+  ensureToolsPanel(api);
+  if (layoutMode === "diffReview") {
+    removePanelIfPresent(api, "diffs");
+    removePanelIfPresent(api, "compare");
+    ensureSessionChangesPanel(api);
+  } else {
+    removePanelIfPresent(api, "sessionChanges");
+    ensureDiffsPanel(api);
+  }
+}
+
+function removePanelIfPresent(api: DockviewComponent, id: "sessionChanges" | "diffs" | "compare"): void {
+  const panel = api.getGroupPanel(id);
+  if (panel) api.removePanel(panel);
+}
+
+function ensureTranscriptPanel(api: DockviewComponent): void {
+  const hasTranscriptPanel = api.panels.some(panel => panel.id === "transcript");
+  if (hasTranscriptPanel) return;
+  api.addPanel({
+    id: "transcript",
+    component: "transcript",
+    title: "Transcript",
+    renderer: "always",
+  });
+}
+
+function ensureToolsPanel(api: DockviewComponent): void {
+  const hasToolsPanel = api.panels.some(panel => panel.id === "tools");
+  if (hasToolsPanel) return;
+  api.addPanel({
+    id: "tools",
+    component: "tools",
+    title: "Tools",
+    position: { referencePanel: "transcript", direction: "right" },
     renderer: "always",
   });
 }
@@ -265,7 +339,7 @@ function ensureSessionChangesPanel(api: DockviewComponent): boolean {
     id: "sessionChanges",
     component: "sessionChanges",
     title: "Diff",
-    position: { referencePanel: "transcript", direction: "within", index: 0 },
+    position: { referencePanel: "transcript", direction: "left" },
     renderer: "always",
   });
   return true;

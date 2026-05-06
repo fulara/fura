@@ -59,12 +59,14 @@ import {
   annotationsForDiffLocation,
   checkoutTargetForDiffFile,
   createDiffReviewAnnotation,
+  createReviewCommentCreateMessage,
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
   formatDiffLocation,
   formatReviewCommentLocation,
   prepareDiffAnnotationPrompt,
   isReviewCommentMatched,
+  isSameDiffLineLocation,
   removeSelectedDiffAnnotations,
   selectedDiffAnnotations,
   reviewCommentsForComparison,
@@ -265,7 +267,10 @@ app.innerHTML = `
         </div>
       </header>
 
-      <div id="workspacePanelHost" class="workspace-panel-host"></div>
+      <div id="workspacePanelHost" class="workspace-panel-stack">
+        <div id="normalWorkspacePanelHost" class="workspace-panel-host workspace-panel-host-active"></div>
+        <div id="diffReviewWorkspacePanelHost" class="workspace-panel-host"></div>
+      </div>
 
       <div id="statusBar" class="status-bar" aria-label="Session status"></div>
 
@@ -752,6 +757,21 @@ const reviewComments = new Map<string, ReviewComment[]>();
 const reviewCommentsRequested = new Set<string>();
 const reviewCommentsLoadInFlight = new Set<string>();
 const reviewCommentsResyncNeeded = new Set<string>();
+type ActiveReviewCommentComposer =
+  | {
+      mode: "create";
+      sessionId: string;
+      comparisonKey: string;
+      anchor: DiffLineLocation;
+      body: string;
+    }
+  | {
+      mode: "edit";
+      sessionId: string;
+      commentId: string;
+      body: string;
+    };
+let activeReviewCommentComposer: ActiveReviewCommentComposer | null = null;
 const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
@@ -942,6 +962,9 @@ type CodeOpenRequest =
 // --- Desktop workspace state ---
 
 let desktopDockview: DesktopDockview | null = null;
+let normalDesktopDockview: DesktopDockview | null = null;
+let diffReviewDesktopDockview: DesktopDockview | null = null;
+let activeDesktopDockviewMode: "normal" | "diffReview" | null = null;
 let codePanelDirty = true;
 let codeSessionId: string | null = null;
 let codeWorkspace: CodeWorkspaceSummary | null = null;
@@ -1478,6 +1501,7 @@ function handleServerMessage(message: ServerMessage): void {
       reviewCommentsRequested.clear();
       reviewCommentsLoadInFlight.clear();
       reviewCommentsResyncNeeded.clear();
+      activeReviewCommentComposer = null;
       markDiffsViewDirty();
       if (activeSessionId) renderDiffsViewIfActive(activeSessionId);
       break;
@@ -1763,6 +1787,9 @@ function handleServerMessage(message: ServerMessage): void {
     case "review.comment.deleted": {
       if (reviewCommentsLoadInFlight.has(message.sessionId)) {
         reviewCommentsResyncNeeded.add(message.sessionId);
+      }
+      if (activeReviewCommentComposer?.mode === "edit" && activeReviewCommentComposer.commentId === message.id) {
+        activeReviewCommentComposer = null;
       }
       reviewComments.set(
         message.sessionId,
@@ -3491,6 +3518,7 @@ function openDiffFileInCode(state: DiffReviewableState, filePath: string): void 
 
 
 function renderActiveDockviewPanel(projection: SessionProjection | undefined): void {
+  syncSessionModePanels();
   renderTranscriptPanelIfNeeded(projection);
   renderToolsPanelIfNeeded(projection);
   if (desktopDockview?.isPanelActive("diffs") && shouldRenderDiffsView(projection)) {
@@ -3506,7 +3534,6 @@ function renderActiveDockviewPanel(projection: SessionProjection | undefined): v
     ensureActiveCodeWorkspace();
     renderCodePanelIfNeeded();
   }
-  syncSessionModePanels();
 }
 
 function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined, force = false): void {
@@ -4160,27 +4187,44 @@ function requestActiveDiffState(): void {
   }
 }
 
-function syncSessionModePanels(activateCreatedDiffReview = false): void {
-  if (!desktopDockview) return;
+function activeSessionUsesDiffReviewWorkspace(): boolean {
+  if (workspaceMode !== "session") return false;
   const summary = (activeSessionId ? projections.get(activeSessionId)?.summary : undefined) ?? (activeSessionId ? currentSessionSummary(activeSessionId) : undefined);
-  const isDiffReview = summary?.sessionMode === "diffReview";
-  desktopDockview.ensureDiffsPanel();
-  const wasDiffsActive = desktopDockview.isPanelActive("diffs");
-  const wasSessionChangesActive = desktopDockview.isPanelActive("sessionChanges");
+  return summary?.sessionMode === "diffReview";
+}
+
+function setActiveDesktopDockviewMode(mode: "normal" | "diffReview"): boolean {
+  const nextDockview = mode === "diffReview" ? diffReviewDesktopDockview : normalDesktopDockview;
+  if (!nextDockview) return false;
+  const normalHost = document.getElementById("normalWorkspacePanelHost");
+  const reviewHost = document.getElementById("diffReviewWorkspacePanelHost");
+  normalHost?.classList.toggle("workspace-panel-host-active", mode === "normal");
+  reviewHost?.classList.toggle("workspace-panel-host-active", mode === "diffReview");
+  desktopDockview = nextDockview;
+  if (activeDesktopDockviewMode !== mode) {
+    activeDesktopDockviewMode = mode;
+    lastTranscriptRenderedSessionId = null;
+    lastToolsRenderedSessionId = null;
+    transcriptPanelDirty = true;
+    toolsPanelDirty = true;
+    codePanelDirty = true;
+    diffPanelDirty = true;
+    comparePanelDirty = true;
+  }
+  return true;
+}
+
+function syncSessionModePanels(activateCreatedDiffReview = false): void {
+  const isDiffReview = activeSessionUsesDiffReviewWorkspace();
+  if (!setActiveDesktopDockviewMode(isDiffReview ? "diffReview" : "normal")) return;
   if (isDiffReview) {
-    desktopDockview.ensureSessionChangesPanel();
-    desktopDockview.setPanelVisible("diffs", false);
-    desktopDockview.setPanelVisible("sessionChanges", true);
+    desktopDockview?.ensureSessionChangesPanel();
+    if (activateCreatedDiffReview || !desktopDockview?.isPanelActive("sessionChanges")) {
+      desktopDockview?.activatePanel("sessionChanges");
+    }
     markDiffsViewDirty();
-    if (activateCreatedDiffReview || wasDiffsActive) desktopDockview.activatePanel("sessionChanges");
     renderDiffsViewIfActive(activeSessionId ?? "");
     requestActiveDiffState();
-  } else {
-    clearCurrentSessionChangesRequest("closed");
-    desktopDockview.setPanelVisible("sessionChanges", false);
-    desktopDockview.setPanelVisible("diffs", true);
-    if (wasSessionChangesActive) desktopDockview.activatePanel("diffs");
-    desktopDockview.closePanel("sessionChanges");
   }
 }
 
@@ -4447,13 +4491,99 @@ function renderDiffAnnotationItem(sessionId: string, annotation: DiffReviewAnnot
   return item;
 }
 
-function editReviewComment(comment: ReviewComment): void {
-  const next = window.prompt("Edit comment", comment.body);
-  if (next === null) return;
-  const body = next.trim();
-  if (!body || body === comment.body) return;
+function reviewCommentAuthorLabel(author: ReviewComment["author"]): string {
+  return author === "agent" ? "Assistant" : "You";
+}
+
+function isReviewCommentCreateComposer(sessionId: string, key: string, location: DiffLineLocation): boolean {
+  return activeReviewCommentComposer?.mode === "create"
+    && activeReviewCommentComposer.sessionId === sessionId
+    && activeReviewCommentComposer.comparisonKey === key
+    && isSameDiffLineLocation(activeReviewCommentComposer.anchor, location);
+}
+
+function renderReviewCommentComposer(options: {
+  mode: "create" | "edit";
+  initialBody: string;
+  title: string;
+  submitLabel: string;
+  onInput: (body: string) => void;
+  onSubmit: (body: string) => void;
+  onCancel: () => void;
+}): HTMLFormElement {
+  const form = mkEl("form");
+  form.className = `review-comment-composer review-comment-composer-${options.mode}`;
+  const header = mkEl("div");
+  header.className = "review-comment-composer-header";
+  const avatar = mkEl("span");
+  avatar.className = "review-comment-avatar review-comment-avatar-user";
+  avatar.textContent = "Y";
+  const title = mkEl("strong");
+  title.textContent = options.title;
+  header.append(avatar, title);
+  const textarea = mkEl("textarea");
+  textarea.className = "review-comment-composer-input";
+  textarea.rows = 4;
+  textarea.placeholder = "Leave a review comment";
+  textarea.value = options.initialBody;
+  const actions = mkEl("div");
+  actions.className = "review-comment-composer-actions";
+  const cancel = mkEl("button");
+  cancel.type = "button";
+  cancel.className = "secondary";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => options.onCancel());
+  const submit = mkEl("button");
+  submit.type = "submit";
+  submit.textContent = options.submitLabel;
+  submit.disabled = textarea.value.trim().length === 0;
+  textarea.addEventListener("input", () => {
+    options.onInput(textarea.value);
+    submit.disabled = textarea.value.trim().length === 0;
+  });
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    const body = textarea.value.trim();
+    if (!body) return;
+    options.onSubmit(body);
+  });
+  actions.append(cancel, submit);
+  form.append(header, textarea, actions);
+  requestAnimationFrame(() => {
+    textarea.focus();
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  });
+  return form;
+}
+
+function closeReviewCommentComposer(sessionId: string): void {
+  activeReviewCommentComposer = null;
+  markDiffsViewDirty();
+  rerenderDiffsViewPreservingScroll(sessionId);
+}
+
+function startReviewCommentEdit(comment: ReviewComment): void {
+  activeReviewCommentComposer = {
+    mode: "edit",
+    sessionId: comment.sessionId,
+    commentId: comment.id,
+    body: comment.body,
+  };
+  markDiffsViewDirty();
+  rerenderDiffsViewPreservingScroll(comment.sessionId);
+}
+
+function submitReviewCommentEdit(comment: ReviewComment, body: string): void {
+  if (body === comment.body) {
+    closeReviewCommentComposer(comment.sessionId);
+    return;
+  }
   markReviewCommentsDirty(comment.sessionId);
-  send({ type: "review.comment.update", id: comment.id, body });
+  if (send({ type: "review.comment.update", id: comment.id, body })) {
+    activeReviewCommentComposer = null;
+    markDiffsViewDirty();
+    rerenderDiffsViewPreservingScroll(comment.sessionId);
+  }
 }
 
 function deleteReviewComment(comment: ReviewComment): void {
@@ -4461,42 +4591,103 @@ function deleteReviewComment(comment: ReviewComment): void {
   send({ type: "review.comment.delete", id: comment.id });
 }
 
-function renderReviewCommentItem(comment: ReviewComment, stale: boolean): HTMLElement {
-  const item = mkEl("div");
-  item.className = `diff-inline-comment review-comment-item review-comment-${comment.author}${stale ? " is-stale" : ""}`;
-  const body = mkEl("span");
-  const label = comment.author === "agent" ? "Agent" : "You";
-  body.textContent = `${label}: ${comment.body}`;
-  const controls = mkEl("span");
+function renderReviewCommentItem(comment: ReviewComment, stale: boolean, options: { locationLabel?: string; summary?: boolean } = {}): HTMLElement {
+  const item = mkEl("article");
+  item.className = [
+    "review-comment-card",
+    options.summary ? "review-comment-summary-card" : "diff-inline-comment",
+    `review-comment-${comment.author}`,
+    stale ? "is-stale" : "",
+  ].filter(Boolean).join(" ");
+  const header = mkEl("header");
+  header.className = "review-comment-card-header";
+  const identity = mkEl("div");
+  identity.className = "review-comment-identity";
+  const avatar = mkEl("span");
+  avatar.className = `review-comment-avatar review-comment-avatar-${comment.author}`;
+  avatar.textContent = comment.author === "agent" ? "A" : "Y";
+  const author = mkEl("strong");
+  author.textContent = reviewCommentAuthorLabel(comment.author);
+  identity.append(avatar, author);
+  const meta = mkEl("div");
+  meta.className = "review-comment-meta";
+  if (options.locationLabel) {
+    const location = mkEl("code");
+    location.className = "review-comment-location";
+    location.textContent = options.locationLabel;
+    meta.append(location);
+  }
+  if (stale) {
+    const badge = mkEl("span");
+    badge.className = "review-comment-stale-badge";
+    badge.textContent = "stale/unmatched";
+    meta.append(badge);
+  }
+  const controls = mkEl("div");
   controls.className = "review-comment-actions";
   const edit = mkEl("button");
   edit.type = "button";
   edit.textContent = "Edit";
-  edit.addEventListener("click", () => editReviewComment(comment));
+  edit.addEventListener("click", () => startReviewCommentEdit(comment));
   const remove = mkEl("button");
   remove.type = "button";
   remove.textContent = "Remove";
   remove.addEventListener("click", () => deleteReviewComment(comment));
   controls.append(edit, remove);
-  item.append(body, controls);
+  header.append(identity, meta, controls);
+  item.append(header);
+  if (activeReviewCommentComposer?.mode === "edit" && activeReviewCommentComposer.commentId === comment.id) {
+    item.append(renderReviewCommentComposer({
+      mode: "edit",
+      initialBody: activeReviewCommentComposer.body,
+      title: "Edit review comment",
+      submitLabel: "Save",
+      onInput: body => {
+        if (activeReviewCommentComposer?.mode === "edit" && activeReviewCommentComposer.commentId === comment.id) {
+          activeReviewCommentComposer.body = body;
+        }
+      },
+      onSubmit: body => submitReviewCommentEdit(comment, body),
+      onCancel: () => closeReviewCommentComposer(comment.sessionId),
+    }));
+  } else {
+    const body = mkEl("p");
+    body.className = "review-comment-body";
+    body.textContent = comment.body;
+    item.append(body);
+  }
   return item;
 }
-function addDiffComment(
+
+function startDiffCommentComposer(
   sessionId: string,
   state: DiffReviewableState,
   location: DiffLineLocation,
 ): void {
-  const comment = window.prompt("Comment on this diff line");
-  if (!comment?.trim()) return;
-  markReviewCommentsDirty(sessionId);
-  send({
-    type: "review.comment.create",
+  const key = comparisonKey(state);
+  activeReviewCommentComposer = {
+    mode: "create",
     sessionId,
-    repoRoot: state.comparison.repoRoot,
-    comparisonKey: comparisonKey(state),
+    comparisonKey: key,
     anchor: location,
-    body: comment.trim(),
-  });
+    body: "",
+  };
+  markDiffsViewDirty();
+  rerenderDiffsViewPreservingScroll(sessionId);
+}
+
+function submitDiffComment(
+  sessionId: string,
+  state: DiffReviewableState,
+  location: DiffLineLocation,
+  body: string,
+): void {
+  markReviewCommentsDirty(sessionId);
+  if (send(createReviewCommentCreateMessage(sessionId, state, location, body))) {
+    activeReviewCommentComposer = null;
+    markDiffsViewDirty();
+    rerenderDiffsViewPreservingScroll(sessionId);
+  }
 }
 
 function askDiffQuestion(
@@ -5263,9 +5454,15 @@ function renderReviewCommentsSection(
 ): void {
   const section = mkEl("section");
   section.className = "diff-review-comments-section";
+  const header = mkEl("div");
+  header.className = "diff-review-comments-header";
   const title = mkEl("h3");
-  title.textContent = `Review comments (${comments.length})`;
-  section.append(title);
+  title.textContent = "Review comments";
+  const count = mkEl("span");
+  count.className = "diff-review-comments-count";
+  count.textContent = String(comments.length);
+  header.append(title, count);
+  section.append(header);
   if (comments.length === 0) {
     const empty = mkEl("p");
     empty.className = "empty";
@@ -5282,12 +5479,10 @@ function renderReviewCommentsSection(
     const stale = comment.stale
       || missingFromCurrentDiff
       || (!selectedFileMismatch && rows.length > 0 && !isReviewCommentMatched(rows, key, comment));
-    const item = renderReviewCommentItem(comment, stale);
-    const meta = mkEl("small");
-    meta.className = "review-comment-meta";
-    meta.textContent = `${formatReviewCommentLocation(comment)}${stale ? " · stale/unmatched" : ""}`;
-    item.prepend(meta);
-    list.append(item);
+    list.append(renderReviewCommentItem(comment, stale, {
+      locationLabel: formatReviewCommentLocation(comment),
+      summary: true,
+    }));
   }
   section.append(list);
   container.append(section);
@@ -5329,7 +5524,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typ
     commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
     commentBtn.disabled = !allowPromptActions;
     commentBtn.title = allowPromptActions ? "Comment on this diff line" : "Comments require a session changes review";
-    commentBtn.addEventListener("click", () => addDiffComment(annotationKey, state, row.location));
+    commentBtn.addEventListener("click", () => startDiffCommentComposer(annotationKey, state, row.location));
     const gutter = mkEl("span");
     gutter.className = "diff-gutter";
     gutter.textContent = row.location.newLine !== undefined ? String(row.location.newLine) : String(row.location.oldLine ?? "");
@@ -5347,11 +5542,27 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typ
     questionBtn.addEventListener("click", () => askDiffQuestion(annotationKey, state, row.location));
     line.append(commentBtn, gutter, content, questionBtn);
     lineWrap.append(line);
-    if (lineComments.length > 0 || lineQuestions.length > 0) {
+    const showComposer = isReviewCommentCreateComposer(annotationKey, key, row.location);
+    if (lineComments.length > 0 || lineQuestions.length > 0 || showComposer) {
       const thread = mkEl("div");
       thread.className = "diff-inline-comments";
       for (const comment of lineComments) thread.append(renderReviewCommentItem(comment, false));
       for (const annotation of lineQuestions) thread.append(renderDiffAnnotationItem(annotationKey, annotation));
+      if (showComposer && activeReviewCommentComposer?.mode === "create") {
+        thread.append(renderReviewCommentComposer({
+          mode: "create",
+          initialBody: activeReviewCommentComposer.body,
+          title: "Add review comment",
+          submitLabel: "Comment",
+          onInput: body => {
+            if (isReviewCommentCreateComposer(annotationKey, key, row.location) && activeReviewCommentComposer?.mode === "create") {
+              activeReviewCommentComposer.body = body;
+            }
+          },
+          onSubmit: body => submitDiffComment(annotationKey, state, row.location, body),
+          onCancel: () => closeReviewCommentComposer(annotationKey),
+        }));
+      }
       lineWrap.append(thread);
     }
     diff.append(lineWrap);
@@ -5372,9 +5583,8 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typ
 // --- Desktop workspace initialization ---
 
 function initDesktopWorkspace(): void {
-  desktopDockview = initDesktopDockview({
-    host: requireElement<HTMLDivElement>("workspacePanelHost"),
-    onPanelReady: id => {
+  const createDockviewCallbacks = () => ({
+    onPanelReady: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
       if (id === "transcript") markTranscriptViewDirty();
       if (id === "tools") markToolsViewDirty();
       if (id === "diffs") markDiffsViewDirty();
@@ -5382,7 +5592,7 @@ function initDesktopWorkspace(): void {
       if (id === "compare") markComparePanelDirty();
       if (id === "code") markCodeViewDirty();
     },
-    onPanelActivated: id => {
+    onPanelActivated: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
       const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
       if (id === "transcript") {
         renderTranscriptPanelIfNeeded(projection, true);
@@ -5402,13 +5612,17 @@ function initDesktopWorkspace(): void {
         requestActiveDiffState();
       }
       if (id === "compare") {
-        desktopDockview?.withPanel("compare", container => renderComparePanel(container));
+        normalDesktopDockview?.withPanel("compare", container => renderComparePanel(container));
       }
     },
-    onPanelClosed: id => {
+    onPanelClosed: (id: "sessionChanges" | "diffs" | "compare") => {
       if (id === "sessionChanges") {
-        clearCurrentSessionChangesRequest("closed");
         markDiffsViewDirty();
+        if (activeSessionUsesDiffReviewWorkspace()) {
+          desktopDockview?.ensureSessionChangesPanel();
+          desktopDockview?.activatePanel("sessionChanges");
+          renderDiffsViewIfActive(activeSessionId ?? "");
+        }
         return;
       }
       if (id === "diffs") {
@@ -5429,6 +5643,20 @@ function initDesktopWorkspace(): void {
       render();
     },
   });
+
+  normalDesktopDockview = initDesktopDockview({
+    host: requireElement<HTMLDivElement>("normalWorkspacePanelHost"),
+    layoutMode: "normal",
+    storageKey: "fura.dockview.layout",
+    ...createDockviewCallbacks(),
+  });
+  diffReviewDesktopDockview = initDesktopDockview({
+    host: requireElement<HTMLDivElement>("diffReviewWorkspacePanelHost"),
+    layoutMode: "diffReview",
+    storageKey: "fura.dockview.diffReview.layout",
+    ...createDockviewCallbacks(),
+  });
+  syncSessionModePanels();
   renderActiveDockviewPanel(activeSessionId ? projections.get(activeSessionId) : undefined);
   if (isSessionChangesPanelActive()) requestActiveDiffState();
 }
@@ -5773,8 +6001,8 @@ function submitCwdPickerDiff(): void {
     compareBaseRef = base;
     compareHeadRef = head;
     comparePayloadKind = payloadKind;
-    desktopDockview?.ensureComparePanel();
-    desktopDockview?.activatePanel("compare");
+    normalDesktopDockview?.ensureComparePanel();
+    normalDesktopDockview?.activatePanel("compare");
     requestCompareDiff({ repoRoot, base, head, payloadKind });
     return;
   }

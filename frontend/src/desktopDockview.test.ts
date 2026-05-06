@@ -133,14 +133,22 @@ describe("initDesktopDockview", () => {
     window.localStorage.clear();
   });
 
-  it("pops out the clicked panel rather than its whole Dockview group", () => {
-    const host = document.createElement("div") as HTMLDivElement;
-    const readyContainers = new Map<string, HTMLElement>();
-    initDesktopDockview({
-      host,
-      onPanelReady: (id, container) => readyContainers.set(id, container),
+  function initTestDockview(options: Partial<Parameters<typeof initDesktopDockview>[0]> = {}) {
+    return initDesktopDockview({
+      host: document.createElement("div") as HTMLDivElement,
+      layoutMode: "normal",
+      storageKey: "test.dockview.layout",
+      onPanelReady: vi.fn(),
       onPanelActivated: vi.fn(),
       onPopoutBlocked: vi.fn(),
+      ...options,
+    });
+  }
+
+  it("pops out the clicked panel rather than its whole Dockview group", () => {
+    const readyContainers = new Map<string, HTMLElement>();
+    initTestDockview({
+      onPanelReady: (id, container) => readyContainers.set(id, container),
     });
     const dockview = dockviewMock.instances[0];
     const codePanel = dockview.panels.find(panel => panel.id === "code");
@@ -154,13 +162,9 @@ describe("initDesktopDockview", () => {
   });
 
   it("activates and focuses a popped-out panel through its panel API", () => {
-    const host = document.createElement("div") as HTMLDivElement;
     const readyContainers = new Map<string, HTMLElement>();
-    const desktopDockview = initDesktopDockview({
-      host,
+    const desktopDockview = initTestDockview({
       onPanelReady: (id, container) => readyContainers.set(id, container),
-      onPanelActivated: vi.fn(),
-      onPopoutBlocked: vi.fn(),
     });
     const dockview = dockviewMock.instances[0];
     const codePanel = dockview.panels.find(panel => panel.id === "code");
@@ -176,14 +180,7 @@ describe("initDesktopDockview", () => {
   });
 
   it("does not add dynamic session changes or compare panels by default", () => {
-    const host = document.createElement("div") as HTMLDivElement;
-
-    initDesktopDockview({
-      host,
-      onPanelReady: vi.fn(),
-      onPanelActivated: vi.fn(),
-      onPopoutBlocked: vi.fn(),
-    });
+    initTestDockview();
 
     const ids = dockviewMock.instances[0].panels.map(panel => panel.id);
     expect(ids).toContain("diffs");
@@ -191,34 +188,23 @@ describe("initDesktopDockview", () => {
     expect(ids).not.toContain("compare");
   });
 
-  it("inserts session changes before transcript in the transcript tab group", () => {
-    const host = document.createElement("div") as HTMLDivElement;
-    const readyContainers = new Map<string, HTMLElement>();
-    const desktopDockview = initDesktopDockview({
-      host,
-      onPanelReady: (id, container) => readyContainers.set(id, container),
-      onPanelActivated: vi.fn(),
-      onPopoutBlocked: vi.fn(),
+  it("uses a separate diff-review layout with a dedicated Diff panel", () => {
+    initTestDockview({
+      layoutMode: "diffReview",
+      storageKey: "test.dockview.diffReview.layout",
     });
 
-    expect(desktopDockview.ensureSessionChangesPanel()).toBe(true);
-
-    const dockview = dockviewMock.instances[0];
-    const transcriptPanel = dockview.panels.find(panel => panel.id === "transcript");
-    const sessionChangesPanel = dockview.panels.find(panel => panel.id === "sessionChanges");
-    expect(sessionChangesPanel?.group).toBe(transcriptPanel?.group);
-    expect(transcriptPanel?.group.panels.map(panel => panel.id).slice(0, 2)).toEqual(["sessionChanges", "transcript"]);
-    expect(readyContainers.has("sessionChanges")).toBe(true);
+    const ids = dockviewMock.instances[0].panels.map(panel => panel.id);
+    expect(ids).toContain("sessionChanges");
+    expect(ids).toContain("transcript");
+    expect(ids).toContain("code");
+    expect(ids).toContain("tools");
+    expect(ids).not.toContain("diffs");
+    expect(ids).not.toContain("compare");
   });
 
   it("opens and closes the lazy compare panel", () => {
-    const host = document.createElement("div") as HTMLDivElement;
-    const desktopDockview = initDesktopDockview({
-      host,
-      onPanelReady: vi.fn(),
-      onPanelActivated: vi.fn(),
-      onPopoutBlocked: vi.fn(),
-    });
+    const desktopDockview = initTestDockview();
 
     expect(desktopDockview.ensureComparePanel()).toBe(true);
     expect(dockviewMock.instances[0].panels.some(panel => panel.id === "compare")).toBe(true);

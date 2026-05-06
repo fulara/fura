@@ -1833,6 +1833,71 @@ pub(crate) async fn handle_review_comments_list(
     }
 }
 
+async fn create_review_comment_with_author(
+    state: &AppState,
+    session_id: String,
+    repo_root: String,
+    comparison_key: String,
+    author: ReviewCommentAuthor,
+    anchor: DiffLineLocation,
+    body: String,
+) -> Result<ReviewComment, String> {
+    if !state.sessions.read().await.contains_key(&session_id) {
+        return Err(format!("unknown session: {session_id}"));
+    }
+    debug!(
+        action = "review.comment.create",
+        session_id = %session_id,
+        repo_root = %repo_root,
+        comparison_key = %comparison_key,
+        author = %author.as_str(),
+        new_path = %anchor.new_path,
+        side = ?anchor.side,
+        old_line = ?anchor.old_line,
+        new_line = ?anchor.new_line,
+        body_chars = body.chars().count(),
+        db_path = %state.review_comment_db_path.display()
+    );
+    let result = create_comment(
+        &state.review_comment_db_path,
+        NewReviewComment {
+            session_id: session_id.clone(),
+            repo_root,
+            comparison_key: comparison_key.clone(),
+            author,
+            body,
+            anchor,
+            stale: false,
+            stale_reason: None,
+        },
+    );
+    match result {
+        Ok(comment) => {
+            debug!(
+                action = "review.comment.create.ok",
+                session_id = %comment.session_id,
+                comment_id = %comment.id,
+                comparison_key = %comment.comparison_key,
+                author = %comment.author.as_str()
+            );
+            let _ = state.events.send(ServerMessage::ReviewCommentUpserted {
+                comment: comment.clone(),
+            });
+            Ok(comment)
+        }
+        Err(message) => {
+            debug!(
+                action = "review.comment.create.err",
+                session_id = %session_id,
+                comparison_key = %comparison_key,
+                author = %author.as_str(),
+                error = %message
+            );
+            Err(message)
+        }
+    }
+}
+
 pub(crate) async fn handle_review_comment_create(
     state: &AppState,
     session_id: String,
@@ -1841,58 +1906,22 @@ pub(crate) async fn handle_review_comment_create(
     anchor: DiffLineLocation,
     body: String,
 ) -> Vec<ServerMessage> {
-    if !state.sessions.read().await.contains_key(&session_id) {
-        return vec![unknown_session_error(session_id)];
-    }
-    debug!(
-        action = "review.comment.create",
-        session_id = %session_id,
-        repo_root = %repo_root,
-        comparison_key = %comparison_key,
-        new_path = %anchor.new_path,
-        side = ?anchor.side,
-        old_line = ?anchor.old_line,
-        new_line = ?anchor.new_line,
-        body_chars = body.chars().count(),
-        db_path = %state.review_comment_db_path.display()
-    );
-    match create_comment(
-        &state.review_comment_db_path,
-        NewReviewComment {
-            session_id: session_id.clone(),
-            repo_root,
-            comparison_key: comparison_key.clone(),
-            author: ReviewCommentAuthor::User,
-            body,
-            anchor,
-            stale: false,
-            stale_reason: None,
-        },
-    ) {
-        Ok(comment) => {
-            debug!(
-                action = "review.comment.create.ok",
-                session_id = %comment.session_id,
-                comment_id = %comment.id,
-                comparison_key = %comment.comparison_key
-            );
-            let _ = state
-                .events
-                .send(ServerMessage::ReviewCommentUpserted { comment });
-            Vec::new()
-        }
-        Err(message) => {
-            debug!(
-                action = "review.comment.create.err",
-                session_id = %session_id,
-                comparison_key = %comparison_key,
-                error = %message
-            );
-            vec![ServerMessage::Error {
-                request_id: None,
-                message,
-            }]
-        }
+    match create_review_comment_with_author(
+        state,
+        session_id,
+        repo_root,
+        comparison_key,
+        ReviewCommentAuthor::User,
+        anchor,
+        body,
+    )
+    .await
+    {
+        Ok(_) => Vec::new(),
+        Err(message) => vec![ServerMessage::Error {
+            request_id: None,
+            message,
+        }],
     }
 }
 
@@ -2187,22 +2216,16 @@ async fn add_agent_review_comment(
             side
         )
     })?;
-    let comment = create_comment(
-        &state.review_comment_db_path,
-        NewReviewComment {
-            session_id: context.session_id.clone(),
-            repo_root: context.repo_root.clone(),
-            comparison_key: context.comparison_key.clone(),
-            author: ReviewCommentAuthor::Agent,
-            body,
-            anchor: anchor.clone(),
-            stale: false,
-            stale_reason: None,
-        },
-    )?;
-    let _ = state.events.send(ServerMessage::ReviewCommentUpserted {
-        comment: comment.clone(),
-    });
+    let comment = create_review_comment_with_author(
+        state,
+        context.session_id.clone(),
+        context.repo_root.clone(),
+        context.comparison_key.clone(),
+        ReviewCommentAuthor::Agent,
+        anchor.clone(),
+        body,
+    )
+    .await?;
     Ok(format!(
         "Created review comment {} at {}:{} for review context {}.",
         comment.id,
@@ -2832,6 +2855,11 @@ mod review_comment_tests {
     #[tokio::test]
     async fn review_host_tool_active_context_creates_agent_comment() {
         let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_session_record("s1"));
         let patch = "diff --git a/src/new.ts b/src/new.ts\n--- a/src/new.ts\n+++ b/src/new.ts\n@@ -1,1 +1,2 @@\n const old = true;\n+const next = true;\n";
         state.active_review_contexts.write().await.insert(
             "ctx".to_string(),
@@ -2880,6 +2908,11 @@ mod review_comment_tests {
     #[tokio::test]
     async fn review_host_tool_new_file_comment_uses_null_old_path() {
         let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_session_record("s1"));
         let patch = "diff --git a/src/new-file.ts b/src/new-file.ts\n--- /dev/null\n+++ b/src/new-file.ts\n@@ -0,0 +1,1 @@\n+const next = true;\n";
         state.active_review_contexts.write().await.insert(
             "ctx".to_string(),
