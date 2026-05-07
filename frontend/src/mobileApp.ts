@@ -370,7 +370,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
             </div>
           </header>
           <div class="mobile-dialog-form">
-            <textarea id="mobileDiffPreviewText" class="mobile-diff-preview-text" readonly spellcheck="false"></textarea>
+            <textarea id="mobileDiffPreviewText" class="mobile-diff-preview-text" spellcheck="false"></textarea>
             <p id="mobileDiffPreviewStatus" class="mobile-dialog-status" aria-live="polite"></p>
             <div class="mobile-dialog-actions">
               <button id="mobileDiffPreviewCancel" type="button">Cancel</button>
@@ -406,7 +406,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
               <h2 id="mobileReviewPreviewTitle">Preview transcript comments</h2>
             </div>
           </header>
-          <textarea id="mobileReviewPreviewText" class="mobile-review-preview-text" readonly spellcheck="false"></textarea>
+          <textarea id="mobileReviewPreviewText" class="mobile-review-preview-text" spellcheck="false"></textarea>
           <p id="mobileReviewPreviewStatus" class="mobile-dialog-status" aria-live="polite"></p>
           <div class="mobile-dialog-actions mobile-review-preview-actions">
             <button id="mobileReviewPreviewCancel" type="button">Cancel</button>
@@ -1343,12 +1343,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const key = comparisonKey(state);
     const annotationsToFlush = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key);
     if (annotationsToFlush.length === 0) return;
-    const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedMobileDiffPatchForAnnotation(state, annotation));
+    const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedMobileDiffPatchForAnnotation(state, annotation), "sessionChanges");
     if (prompt.ok) {
       diffPreviewDraft = { sessionId, state, comparisonKey: key, annotations: annotationsToFlush };
       diffPreviewSend.disabled = false;
       diffPreviewSend.textContent = "Send to agent";
-      diffPreviewText.readOnly = true;
+      diffPreviewText.readOnly = false;
       diffPreviewText.value = prompt.prompt;
       diffPreviewStatus.textContent = diffCommentPreviewStatus(annotationsToFlush.length);
       diffPreviewOverlay.hidden = false;
@@ -1409,16 +1409,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
     const draft = diffPreviewDraft;
     if (!draft) return;
-    const prompt = prepareDiffAnnotationPrompt(draft.state, draft.annotations, annotation => cachedMobileDiffPatchForAnnotation(draft.state, annotation));
-    if (!prompt.ok) {
-      diffPreviewStatus.textContent = "message" in prompt ? prompt.message : "";
+    const promptText = diffPreviewText.value.trim();
+    if (!promptText) {
+      diffPreviewStatus.textContent = "Prompt text is required.";
+      diffPreviewText.focus();
       return;
     }
     const clearComments = () => clearFlushedDiffAnnotations(draft.sessionId, draft.comparisonKey);
     if (projections.get(draft.sessionId)?.isBusy) {
       busyPromptDraft = createBusyPromptDraft({
         sessionId: draft.sessionId,
-        text: prompt.prompt,
+        text: promptText,
         editorText: diffCommentFlushEditorText(draft.annotations.length),
         images: [],
         onSend: clearComments,
@@ -1428,7 +1429,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
 
-    const accepted = send(createPromptSendMessage(draft.sessionId, prompt.prompt, []));
+    const accepted = send(createPromptSendMessage(draft.sessionId, promptText, []));
     if (!accepted) {
       diffPreviewStatus.textContent = "Not connected to the Fura bridge.";
       return;
@@ -2604,10 +2605,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function sendReviewPreviewDraft(): void {
     const draft = reviewPreviewDraft;
     if (!draft) return;
+    const promptText = reviewPreviewText.value.trim();
+    if (!promptText) {
+      reviewPreviewStatus.textContent = "Prompt text is required.";
+      reviewPreviewText.focus();
+      return;
+    }
     closeReviewPreview();
     const accepted = send(createPromptSendMessage(
       draft.sessionId,
-      draft.promptText ?? buildTranscriptReviewPrompt(draft.message, draft.comments),
+      promptText,
       [],
     ));
     if (!accepted) return;

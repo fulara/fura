@@ -72,6 +72,7 @@ import {
   selectedDiffAnnotations,
   reviewCommentsForComparison,
   reviewCommentsForDiffLocation,
+  type DiffAnnotationPromptMode,
   type DiffPreviewDraft,
 } from "./diffReview";
 import {
@@ -3509,7 +3510,18 @@ function deleteCodeComment(sessionId: string, comment: CodeFileComment): void {
   renderCodePanelIfNeeded(true);
 }
 
-function sendCodeComments(sessionId: string, file: CodeFileContent, comments: CodeFileComment[]): void {
+
+function editablePromptPreviewText(): string | null {
+  const text = diffPreviewText.value.trim();
+  if (!text) {
+    diffPreviewStatus.textContent = "Prompt text is required.";
+    diffPreviewText.focus();
+    return null;
+  }
+  return text;
+}
+
+function sendCodeComments(sessionId: string, file: CodeFileContent, comments: CodeFileComment[], promptText = buildCodeCommentPrompt(file, comments)): void {
   if (comments.length === 0) return;
   const clearFlushedComments = () => {
     const commentsByFile = sessionCodeComments(sessionId);
@@ -3519,7 +3531,7 @@ function sendCodeComments(sessionId: string, file: CodeFileContent, comments: Co
   };
   sendPromptWithBusyHandling({
     sessionId,
-    text: buildCodeCommentPrompt(file, comments),
+    text: promptText,
     editorText: codeCommentFlushEditorText(comments.length),
     images: [],
     onSend: clearFlushedComments,
@@ -3532,14 +3544,17 @@ function previewCodeComments(sessionId: string, file: CodeFileContent): void {
   codePreviewDraft = { sessionId, file, comments };
   diffPreviewDraft = null;
   transcriptPreviewDraft = null;
+  agentReviewDraft = null;
   diffPreviewTitle.textContent = "Preview code comments";
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewSend.textContent = "Send comments";
+  diffPreviewSend.disabled = false;
+  diffPreviewText.readOnly = false;
   diffPreviewText.value = buildCodeCommentPrompt(file, comments);
   diffPreviewStatus.textContent = codeCommentPreviewStatus(comments.length);
   diffPreviewOverlay.hidden = false;
   diffPreviewText.scrollTop = 0;
-  diffPreviewSend.focus();
+  diffPreviewText.focus();
 }
 
 function flushCodeComments(sessionId: string, file: CodeFileContent): void {
@@ -4487,17 +4502,20 @@ function flushTranscriptReviewComments(sessionId: string, message: TranscriptMes
   diffPreviewTitle.textContent = "Preview transcript comments";
   diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
   diffPreviewText.value = buildTranscriptReviewPrompt(message, comments);
+  diffPreviewText.readOnly = false;
   diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
   diffPreviewSend.textContent = "Send comments";
+  diffPreviewSend.disabled = false;
   diffPreviewOverlay.hidden = false;
   diffPreviewText.scrollTop = 0;
-  diffPreviewSend.focus();
+  diffPreviewText.focus();
 }
 
 function sendTranscriptReviewComments(
   sessionId: string,
   message: TranscriptMessage,
   comments: TranscriptReviewComment[],
+  promptText = buildTranscriptReviewPrompt(message, comments),
 ): void {
   if (comments.length === 0) return;
   const clearFlushedComments = () => {
@@ -4511,7 +4529,7 @@ function sendTranscriptReviewComments(
   };
   sendPromptWithBusyHandling({
     sessionId,
-    text: buildTranscriptReviewPrompt(message, comments),
+    text: promptText,
     editorText: `Flush ${comments.length} transcript comment${comments.length === 1 ? "" : "s"}`,
     images: [],
     onSend: clearFlushedComments,
@@ -4542,11 +4560,13 @@ function flushPlanReviewComments(sessionId: string, review: PendingPlanReview): 
   diffPreviewTitle.textContent = "Preview plan comments";
   diffPreviewSubtitle.textContent = "Review the refinement prompt that will be sent to OMP.";
   diffPreviewText.value = promptText;
+  diffPreviewText.readOnly = false;
   diffPreviewStatus.textContent = `${comments.length} comment${comments.length === 1 ? "" : "s"} ready to send`;
   diffPreviewSend.textContent = "Send refinement";
+  diffPreviewSend.disabled = false;
   diffPreviewOverlay.hidden = false;
   diffPreviewText.scrollTop = 0;
-  diffPreviewSend.focus();
+  diffPreviewText.focus();
 }
 
 function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
@@ -4872,43 +4892,39 @@ function diffAnnotationPreviewStatus(annotations: DiffReviewAnnotation[]): strin
 
 function sendDiffAnnotations(
   sessionId: string,
-  state: DiffReviewableState,
   annotationsToFlush: DiffReviewAnnotation[],
+  promptText: string,
 ): void {
   if (annotationsToFlush.length === 0) return;
-  const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffPatchForAnnotation(state, annotation));
-  if (prompt.ok) {
-    const flushedIds = new Set(annotationsToFlush.map(annotation => annotation.id));
-    const clearFlushedAnnotations = () => {
-      diffAnnotations.set(
-        sessionId,
-        (diffAnnotations.get(sessionId) ?? []).filter(annotation => !flushedIds.has(annotation.id)),
-      );
-      markDiffsViewDirty();
-      rerenderDiffsViewPreservingScroll(sessionId);
-    };
-    closeDiffPreview();
-    sendPromptWithBusyHandling({
+  const flushedIds = new Set(annotationsToFlush.map(annotation => annotation.id));
+  const clearFlushedAnnotations = () => {
+    diffAnnotations.set(
       sessionId,
-      text: prompt.prompt,
-      editorText: diffAnnotationFlushEditorText(annotationsToFlush),
-      images: [],
-      onSend: clearFlushedAnnotations,
-    });
-    return;
-  }
-  diffPreviewStatus.textContent = "message" in prompt ? prompt.message : "";
+      (diffAnnotations.get(sessionId) ?? []).filter(annotation => !flushedIds.has(annotation.id)),
+    );
+    markDiffsViewDirty();
+    rerenderDiffsViewPreservingScroll(sessionId);
+  };
+  closeDiffPreview();
+  sendPromptWithBusyHandling({
+    sessionId,
+    text: promptText,
+    editorText: diffAnnotationFlushEditorText(annotationsToFlush),
+    images: [],
+    onSend: clearFlushedAnnotations,
+  });
 }
 
 function previewDiffAnnotations(
   sessionId: string,
   state: DiffReviewableState,
-  kind?: "comment" | "question",
+  kind: "comment" | "question" | undefined,
+  promptMode: DiffAnnotationPromptMode,
 ): void {
   const key = comparisonKey(state);
   const annotationsToFlush = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, kind);
   if (annotationsToFlush.length === 0) return;
-  const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffPatchForAnnotation(state, annotation));
+  const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffPatchForAnnotation(state, annotation), promptMode);
   const isQuestionPreview = annotationsToFlush.every(annotation => annotation.kind === "question");
   if (prompt.ok) {
     diffPreviewDraft = { sessionId, state, comparisonKey: key, annotations: annotationsToFlush };
@@ -4917,12 +4933,12 @@ function previewDiffAnnotations(
     diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
     diffPreviewSend.textContent = isQuestionPreview ? "Send questions" : "Send notes";
     diffPreviewSend.disabled = false;
-    diffPreviewText.readOnly = true;
+    diffPreviewText.readOnly = false;
     diffPreviewText.value = prompt.prompt;
     diffPreviewStatus.textContent = diffAnnotationPreviewStatus(annotationsToFlush);
     diffPreviewOverlay.hidden = false;
     diffPreviewText.scrollTop = 0;
-    diffPreviewSend.focus();
+    diffPreviewText.focus();
     return;
   }
   diffPreviewDraft = null;
@@ -4965,6 +4981,7 @@ function closeDiffPreview(): void {
   diffPreviewSend.textContent = "Send notes";
   diffPreviewSend.disabled = false;
   diffPreviewText.readOnly = true;
+  codePreviewDraft = null;
   diffPreviewDraft = null;
   agentReviewDraft = null;
   transcriptPreviewDraft = null;
@@ -4973,6 +4990,7 @@ function closeDiffPreview(): void {
 function sendPromptPreviewDraft(): void {
   const diffDraft = diffPreviewDraft;
   const transcriptDraft = transcriptPreviewDraft;
+  const codeDraft = codePreviewDraft;
   const agentDraft = agentReviewDraft;
   if (agentDraft) {
     const instructions = diffPreviewText.value.trim();
@@ -4980,22 +4998,34 @@ function sendPromptPreviewDraft(): void {
     send({ type: "review.agentReview.start", sessionId: agentDraft.sessionId, state: agentDraft.state, instructions });
     return;
   }
+  if (codeDraft) {
+    const promptText = editablePromptPreviewText();
+    if (!promptText) return;
+    closeDiffPreview();
+    sendCodeComments(codeDraft.sessionId, codeDraft.file, codeDraft.comments, promptText);
+    return;
+  }
   if (diffDraft) {
-    sendDiffAnnotations(diffDraft.sessionId, diffDraft.state, diffDraft.annotations);
+    const promptText = editablePromptPreviewText();
+    if (!promptText) return;
+    sendDiffAnnotations(diffDraft.sessionId, diffDraft.annotations, promptText);
     return;
   }
   if (transcriptDraft) {
+    const promptText = editablePromptPreviewText();
+    if (!promptText) return;
     closeDiffPreview();
-    sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments);
+    sendTranscriptReviewComments(transcriptDraft.sessionId, transcriptDraft.message, transcriptDraft.comments, promptText);
   }
 }
 
 function flushDiffAnnotations(
   sessionId: string,
   state: DiffReviewableState,
-  kind?: "comment" | "question",
+  kind: "comment" | "question" | undefined,
+  promptMode: DiffAnnotationPromptMode,
 ): void {
-  previewDiffAnnotations(sessionId, state, kind);
+  previewDiffAnnotations(sessionId, state, kind, promptMode);
 }
 
 function diffTargetOffsetTop(container: HTMLElement, target: HTMLElement): number {
@@ -5431,20 +5461,21 @@ function renderReviewableDiff(
     toolbar.append(code);
   }
   if (allowPromptActions) {
+    const promptMode: DiffAnnotationPromptMode = requestMode === "sessionChanges" ? "sessionChanges" : "comparisonReview";
     const queuedComments = selectedDiffAnnotations(annotations, key, "comment");
     const queuedQuestions = selectedDiffAnnotations(annotations, key, "question");
     if (queuedComments.length > 0) {
       const flushComments = mkEl("button");
       flushComments.type = "button";
       flushComments.textContent = `Preview notes (${queuedComments.length})`;
-      flushComments.addEventListener("click", () => flushDiffAnnotations(annotationKey, state, "comment"));
+      flushComments.addEventListener("click", () => flushDiffAnnotations(annotationKey, state, "comment", promptMode));
       toolbar.append(flushComments);
     }
     const flushQuestions = mkEl("button");
     flushQuestions.type = "button";
     flushQuestions.textContent = `Preview questions (${queuedQuestions.length})`;
     flushQuestions.disabled = queuedQuestions.length === 0;
-    flushQuestions.addEventListener("click", () => flushDiffAnnotations(annotationKey, state, "question"));
+    flushQuestions.addEventListener("click", () => flushDiffAnnotations(annotationKey, state, "question", promptMode));
     toolbar.append(flushQuestions);
     const review = mkEl("button");
     review.type = "button";

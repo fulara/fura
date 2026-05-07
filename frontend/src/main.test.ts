@@ -265,4 +265,66 @@ describe("desktop cog options", () => {
     }));
     vi.useRealTimers();
   });
+
+  it("sends edited Diffs question preview text", async () => {
+    const { connection } = await createHarness();
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("Should this become a helper?");
+    const patch = [
+      "diff --git a/src/main.ts b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-console.log('old')",
+      "+console.log('new')",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
+        patch: null,
+      },
+    });
+    connection.emit({
+      type: "diff.filePatch",
+      patch: {
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        scope: "sessionChanges",
+        comparisonKey: "key",
+        file: { oldPath: null, newPath: "src/main.ts" },
+        patch,
+        truncated: false,
+        generatedAt: "now",
+      },
+    });
+
+    document.querySelector<HTMLButtonElement>("#testDiffPanel .diff-question-btn")?.click();
+    expect(prompt).toHaveBeenCalledWith("Ask the agent about this diff line");
+    [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .find(button => button.textContent === "Preview questions (1)")
+      ?.click();
+
+    const preview = document.querySelector<HTMLTextAreaElement>("#diffPreviewText");
+    expect(preview?.readOnly).toBe(false);
+    expect(preview?.value).toContain("request for an implementation change");
+    if (!preview) throw new Error("diff preview missing");
+    preview.value = "Please extract the repeated console logging into a helper.";
+    document.querySelector<HTMLButtonElement>("#diffPreviewSend")?.click();
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "prompt.send",
+      sessionId: "live",
+      text: "Please extract the repeated console logging into a helper.",
+    }));
+  });
 });

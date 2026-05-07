@@ -78,7 +78,7 @@ describe("diffReview", () => {
     const comment = createDiffReviewAnnotation({ id: "c", kind: "comment", state, location: addLocation, text: "Please keep the exported name stable.", createdAt: "now" });
     const prompt = buildDiffCommentPrompt(state, [comment]);
 
-    expect(prompt).toContain("I reviewed a repository diff in Fura");
+    expect(prompt).toContain("I reviewed a repository diff in Fura's Diff view");
     expect(prompt).toContain("Do not edit files, generate patches, or modify a checkout");
     expect(prompt).toContain("Repository: /repo");
     expect(prompt).toContain("Base: main (aaaaaaaaaaaa)");
@@ -89,14 +89,19 @@ describe("diffReview", () => {
     expect(prompt).toContain("```diff\n@@ -1,3 +1,3 @@\n const same = true;\n-const value = 'old';\n+const value = 'new';\n export { value };\n```");
   });
 
-  it("builds question prompts without mixing them into comment flushes", () => {
+  it("builds question prompts differently for Diff and Diffs views", () => {
     const question = createDiffReviewAnnotation({ id: "q", kind: "question", state, location: addLocation, text: "Is this safe?", createdAt: "now" });
     const prompt = buildDiffQuestionPrompt(state, question);
     const commentPrompt = buildDiffCommentPrompt(state, [question]);
+    const sessionChangesPrompt = buildDiffQuestionPrompt(state, question, "sessionChanges");
 
-    expect(prompt).toContain("I have a question about this exact diff line");
+    expect(prompt).toContain("I have a question about this exact diff line in Fura's Diff view");
     expect(prompt).toContain("Question: Is this safe?");
     expect(prompt).toContain("review helper");
+    expect(sessionChangesPrompt).toContain("I used the ? action in Fura's Diffs view");
+    expect(sessionChangesPrompt).toContain("request for an implementation change");
+    expect(sessionChangesPrompt).toContain("make that change in the active checkout");
+    expect(sessionChangesPrompt).not.toContain("Do not edit files");
     expect(commentPrompt).not.toContain("Question: Is this safe?");
   });
 

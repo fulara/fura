@@ -621,12 +621,16 @@ describe("mountMobileApp", () => {
 
     document.querySelector<HTMLButtonElement>(".transcript-review-actions button:last-child")?.click();
     expect(document.querySelector<HTMLElement>("#mobileReviewPreviewOverlay")?.hidden).toBe(false);
-    expect(document.querySelector<HTMLTextAreaElement>("#mobileReviewPreviewText")?.value).toContain("Comment: Please clarify line two");
+    const reviewPreview = document.querySelector<HTMLTextAreaElement>("#mobileReviewPreviewText");
+    expect(reviewPreview?.readOnly).toBe(false);
+    expect(reviewPreview?.value).toContain("Comment: Please clarify line two");
+    if (!reviewPreview) throw new Error("review preview missing");
+    reviewPreview.value = "Please clarify the reviewed transcript line.";
 
     document.querySelector<HTMLButtonElement>("#mobileReviewPreviewSend")?.click();
 
     const sentPrompt = connection.sent.find(
-      message => message.type === "prompt.send" && message.sessionId === "live" && message.text.includes("Please clarify line two"),
+      message => message.type === "prompt.send" && message.sessionId === "live" && message.text === "Please clarify the reviewed transcript line.",
     );
     expect(sentPrompt).toBeTruthy();
     expect(document.querySelector<HTMLElement>("#mobileReviewPreviewOverlay")?.hidden).toBe(true);
@@ -1307,6 +1311,11 @@ describe("mountMobileApp", () => {
     [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
       .find(button => button.textContent === "Preview & flush (1)")
       ?.click();
+    const diffPreview = document.querySelector<HTMLTextAreaElement>("#mobileDiffPreviewText");
+    expect(diffPreview?.readOnly).toBe(false);
+    expect(diffPreview?.value).toContain("request for an implementation change");
+    if (!diffPreview) throw new Error("diff preview missing");
+    diffPreview.value = "Please make the queued diff change after the current task.";
     document.querySelector<HTMLButtonElement>("#mobileDiffPreviewSend")?.click();
 
     expect(connection.sent.filter(message => message.type === "prompt.send")).toHaveLength(0);
@@ -1316,7 +1325,7 @@ describe("mountMobileApp", () => {
     document.querySelector<HTMLButtonElement>("#mobileBusyPromptFollowUp")?.click();
 
     const promptMessage = connection.sent.filter(message => message.type === "prompt.send").at(-1);
-    expect(promptMessage).toMatchObject({ type: "prompt.send", sessionId: "live", behavior: "followUp" });
+    expect(promptMessage).toMatchObject({ type: "prompt.send", sessionId: "live", behavior: "followUp", text: "Please make the queued diff change after the current task." });
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("No persisted review comments on this diff yet.");
   });
 

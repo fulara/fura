@@ -8,6 +8,8 @@ export type DiffPreviewDraft = {
   annotations: DiffReviewAnnotation[];
 };
 
+export type DiffAnnotationPromptMode = "sessionChanges" | "comparisonReview";
+
 export type DiffAnnotationPromptResult =
   | { ok: true; prompt: string }
   | { ok: false; message: string; missingFiles: string[] };
@@ -214,11 +216,21 @@ function comparisonLines(state: DiffReviewableState): string[] {
   ];
 }
 
-const reviewHelperInstruction = [
-  "You are helping review and understand this exact diff context.",
-  "Answer as a review helper: explain risk, intent, correctness, and questions about the shown changes.",
-  "Do not edit files, generate patches, or modify a checkout from this review prompt. If implementation changes are needed, say that they should be handled in a separate coding session/worktree.",
-].join(" ");
+function reviewHelperInstruction(promptMode: DiffAnnotationPromptMode): string {
+  if (promptMode === "sessionChanges") {
+    return [
+      "You are helping review and act on changes shown in Fura's Diffs view for the active coding session.",
+      "The user's note may be a question, concern, instruction, or request for an implementation change.",
+      "Use the diff metadata and nearby context to locate the issue. If the note asks for a code change, make the change in the active checkout; otherwise answer or explain the review concern.",
+    ].join(" ");
+  }
+
+  return [
+    "You are helping review and understand this exact diff context.",
+    "Answer as a review helper: explain risk, intent, correctness, and questions about the shown changes.",
+    "Do not edit files, generate patches, or modify a checkout from this review prompt. If implementation changes are needed, say that they should be handled in a separate coding session/worktree.",
+  ].join(" ");
+}
 
 function buildAnnotationSection(annotation: DiffReviewAnnotation, index: number, rows: ParsedDiffRow[]): string {
   const label = annotation.kind === "question" ? "Question" : "Comment";
@@ -242,6 +254,7 @@ export function prepareDiffAnnotationPrompt(
   state: DiffReviewableState,
   annotations: DiffReviewAnnotation[],
   patchForAnnotation?: (annotation: DiffReviewAnnotation) => string | null,
+  promptMode: DiffAnnotationPromptMode = "comparisonReview",
 ): DiffAnnotationPromptResult {
   const key = comparisonKey(state);
   const selectedAnnotations = annotations.filter(annotation => annotation.comparisonKey === key);
@@ -270,15 +283,19 @@ export function prepareDiffAnnotationPrompt(
   return {
     ok: true,
     prompt: [
-      "I reviewed a repository diff in Fura and left comments/questions on specific diff lines.",
-      reviewHelperInstruction,
+      promptMode === "sessionChanges"
+        ? "I reviewed changes in Fura's Diffs view and left notes/questions on specific diff lines."
+        : "I reviewed a repository diff in Fura's Diff view and left comments/questions on specific diff lines.",
+      reviewHelperInstruction(promptMode),
       ...comparisonLines(state),
       "",
       "Only the diff context around annotated lines is included below; the full diff is intentionally omitted.",
       "",
       sections,
       "",
-      "Please respond to these review notes using the path, side, and old/new diff line metadata to locate each item precisely.",
+      promptMode === "sessionChanges"
+        ? "Please respond to these review notes using the path, side, and old/new diff line metadata to locate each item precisely. Treat each note as the user's actual instruction: it may ask a question, flag a concern, or request a concrete change."
+        : "Please respond to these review notes using the path, side, and old/new diff line metadata to locate each item precisely.",
     ].join("\n"),
   };
 }
@@ -287,24 +304,28 @@ export function prepareDiffCommentPrompt(
   state: DiffReviewableState,
   comments: DiffReviewAnnotation[],
   patchForComment?: (comment: DiffReviewAnnotation) => string | null,
+  promptMode: DiffAnnotationPromptMode = "comparisonReview",
 ): DiffAnnotationPromptResult {
   return prepareDiffAnnotationPrompt(
     state,
     comments.filter(annotation => annotation.kind === "comment"),
     patchForComment,
+    promptMode,
   );
 }
 
-export function buildDiffCommentPrompt(state: DiffReviewableState, comments: DiffReviewAnnotation[]): string {
-  const prompt = prepareDiffCommentPrompt(state, comments);
+export function buildDiffCommentPrompt(state: DiffReviewableState, comments: DiffReviewAnnotation[], promptMode: DiffAnnotationPromptMode = "comparisonReview"): string {
+  const prompt = prepareDiffCommentPrompt(state, comments, undefined, promptMode);
   return prompt.ok ? prompt.prompt : "";
 }
 
-export function buildDiffQuestionPrompt(state: DiffReviewableState, question: DiffReviewAnnotation): string {
+export function buildDiffQuestionPrompt(state: DiffReviewableState, question: DiffReviewAnnotation, promptMode: DiffAnnotationPromptMode = "comparisonReview"): string {
   const rows = parseDiffRows(reviewPatchText(state));
   return [
-    "I have a question about this exact diff line in Fura.",
-    reviewHelperInstruction,
+    promptMode === "sessionChanges"
+      ? "I used the ? action in Fura's Diffs view on this exact diff line."
+      : "I have a question about this exact diff line in Fura's Diff view.",
+    reviewHelperInstruction(promptMode),
     ...comparisonLines(state),
     "",
     `Question location: ${formatDiffLocation(question)}`,
@@ -317,7 +338,9 @@ export function buildDiffQuestionPrompt(state: DiffReviewableState, question: Di
     buildDiffAnnotationContext(rows, question),
     "```",
     "",
-    "Please answer the question against this diff context. Do not propose direct file edits unless you explicitly frame them as work for a separate coding session.",
+    promptMode === "sessionChanges"
+      ? "Please respond to this note against the diff context. If it asks for a change, make that change in the active checkout; otherwise answer the question or explain the concern."
+      : "Please answer the question against this diff context. Do not propose direct file edits unless you explicitly frame them as work for a separate coding session.",
   ]
     .filter(Boolean)
     .join("\n");
