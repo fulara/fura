@@ -136,7 +136,9 @@ describe("code viewer", () => {
       baseActions({ addComment, editComment, deleteComment, previewComments, flushComments }),
     );
 
-    expect(container.querySelector(".code-file-header code")?.textContent).toBe("src/main.rs");
+    const filePath = container.querySelector<HTMLElement>(".code-file-path");
+    expect(filePath?.textContent).toBe("src/main.rs");
+    expect(filePath?.title).toBe("src/main.rs");
     expect(container.querySelector(".code-file-header span")?.textContent).toContain("read-only");
     expect(container.textContent).toContain("fn main");
 
@@ -151,6 +153,32 @@ describe("code viewer", () => {
     expect(flushComments).toHaveBeenCalledOnce();
     expect(editComment).toHaveBeenCalledWith(expect.objectContaining({ id: "c1" }));
     expect(deleteComment).toHaveBeenCalledWith(expect.objectContaining({ id: "c1" }));
+  });
+ 
+
+  it("marks long selected file paths for constrained display", () => {
+    const container = document.createElement("div");
+    const longPath = "packages/frontend/src/components/review/diff/very/deeply/nested/selected-file-with-a-long-name.ts";
+
+    renderCodeViewer(
+      container,
+      baseState({
+        file: {
+          path: longPath,
+          language: "typescript",
+          text: "export const value = 1;\n",
+          size: 23,
+          version: 1,
+        },
+      }),
+      baseActions(),
+    );
+
+    const title = container.querySelector<HTMLElement>(".code-file-title");
+    const path = container.querySelector<HTMLElement>(".code-file-path");
+    expect(title).toBeTruthy();
+    expect(path?.textContent).toBe(longPath);
+    expect(path?.title).toBe(longPath);
   });
 
   it("renders file search dialog and routes search actions", () => {

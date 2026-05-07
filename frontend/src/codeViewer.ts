@@ -329,7 +329,10 @@ function renderCodeMain(state: CodeViewerState, actions: CodeViewerActions): HTM
   const header = mkEl("header");
   header.className = "code-file-header";
   const title = mkEl("div");
+  title.className = "code-file-title";
   const path = mkEl("code");
+  path.className = "code-file-path";
+  path.title = state.file.path;
   path.textContent = state.file.path;
   const meta = mkEl("span");
   meta.textContent = `${state.file.language || "text"} · ${formatCodeFileSize(state.file.size)} · read-only`;

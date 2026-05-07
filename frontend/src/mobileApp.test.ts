@@ -289,6 +289,21 @@ describe("mountMobileApp", () => {
     debug.mockRestore();
   });
 
+  it("clears stale connection failure text after a later successful connection", () => {
+    const { connection, debug } = createHarness();
+    const log = document.querySelector<HTMLElement>("#mobileLog");
+    const status = document.querySelector<HTMLElement>("#mobileConnectionStatus");
+
+    connection.options.onLog("Connection failed: Failed to fetch");
+    connection.options.onStatus("connected", "connected");
+    connection.options.onOpen?.();
+
+    expect(log?.textContent).toBe("");
+    expect(status?.textContent).toBe("connected");
+    expect(document.querySelector<HTMLElement>("#mobileAuthGate")?.hidden).toBe(true);
+    debug.mockRestore();
+  });
+
   it("opens available sessions by session file", () => {
     const { connection } = createHarness();
     connection.emit({

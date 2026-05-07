@@ -327,4 +327,76 @@ describe("desktop cog options", () => {
       text: "Please extract the repeated console logging into a helper.",
     }));
   });
+
+  it("keeps the diff file list mounted when selecting another file", async () => {
+    const { connection } = await createHarness();
+    const secondPatch = [
+      "diff --git a/src/b.ts b/src/b.ts",
+      "@@ -1 +1 @@",
+      "-export const value = 'old b';",
+      "+export const value = 'new b';",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: null },
+        summary: {
+          files: [
+            { oldPath: null, newPath: "src/a.ts", status: "modified", added: 1, removed: 1 },
+            { oldPath: null, newPath: "src/b.ts", status: "modified", added: 1, removed: 1 },
+          ],
+          stat: null,
+          truncated: false,
+        },
+        patch: null,
+      },
+    });
+
+    const sidebar = document.querySelector<HTMLElement>("#testDiffPanel .diffs-sidebar-scroll");
+    const main = document.querySelector<HTMLElement>("#testDiffPanel .diffs-main");
+    if (!sidebar || !main) throw new Error("diff layout missing");
+    sidebar.scrollTop = 77;
+    const fileButtons = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel .diffs-file-jump")];
+    expect(fileButtons.map(button => button.dataset.diffFilePath)).toEqual(["src/a.ts", "src/b.ts"]);
+
+    fileButtons[1]?.click();
+
+    expect(document.querySelector<HTMLElement>("#testDiffPanel .diffs-sidebar-scroll")).toBe(sidebar);
+    expect(document.querySelector<HTMLElement>("#testDiffPanel .diffs-main")).toBe(main);
+    expect(sidebar.scrollTop).toBe(77);
+    expect(fileButtons[1]?.classList.contains("active")).toBe(true);
+    expect(connection.sent.some(message =>
+      message.type === "sessionChanges.request" &&
+      message.selectedFile?.newPath === "src/b.ts"
+    )).toBe(true);
+
+    connection.emit({
+      type: "diff.filePatch",
+      patch: {
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        scope: "sessionChanges",
+        comparisonKey: "key",
+        file: { oldPath: null, newPath: "src/b.ts" },
+        patch: secondPatch,
+        truncated: false,
+        generatedAt: "now",
+      },
+    });
+
+    expect(document.querySelector<HTMLElement>("#testDiffPanel .diffs-sidebar-scroll")).toBe(sidebar);
+    expect(sidebar.scrollTop).toBe(77);
+    expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("new b");
+  });
 });

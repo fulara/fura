@@ -895,6 +895,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       onOpen: () => {
         pendingRestoreAfterSessionsSnapshot = true;
         hideAuthGate();
+        clearConnectionFailureStatus();
         send({ type: "session.list" });
       },
       onClose: () => handleConnectionClosed(),
@@ -920,6 +921,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     authSubmit.disabled = false;
     authStatus.textContent = "";
     authTokenInput.value = "";
+  }
+
+  function clearConnectionFailureStatus(): void {
+    const current = mobileLog.textContent?.trim() ?? "";
+    if (current.startsWith("Connection failed:") || current.startsWith("Authentication failed.")) {
+      mobileLog.textContent = "";
+    }
+    if (!authGate.hidden) hideAuthGate();
   }
 
   function setStatus(label: string, className: ConnectionStatus): void {

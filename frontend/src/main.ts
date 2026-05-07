@@ -1704,8 +1704,11 @@ function handleServerMessage(message: ServerMessage): void {
           if (diffFilePatchErrors.get(activeDiffReviewSessionId)?.filePath === patch.file.newPath) diffFilePatchErrors.delete(activeDiffReviewSessionId);
         }
         markComparePanelDirty();
-        renderComparePanelIfActive();
-        if (activeDiffReviewSessionId) renderDiffsViewIfActive(activeDiffReviewSessionId);
+        if (!rerenderSelectedDiffFileContentIfActive("compareDiff")) renderComparePanelIfActive();
+        if (activeDiffReviewSessionId) {
+          markDiffsViewDirty();
+          if (!rerenderSelectedDiffFileContentIfActive(activeDiffReviewSessionId)) renderDiffsViewIfActive(activeDiffReviewSessionId);
+        }
       } else {
         const sessionId = currentSessionChangesRequest?.sessionId;
         const state = sessionId ? sessionChangesStates.get(sessionId) : undefined;
@@ -1721,7 +1724,7 @@ function handleServerMessage(message: ServerMessage): void {
         clearPendingDiffFilePatch(sessionId, patch.diffId);
         if (diffFilePatchErrors.get(sessionId)?.filePath === patch.file.newPath) diffFilePatchErrors.delete(sessionId);
         markDiffsViewDirty();
-        renderDiffsViewIfActive(sessionId);
+        if (!rerenderSelectedDiffFileContentIfActive(sessionId)) renderDiffsViewIfActive(sessionId);
       }
       break;
     }
@@ -5028,31 +5031,6 @@ function flushDiffAnnotations(
   previewDiffAnnotations(sessionId, state, kind, promptMode);
 }
 
-function diffTargetOffsetTop(container: HTMLElement, target: HTMLElement): number {
-  let offset = target.offsetTop;
-  let parent = target.offsetParent as HTMLElement | null;
-  while (parent && parent !== container) {
-    offset += parent.offsetTop;
-    parent = parent.offsetParent as HTMLElement | null;
-  }
-  return offset;
-}
-
-function scrollDiffsToFile(container: HTMLElement, filePath: string): void {
-  const mainBody = container.querySelector<HTMLElement>(".diffs-main-body");
-  if (!mainBody) return;
-  const targets = [...container.querySelectorAll<HTMLElement>("[data-diff-file-path]")];
-  const target = targets.find(element => element.dataset.diffFilePath === filePath);
-  if (!target) return;
-
-  const scrollTop = Math.max(0, diffTargetOffsetTop(mainBody, target));
-  mainBody.scrollTop = scrollTop;
-  requestAnimationFrame(() => {
-    mainBody.scrollTop = scrollTop;
-  });
-  target.classList.add("diff-line-target");
-  window.setTimeout(() => target.classList.remove("diff-line-target"), 1200);
-}
 
 function renderDiffsView(container: HTMLElement, projection: SessionProjection | undefined): void {
   setRenderDocument(container.ownerDocument);
@@ -5131,7 +5109,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
     renderDiffMessage(main, state.reason, true);
     return;
   }
-  renderReviewableDiff(sessionId, state, sidebarTop, sidebar, main, container, true, "sessionChanges");
+  renderReviewableDiff(sessionId, state, sidebarTop, sidebar, main, true, "sessionChanges");
 }
 
 function renderDiffReviewSessionView(
@@ -5163,7 +5141,7 @@ function renderDiffReviewSessionView(
     if (!compareDiffLoading) requestDiffReviewState(sessionId, summary);
     return;
   }
-  renderReviewableDiff(sessionId, compareDiffState, sidebarTop, sidebar, main, container, true, "compareDiff");
+  renderReviewableDiff(sessionId, compareDiffState, sidebarTop, sidebar, main, true, "compareDiff");
 }
 
 function renderSessionRepoControls(sessionId: string, state: SessionChangesSummaryState, sidebar: HTMLElement): void {
@@ -5249,7 +5227,7 @@ function renderComparePanel(container: HTMLElement): void {
     renderDiffMessage(main, compareDiffLoading ? "Loading compare diff…" : "Run an explicit repository/ref comparison.", false);
     return;
   }
-  renderReviewableDiff("compareDiff", compareDiffState, sidebarTop, sidebar, main, null, false, "compareDiff");
+  renderReviewableDiff("compareDiff", compareDiffState, sidebarTop, sidebar, main, false, "compareDiff");
 }
 
 function renderDiffMessage(main: HTMLElement, message: string, error: boolean): void {
@@ -5322,7 +5300,6 @@ function renderReviewableDiff(
   sidebarTop: HTMLElement,
   sidebar: HTMLElement,
   main: HTMLElement,
-  jumpContainer: HTMLElement | null,
   allowPromptActions: boolean,
   requestMode: "sessionChanges" | "compareDiff",
 ): void {
@@ -5332,9 +5309,24 @@ function renderReviewableDiff(
   const comments = reviewCommentsForComparison(reviewComments.get(annotationKey) ?? [], key);
   const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
   const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
-  const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
   renderDiffFileFilter(sidebarTop, annotationKey);
-  renderDesktopModifiedFiles(sidebar, state, fileSummaries, selectedFilePath, annotationKey, jumpContainer);
+  renderDesktopModifiedFiles(sidebar, state, fileSummaries, selectedFilePath, annotationKey);
+  renderReviewableDiffMainContent(annotationKey, state, main, allowPromptActions, requestMode);
+}
+
+function renderReviewableDiffMainContent(
+  annotationKey: string,
+  state: DiffReviewableState,
+  main: HTMLElement,
+  allowPromptActions: boolean,
+  requestMode: "sessionChanges" | "compareDiff",
+): void {
+  const key = comparisonKey(state);
+  const annotations = diffAnnotations.get(annotationKey) ?? [];
+  const comments = reviewCommentsForComparison(reviewComments.get(annotationKey) ?? [], key);
+  const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
+  const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
+  const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
   const summary = mkEl("section");
   summary.className = "diffs-summary";
   const comparison = mkEl("p");
@@ -5547,6 +5539,57 @@ function stateForDiffFileFilter(annotationKey: string): DiffReviewableState | nu
   return state?.status === "ready" ? state : null;
 }
 
+function diffRequestModeForAnnotationKey(annotationKey: string): "sessionChanges" | "compareDiff" {
+  if (annotationKey === "compareDiff") return "compareDiff";
+  return projections.get(annotationKey)?.summary.sessionMode === "diffReview" ? "compareDiff" : "sessionChanges";
+}
+
+function updateDesktopModifiedFileSelection(root: HTMLElement, selectedFilePath: string | null): void {
+  for (const jump of root.querySelectorAll<HTMLButtonElement>(".diffs-file-jump[data-diff-file-path]")) {
+    jump.classList.toggle("active", jump.dataset.diffFilePath === selectedFilePath);
+  }
+}
+
+function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElement | null): boolean {
+  const state = stateForDiffFileFilter(annotationKey);
+  const main = root?.querySelector<HTMLElement>(".diffs-main") ?? null;
+  if (!root || !main || !state) return false;
+  setRenderDocument(root.ownerDocument);
+  const selectedFilePath = sessionChangesSelectedFiles.get(annotationKey) ?? null;
+  updateDesktopModifiedFileSelection(root, selectedFilePath);
+  main.replaceChildren();
+  renderReviewableDiffMainContent(
+    annotationKey,
+    state,
+    main,
+    annotationKey !== "compareDiff",
+    diffRequestModeForAnnotationKey(annotationKey),
+  );
+  if (annotationKey === "compareDiff") comparePanelDirty = false;
+  else diffPanelDirty = false;
+  return true;
+}
+
+function rerenderSelectedDiffFileContentIfActive(annotationKey: string): boolean {
+  let rendered = false;
+  if (annotationKey === "compareDiff") {
+    if (!desktopDockview?.isPanelActive("compare")) return false;
+    desktopDockview.withPanel("compare", container => {
+      rendered = rerenderSelectedDiffFileContent(annotationKey, container.querySelector<HTMLElement>(".compare-view"));
+    });
+    return rendered;
+  }
+  const dockview = desktopDockview;
+  const panelId = dockview?.isPanelActive("sessionChanges")
+    ? "sessionChanges"
+    : dockview?.isPanelActive("diffs") ? "diffs" : null;
+  if (!dockview || !panelId) return false;
+  dockview.withPanel(panelId, container => {
+    rendered = rerenderSelectedDiffFileContent(annotationKey, container.querySelector<HTMLElement>(".diffs-view"));
+  });
+  return rendered;
+}
+
 function rerenderDesktopModifiedFilesOnly(annotationKey: string, sidebarTop: HTMLElement): boolean {
   const root = sidebarTop.closest<HTMLElement>(".diffs-view");
   const sidebar = root?.querySelector<HTMLElement>(".diffs-sidebar-scroll");
@@ -5558,7 +5601,7 @@ function rerenderDesktopModifiedFilesOnly(annotationKey: string, sidebarTop: HTM
   const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
   const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
   sidebar.replaceChildren();
-  renderDesktopModifiedFiles(sidebar, state, fileSummaries, selectedFilePath, annotationKey, root);
+  renderDesktopModifiedFiles(sidebar, state, fileSummaries, selectedFilePath, annotationKey);
   return true;
 }
 
@@ -5592,7 +5635,6 @@ function renderDesktopModifiedFiles(
   files: ReturnType<typeof summarizeWireDiffFiles>,
   selectedFilePath: string | null,
   annotationKey: string,
-  jumpContainer: HTMLElement | null,
 ): void {
   const filterValue = (diffFileFilters.get(annotationKey) ?? "").trim().toLowerCase();
   const visibleFiles = filterValue
@@ -5631,15 +5673,18 @@ function renderDesktopModifiedFiles(
     jump.type = "button";
     jump.className = `diffs-file-jump${file.filePath === selectedFilePath ? " active" : ""}`;
     jump.title = "Click to select. Right-click for file actions.";
+    jump.dataset.diffFilePath = file.filePath;
     jump.append(name, meta);
     jump.addEventListener("click", () => {
       openDiffFileMenu = null;
       sessionChangesSelectedFiles.set(annotationKey, file.filePath);
-      if (jumpContainer) scrollDiffsToFile(jumpContainer, file.filePath);
-      markDiffsViewDirty();
-      markComparePanelDirty();
-      if (annotationKey === "compareDiff") renderComparePanelIfActive();
-      else renderDiffsViewIfActive(annotationKey);
+      const root = jump.closest<HTMLElement>(".diffs-view, .compare-view");
+      if (!rerenderSelectedDiffFileContent(annotationKey, root)) {
+        markDiffsViewDirty();
+        markComparePanelDirty();
+        if (annotationKey === "compareDiff") renderComparePanelIfActive();
+        else renderDiffsViewIfActive(annotationKey);
+      }
     });
     jump.addEventListener("contextmenu", event => {
       event.preventDefault();

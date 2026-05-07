@@ -802,8 +802,25 @@ h2 {
   border-bottom: 1px solid #252a35;
 }
 
+.code-file-title {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: grid;
+  gap: 0.2rem;
+}
+
+.code-file-path {
+  display: block;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .code-file-actions {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 0.45rem;
