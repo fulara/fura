@@ -549,22 +549,35 @@ app.innerHTML = `
     <section class="snapshot-label-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="snapshotLabelTitle" aria-describedby="snapshotLabelDescription">
       <header class="modal-header">
         <div>
-          <h2 id="snapshotLabelTitle">Name diff snapshot</h2>
-          <p id="snapshotLabelDescription">Edit the label before Fura records this repository diff snapshot.</p>
+          <h2 id="snapshotLabelTitle">Create diff snapshot</h2>
+          <p id="snapshotLabelDescription">Record a repository diff snapshot, or target a specific Git ref without changing the worktree.</p>
         </div>
-        <button id="snapshotLabelClose" class="modal-close" type="button" aria-label="Close snapshot label dialog">×</button>
+        <button id="snapshotLabelClose" class="modal-close" type="button" aria-label="Close snapshot dialog">×</button>
       </header>
-      <div class="cwd-picker-body">
-        <label for="snapshotLabelInput">Snapshot label</label>
-        <input id="snapshotLabelInput" autocomplete="off" spellcheck="false" />
-      </div>
-      <footer class="modal-footer">
-        <span></span>
-        <div class="modal-actions">
-          <button id="snapshotLabelCancel" type="button">Cancel</button>
-          <button id="snapshotLabelCreate" type="button">Create snapshot</button>
+      <form id="snapshotForm" class="snapshot-form" novalidate>
+        <div class="cwd-picker-body">
+          <label for="snapshotLabelInput">Snapshot label</label>
+          <input id="snapshotLabelInput" autocomplete="off" spellcheck="false" />
+          <label class="snapshot-explicit-toggle" for="snapshotExplicitToggle">
+            <input id="snapshotExplicitToggle" type="checkbox" />
+            <span>Snapshot an explicit Git ref</span>
+          </label>
+          <div id="snapshotExplicitFields" class="snapshot-explicit-fields" hidden>
+            <label for="snapshotRefInput">Git ref <span class="label-optional">(required)</span></label>
+            <input id="snapshotRefInput" autocomplete="off" spellcheck="false" placeholder="HEAD~1, main, v1.2.3, or a commit SHA" />
+            <label for="snapshotRepoInput">Repository root <span class="label-optional">(optional)</span></label>
+            <input id="snapshotRepoInput" autocomplete="off" spellcheck="false" placeholder="Defaults to the selected diff repository" />
+          </div>
+          <p id="snapshotFormStatus" class="modal-status" aria-live="polite"></p>
         </div>
-      </footer>
+        <footer class="modal-footer">
+          <span></span>
+          <div class="modal-actions">
+            <button id="snapshotLabelCancel" type="button">Cancel</button>
+            <button id="snapshotLabelCreate" type="submit">Create snapshot</button>
+          </div>
+        </footer>
+      </form>
     </section>
   </div>
 
@@ -712,10 +725,15 @@ const diffPreviewStatus = requireElement<HTMLSpanElement>("diffPreviewStatus");
 const diffPreviewCancel = requireElement<HTMLButtonElement>("diffPreviewCancel");
 const diffPreviewSend = requireElement<HTMLButtonElement>("diffPreviewSend");
 const snapshotLabelOverlay = requireElement<HTMLDivElement>("snapshotLabelOverlay");
+const snapshotForm = requireElement<HTMLFormElement>("snapshotForm");
 const snapshotLabelClose = requireElement<HTMLButtonElement>("snapshotLabelClose");
 const snapshotLabelInput = requireElement<HTMLInputElement>("snapshotLabelInput");
+const snapshotExplicitToggle = requireElement<HTMLInputElement>("snapshotExplicitToggle");
+const snapshotExplicitFields = requireElement<HTMLDivElement>("snapshotExplicitFields");
+const snapshotRefInput = requireElement<HTMLInputElement>("snapshotRefInput");
+const snapshotRepoInput = requireElement<HTMLInputElement>("snapshotRepoInput");
+const snapshotFormStatus = requireElement<HTMLParagraphElement>("snapshotFormStatus");
 const snapshotLabelCancel = requireElement<HTMLButtonElement>("snapshotLabelCancel");
-const snapshotLabelCreate = requireElement<HTMLButtonElement>("snapshotLabelCreate");
 
 type TranscriptPreviewDraft = {
   sessionId: string;
@@ -1305,12 +1323,15 @@ handoffPickerInstructions.addEventListener("keydown", event => {
 diffPreviewClose.addEventListener("click", closeDiffPreview);
 snapshotLabelClose.addEventListener("click", closeSnapshotLabelPicker);
 snapshotLabelCancel.addEventListener("click", closeSnapshotLabelPicker);
-snapshotLabelCreate.addEventListener("click", submitSnapshotLabelPicker);
+snapshotForm.addEventListener("submit", event => {
+  event.preventDefault();
+  submitSnapshotLabelPicker();
+});
 snapshotLabelOverlay.addEventListener("mousedown", event => {
   if (event.target === snapshotLabelOverlay) closeSnapshotLabelPicker();
 });
-snapshotLabelInput.addEventListener("keydown", event => {
-  if (event.key === "Enter") { event.preventDefault(); submitSnapshotLabelPicker(); }
+snapshotExplicitToggle.addEventListener("change", updateSnapshotExplicitFields);
+snapshotForm.addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); closeSnapshotLabelPicker(); }
 });
 diffPreviewCancel.addEventListener("click", closeDiffPreview);
@@ -4136,10 +4157,44 @@ function defaultSnapshotLabel(now = new Date()): string {
   }).format(now);
 }
 
+type SnapshotRequestOptions = {
+  repoRoot?: string;
+  ref?: string;
+};
+
+function selectedSnapshotRepoRoot(sessionId: string): string {
+  const state = sessionChangesStates.get(sessionId);
+  if (state?.status !== "ready") return "";
+  const selectedRepo = state.repos.find(repo => repo.id === state.selectedRepoId);
+  return selectedRepo?.repoRoot || state.comparison.repoRoot || "";
+}
+
+function setSnapshotFormStatus(message: string, kind: "error" | "idle" = "idle"): void {
+  snapshotFormStatus.textContent = message;
+  snapshotFormStatus.classList.toggle("error", kind === "error");
+}
+
+function updateSnapshotExplicitFields(): void {
+  const enabled = snapshotExplicitToggle.checked;
+  snapshotExplicitFields.hidden = !enabled;
+  snapshotRefInput.disabled = !enabled;
+  snapshotRepoInput.disabled = !enabled;
+  snapshotRefInput.required = enabled;
+  if (enabled) {
+    setSnapshotFormStatus("Git ref snapshots are resolved by OMP without checkout or worktree mutation.");
+  } else {
+    setSnapshotFormStatus("");
+  }
+}
+
 function openSnapshotLabelPicker(sessionId: string): void {
   if (diffLoadingSessions.has(sessionId)) return;
   snapshotLabelSessionId = sessionId;
   snapshotLabelInput.value = defaultSnapshotLabel();
+  snapshotExplicitToggle.checked = false;
+  snapshotRefInput.value = "";
+  snapshotRepoInput.value = selectedSnapshotRepoRoot(sessionId);
+  updateSnapshotExplicitFields();
   snapshotLabelOverlay.hidden = false;
   window.setTimeout(() => {
     snapshotLabelInput.focus();
@@ -4157,12 +4212,24 @@ function submitSnapshotLabelPicker(): void {
   const sessionId = snapshotLabelSessionId;
   if (!sessionId) return;
   const label = snapshotLabelInput.value.trim() || defaultSnapshotLabel();
+  const options: SnapshotRequestOptions = {};
+  if (snapshotExplicitToggle.checked) {
+    const ref = snapshotRefInput.value.trim();
+    if (!ref) {
+      setSnapshotFormStatus("Git ref is required for an explicit snapshot.", "error");
+      snapshotRefInput.focus();
+      return;
+    }
+    options.ref = ref;
+    const repoRoot = snapshotRepoInput.value.trim();
+    if (repoRoot) options.repoRoot = repoRoot;
+  }
   snapshotLabelSessionId = null;
   snapshotLabelOverlay.hidden = true;
-  requestSessionChangesSnapshot(sessionId, label);
+  requestSessionChangesSnapshot(sessionId, label, options);
 }
 
-function requestSessionChangesSnapshot(sessionId: string, label: string): void {
+function requestSessionChangesSnapshot(sessionId: string, label: string, options: SnapshotRequestOptions = {}): void {
   if (diffLoadingSessions.has(sessionId)) return;
   const state = sessionChangesStates.get(sessionId);
   const repoId = state?.status === "ready" ? state.selectedRepoId : null;
@@ -4174,7 +4241,7 @@ function requestSessionChangesSnapshot(sessionId: string, label: string): void {
   const diffId = newDiffId();
   sessionChangesDiffIds.set(sessionId, diffId);
   setCurrentSessionChangesRequest(sessionId, diffId, "refreshed");
-  const sent = send({ type: "sessionChanges.snapshot", clientId: diffClientId, diffId, sessionId, repoId, label, detailMode: payloadKind, currentCommitOid, selectedFile: null });
+  const sent = send({ type: "sessionChanges.snapshot", clientId: diffClientId, diffId, sessionId, repoId, label, repoRoot: options.repoRoot ?? null, ref: options.ref ?? null, detailMode: payloadKind, currentCommitOid, selectedFile: null });
   if (!sent) {
     diffLoadingSessions.delete(sessionId);
     diffErrors.set(sessionId, "Not connected to the Fura bridge.");

@@ -1009,7 +1009,12 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             } else {
                 None
             };
-            if let Some(pending) = pending {
+            if let Some(mut pending) = pending {
+                if pending.select_created_snapshot {
+                    if let Some(entry_id) = selected_repo_diff_snapshot_entry_id(frame) {
+                        pending.repo_id = Some(crate::diff::snapshot_candidate_id(entry_id));
+                    }
+                }
                 let request = DiffRequestIdentity::SessionChanges {
                     client_id: pending.client_id.clone(),
                     diff_id: pending.diff_id.clone(),
@@ -1561,6 +1566,14 @@ pub(crate) fn model_display_name(value: &Value) -> Option<String> {
 
 pub(crate) fn value_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(|value| value.as_str())
+}
+
+fn selected_repo_diff_snapshot_entry_id(frame: &Value) -> Option<&str> {
+    frame
+        .get("data")?
+        .get("selectedSnapshot")?
+        .get("entryId")?
+        .as_str()
 }
 
 pub(crate) fn tool_async_state(result: &Value) -> Option<&str> {

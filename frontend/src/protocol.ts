@@ -575,7 +575,7 @@ export type ClientMessage =
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }
   | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null }
-  | { type: "sessionChanges.snapshot"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; label?: string | null; detailMode?: DiffDetailMode | null; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null }
+  | { type: "sessionChanges.snapshot"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; label?: string | null; repoRoot?: string | null; ref?: string | null; detailMode?: DiffDetailMode | null; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null }
   | { type: "compareDiff.request"; clientId: string; diffId: string; repoRoot: string; base: DiffRefInput; head: DiffRefInput; detailMode: DiffDetailMode; mergeBase?: boolean; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null }
   | { type: "diff.cancel"; clientId: string; diffId: string; scope: DiffScope; reason?: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed" }
   | { type: "diff.reviewWorktree.ensure"; sourceRepoRoot: string; target?: DiffCheckoutTarget | null }

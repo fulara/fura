@@ -223,7 +223,7 @@ describe("desktop cog options", () => {
     });
   });
 
-  it("prompts for a timestamp-prefilled diff snapshot label", async () => {
+  it("opens a diff snapshot form with a timestamp-prefilled label", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-06T12:34:56Z"));
     const { connection } = await createHarness();
@@ -264,6 +264,58 @@ describe("desktop cog options", () => {
       label: "before risky refactor",
     }));
     vi.useRealTimers();
+  });
+
+  it("sends explicit Git ref and repository root from the diff snapshot form", async () => {
+    const { connection } = await createHarness();
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...sessionChangesState("live"),
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile },
+      },
+    });
+    connection.sent.length = 0;
+
+    const snapshotButton = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .find(button => button.textContent === "Snapshot now");
+    snapshotButton?.click();
+
+    const explicitToggle = document.querySelector<HTMLInputElement>("#snapshotExplicitToggle");
+    const explicitFields = document.querySelector<HTMLDivElement>("#snapshotExplicitFields");
+    const labelInput = document.querySelector<HTMLInputElement>("#snapshotLabelInput");
+    const refInput = document.querySelector<HTMLInputElement>("#snapshotRefInput");
+    const repoInput = document.querySelector<HTMLInputElement>("#snapshotRepoInput");
+    if (!explicitToggle || !labelInput || !refInput || !repoInput || !explicitFields) {
+      throw new Error("snapshot form controls missing");
+    }
+
+    expect(explicitFields.hasAttribute("hidden")).toBe(true);
+    explicitToggle.click();
+    expect(explicitFields.hasAttribute("hidden")).toBe(false);
+    expect(repoInput.value).toBe("/repo");
+
+    labelInput.value = "historical baseline";
+    refInput.value = "HEAD~1";
+    repoInput.value = "/other/repo";
+    document.querySelector<HTMLButtonElement>("#snapshotLabelCreate")?.click();
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "sessionChanges.snapshot",
+      sessionId: "live",
+      repoId: "/repo",
+      label: "historical baseline",
+      repoRoot: "/other/repo",
+      ref: "HEAD~1",
+    }));
   });
 
   it("sends edited Diffs question preview text", async () => {

@@ -94,6 +94,8 @@ pub(crate) async fn handle_session_changes_snapshot(
     session_id: String,
     repo_id: Option<String>,
     label: Option<String>,
+    repo_root: Option<String>,
+    ref_name: Option<String>,
     detail_mode: DiffDetailMode,
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
@@ -119,16 +121,30 @@ pub(crate) async fn handle_session_changes_snapshot(
             diff_id,
             session_id: session_id.clone(),
             repo_id,
+            select_created_snapshot: repo_root
+                .as_ref()
+                .and_then(|value| non_empty_trimmed(value))
+                .is_some()
+                || ref_name
+                    .as_ref()
+                    .and_then(|value| non_empty_trimmed(value))
+                    .is_some(),
             detail_mode,
             current_commit_oid,
             selected_file,
         },
     );
-    let command = serde_json::json!({
+    let mut command = serde_json::json!({
         "id": command_id.clone(),
         "type": "repo_diff_snapshot",
         "label": label,
     });
+    if let Some(value) = repo_root.and_then(|value| non_empty_trimmed(&value).map(str::to_string)) {
+        command["repoRoot"] = Value::String(value);
+    }
+    if let Some(value) = ref_name.and_then(|value| non_empty_trimmed(&value).map(str::to_string)) {
+        command["ref"] = Value::String(value);
+    }
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => Vec::new(),
         Err(message) => {
@@ -1003,7 +1019,7 @@ fn format_diff_snapshot_label(repo_root: &str, snapshot: &SessionDiffSnapshot) -
     format!("{name} · {} snapshot · {}", snapshot.kind, snapshot.label)
 }
 
-fn snapshot_candidate_id(entry_id: &str) -> String {
+pub(crate) fn snapshot_candidate_id(entry_id: &str) -> String {
     format!("snapshot:{entry_id}")
 }
 
@@ -2830,6 +2846,8 @@ mod tests {
             "s1".into(),
             Some(repo.display().to_string()),
             Some(" now ".into()),
+            None,
+            None,
             DiffDetailMode::FilePatch,
             Some("commit-1".into()),
             None,
@@ -2843,6 +2861,8 @@ mod tests {
             Some("repo_diff_snapshot")
         );
         assert_eq!(command.get("label").and_then(Value::as_str), Some("now"));
+        assert!(command.get("repoRoot").is_none());
+        assert!(command.get("ref").is_none());
         let command_id = command
             .get("id")
             .and_then(Value::as_str)
@@ -2852,6 +2872,59 @@ mod tests {
         assert_eq!(pending.session_id, "s1");
         assert_eq!(pending.detail_mode, DiffDetailMode::FilePatch);
         assert_eq!(pending.current_commit_oid.as_deref(), Some("commit-1"));
+        assert!(!pending.select_created_snapshot);
+    }
+
+    #[tokio::test]
+    async fn session_changes_snapshot_can_target_explicit_ref_and_repo_root() {
+        let (_temp, repo, _base, _head) = test_repo();
+        let session_file = repo.join("snapshot-explicit-session.jsonl");
+        fs::write(&session_file, "").expect("session file");
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
+        let mut commands = crate::tests::register_test_transport(&state, "s1", "s1", 4).await;
+
+        let responses = handle_session_changes_snapshot(
+            &state,
+            "client-1".into(),
+            test_diff_id(),
+            "s1".into(),
+            Some(repo.display().to_string()),
+            Some("historical".into()),
+            Some(repo.display().to_string()),
+            Some("HEAD~1".into()),
+            DiffDetailMode::StatOnly,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(responses.is_empty());
+        let command = commands.recv().await.expect("snapshot rpc command");
+        assert_eq!(
+            command.get("type").and_then(Value::as_str),
+            Some("repo_diff_snapshot")
+        );
+        assert_eq!(
+            command.get("label").and_then(Value::as_str),
+            Some("historical")
+        );
+        assert_eq!(
+            command.get("repoRoot").and_then(Value::as_str),
+            Some(repo.display().to_string().as_str())
+        );
+        assert_eq!(command.get("ref").and_then(Value::as_str), Some("HEAD~1"));
+        let command_id = command
+            .get("id")
+            .and_then(Value::as_str)
+            .expect("command id");
+        let pending = state.pending_session_change_snapshots.read().await;
+        let pending = pending.get(command_id).expect("pending snapshot context");
+        assert!(pending.select_created_snapshot);
     }
 
     #[tokio::test]

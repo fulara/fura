@@ -693,6 +693,9 @@ pub(crate) enum ClientMessage {
         session_id: String,
         repo_id: Option<String>,
         label: Option<String>,
+        repo_root: Option<String>,
+        #[serde(rename = "ref")]
+        ref_name: Option<String>,
         detail_mode: Option<DiffDetailMode>,
         current_commit_oid: Option<String>,
         selected_file: Option<DiffFileSelector>,

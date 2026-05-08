@@ -724,6 +724,7 @@ pub(crate) struct PendingSessionChangesSnapshot {
     pub(crate) diff_id: String,
     pub(crate) session_id: String,
     pub(crate) repo_id: Option<String>,
+    pub(crate) select_created_snapshot: bool,
     pub(crate) detail_mode: DiffDetailMode,
     pub(crate) current_commit_oid: Option<String>,
     pub(crate) selected_file: Option<DiffFileSelector>,

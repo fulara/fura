@@ -1217,6 +1217,39 @@ h2 {
   font-size: 0.78rem;
 }
 
+.snapshot-form {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.snapshot-explicit-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.35rem;
+  color: #d7dae4;
+}
+
+.snapshot-explicit-toggle input {
+  width: auto;
+}
+
+.snapshot-explicit-fields {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+  padding: 0.75rem;
+  border: 1px solid #252a35;
+  border-radius: 0.65rem;
+  background: rgba(13, 16, 23, 0.55);
+}
+
+.snapshot-explicit-fields[hidden] {
+  display: none;
+}
+
 .diffs-error {
   color: #ffaaa6;
   white-space: pre-wrap;
