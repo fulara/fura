@@ -561,17 +561,22 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 if message.id.is_empty() {
                     message.id = "__streaming__".to_string();
                 }
-                let snapshot = {
+                let delta = {
                     let mut sessions = state.sessions.write().await;
                     sessions.get_mut(&target_session_id).map(|record| {
                         record.streaming_message = Some(message);
-                        ServerMessage::SessionSnapshot {
+                        let projection = record.projection();
+                        let replace_from = projection.transcript.len().saturating_sub(1);
+                        ServerMessage::SessionDelta {
                             session_id: target_session_id.clone(),
-                            state: record.projection(),
+                            state: SessionProjectionDelta::from_projection_replace_tail(
+                                replace_from,
+                                &projection,
+                            ),
                         }
                     })
                 };
-                if let Some(msg) = snapshot {
+                if let Some(msg) = delta {
                     let _ = state.events.send(msg);
                 }
             }
@@ -585,21 +590,26 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 message.is_new = true;
                 // Clear streaming_message and push the final message atomically in a single
                 // lock so no snapshot can fire showing a gap between the two.
-                let snapshot = {
+                let delta = {
                     let mut sessions = state.sessions.write().await;
                     sessions.get_mut(&target_session_id).map(|record| {
                         record.streaming_message = None;
                         record.live_message_ids.insert(message.id.clone());
                         record.messages.push(message);
                         record.updated_at = Timestamp::now();
-                        ServerMessage::SessionSnapshot {
+                        let projection = record.projection();
+                        let replace_from = projection.transcript.len().saturating_sub(1);
+                        ServerMessage::SessionDelta {
                             session_id: target_session_id.clone(),
-                            state: record.projection(),
+                            state: SessionProjectionDelta::from_projection_replace_tail(
+                                replace_from,
+                                &projection,
+                            ),
                         }
                     })
                 };
-                if let Some(snapshot) = snapshot {
-                    let _ = state.events.send(snapshot);
+                if let Some(delta) = delta {
+                    let _ = state.events.send(delta);
                     broadcast_sessions_snapshot(state).await;
                 }
             }
@@ -611,7 +621,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             intent,
         } => {
             let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
-            let snapshot = {
+            let delta = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&target_session_id).map(|record| {
                     let insert_after_count = record.messages.len();
@@ -627,14 +637,19 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         result: None,
                         insert_after_count,
                     });
-                    ServerMessage::SessionSnapshot {
+                    let projection = record.projection();
+                    let replace_from = projection.transcript.len().saturating_sub(1);
+                    ServerMessage::SessionDelta {
                         session_id: target_session_id.clone(),
-                        state: record.projection(),
+                        state: SessionProjectionDelta::from_projection_replace_tail(
+                            replace_from,
+                            &projection,
+                        ),
                     }
                 })
             };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
+            if let Some(delta) = delta {
+                let _ = state.events.send(delta);
             }
         }
         OmpRpcFrame::ToolExecutionUpdate {
@@ -645,7 +660,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             let async_state = partial_result.as_ref().and_then(tool_async_state);
             let is_final_async = matches!(async_state, Some("completed" | "failed"));
             let is_async_error = matches!(async_state, Some("failed"));
-            let snapshot = {
+            let delta = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&target_session_id).and_then(|record| {
                     let pos = record
@@ -670,14 +685,25 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     } else {
                         record.active_tool_calls[pos].partial_result = partial_result;
                     }
-                    Some(ServerMessage::SessionSnapshot {
+                    let projection = record.projection();
+                    let replace_from = projection
+                        .transcript
+                        .iter()
+                        .position(|entry| {
+                            matches!(entry, TranscriptEntry::Tool(card) if card.tool_call_id == tool_call_id)
+                        })
+                        .unwrap_or_else(|| projection.transcript.len().saturating_sub(1));
+                    Some(ServerMessage::SessionDelta {
                         session_id: target_session_id.clone(),
-                        state: record.projection(),
+                        state: SessionProjectionDelta::from_projection_replace_tail(
+                            replace_from,
+                            &projection,
+                        ),
                     })
                 })
             };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
+            if let Some(delta) = delta {
+                let _ = state.events.send(delta);
             }
         }
         OmpRpcFrame::ToolExecutionEnd {
@@ -689,7 +715,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             let is_error = is_error.unwrap_or(false);
             let is_background_running =
                 matches!(result.as_ref().and_then(tool_async_state), Some("running"));
-            let snapshot = {
+            let delta = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&target_session_id).map(|record| {
                     if let Some(pos) = record
@@ -728,14 +754,25 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             record.tool_cards.push(card);
                         }
                     }
-                    ServerMessage::SessionSnapshot {
+                    let projection = record.projection();
+                    let replace_from = projection
+                        .transcript
+                        .iter()
+                        .position(|entry| {
+                            matches!(entry, TranscriptEntry::Tool(card) if card.tool_call_id == tool_call_id)
+                        })
+                        .unwrap_or_else(|| projection.transcript.len().saturating_sub(1));
+                    ServerMessage::SessionDelta {
                         session_id: target_session_id.clone(),
-                        state: record.projection(),
+                        state: SessionProjectionDelta::from_projection_replace_tail(
+                            replace_from,
+                            &projection,
+                        ),
                     }
                 })
             };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
+            if let Some(delta) = delta {
+                let _ = state.events.send(delta);
             }
         }
         OmpRpcFrame::Response(response) => {

@@ -193,7 +193,7 @@ pub(crate) struct SessionWorktreeSummary {
     pub(crate) path: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SessionProjection {
     pub(crate) summary: SessionSummary,
@@ -209,6 +209,49 @@ pub(crate) struct SessionProjection {
     pub(crate) plan_mode: Option<PlanModeProjection>,
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionProjectionDelta {
+    pub(crate) summary: SessionSummary,
+    pub(crate) transcript_replace_from: usize,
+    pub(crate) transcript_append: Vec<TranscriptEntry>,
+    pub(crate) is_busy: bool,
+    pub(crate) model: Option<String>,
+    pub(crate) thinking_level: Option<String>,
+    pub(crate) tokens_total: u64,
+    pub(crate) cost_usd: f64,
+    pub(crate) context_tokens: Option<u64>,
+    pub(crate) context_window: Option<u64>,
+    pub(crate) context_percent: Option<f64>,
+    pub(crate) plan_mode: Option<PlanModeProjection>,
+    pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
+    pub(crate) todo_phases: Vec<TodoPhaseProjection>,
+}
+
+impl SessionProjectionDelta {
+    pub(crate) fn from_projection_replace_tail(
+        transcript_replace_from: usize,
+        projection: &SessionProjection,
+    ) -> Self {
+        Self {
+            summary: projection.summary.clone(),
+            transcript_replace_from,
+            transcript_append: projection.transcript[transcript_replace_from..].to_vec(),
+            is_busy: projection.is_busy,
+            model: projection.model.clone(),
+            thinking_level: projection.thinking_level.clone(),
+            tokens_total: projection.tokens_total,
+            cost_usd: projection.cost_usd,
+            context_tokens: projection.context_tokens,
+            context_window: projection.context_window,
+            context_percent: projection.context_percent,
+            plan_mode: projection.plan_mode.clone(),
+            pending_plan_review: projection.pending_plan_review.clone(),
+            todo_phases: projection.todo_phases.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -274,7 +317,7 @@ fn latest_todo_phases_from_tool_cards(cards: &[ToolCard]) -> Option<Vec<TodoPhas
         .find_map(|card| todo_phases_from_tool_result_value(card.result.as_ref()))
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptMessage {
     pub(crate) id: String,
@@ -287,7 +330,7 @@ pub(crate) struct TranscriptMessage {
     pub(crate) is_new: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MessageRole {
     User,
@@ -296,7 +339,7 @@ pub(crate) enum MessageRole {
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub(crate) enum ContentBlock {
     Text {
@@ -318,7 +361,7 @@ pub(crate) enum ContentBlock {
 }
 
 /// A single tool-execution card tracked in the session transcript.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ToolCard {
     pub(crate) tool_call_id: String,
@@ -342,7 +385,7 @@ pub(crate) struct ToolCard {
 }
 
 /// A single entry in the unified session transcript.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub(crate) enum TranscriptEntry {
     #[serde(rename = "message")]
@@ -360,4 +403,70 @@ pub(crate) struct SessionHeader {
     pub(crate) timestamp: Option<String>,
     pub(crate) cwd: Option<String>,
     pub(crate) title: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_message(id: &str) -> TranscriptEntry {
+        TranscriptEntry::Message(TranscriptMessage {
+            id: id.to_string(),
+            role: MessageRole::Assistant,
+            blocks: vec![ContentBlock::Text {
+                text: id.to_string(),
+            }],
+            timestamp: None,
+            is_new: true,
+        })
+    }
+
+    fn test_summary(message_count: usize) -> SessionSummary {
+        SessionSummary {
+            session_id: "s1".to_string(),
+            cwd: None,
+            status: SessionStatus::Idle,
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            message_count,
+            kind: SessionKind::Managed,
+            session_mode: SessionMode::Standard,
+            session_file: None,
+            title: None,
+            timestamp: None,
+            category: None,
+            worktree: None,
+        }
+    }
+
+    #[test]
+    fn projection_delta_replaces_transcript_tail_from_index() {
+        let projection = SessionProjection {
+            summary: test_summary(3),
+            transcript: vec![
+                test_message("stable"),
+                test_message("old"),
+                test_message("new"),
+            ],
+            is_busy: true,
+            model: Some("mock/model".to_string()),
+            thinking_level: Some("high".to_string()),
+            tokens_total: 42,
+            cost_usd: 0.5,
+            context_tokens: Some(10),
+            context_window: Some(100),
+            context_percent: Some(10.0),
+            plan_mode: None,
+            pending_plan_review: None,
+            todo_phases: Vec::new(),
+        };
+
+        let delta = SessionProjectionDelta::from_projection_replace_tail(1, &projection);
+
+        assert_eq!(delta.transcript_replace_from, 1);
+        assert_eq!(delta.transcript_append, projection.transcript[1..]);
+        assert_eq!(delta.summary.session_id, "s1");
+        assert!(delta.is_busy);
+        assert_eq!(delta.tokens_total, 42);
+    }
 }

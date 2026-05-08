@@ -134,6 +134,23 @@ export type SessionProjection = {
   todoPhases: TodoPhase[];
 };
 
+export type SessionProjectionDelta = {
+  summary: SessionSummary;
+  transcriptReplaceFrom: number;
+  transcriptAppend: TranscriptEntry[];
+  isBusy: boolean;
+  model?: string | null;
+  thinkingLevel?: string | null;
+  tokensTotal: number;
+  costUsd: number;
+  contextTokens?: number | null;
+  contextWindow?: number | null;
+  contextPercent?: number | null;
+  planMode?: PlanModeProjection | null;
+  pendingPlanReview?: PendingPlanReviewProjection | null;
+  todoPhases: TodoPhase[];
+};
+
 export type DiffDetailMode = "filePatch" | "statOnly";
 export type DiffPayloadKind = DiffDetailMode;
 export type DiffSide = "left" | "right";
@@ -492,6 +509,7 @@ export type ServerMessage =
   | { type: "config.updated"; config: ServerConfig }
   | { type: "sessions.snapshot"; sessions: SessionSummary[] }
   | { type: "session.snapshot"; sessionId: string; state: SessionProjection }
+  | { type: "session.delta"; sessionId: string; state: SessionProjectionDelta }
   | { type: "session.exited"; sessionId: string; code?: number; signal?: string }
   | { type: "dialog.request"; sessionId: string; dialog: unknown }
   | { type: "log.stderr"; sessionId: string; text: string }

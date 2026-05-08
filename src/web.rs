@@ -7,7 +7,7 @@ use anyhow::anyhow;
 use axum::{
     Json,
     extract::{
-        Json as JsonBody, State,
+        Json as JsonBody, Query, State,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
     http::{HeaderMap, StatusCode, header},
@@ -27,6 +27,33 @@ const AUTH_SESSION_COOKIE: &str = "fura_session";
 const AUTH_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_CLIENT_TEXT_FRAME_BYTES: usize = 32 * 1024 * 1024;
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct WebSocketQuery {
+    client: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WebSocketUpdateMode {
+    Immediate,
+    ConflateAndDelta,
+}
+
+impl WebSocketUpdateMode {
+    fn from_client(client: Option<&str>) -> Self {
+        match client {
+            Some("mobile") => Self::ConflateAndDelta,
+            _ => Self::Immediate,
+        }
+    }
+
+    fn uses_conflation(self) -> bool {
+        matches!(self, Self::ConflateAndDelta)
+    }
+
+    fn uses_session_deltas(self) -> bool {
+        matches!(self, Self::ConflateAndDelta)
+    }
+}
 #[derive(Debug, Deserialize)]
 pub(crate) struct AuthSessionRequest {
     token: String,
@@ -154,6 +181,7 @@ pub(crate) async fn healthz() -> Json<Value> {
 
 pub(crate) async fn ws_handler(
     State(state): State<AppState>,
+    Query(query): Query<WebSocketQuery>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -172,7 +200,8 @@ pub(crate) async fn ws_handler(
 
     match authenticate_websocket_headers(&headers, &state, Instant::now()).await {
         Ok(WebSocketAuth::SessionCookie) => {
-            ws.on_upgrade(move |socket| handle_socket(socket, state))
+            let update_mode = WebSocketUpdateMode::from_client(query.client.as_deref());
+            ws.on_upgrade(move |socket| handle_socket(socket, state, update_mode))
         }
         Err(AuthError::MissingOrInvalidSession) => {
             (StatusCode::UNAUTHORIZED, "missing or invalid session").into_response()
@@ -180,8 +209,12 @@ pub(crate) async fn ws_handler(
     }
 }
 
-pub(crate) async fn handle_socket(mut socket: WebSocket, state: AppState) {
-    info!("websocket client connected");
+pub(crate) async fn handle_socket(
+    mut socket: WebSocket,
+    state: AppState,
+    update_mode: WebSocketUpdateMode,
+) {
+    info!(?update_mode, "websocket client connected");
     let mut event_rx = state.events.subscribe();
 
     let config = client_config(&state).await;
@@ -207,22 +240,44 @@ pub(crate) async fn handle_socket(mut socket: WebSocket, state: AppState) {
         tokio::select! {
             frame = socket.recv() => {
                 let Some(frame) = frame else { return; };
-                if handle_websocket_frame(&mut socket, &state, frame).await.is_err() {
-                    return;
+                match handle_websocket_frame(
+                    &mut socket,
+                    &state,
+                    frame,
+                    update_mode,
+                ).await {
+                    Ok(FrameOutcome::Continue) => {}
+                    Ok(FrameOutcome::Resynced) => {
+                        event_rx = state.events.subscribe();
+                    }
+                    Err(_) => return,
                 }
             }
             event = event_rx.recv() => {
                 match event {
                     Ok(message) => {
-                        if send_json(&mut socket, &message).await.is_err() {
-                            return;
+                        let messages = match collect_outbound_events(message, &mut event_rx, update_mode) {
+                            Ok(messages) => messages,
+                            Err(OutboundCollectError::Lagged(skipped)) => {
+                                warn!(skipped, "websocket client lagged behind bridge events");
+                                return;
+                            }
+                            Err(OutboundCollectError::Closed) => return,
+                        };
+                        for message in messages {
+                            if send_client_message(
+                                &mut socket,
+                                &state,
+                                message,
+                                update_mode,
+                            ).await.is_err() {
+                                return;
+                            }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!(skipped, "websocket client lagged behind bridge events");
-                        if send_sessions_snapshot(&mut socket, &state).await.is_err() {
-                            return;
-                        }
+                        return;
                     }
                     Err(broadcast::error::RecvError::Closed) => return,
                 }
@@ -253,11 +308,18 @@ async fn close_for_text_frame_too_large(
     Err(axum::Error::new(anyhow!("websocket text frame too large")))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameOutcome {
+    Continue,
+    Resynced,
+}
+
 pub(crate) async fn handle_websocket_frame(
     socket: &mut WebSocket,
     state: &AppState,
     frame: Result<Message, axum::Error>,
-) -> Result<(), axum::Error> {
+    update_mode: WebSocketUpdateMode,
+) -> Result<FrameOutcome, axum::Error> {
     let frame = match frame {
         Ok(frame) => frame,
         Err(error) => {
@@ -269,7 +331,8 @@ pub(crate) async fn handle_websocket_frame(
     match frame {
         Message::Text(text) => {
             if client_text_frame_too_large(&text) {
-                return close_for_text_frame_too_large(socket, text.len()).await;
+                close_for_text_frame_too_large(socket, text.len()).await?;
+                return Ok(FrameOutcome::Continue);
             }
 
             if state.log_frames {
@@ -278,9 +341,21 @@ pub(crate) async fn handle_websocket_frame(
 
             match serde_json::from_str::<ClientMessage>(&text) {
                 Ok(message) => {
+                    let outcome = if client_message_resyncs_stream(&message, update_mode) {
+                        FrameOutcome::Resynced
+                    } else {
+                        FrameOutcome::Continue
+                    };
                     for response in handle_client_message(state, message).await {
-                        send_json(socket, &response).await?;
+                        send_client_message(
+                            socket,
+                            state,
+                            response,
+                            WebSocketUpdateMode::Immediate,
+                        )
+                        .await?;
                     }
+                    return Ok(outcome);
                 }
                 Err(error) => {
                     warn!(%error, "invalid client websocket message");
@@ -303,7 +378,14 @@ pub(crate) async fn handle_websocket_frame(
         }
     }
 
-    Ok(())
+    Ok(FrameOutcome::Continue)
+}
+
+fn client_message_resyncs_stream(
+    message: &ClientMessage,
+    update_mode: WebSocketUpdateMode,
+) -> bool {
+    update_mode.uses_session_deltas() && matches!(message, ClientMessage::StateRefresh { .. })
 }
 
 pub(crate) async fn send_sessions_snapshot(
@@ -313,6 +395,112 @@ pub(crate) async fn send_sessions_snapshot(
     refresh_session_catalog(state).await;
     let sessions = state.sessions.read().await;
     send_json(socket, &sessions_snapshot_from_map(&sessions)).await
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ConflationKey {
+    SessionsSnapshot,
+    SessionSnapshot(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OutboundCollectError {
+    Lagged(u64),
+    Closed,
+}
+
+fn collect_outbound_events(
+    first: ServerMessage,
+    event_rx: &mut broadcast::Receiver<ServerMessage>,
+    update_mode: WebSocketUpdateMode,
+) -> Result<Vec<ServerMessage>, OutboundCollectError> {
+    if !update_mode.uses_conflation() {
+        return Ok(vec![first]);
+    }
+
+    let mut messages = vec![first];
+    loop {
+        match event_rx.try_recv() {
+            Ok(message) => messages.push(message),
+            Err(broadcast::error::TryRecvError::Empty) => {
+                return Ok(conflate_server_messages(messages));
+            }
+            Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                return Err(OutboundCollectError::Lagged(skipped));
+            }
+            Err(broadcast::error::TryRecvError::Closed) => {
+                return Err(OutboundCollectError::Closed);
+            }
+        }
+    }
+}
+
+fn conflate_server_messages(messages: Vec<ServerMessage>) -> Vec<ServerMessage> {
+    let mut conflated: HashMap<ConflationKey, (usize, ServerMessage)> = HashMap::new();
+    let mut passthrough: Vec<(usize, ServerMessage)> = Vec::new();
+
+    for (index, message) in messages.into_iter().enumerate() {
+        match &message {
+            ServerMessage::SessionsSnapshot { .. } => {
+                conflated.insert(ConflationKey::SessionsSnapshot, (index, message));
+            }
+            ServerMessage::SessionSnapshot { session_id, .. } => {
+                conflated.insert(
+                    ConflationKey::SessionSnapshot(session_id.clone()),
+                    (index, message),
+                );
+            }
+            _ => passthrough.push((index, message)),
+        }
+    }
+
+    let mut indexed: Vec<(usize, ServerMessage)> = conflated.into_values().collect();
+    indexed.extend(passthrough);
+    indexed.sort_by_key(|(index, _)| *index);
+    indexed.into_iter().map(|(_, message)| message).collect()
+}
+
+async fn send_client_message(
+    socket: &mut WebSocket,
+    state: &AppState,
+    message: ServerMessage,
+    update_mode: WebSocketUpdateMode,
+) -> Result<(), axum::Error> {
+    let message = prepare_client_message(state, message, update_mode).await;
+    send_json(socket, &message).await
+}
+
+async fn prepare_client_message(
+    state: &AppState,
+    message: ServerMessage,
+    update_mode: WebSocketUpdateMode,
+) -> ServerMessage {
+    match message {
+        ServerMessage::SessionDelta {
+            session_id,
+            state: delta,
+        } => {
+            if update_mode.uses_session_deltas() {
+                ServerMessage::SessionDelta {
+                    session_id,
+                    state: delta,
+                }
+            } else {
+                let sessions = state.sessions.read().await;
+                sessions
+                    .get(&session_id)
+                    .map(|record| ServerMessage::SessionSnapshot {
+                        session_id: session_id.clone(),
+                        state: record.projection(),
+                    })
+                    .unwrap_or(ServerMessage::SessionDelta {
+                        session_id,
+                        state: delta,
+                    })
+            }
+        }
+        message => message,
+    }
 }
 
 pub(crate) async fn send_json(
@@ -356,6 +544,14 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "session.snapshot",
             session_id = %session_id,
             transcript_len = state.transcript.len(),
+            status = ?state.summary.status
+        ),
+        ServerMessage::SessionDelta { session_id, state } => info!(
+            direction = "bridge_to_client",
+            message_type = "session.delta",
+            session_id = %session_id,
+            transcript_replace_from = state.transcript_replace_from,
+            transcript_append_len = state.transcript_append.len(),
             status = ?state.summary.status
         ),
         ServerMessage::SessionExited {
@@ -661,6 +857,59 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        ContentBlock, MessageRole, SessionKind, SessionMode, SessionProjection,
+        SessionProjectionDelta, SessionStatus, SessionSummary, Timestamp, TranscriptEntry,
+        TranscriptMessage,
+    };
+
+    fn test_summary(session_id: &str, message_count: usize) -> SessionSummary {
+        SessionSummary {
+            session_id: session_id.to_string(),
+            cwd: Some("/repo".to_string()),
+            status: SessionStatus::Idle,
+            created_at: Timestamp::now(),
+            updated_at: Timestamp::now(),
+            message_count,
+            kind: SessionKind::Managed,
+            session_mode: SessionMode::Standard,
+            session_file: None,
+            title: Some(session_id.to_string()),
+            timestamp: None,
+            category: None,
+            worktree: None,
+        }
+    }
+
+    fn test_message(id: &str, text: &str) -> TranscriptEntry {
+        TranscriptEntry::Message(TranscriptMessage {
+            id: id.to_string(),
+            role: MessageRole::Assistant,
+            blocks: vec![ContentBlock::Text {
+                text: text.to_string(),
+            }],
+            timestamp: None,
+            is_new: true,
+        })
+    }
+
+    fn test_projection(session_id: &str, entries: Vec<TranscriptEntry>) -> SessionProjection {
+        SessionProjection {
+            summary: test_summary(session_id, entries.len()),
+            transcript: entries,
+            is_busy: false,
+            model: None,
+            thinking_level: None,
+            tokens_total: 0,
+            cost_usd: 0.0,
+            context_tokens: None,
+            context_window: None,
+            context_percent: None,
+            plan_mode: None,
+            pending_plan_review: None,
+            todo_phases: Vec::new(),
+        }
+    }
 
     #[test]
     fn build_auth_session_response_sets_http_only_cookie() {
@@ -747,6 +996,26 @@ mod tests {
     }
 
     #[test]
+    fn mobile_state_refresh_resets_event_cursor_after_snapshot_resync() {
+        assert!(client_message_resyncs_stream(
+            &ClientMessage::StateRefresh {
+                session_id: "s1".to_string(),
+            },
+            WebSocketUpdateMode::ConflateAndDelta,
+        ));
+        assert!(!client_message_resyncs_stream(
+            &ClientMessage::StateRefresh {
+                session_id: "s1".to_string(),
+            },
+            WebSocketUpdateMode::Immediate,
+        ));
+        assert!(!client_message_resyncs_stream(
+            &ClientMessage::SessionList,
+            WebSocketUpdateMode::ConflateAndDelta,
+        ));
+    }
+
+    #[test]
     fn client_text_frame_size_limit_is_explicit() {
         assert!(!client_text_frame_too_large(
             &"a".repeat(MAX_CLIENT_TEXT_FRAME_BYTES)
@@ -754,6 +1023,75 @@ mod tests {
         assert!(client_text_frame_too_large(
             &"a".repeat(MAX_CLIENT_TEXT_FRAME_BYTES + 1)
         ));
+    }
+
+    #[test]
+    fn conflate_server_messages_keeps_only_latest_snapshots() {
+        let first = test_projection("s1", vec![test_message("m1", "first")]);
+        let latest = test_projection(
+            "s1",
+            vec![test_message("m1", "first"), test_message("m2", "second")],
+        );
+
+        let messages = conflate_server_messages(vec![
+            ServerMessage::SessionSnapshot {
+                session_id: "s1".to_string(),
+                state: first,
+            },
+            ServerMessage::Error {
+                request_id: None,
+                message: "keep me".to_string(),
+            },
+            ServerMessage::SessionSnapshot {
+                session_id: "s1".to_string(),
+                state: latest,
+            },
+            ServerMessage::SessionsSnapshot {
+                sessions: vec![test_summary("s1", 2)],
+            },
+            ServerMessage::SessionsSnapshot {
+                sessions: vec![test_summary("s1", 2), test_summary("s2", 0)],
+            },
+        ]);
+
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0], ServerMessage::Error { .. }));
+        match &messages[1] {
+            ServerMessage::SessionSnapshot { state, .. } => assert_eq!(state.transcript.len(), 2),
+            other => panic!("expected session snapshot, got {other:?}"),
+        }
+        match &messages[2] {
+            ServerMessage::SessionsSnapshot { sessions } => assert_eq!(sessions.len(), 2),
+            other => panic!("expected sessions snapshot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflate_server_messages_preserves_ordered_deltas() {
+        let projection = test_projection("s1", vec![test_message("m1", "first")]);
+        let delta = ServerMessage::SessionDelta {
+            session_id: "s1".to_string(),
+            state: SessionProjectionDelta::from_projection_replace_tail(0, &projection),
+        };
+
+        let messages = conflate_server_messages(vec![
+            delta.clone(),
+            ServerMessage::SessionsSnapshot {
+                sessions: vec![test_summary("s1", 1)],
+            },
+            ServerMessage::SessionsSnapshot {
+                sessions: vec![test_summary("s1", 1), test_summary("s2", 0)],
+            },
+            delta.clone(),
+        ]);
+
+        assert_eq!(messages.len(), 3);
+        assert!(matches!(messages[0], ServerMessage::SessionDelta { .. }));
+        match &messages[1] {
+            ServerMessage::SessionsSnapshot { sessions } => assert_eq!(sessions.len(), 2),
+            other => panic!("expected sessions snapshot, got {other:?}"),
+        }
+        assert!(matches!(messages[2], ServerMessage::SessionDelta { .. }));
     }
 
     #[test]

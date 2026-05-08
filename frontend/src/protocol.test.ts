@@ -30,6 +30,25 @@ describe("protocol type fixtures", () => {
     expect(message.state.summary.sessionId).toBe("session-1");
   });
 
+  it("preserves the session delta server message shape", () => {
+    const message = {
+      type: "session.delta",
+      sessionId: "session-1",
+      state: {
+        summary: emptyProjection.summary,
+        transcriptReplaceFrom: 0,
+        transcriptAppend: [],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    } satisfies ServerMessage;
+
+    expect(message.type).toBe("session.delta");
+    expect(message.state.transcriptReplaceFrom).toBe(0);
+  });
+
   it("preserves prompt send client message shape", () => {
     const message = {
       type: "prompt.send",

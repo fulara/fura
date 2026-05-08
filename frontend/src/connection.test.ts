@@ -74,6 +74,7 @@ describe("auth and WebSocket URLs", () => {
   it("builds WebSocket URLs without putting tokens in the URL", () => {
     expect(buildWebSocketUrl("http://127.0.0.1:3737/?token=dev")).toBe("ws://127.0.0.1:3737/ws");
     expect(buildWebSocketUrl("https://fura.example/app?token=secret")).toBe("wss://fura.example/ws");
+    expect(buildWebSocketUrl("https://fura.example/mobile.html?token=secret", "mobile")).toBe("wss://fura.example/ws?client=mobile");
   });
 
   it("establishes an HttpOnly cookie session before WebSocket connection", async () => {

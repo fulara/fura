@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { SessionProjection, SessionSummary } from "./protocol";
 import {
   activateSession,
+  applySessionDelta,
   applySessionSnapshot,
   applySessionsSnapshot,
   mergeSessionSummary,
@@ -80,6 +81,70 @@ describe("applySessionSnapshot", () => {
     expect(result.projections.get("old")).toBe(oldProjection);
     expect(result.projections).not.toBe(projections);
     expect(projections.has("new")).toBe(false);
+  });
+});
+
+describe("applySessionDelta", () => {
+  it("appends transcript entries and replaces scalar projection state", () => {
+    const existing = projection("a", {
+      transcript: [{ kind: "message", id: "m1", role: "assistant", blocks: [{ kind: "text", text: "old" }], timestamp: null, isNew: false }],
+      isBusy: true,
+    });
+    const projections = new Map([["a", existing]]);
+
+    const result = applySessionDelta([summary("a")], projections, "a", {
+      summary: summary("a", { status: "idle", messageCount: 2 }),
+      transcriptReplaceFrom: 1,
+      transcriptAppend: [{ kind: "message", id: "m2", role: "assistant", blocks: [{ kind: "text", text: "new" }], timestamp: null, isNew: true }],
+      isBusy: false,
+      tokensTotal: 12,
+      costUsd: 0.01,
+      todoPhases: [],
+    });
+
+    expect(result?.projections.get("a")?.transcript.map(entry => entry.kind === "message" ? entry.id : entry.toolCallId)).toEqual(["m1", "m2"]);
+    expect(result?.projections.get("a")?.isBusy).toBe(false);
+    expect(result?.sessions[0]?.messageCount).toBe(2);
+    expect(projections.get("a")).toBe(existing);
+  });
+
+  it("replaces the transcript tail from the supplied replace-from index", () => {
+    const existing = projection("a", {
+      transcript: [
+        { kind: "message", id: "m1", role: "assistant", blocks: [{ kind: "text", text: "stable" }], timestamp: null, isNew: false },
+        { kind: "message", id: "streaming", role: "assistant", blocks: [{ kind: "text", text: "old partial" }], timestamp: null, isNew: true },
+      ],
+    });
+    const result = applySessionDelta([summary("a")], new Map([["a", existing]]), "a", {
+      summary: summary("a", { messageCount: 1 }),
+      transcriptReplaceFrom: 1,
+      transcriptAppend: [{ kind: "message", id: "streaming", role: "assistant", blocks: [{ kind: "text", text: "new partial" }], timestamp: null, isNew: true }],
+      isBusy: true,
+      tokensTotal: 0,
+      costUsd: 0,
+      todoPhases: [],
+    });
+
+    expect(result?.projections.get("a")?.transcript).toHaveLength(2);
+    expect(result?.projections.get("a")?.transcript[1]).toMatchObject({
+      kind: "message",
+      id: "streaming",
+      blocks: [{ kind: "text", text: "new partial" }],
+    });
+  });
+
+  it("returns null when the delta replace-from index is beyond the current transcript", () => {
+    const projections = new Map([["a", projection("a")]]);
+
+    expect(applySessionDelta([summary("a")], projections, "a", {
+      summary: summary("a"),
+      transcriptReplaceFrom: 1,
+      transcriptAppend: [],
+      isBusy: false,
+      tokensTotal: 0,
+      costUsd: 0,
+      todoPhases: [],
+    })).toBeNull();
   });
 });
 

@@ -29,8 +29,11 @@ export type FuraConnection = {
 export type WebSocketAuth =
   | { type: "sessionCookie"; token: string };
 
+export type FuraClientKind = "desktop" | "mobile";
+
 type FuraConnectionOptions = {
   auth: WebSocketAuth;
+  clientKind?: FuraClientKind;
   locationHref?: string;
   WebSocketCtor?: WebSocketConstructor;
   fetchImpl?: FetchLike;
@@ -49,9 +52,10 @@ type FuraConnectionOptions = {
 const OPEN_READY_STATE = 1;
 const DEFAULT_RECONNECT_DELAYS_MS = [500, 1000, 2000, 5000, 10000] as const;
 
-export function buildWebSocketUrl(locationHref: string): string {
+export function buildWebSocketUrl(locationHref: string, clientKind?: FuraClientKind): string {
   const wsUrl = new URL("/ws", locationHref);
   wsUrl.protocol = wsUrl.protocol === "https:" ? "wss:" : "ws:";
+  if (clientKind) wsUrl.searchParams.set("client", clientKind);
   return wsUrl.toString();
 }
 
@@ -99,7 +103,7 @@ export function createFuraConnection(options: FuraConnectionOptions): FuraConnec
         return;
       }
 
-      const nextSocket = new WebSocketCtor(buildWebSocketUrl(locationHref));
+      const nextSocket = new WebSocketCtor(buildWebSocketUrl(locationHref, options.clientKind));
       socket = nextSocket;
       nextSocket.addEventListener("open", () => {
         if (generation !== connectionGeneration || socket !== nextSocket) return;

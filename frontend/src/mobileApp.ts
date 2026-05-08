@@ -74,7 +74,7 @@ import type {
 } from "./protocol";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility } from "./uiPreferences";
 import { sessionCategories, visibleSessions } from "./sessionList";
-import { activateSession as activateSessionState, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
+import { activateSession as activateSessionState, applySessionDelta, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   deriveWorktreeCreateView,
   resolveSessionCreateMessage,
@@ -120,6 +120,7 @@ type ControlChatMessage = {
 
 export type MobileConnectionOptions = {
   auth: WebSocketAuth;
+  clientKind?: "mobile";
   onStatus(label: string, className: ConnectionStatus): void;
   onOpen?(): void;
   onClose?(): void;
@@ -891,6 +892,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     connection?.disconnect();
     connection = createConnection({
       auth: { type: "sessionCookie", token: bridgeToken },
+      clientKind: "mobile",
       onStatus: setStatus,
       onOpen: () => {
         pendingRestoreAfterSessionsSnapshot = true;
@@ -2102,6 +2104,25 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         if (createdByPendingRequest || !activeSessionId || activeSessionId === message.sessionId) {
           activateSession(message.sessionId);
           if (createdByPendingRequest) finishCreateSession();
+          render();
+        } else {
+          unreadSessions.add(message.sessionId);
+          renderSessions();
+        }
+        break;
+      }
+      case "session.delta": {
+        rememberTrackedSessionId(message.sessionId);
+        const result = applySessionDelta(sessions, projections, message.sessionId, message.state);
+        if (!result) {
+          send({ type: "state.refresh", sessionId: message.sessionId });
+          break;
+        }
+        ({ sessions, projections } = result);
+        const projection = projections.get(message.sessionId);
+        if (projection) syncVisiblePlanReviewFromProjection(message.sessionId, projection);
+        if (!activeSessionId || activeSessionId === message.sessionId) {
+          activateSession(message.sessionId);
           render();
         } else {
           unreadSessions.add(message.sessionId);

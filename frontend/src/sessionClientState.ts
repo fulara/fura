@@ -1,4 +1,4 @@
-import type { ClientMessage, SessionProjection, SessionSummary } from "./protocol";
+import type { ClientMessage, SessionProjection, SessionProjectionDelta, SessionSummary } from "./protocol";
 
 export type SessionsSnapshotUpdate = {
   sessions: SessionSummary[];
@@ -42,6 +42,32 @@ export function applySessionSnapshot(
     sessions: mergeSessionSummary(sessions, projection.summary),
     projections: nextProjections,
   };
+}
+
+export function applySessionDelta(
+  sessions: SessionSummary[],
+  projections: ReadonlyMap<string, SessionProjection>,
+  sessionId: string,
+  delta: SessionProjectionDelta,
+): SessionSnapshotUpdate | null {
+  const previous = projections.get(sessionId);
+  if (!previous || previous.transcript.length < delta.transcriptReplaceFrom) return null;
+  const projection: SessionProjection = {
+    summary: delta.summary,
+    transcript: [...previous.transcript.slice(0, delta.transcriptReplaceFrom), ...delta.transcriptAppend],
+    isBusy: delta.isBusy,
+    model: delta.model,
+    thinkingLevel: delta.thinkingLevel,
+    tokensTotal: delta.tokensTotal,
+    costUsd: delta.costUsd,
+    contextTokens: delta.contextTokens,
+    contextWindow: delta.contextWindow,
+    contextPercent: delta.contextPercent,
+    planMode: delta.planMode,
+    pendingPlanReview: delta.pendingPlanReview,
+    todoPhases: delta.todoPhases,
+  };
+  return applySessionSnapshot(sessions, projections, sessionId, projection);
 }
 
 export function activateSession(unreadSessionIds: Set<string>, sessionId: string): string {

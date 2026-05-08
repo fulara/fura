@@ -262,6 +262,7 @@ describe("mountMobileApp", () => {
     expect(window.sessionStorage.getItem(FURA_TOKEN_STORAGE_KEY)).toBe("stored-token");
     expect(connection.options.auth).toEqual({ type: "sessionCookie", token: "stored-token" });
     expect(connection.sent).toContainEqual({ type: "session.list" });
+    expect(connection.options.clientKind).toBe("mobile");
     expect(document.querySelector("#mobileConnectionStatus")?.textContent).toBe("connected");
     debug.mockRestore();
   });
@@ -327,6 +328,88 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileSessionMeta")?.hasAttribute("hidden")).toBe(true);
     expect(document.querySelector("#mobileStatusBar")?.textContent).toContain("/repo");
     expect(connection.sent).toContainEqual({ type: "session.attach", sessionId: "live" });
+  });
+
+  it("applies mobile session deltas after an initial snapshot", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "live",
+      state: {
+        summary: summary("live", { title: "Live", messageCount: 2 }),
+        transcriptReplaceFrom: 1,
+        transcriptAppend: [{
+          kind: "message",
+          id: "delta-message",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "Delta transcript" }],
+          timestamp: null,
+          isNew: true,
+        }],
+        isBusy: false,
+        tokensTotal: 10,
+        costUsd: 0.01,
+        todoPhases: [],
+      },
+    });
+
+    expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Transcript live");
+    expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Delta transcript");
+    expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Live");
+  });
+
+  it("requests a full refresh when a mobile session delta cannot be applied", () => {
+    const { connection } = createHarness();
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "live",
+      state: {
+        summary: summary("live"),
+        transcriptReplaceFrom: 1,
+        transcriptAppend: [],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    });
+
+    expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "live" });
+  });
+
+  it("recovers from a rejected session delta when a full snapshot follows", () => {
+    const { connection } = createHarness();
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "live",
+      state: {
+        summary: summary("live"),
+        transcriptReplaceFrom: 1,
+        transcriptAppend: [],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        summary: summary("live", { title: "Recovered" }),
+      }),
+    });
+
+    expect(connection.sent.filter(message => message.type === "state.refresh")).toEqual([
+      { type: "state.refresh", sessionId: "live" },
+    ]);
+    expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Recovered");
+    expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Transcript live");
   });
 
   it("keeps the mobile options menu open when visibility toggles are changed", () => {

@@ -3,7 +3,8 @@ use serde_json::Value;
 
 use crate::{
     ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, ProposedModelConfig,
-    SessionMode, SessionProjection, SessionSummary, ThinkingVisibilityPreference,
+    SessionMode, SessionProjection, SessionProjectionDelta, SessionSummary,
+    ThinkingVisibilityPreference,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -841,6 +842,11 @@ pub(crate) enum ServerMessage {
     SessionSnapshot {
         session_id: String,
         state: SessionProjection,
+    },
+    #[serde(rename = "session.delta")]
+    SessionDelta {
+        session_id: String,
+        state: SessionProjectionDelta,
     },
     #[serde(rename = "session.exited")]
     SessionExited {
