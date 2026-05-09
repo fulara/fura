@@ -69,7 +69,7 @@ function summary(sessionId: string, overrides: Partial<SessionSummary> = {}): Se
   };
 }
 
-function projection(sessionId: string): SessionProjection {
+function projection(sessionId: string, overrides: Partial<SessionProjection> = {}): SessionProjection {
   return {
     summary: summary(sessionId),
     transcript: [],
@@ -77,6 +77,7 @@ function projection(sessionId: string): SessionProjection {
     tokensTotal: 0,
     costUsd: 0,
     todoPhases: [],
+    ...overrides,
   };
 }
 
@@ -122,15 +123,19 @@ function installMocks(): void {
     initDesktopDockview: () => {
       const diffPanel = document.createElement("div");
       diffPanel.id = "testDiffPanel";
-      document.body.append(diffPanel);
+      const transcriptPanel = document.createElement("div");
+      transcriptPanel.id = "testTranscriptPanel";
+      document.body.append(diffPanel, transcriptPanel);
+      const panels: Record<string, HTMLElement> = { diffs: diffPanel, transcript: transcriptPanel };
       return {
-        panelMounted: (id: string) => id === "diffs",
-        panelContains: (id: string, element: Element) => id === "diffs" && diffPanel.contains(element),
+        panelMounted: (id: string) => Boolean(panels[id]),
+        panelContains: (id: string, element: Element) => Boolean(panels[id]?.contains(element)),
         isPanelActive: (id: string) => id === "diffs",
         activatePanel: () => false,
         withPanel: (id: string, render: (container: HTMLElement) => void) => {
-          if (id !== "diffs") return false;
-          render(diffPanel);
+          const panel = panels[id];
+          if (!panel) return false;
+          render(panel);
           return true;
         },
         ensureSessionChangesPanel: () => false,
@@ -450,5 +455,46 @@ describe("desktop cog options", () => {
     expect(document.querySelector<HTMLElement>("#testDiffPanel .diffs-sidebar-scroll")).toBe(sidebar);
     expect(sidebar.scrollTop).toBe(77);
     expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("new b");
+  });
+
+  it("preserves transcript scroll and cached bubbles while entering transcript review", async () => {
+    const { connection } = await createHarness();
+    const transcriptPanels = [...document.querySelectorAll<HTMLElement>("#testTranscriptPanel")];
+    if (transcriptPanels.length === 0) throw new Error("transcript panel missing");
+    for (const panel of transcriptPanels) {
+      Object.defineProperty(panel, "scrollHeight", { configurable: true, value: 1000 });
+      Object.defineProperty(panel, "clientHeight", { configurable: true, value: 200 });
+      const replaceChildren = panel.replaceChildren.bind(panel);
+      panel.replaceChildren = (...nodes: Parameters<HTMLElement["replaceChildren"]>) => {
+        replaceChildren(...nodes);
+        panel.scrollTop = 0;
+      };
+    }
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [0, 1, 2].map(index => ({
+          kind: "message",
+          id: `message-${index}`,
+          role: "assistant",
+          blocks: [{ kind: "text", text: `line ${index}` }],
+          timestamp: null,
+          isNew: false,
+        })),
+      }),
+    });
+    const transcriptPanel = transcriptPanels.find(panel => panel.querySelector('[data-message-id="message-1"]'));
+    if (!transcriptPanel) throw new Error(`rendered transcript panel missing: ${transcriptPanels.map(panel => panel.textContent).join(" | ")}`);
+    transcriptPanel.scrollTop = 320;
+    const untouchedBubble = transcriptPanel.querySelector<HTMLElement>('[data-message-id="message-1"]');
+
+    transcriptPanel.querySelector<HTMLButtonElement>('[data-message-id="message-0"] .message-review-toggle')?.click();
+
+    expect(transcriptPanel.scrollTop).toBe(320);
+    expect(transcriptPanel.querySelector('[data-message-id="message-0"] .transcript-review-body')).toBeTruthy();
+    expect(transcriptPanel.querySelector<HTMLElement>('[data-message-id="message-1"]')).toBe(untouchedBubble);
   });
 });
