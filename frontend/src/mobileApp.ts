@@ -2752,6 +2752,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function renderTranscript(projection: SessionProjection | undefined): void {
     setRenderDocument(transcript.ownerDocument);
     const wasNearBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 120;
+    const previousScrollTop = transcript.scrollTop;
 
     if (!projection) {
       const empty = transcript.ownerDocument.createElement("p");
@@ -2798,7 +2799,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     transcript.replaceChildren(fragment);
-    if (wasNearBottom) transcript.scrollTop = transcript.scrollHeight;
+    if (wasNearBottom) {
+      transcript.scrollTop = transcript.scrollHeight;
+    } else {
+      transcript.scrollTop = previousScrollTop;
+    }
   }
 
   function renderDiffView(projection: SessionProjection | undefined): void {

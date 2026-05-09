@@ -710,12 +710,25 @@ describe("mountMobileApp", () => {
       }),
     });
 
+    const transcript = document.querySelector<HTMLElement>("#mobileTranscript");
+    if (!transcript) throw new Error("mobile transcript missing");
+    Object.defineProperty(transcript, "scrollHeight", { configurable: true, value: 1000 });
+    Object.defineProperty(transcript, "clientHeight", { configurable: true, value: 200 });
+    const replaceChildren = transcript.replaceChildren.bind(transcript);
+    transcript.replaceChildren = (...nodes: Parameters<HTMLElement["replaceChildren"]>) => {
+      replaceChildren(...nodes);
+      transcript.scrollTop = 0;
+    };
+    transcript.scrollTop = 240;
+
     const reviewButton = [...document.querySelectorAll<HTMLButtonElement>(".message-actions button")]
       .find(button => button.textContent === "Review");
     reviewButton?.click();
+    expect(transcript.scrollTop).toBe(240);
     document.querySelectorAll<HTMLButtonElement>(".transcript-review-comment-btn")[1]?.click();
     expect(prompt).toHaveBeenCalledWith("Comment on this transcript line");
     expect(document.querySelector(".transcript-review-inline-comment")?.textContent).toContain("Please clarify line two");
+    expect(transcript.scrollTop).toBe(240);
 
     document.querySelector<HTMLButtonElement>(".transcript-review-actions button:last-child")?.click();
     expect(document.querySelector<HTMLElement>("#mobileReviewPreviewOverlay")?.hidden).toBe(false);

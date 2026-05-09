@@ -3774,22 +3774,6 @@ function clearCachedPanelRenderState(cache: CachedPanelRenderState): void {
   cache.nodes.clear();
 }
 
-function firstChangedPanelItemIndex(previousKeys: string[], items: PanelRenderItem[]): number {
-  const sharedLength = Math.min(previousKeys.length, items.length);
-  for (let i = 0; i < sharedLength; i++) {
-    if (previousKeys[i] !== items[i]?.key) return i;
-  }
-  return previousKeys.length === items.length ? items.length : sharedLength;
-}
-
-function firstPanelItemRenderIndex(cache: CachedPanelRenderState, items: PanelRenderItem[], revision: number): number {
-  if (cache.revision !== revision || cache.keys.length === 0) return 0;
-  const firstChangedIndex = firstChangedPanelItemIndex(cache.keys, items);
-  if (firstChangedIndex === items.length && cache.keys.length === items.length) {
-    return Math.max(0, items.length - 1);
-  }
-  return Math.max(0, Math.min(firstChangedIndex, cache.keys.length - 1));
-}
 
 function renderCachedPanelItems(
   container: HTMLElement,
@@ -3798,13 +3782,14 @@ function renderCachedPanelItems(
   revision: number,
   trailingNodes: Node[] = [],
 ): void {
-  const renderFromIndex = firstPanelItemRenderIndex(cache, items, revision);
+  const canReuseCache = cache.revision === revision;
+
   const fragment = mkFrag();
   const nextNodes = new Map<string, HTMLElement>();
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const cachedNode = i < renderFromIndex ? cache.nodes.get(item.key) : undefined;
+    const cachedNode = canReuseCache && i < items.length - 1 ? cache.nodes.get(item.key) : undefined;
     const node = cachedNode?.ownerDocument === container.ownerDocument ? cachedNode : item.render();
     nextNodes.set(item.key, node);
     fragment.append(node);
@@ -3914,6 +3899,15 @@ function todoPhasesRenderKey(phases: TodoPhase[]): string {
   ]));
 }
 
+function transcriptReviewRenderKey(sessionId: string, messageId: string): string {
+  const comments = transcriptReviewCommentsForMessage(sessionId, messageId)
+    .map(comment => [comment.id, comment.lineNumber, comment.lineText, comment.text]);
+  return JSON.stringify({
+    active: isTranscriptMessageUnderReview(sessionId, messageId),
+    comments,
+  });
+}
+
 function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderItem[] {
   const items: PanelRenderItem[] = [];
   for (let i = 0; i < projection.transcript.length; i++) {
@@ -3922,7 +3916,7 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
 
     if (entry.kind === "message") {
       items.push({
-        key: `message:${entry.id}:${startIndex}`,
+        key: `message:${entry.id}:${startIndex}:${transcriptReviewRenderKey(projection.summary.sessionId, entry.id)}`,
         render: () => renderMessage(entry, projection.summary.sessionId),
       });
       continue;
@@ -3956,8 +3950,9 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
   }
   const visiblePlanReview = visiblePlanReviews.get(projection.summary.sessionId);
   if (visiblePlanReview) {
+    const reviewMessage = planReviewTranscriptMessage(visiblePlanReview.review);
     items.push({
-      key: `plan-review:${planReviewRenderKey(visiblePlanReview.review, visiblePlanReview.mode)}`,
+      key: `plan-review:${planReviewRenderKey(visiblePlanReview.review, visiblePlanReview.mode)}:${transcriptReviewRenderKey(projection.summary.sessionId, reviewMessage.id)}`,
       render: () => renderPlanReviewCard(
         visiblePlanReview.review,
         {
@@ -4012,6 +4007,7 @@ function renderTranscriptView(
 
   const wasNearBottom =
     container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+  const previousScrollTop = container.scrollTop;
   const restoreThinkingOpenState = !skipThinkingOpenRestoreOnce;
   skipThinkingOpenRestoreOnce = false;
   const openThinking = new Set<string>();
@@ -4047,6 +4043,8 @@ function renderTranscriptView(
 
   if (sessionChanged || wasNearBottom) {
     container.scrollTop = container.scrollHeight;
+  } else {
+    container.scrollTop = previousScrollTop;
   }
 }
 
@@ -4505,7 +4503,7 @@ function isTranscriptMessageUnderReview(sessionId: string, messageId: string): b
 
 function startTranscriptReview(sessionId: string, message: TranscriptMessage): void {
   transcriptReviewActiveMessages.set(sessionId, message.id);
-  markTranscriptViewDirty({ resetCache: true });
+  markTranscriptViewDirty();
   render();
 }
 
@@ -4515,7 +4513,7 @@ function cancelTranscriptReview(sessionId: string, message: TranscriptMessage): 
     sessionId,
     (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId !== message.id),
   );
-  markTranscriptViewDirty({ resetCache: true });
+  markTranscriptViewDirty();
   render();
 }
 
@@ -4536,7 +4534,7 @@ function addTranscriptReviewComment(
     text: comment.trim(),
   });
   transcriptReviewComments.set(sessionId, comments);
-  markTranscriptViewDirty({ resetCache: true });
+  markTranscriptViewDirty();
   render();
 }
 
@@ -4551,7 +4549,7 @@ function editTranscriptReviewComment(sessionId: string, comment: TranscriptRevie
       existing.id === comment.id ? { ...existing, text: trimmed } : existing,
     ),
   );
-  markTranscriptViewDirty({ resetCache: true });
+  markTranscriptViewDirty();
   render();
 }
 
@@ -4560,7 +4558,7 @@ function deleteTranscriptReviewComment(sessionId: string, comment: TranscriptRev
     sessionId,
     (transcriptReviewComments.get(sessionId) ?? []).filter(existing => existing.id !== comment.id),
   );
-  markTranscriptViewDirty({ resetCache: true });
+  markTranscriptViewDirty();
   render();
 }
 
@@ -4594,7 +4592,7 @@ function sendTranscriptReviewComments(
       (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId !== message.id),
     );
     transcriptReviewActiveMessages.delete(sessionId);
-    markTranscriptViewDirty({ resetCache: true });
+    markTranscriptViewDirty();
     render();
   };
   sendPromptWithBusyHandling({
