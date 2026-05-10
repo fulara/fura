@@ -2431,6 +2431,38 @@ pub(crate) async fn handle_session_host_tool_call(
     }
 }
 
+pub(crate) async fn handle_session_host_tool_cancel(
+    state: &AppState,
+    transport_session_id: &str,
+    frame_id: String,
+    target_id: String,
+) {
+    let has_review_context = state
+        .active_review_contexts
+        .read()
+        .await
+        .values()
+        .any(|context| context.session_id == transport_session_id);
+    let has_conflict_context =
+        state
+            .active_conflict_contexts
+            .read()
+            .await
+            .values()
+            .any(|context| {
+                context.transport_session_id == transport_session_id
+                    || context.session_id == transport_session_id
+            });
+    debug!(
+        transport_session_id,
+        frame_id = %frame_id,
+        target_id = %target_id,
+        has_review_context,
+        has_conflict_context,
+        "received session host tool cancellation; Fura host tools do not expose cancellable in-flight work yet"
+    );
+}
+
 async fn dispatch_session_host_tool(
     state: &AppState,
     transport_session_id: &str,

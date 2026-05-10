@@ -7,7 +7,7 @@ use tokio::{
     process::Command,
     sync::{mpsc, oneshot},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::*;
 
@@ -470,8 +470,10 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 let _ = response.payload();
                 apply_rpc_response(state, session_id, frame).await;
             }
-            OmpRpcFrame::HostToolCancel { .. }
-            | OmpRpcFrame::ExtensionUiRequest { .. }
+            OmpRpcFrame::HostToolCancel { id, target_id } => {
+                handle_controller_host_tool_cancel(state, id, target_id).await
+            }
+            OmpRpcFrame::ExtensionUiRequest { .. }
             | OmpRpcFrame::MessageUpdate { .. }
             | OmpRpcFrame::MessageEnd { .. }
             | OmpRpcFrame::ToolExecutionStart { .. }
@@ -826,8 +828,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             handle_session_host_tool_call(state, session_id, id, tool_call_id, tool_name, arguments)
                 .await
         }
-        OmpRpcFrame::HostToolCancel { .. } | OmpRpcFrame::Unknown => {
-            apply_rpc_response(state, session_id, frame).await
+        OmpRpcFrame::HostToolCancel { id, target_id } => {
+            handle_session_host_tool_cancel(state, session_id, id, target_id).await
+        }
+        OmpRpcFrame::Unknown => {
+            debug!(transport_session_id = %session_id, "ignored unknown OMP RPC frame");
         }
     }
 }

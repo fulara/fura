@@ -865,6 +865,33 @@ describe("mountMobileApp", () => {
     });
   });
 
+  it("renders open_url dialog requests without sending extension responses", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "dialog-open",
+        method: "open_url",
+        title: "Open login URL",
+        instructions: "Use this link to continue.",
+        url: "https://auth.example.test/mobile",
+      },
+    });
+
+    const overlay = document.querySelector<HTMLElement>("#mobileDialogOverlay");
+    expect(overlay?.hidden).toBe(false);
+    expect(document.querySelector("#mobileDialogTitle")?.textContent).toBe("Open login URL");
+    expect(document.querySelector("#mobileDialogBody")?.textContent).toContain("Use this link to continue.");
+    expect(document.querySelector<HTMLAnchorElement>("#mobileDialogField a")?.href).toBe("https://auth.example.test/mobile");
+    expect(document.querySelector<HTMLButtonElement>("#mobileDialogSubmit")?.hidden).toBe(true);
+
+    document.querySelector<HTMLButtonElement>("#mobileDialogCancel")?.click();
+
+    expect(overlay?.hidden).toBe(true);
+    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
+  });
+
   it("applies extension editor text updates to the mobile prompt draft", () => {
     const { connection } = createHarness();
     connection.emit({

@@ -14,6 +14,8 @@ export type ExtensionDialogRequest = {
   statusText?: string;
   widgetLines?: string[];
   text?: string;
+  url?: string;
+  instructions?: string;
 };
 
 export function parseExtensionDialogRequest(sessionId: string, dialog: unknown): ExtensionDialogRequest | null {
@@ -38,6 +40,8 @@ export function parseExtensionDialogRequest(sessionId: string, dialog: unknown):
     statusText: stringField(dialog, "statusText"),
     widgetLines: stringArrayField(dialog, "widgetLines"),
     text: stringField(dialog, "text"),
+    url: stringField(dialog, "url"),
+    instructions: stringField(dialog, "instructions"),
   };
 }
 
@@ -53,12 +57,15 @@ export function extensionDialogFallbackTitle(method: string): string {
       return "Edit response";
     case "notify":
       return "Extension notice";
+    case "open_url":
+      return "Open URL";
     default:
       return "Extension request";
   }
 }
 
 export function extensionDialogBodyText(request: ExtensionDialogRequest): string {
+  if (request.method === "open_url" && request.instructions) return request.instructions;
   if (request.message) return request.message;
   if (request.method === "editor" && request.promptStyle) return "The extension requested a prompt-style editor response.";
   if (request.method === "setWidget" && request.widgetLines?.length) return request.widgetLines.join("\n");
@@ -68,6 +75,16 @@ export function extensionDialogBodyText(request: ExtensionDialogRequest): string
 export function formatExtensionDialogNotification(request: ExtensionDialogRequest): string {
   const prefix = request.notifyType ? `${request.notifyType}: ` : "";
   return `${prefix}${request.message ?? request.title}`;
+}
+
+export function extensionDialogHttpUrl(request: ExtensionDialogRequest): string | null {
+  if (!request.url) return null;
+  try {
+    const url = new URL(request.url);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -20,6 +20,7 @@ import {
 } from "./diffState";
 import {
   extensionDialogBodyText,
+  extensionDialogHttpUrl,
   formatExtensionDialogNotification,
   parseExtensionDialogRequest,
   type ExtensionDialogRequest,
@@ -846,7 +847,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     event.preventDefault();
     submitActiveDialog();
   });
-  dialogCancel.addEventListener("click", () => respondToActiveDialog({ cancelled: true }));
+  dialogCancel.addEventListener("click", dismissOrCancelActiveDialog);
   busyPromptCancel.addEventListener("click", restoreBusyPromptDraft);
   busyPromptSteer.addEventListener("click", () => sendBusyPromptDraft("steer"));
   busyPromptFollowUp.addEventListener("click", () => sendBusyPromptDraft("followUp"));
@@ -1502,6 +1503,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     renderMobileDialog();
   }
 
+  function dismissOrCancelActiveDialog(): void {
+    if (!activeDialog) return;
+    if (activeDialog.method === "open_url") {
+      showNextMobileDialog();
+      return;
+    }
+    respondToActiveDialog({ cancelled: true });
+  }
+
   function submitActiveDialog(): void {
     if (!activeDialog) return;
     switch (activeDialog.method) {
@@ -1523,6 +1533,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         respondToActiveDialog({ value: input?.value ?? "" });
         return;
       }
+      case "open_url":
+        showNextMobileDialog();
+        return;
       default:
         respondToActiveDialog({ cancelled: true });
     }
@@ -1585,6 +1598,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         renderMobileDialogEditor(activeDialog);
         dialogSubmit.textContent = "Submit";
         break;
+      case "open_url":
+        renderMobileDialogOpenUrl(activeDialog);
+        dialogSubmit.hidden = true;
+        dialogCancel.textContent = "Dismiss";
+        break;
       default:
         dialogSubmit.hidden = true;
         dialogCancel.textContent = "Dismiss";
@@ -1597,7 +1615,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     window.setTimeout(() => {
-      const target = dialogField.querySelector<HTMLElement>("[data-dialog-value]") ?? dialogSubmit;
+      const target = dialogField.querySelector<HTMLElement>("[data-dialog-value]") ?? (dialogSubmit.hidden ? dialogCancel : dialogSubmit);
       target.focus();
     }, 0);
   }
@@ -1643,6 +1661,55 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     textarea.value = request.prefill ?? "";
     label.append(textarea);
     dialogField.append(label);
+  }
+
+  function renderMobileDialogOpenUrl(request: ExtensionDialogRequest): void {
+    const urlText = request.url ?? "";
+    const safeUrl = extensionDialogHttpUrl(request);
+    const wrapper = dialogField.ownerDocument.createElement("div");
+    wrapper.className = "mobile-dialog-open-url";
+
+    const label = dialogField.ownerDocument.createElement("p");
+    label.textContent = "URL";
+    const code = dialogField.ownerDocument.createElement("code");
+    code.textContent = urlText || "No URL provided.";
+    wrapper.append(label, code);
+
+    const actions = dialogField.ownerDocument.createElement("div");
+    actions.className = "mobile-dialog-open-url-actions";
+    if (safeUrl) {
+      const link = dialogField.ownerDocument.createElement("a");
+      link.href = safeUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Open link";
+      actions.append(link);
+    } else {
+      const warning = dialogField.ownerDocument.createElement("p");
+      warning.className = "mobile-dialog-open-url-warning";
+      warning.textContent = "Fura only opens http:// and https:// extension URLs.";
+      wrapper.append(warning);
+    }
+
+    const copyButton = dialogField.ownerDocument.createElement("button");
+    copyButton.type = "button";
+    copyButton.textContent = "Copy URL";
+    copyButton.disabled = !urlText;
+    copyButton.addEventListener("click", async () => {
+      if (!urlText || !navigator.clipboard?.writeText) {
+        dialogStatus.textContent = "Clipboard copy is not available in this browser.";
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(urlText);
+        dialogStatus.textContent = "URL copied.";
+      } catch {
+        dialogStatus.textContent = "Could not copy URL.";
+      }
+    });
+    actions.append(copyButton);
+    wrapper.append(actions);
+    dialogField.append(wrapper);
   }
 
 

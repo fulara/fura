@@ -114,6 +114,7 @@ import {
 } from "./categoryCombobox";
 import {
   extensionDialogBodyText,
+  extensionDialogHttpUrl,
   formatExtensionDialogNotification,
   parseExtensionDialogRequest,
   type ExtensionDialogRequest,
@@ -1269,13 +1270,13 @@ extensionDialogForm.addEventListener("submit", event => {
   event.preventDefault();
   submitActiveExtensionDialog();
 });
-extensionDialogClose.addEventListener("click", () => respondToActiveExtensionDialog({ cancelled: true }));
-extensionDialogCancel.addEventListener("click", () => respondToActiveExtensionDialog({ cancelled: true }));
+extensionDialogClose.addEventListener("click", dismissOrCancelActiveExtensionDialog);
+extensionDialogCancel.addEventListener("click", dismissOrCancelActiveExtensionDialog);
 extensionDialogOverlay.addEventListener("mousedown", event => {
-  if (event.target === extensionDialogOverlay) respondToActiveExtensionDialog({ cancelled: true });
+  if (event.target === extensionDialogOverlay) dismissOrCancelActiveExtensionDialog();
 });
 extensionDialogOverlay.addEventListener("keydown", event => {
-  if (event.key === "Escape") { event.preventDefault(); respondToActiveExtensionDialog({ cancelled: true }); }
+  if (event.key === "Escape") { event.preventDefault(); dismissOrCancelActiveExtensionDialog(); }
 });
 deleteSessionButton.addEventListener("click", () => {
   if (activeSessionId) openDeleteSessionPicker(activeSessionId);
@@ -2545,6 +2546,15 @@ function showNextExtensionDialog(): void {
   renderExtensionDialog();
 }
 
+function dismissOrCancelActiveExtensionDialog(): void {
+  if (!activeExtensionDialog) return;
+  if (activeExtensionDialog.method === "open_url") {
+    showNextExtensionDialog();
+    return;
+  }
+  respondToActiveExtensionDialog({ cancelled: true });
+}
+
 function submitActiveExtensionDialog(): void {
   if (!activeExtensionDialog) return;
   switch (activeExtensionDialog.method) {
@@ -2566,6 +2576,9 @@ function submitActiveExtensionDialog(): void {
       respondToActiveExtensionDialog({ value: input?.value ?? "" });
       return;
     }
+    case "open_url":
+      showNextExtensionDialog();
+      return;
     default:
       respondToActiveExtensionDialog({ cancelled: true });
   }
@@ -2631,6 +2644,12 @@ function renderExtensionDialog(): void {
     case "editor":
       renderExtensionDialogEditor(activeExtensionDialog);
       break;
+    case "open_url":
+      renderExtensionDialogOpenUrl(activeExtensionDialog);
+      extensionDialogSubmit.hidden = true;
+      extensionDialogCancel.textContent = "Dismiss";
+      extensionDialogSubtitle.textContent = "Open the link requested by the OMP extension.";
+      break;
     default:
       extensionDialogSubmit.hidden = true;
       extensionDialogCancel.textContent = "Dismiss";
@@ -2643,7 +2662,7 @@ function renderExtensionDialog(): void {
   }
 
   window.setTimeout(() => {
-    const target = extensionDialogField.querySelector<HTMLElement>("[data-dialog-value]") ?? extensionDialogSubmit;
+    const target = extensionDialogField.querySelector<HTMLElement>("[data-dialog-value]") ?? (extensionDialogSubmit.hidden ? extensionDialogCancel : extensionDialogSubmit);
     target.focus();
   }, 0);
 }
@@ -2689,6 +2708,54 @@ function renderExtensionDialogEditor(request: ExtensionDialogRequest): void {
   textarea.value = request.prefill ?? "";
   label.append(textarea);
   extensionDialogField.append(label);
+}
+
+function renderExtensionDialogOpenUrl(request: ExtensionDialogRequest): void {
+  const urlText = request.url ?? "";
+  const safeUrl = extensionDialogHttpUrl(request);
+  const wrapper = document.createElement("div");
+  wrapper.className = "extension-dialog-open-url";
+  const label = document.createElement("p");
+  label.textContent = "URL";
+  const code = document.createElement("code");
+  code.textContent = urlText || "No URL provided.";
+  wrapper.append(label, code);
+
+  const actions = document.createElement("div");
+  actions.className = "extension-dialog-open-url-actions";
+  if (safeUrl) {
+    const link = document.createElement("a");
+    link.href = safeUrl;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = "Open link";
+    actions.append(link);
+  } else {
+    const warning = document.createElement("p");
+    warning.className = "extension-dialog-open-url-warning";
+    warning.textContent = "Fura only opens http:// and https:// extension URLs.";
+    wrapper.append(warning);
+  }
+
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.textContent = "Copy URL";
+  copyButton.disabled = !urlText;
+  copyButton.addEventListener("click", async () => {
+    if (!urlText || !navigator.clipboard?.writeText) {
+      extensionDialogStatus.textContent = "Clipboard copy is not available in this browser.";
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(urlText);
+      extensionDialogStatus.textContent = "URL copied.";
+    } catch {
+      extensionDialogStatus.textContent = "Could not copy URL.";
+    }
+  });
+  actions.append(copyButton);
+  wrapper.append(actions);
+  extensionDialogField.append(wrapper);
 }
 
 

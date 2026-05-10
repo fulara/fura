@@ -211,6 +211,42 @@ describe("conflict resolver entry", () => {
 
 });
 
+describe("desktop extension dialogs", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    connections = [];
+    vi.useRealTimers();
+  });
+
+  it("renders open_url requests as safe links without sending dialog responses", async () => {
+    const { connection } = await createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "open-1",
+        method: "open_url",
+        title: "Sign in",
+        instructions: "Open the browser link.",
+        url: "https://auth.example.test/start",
+      },
+    });
+
+    const overlay = document.querySelector<HTMLElement>("#extensionDialogOverlay");
+    expect(overlay?.hidden).toBe(false);
+    expect(document.querySelector("#extensionDialogTitle")?.textContent).toBe("Sign in");
+    expect(document.querySelector("#extensionDialogBody")?.textContent).toContain("Open the browser link.");
+    expect(document.querySelector<HTMLAnchorElement>("#extensionDialogField a")?.href).toBe("https://auth.example.test/start");
+    expect(document.querySelector<HTMLButtonElement>("#extensionDialogSubmit")?.hidden).toBe(true);
+
+    document.querySelector<HTMLButtonElement>("#extensionDialogCancel")?.click();
+
+    expect(overlay?.hidden).toBe(true);
+    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
+  });
+});
+
 
 describe("desktop cog options", () => {
   beforeEach(() => {

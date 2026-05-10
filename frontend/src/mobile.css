@@ -861,6 +861,47 @@ body {
   gap: 0.5rem;
 }
 
+.mobile-dialog-open-url {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.mobile-dialog-open-url p {
+  margin: 0;
+}
+
+.mobile-dialog-open-url code {
+  overflow-wrap: anywhere;
+  border: 1px solid #30384a;
+  border-radius: 0.7rem;
+  padding: 0.65rem;
+  background: #0b0f17;
+  color: #d7deea;
+}
+
+.mobile-dialog-open-url-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.mobile-dialog-open-url-actions a {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #3b82f6;
+  border-radius: 999px;
+  padding: 0.55rem 0.8rem;
+  background: #1d4ed8;
+  color: #ffffff;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.mobile-dialog-open-url-warning {
+  color: #fca5a5;
+}
+
 .mobile-empty-state {
   color: #9ba4b5;
   padding: 1rem;

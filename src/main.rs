@@ -1640,6 +1640,32 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn host_tool_cancel_event_is_noop_safe() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut commands = register_test_transport(&state, "transport-1", "s1", 4).await;
+        let mut events = state.events.subscribe();
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "host_tool_cancel",
+                "id": "cancel-1",
+                "targetId": "host-call-1"
+            }),
+        )
+        .await;
+
+        assert!(commands.try_recv().is_err());
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn exit_plan_mode_tool_end_does_not_request_preview() {
         let state = test_state(8, None);
         state

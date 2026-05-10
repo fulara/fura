@@ -2688,6 +2688,46 @@ h2 {
   font-size: 0.86rem;
 }
 
+.extension-dialog-open-url {
+  display: grid;
+  gap: 0.65rem;
+}
+
+.extension-dialog-open-url p {
+  margin: 0;
+}
+
+.extension-dialog-open-url code {
+  overflow-wrap: anywhere;
+  border: 1px solid #2f3748;
+  border-radius: 0.6rem;
+  padding: 0.7rem;
+  background: #0b0f17;
+  color: #d7deea;
+}
+
+.extension-dialog-open-url-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.extension-dialog-open-url-actions a {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid #3b82f6;
+  border-radius: 0.6rem;
+  padding: 0.55rem 0.8rem;
+  background: #1d4ed8;
+  color: #ffffff;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.extension-dialog-open-url-warning {
+  color: #fca5a5;
+}
+
 .model-picker-search {
   border: 0;
   border-bottom: 1px solid #252a35;

@@ -63,6 +63,10 @@ const todoPhases = [
 ];
 const mockImageData =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+const mockSnapshotCommit = "1111111111111111111111111111111111111111";
+const mockSnapshotHeadCommit = "2222222222222222222222222222222222222222";
+const mockSnapshotTree = "3333333333333333333333333333333333333333";
+
 
 const diffSnapshots = [
   {
@@ -71,6 +75,11 @@ const diffSnapshots = [
     kind: "session-start",
     createdAt: "2026-04-29T00:00:00.000Z",
     repoRoot: "/mock/repo",
+    ref: "refs/omp/diff-snapshots/snap-session-start",
+    sourceRef: "HEAD",
+    commit: mockSnapshotCommit,
+    headCommit: mockSnapshotHeadCommit,
+    tree: mockSnapshotTree,
   },
 ];
 function write(frame) {
@@ -395,12 +404,18 @@ for await (const line of rl) {
       break;
     }
     case "repo_diff_snapshot": {
+      const snapshotNumber = diffSnapshots.length + 1;
       const snapshot = {
-        entryId: `snap-${diffSnapshots.length + 1}`,
-        label: command.label ?? `snapshot-${diffSnapshots.length + 1}`,
+        entryId: `snap-${snapshotNumber}`,
+        label: command.label ?? `snapshot-${snapshotNumber}`,
         kind: "manual",
         createdAt: new Date().toISOString(),
-        repoRoot: "/mock/repo",
+        repoRoot: command.repoRoot ?? "/mock/repo",
+        ref: command.ref ?? `refs/omp/diff-snapshots/snap-${snapshotNumber}`,
+        sourceRef: command.sourceRef ?? command.ref ?? "HEAD",
+        commit: mockSnapshotHeadCommit,
+        headCommit: mockSnapshotHeadCommit,
+        tree: mockSnapshotTree,
       };
       diffSnapshots.push(snapshot);
       success(command, {

@@ -1,6 +1,6 @@
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::*;
@@ -313,6 +313,20 @@ pub(crate) async fn handle_controller_host_tool_call(
         warn!(tool_call_id = %tool_call_id, tool_name = %tool_name, %message, "failed to send host tool result");
         handle_controller_rpc_error(state, message).await;
     }
+}
+
+pub(crate) async fn handle_controller_host_tool_cancel(
+    state: &AppState,
+    frame_id: String,
+    target_id: String,
+) {
+    let has_active_run = state.bridge_controller.read().await.active_run.is_some();
+    debug!(
+        frame_id = %frame_id,
+        target_id = %target_id,
+        has_active_run,
+        "received Ask Fura host tool cancellation; controller tools are short-lived and not cancellable after dispatch"
+    );
 }
 
 pub(crate) async fn reset_controller_if_transport_exited(
