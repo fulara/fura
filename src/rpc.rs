@@ -313,12 +313,30 @@ pub(crate) async fn spawn_rpc_child(
             remember_session_host_tools(&state, &target_session_id, context.previous_host_tools)
                 .await;
         }
+        let removed_conflict_contexts =
+            remove_conflict_contexts_for_session(&state, &target_session_id).await;
+        if let Some(context) = removed_conflict_contexts.iter().last() {
+            remember_session_host_tools(
+                &state,
+                &target_session_id,
+                context.previous_host_tools.clone(),
+            )
+            .await;
+        }
+        for context in removed_conflict_contexts {
+            let _ = state.events.send(ServerMessage::ConflictError {
+                repo_id: Some(context.repo_id),
+                path: Some(context.path),
+                message: "Conflict Resolver session exited before returning a result.".to_string(),
+            });
+        }
         if reset_controller_if_transport_exited(&state, &session_id).await {
             return;
         }
         if reset_model_catalog_if_transport_exited(&state, &session_id).await {
             return;
         }
+
         let pending_create = state
             .session_runtime
             .remove_pending_create(&session_id)
@@ -496,6 +514,12 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         }
         OmpRpcFrame::AgentEnd { .. } => {
             clear_review_contexts_for_session(state, &target_session_id).await;
+            clear_conflict_contexts_for_session(
+                state,
+                &target_session_id,
+                Some("Conflict Resolver agent run finished without submitting an explanation or proposal."),
+            )
+            .await;
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
             if let Err(message) = send_rpc_command(
                 state,
@@ -799,7 +823,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             tool_name,
             arguments,
         } => {
-            handle_review_host_tool_call(state, session_id, id, tool_call_id, tool_name, arguments)
+            handle_session_host_tool_call(state, session_id, id, tool_call_id, tool_name, arguments)
                 .await
         }
         OmpRpcFrame::HostToolCancel { .. } | OmpRpcFrame::Unknown => {
@@ -962,10 +986,13 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             }
             if command == Some("prompt") {
                 if let Some(command_id) = value_str(frame, "id") {
-                    let cleared =
+                    let cleared_review =
                         clear_review_context_for_command(state, &current_session_id, command_id)
                             .await;
-                    if cleared {
+                    let cleared_conflict =
+                        clear_conflict_context_for_command(state, &current_session_id, command_id)
+                            .await;
+                    if cleared_review || cleared_conflict {
                         let _ = refresh_rpc_state(state, &current_session_id).await;
                     }
                 }
@@ -973,9 +1000,12 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         }
         if matches!(command, Some("prompt" | "set_host_tools")) {
             if let Some(command_id) = value_str(frame, "id") {
-                let cleared =
+                let cleared_review =
                     clear_review_context_for_command(state, &current_session_id, command_id).await;
-                if cleared && command == Some("set_host_tools") {
+                let cleared_conflict =
+                    clear_conflict_context_for_command(state, &current_session_id, command_id)
+                        .await;
+                if (cleared_review || cleared_conflict) && command == Some("set_host_tools") {
                     settle_prompt_error_and_broadcast(state, &current_session_id).await;
                 }
             }

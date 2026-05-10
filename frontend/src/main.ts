@@ -142,6 +142,17 @@ import {
   renderCodeViewer,
   type CodeViewerState,
 } from "./codeViewer";
+import {
+  adjacentConflictId,
+  conflictSelectionRange,
+  containsConflictMarkerLines,
+  draftConflictRegions,
+  renderConflictResolver,
+  resolveDraftConflict,
+  type ConflictResolutionMode,
+  type ConflictResolverState,
+  type DraftSelectionState,
+} from "./conflictResolver";
 import type {
   ClientMessage,
   CodeFileContent,
@@ -153,19 +164,26 @@ import type {
   CompareDiffSummaryState,
   DiffCheckoutTarget,
   DiffDetailMode,
-  DiffReviewAnnotation,
   DiffLineLocation,
+  DiffReviewAnnotation,
   DiffReviewWorktree,
   DiffReviewableState,
   FrontendControlAction,
   FrontendUiSnapshot,
+  ConflictAgentMode,
+  ConflictAgentResult,
+  ConflictAgentScope,
+  ConflictFileState,
+  ConflictMagicWandPreview,
+  ConflictRepositorySummary,
   ModelSummary,
   ProposedModelConfig,
   ProposedThinkingLevel,
+  ReviewComment,
   ServerConfig,
   ServerMessage,
-  ReviewComment,
   SessionChangesSummaryState,
+  SessionMode,
   SessionProjection,
   SessionStatus,
   SessionSummary,
@@ -206,7 +224,9 @@ app.innerHTML = `
       </section>
 
       <section class="sidebar-actions">
-        <button id="createSessionButton" type="button">New session</button>
+        <button id="createSessionButton" type="button">New</button>
+        <button id="openDiffButton" type="button">Diff</button>
+        <button id="conflictResolverButton" class="conflict-resolver-toggle" type="button" aria-pressed="false">Conflict Resolver</button>
       </section>
 
       <section class="category-filter-card" aria-label="Session category filter">
@@ -255,6 +275,7 @@ app.innerHTML = `
       <div id="workspacePanelHost" class="workspace-panel-stack">
         <div id="normalWorkspacePanelHost" class="workspace-panel-host workspace-panel-host-active"></div>
         <div id="diffReviewWorkspacePanelHost" class="workspace-panel-host"></div>
+        <div id="conflictResolverWorkspacePanelHost" class="workspace-panel-host"></div>
       </div>
 
       <div id="statusBar" class="status-bar" aria-label="Session status"></div>
@@ -405,13 +426,14 @@ app.innerHTML = `
       <header class="modal-header">
         <div>
           <h2 id="cwdPickerTitle">New session</h2>
-          <p>Choose the working directory for the new OMP session. Optionally create a git worktree first.</p>
+          <p id="cwdPickerDescription">Choose the working directory for the new OMP session. Optionally create a git worktree first.</p>
         </div>
         <button id="cwdPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
       </header>
       <div class="modal-tabs" role="tablist" aria-label="New session mode">
         <button id="cwdPickerSessionTab" type="button" class="active" role="tab" aria-selected="true" aria-controls="cwdPickerSessionBody">Session</button>
         <button id="cwdPickerDiffTab" type="button" role="tab" aria-selected="false" aria-controls="cwdPickerDiffBody">Diff</button>
+        <button id="cwdPickerConflictTab" type="button" role="tab" aria-selected="false" aria-controls="cwdPickerConflictBody">Conflict Resolver</button>
       </div>
       <div id="cwdPickerSessionBody" class="cwd-picker-body" role="tabpanel" aria-labelledby="cwdPickerSessionTab">
         <label for="cwdPickerNameInput">Session name</label>
@@ -459,6 +481,11 @@ app.innerHTML = `
           <span>Create/attach agent session for questions</span>
         </label>
         <p class="field-help">Questions from the diff use the normal prompt channel of the backing session.</p>
+      </div>
+      <div id="cwdPickerConflictBody" class="cwd-picker-body" role="tabpanel" aria-labelledby="cwdPickerConflictTab" hidden>
+        <label for="cwdPickerConflictRepo">Repository root</label>
+        <input id="cwdPickerConflictRepo" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
+        <p class="field-help">Create a dedicated OMP session for Conflict Resolver using this conflicted repository root.</p>
       </div>
       <footer class="modal-footer">
         <span id="cwdPickerStatus" class="modal-status" aria-live="polite" aria-atomic="true"></span>
@@ -609,9 +636,11 @@ const authStatus = requireElement<HTMLParagraphElement>("authStatus");
 const authSubmit = requireElement<HTMLButtonElement>("authSubmit");
 const connectionStatus = requireElement<HTMLSpanElement>("connectionStatus");
 const createSessionButton = requireElement<HTMLButtonElement>("createSessionButton");
+const openDiffButton = requireElement<HTMLButtonElement>("openDiffButton");
 const sessionsList = requireElement<HTMLElement>("sessionsList");
 const sessionCategoryFilter = requireElement<HTMLSelectElement>("sessionCategoryFilter");
 const askFuraButton = requireElement<HTMLButtonElement>("askFuraButton");
+const conflictResolverButton = requireElement<HTMLButtonElement>("conflictResolverButton");
 const workspaceOptionsToggle = requireElement<HTMLButtonElement>("workspaceOptionsToggle");
 const workspaceOptionsMenu = requireElement<HTMLDivElement>("workspaceOptionsMenu");
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
@@ -673,6 +702,8 @@ const modelPickerCancel = requireElement<HTMLButtonElement>("modelPickerCancel")
 const modelPickerSelect = requireElement<HTMLButtonElement>("modelPickerSelect");
 const cwdPickerOverlay = requireElement<HTMLDivElement>("cwdPickerOverlay");
 const cwdPickerClose = requireElement<HTMLButtonElement>("cwdPickerClose");
+const cwdPickerTitle = requireElement<HTMLHeadingElement>("cwdPickerTitle");
+const cwdPickerDescription = requireElement<HTMLParagraphElement>("cwdPickerDescription");
 const cwdPickerNameInput = requireElement<HTMLInputElement>("cwdPickerNameInput");
 const cwdPickerCategoryInput = requireElement<HTMLInputElement>("cwdPickerCategoryInput");
 const cwdPickerCategorySuggestions = requireElement<HTMLDivElement>("cwdPickerCategorySuggestions");
@@ -692,6 +723,9 @@ const cwdPickerWorktreeBranch = requireElement<HTMLInputElement>("cwdPickerWorkt
 const cwdPickerWorktreeSummary = requireElement<HTMLParagraphElement>("cwdPickerWorktreeSummary");
 const cwdPickerSessionTab = requireElement<HTMLButtonElement>("cwdPickerSessionTab");
 const cwdPickerDiffTab = requireElement<HTMLButtonElement>("cwdPickerDiffTab");
+const cwdPickerConflictTab = requireElement<HTMLButtonElement>("cwdPickerConflictTab");
+const cwdPickerConflictBody = requireElement<HTMLDivElement>("cwdPickerConflictBody");
+const cwdPickerConflictRepo = requireElement<HTMLInputElement>("cwdPickerConflictRepo");
 const cwdPickerDiffBody = requireElement<HTMLDivElement>("cwdPickerDiffBody");
 const cwdPickerDiffRepo = requireElement<HTMLInputElement>("cwdPickerDiffRepo");
 const cwdPickerDiffBase = requireElement<HTMLInputElement>("cwdPickerDiffBase");
@@ -766,8 +800,10 @@ let pendingCreatedSessionBaseline: Set<string> | null = null;
 let pendingSessionSelectionId: string | null = null;
 let cwdPickerCreatePending = false;
 let cwdPickerPendingRequestId: string | null = null;
-let cwdPickerMode: "session" | "diff" = "session";
+let cwdPickerMode: "session" | "diff" | "conflict" = "session";
 let pendingDiffCreate: { repoRoot: string; base: string; head: string; payloadKind: DiffDetailMode } | null = null;
+let pendingConflictResolverCreate = false;
+let conflictResolverSessionId: string | null = null;
 let deleteSessionTarget: SessionDeleteView | null = null;
 let cwdPickerSourceRepoAutofill = true;
 let cwdPickerDirectoryAutofill = true;
@@ -1035,7 +1071,8 @@ type CodeOpenRequest =
 let desktopDockview: DesktopDockview | null = null;
 let normalDesktopDockview: DesktopDockview | null = null;
 let diffReviewDesktopDockview: DesktopDockview | null = null;
-let activeDesktopDockviewMode: "normal" | "diffReview" | null = null;
+let conflictDesktopDockview: DesktopDockview | null = null;
+let activeDesktopDockviewMode: "normal" | "diffReview" | "conflictResolver" | null = null;
 let codePanelDirty = true;
 let codeSessionId: string | null = null;
 let codeWorkspace: CodeWorkspaceSummary | null = null;
@@ -1054,6 +1091,26 @@ let codeSearchResults: CodeTreeEntry[] = [];
 let codeSearchLoading = false;
 let codeSearchError: string | null = null;
 let codeSearchRequestTimer: number | null = null;
+let conflictRepos: ConflictRepositorySummary[] = [];
+let conflictRoot: string | null = null;
+let conflictSelectedRepoId: string | null = null;
+let conflictSelectedPath: string | null = null;
+let conflictFile: ConflictFileState | null = null;
+let conflictLoadingScan = false;
+let conflictLoadingFile = false;
+let conflictError: string | null = null;
+let conflictPanelDirty = true;
+let conflictResultDraft = "";
+let conflictSelectedConflictId: string | null = null;
+let conflictSaving = false;
+let conflictStaging = false;
+let conflictPreviewingMagicWand = false;
+let conflictMagicWandPreview: ConflictMagicWandPreview | null = null;
+let conflictRequestingAgentAssistance = false;
+let conflictAgentInstructions = "";
+let conflictAgentResult: ConflictAgentResult | null = null;
+let conflictStatus: string | null = null;
+let conflictEditorSelection: DraftSelectionState | null = null;
 
 const sessionListView = createSessionListView(sessionsList, {
   onSelectSession: handleSessionButtonClick,
@@ -1089,8 +1146,12 @@ connectionStatus.addEventListener("keydown", event => {
 });
 
 askFuraButton.addEventListener("click", activateControllerWorkspace);
+conflictResolverButton.addEventListener("click", handleConflictResolverButtonClick);
 createSessionButton.addEventListener("click", () => {
   openCwdPicker();
+});
+openDiffButton.addEventListener("click", () => {
+  openCwdPicker("diff");
 });
 sessionCategoryFilter.addEventListener("change", () => {
   selectedCategoryFilter = sessionCategoryFilter.value;
@@ -1241,6 +1302,7 @@ cwdPickerCancel.addEventListener("click", closeCwdPicker);
 cwdPickerCreate.addEventListener("click", submitCwdPicker);
 cwdPickerSessionTab.addEventListener("click", () => setCwdPickerMode("session"));
 cwdPickerDiffTab.addEventListener("click", () => setCwdPickerMode("diff"));
+cwdPickerConflictTab.addEventListener("click", () => setCwdPickerMode("conflict"));
 cwdPickerWorktreeEnabled.addEventListener("change", syncCwdPickerWorktreeFields);
 cwdPickerNameInput.addEventListener("input", applyCwdPickerAutofill);
 cwdPickerInput.addEventListener("input", () => {
@@ -1529,6 +1591,10 @@ function activeWorkspaceKey(): string | null {
 }
 
 function activateControllerWorkspace(): void {
+  if (activeDesktopDockviewMode === "conflictResolver") {
+    if (!confirmDiscardConflictDraft("switching to Ask Fura")) return;
+    activeDesktopDockviewMode = null;
+  }
   if (workspaceMode !== "controller") {
     sessionPromptDraft = promptInput.value;
     promptInput.value = controllerPromptDraft;
@@ -1542,11 +1608,15 @@ function activateControllerWorkspace(): void {
   promptInput.focus();
 }
 
-function activateSession(sessionId: string): void {
+function activateSession(sessionId: string, options: { skipConflictDiscardPrompt?: boolean } = {}): void {
   const previousMode = workspaceMode;
   const previousSessionId = activeSessionId;
   const sessionChanged = activeSessionId !== sessionId || workspaceMode !== "session";
   if (sessionChanged) {
+    if (activeDesktopDockviewMode === "conflictResolver") {
+      if (!options.skipConflictDiscardPrompt && !confirmDiscardConflictDraft("switching sessions")) return;
+      activeDesktopDockviewMode = null;
+    }
     if (previousMode === "controller") {
       controllerPromptDraft = promptInput.value;
       promptInput.value = sessionPromptDraft;
@@ -1619,6 +1689,9 @@ function handleServerMessage(message: ServerMessage): void {
       {
         const previousActiveSessionId = activeSessionId;
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
+        if (conflictResolverSessionId && !message.sessions.some(session => session.sessionId === conflictResolverSessionId)) {
+          conflictResolverSessionId = null;
+        }
         pruneVisiblePlanReviewsWithSessionList();
         if (previousActiveSessionId && !activeSessionId) resetPromptHistoryNavigation();
         if (pendingSessionSelectionId) {
@@ -1645,12 +1718,20 @@ function handleServerMessage(message: ServerMessage): void {
         render();
         if (createdByPendingRequest && cwdPickerCreatePending) {
           const activateSessionChanges = Boolean(pendingDiffCreate);
+          const activateConflictResolver = pendingConflictResolverCreate;
+          if (activateConflictResolver) {
+            conflictResolverSessionId = message.sessionId;
+          }
           setCwdPickerCreatePending(false);
           closeCwdPicker();
           if (pendingDiffCreate) {
             pendingDiffCreate = null;
           }
+          pendingConflictResolverCreate = false;
           syncSessionModePanels(activateSessionChanges);
+          if (activateConflictResolver) {
+            openConflictResolver();
+          }
         } else {
           syncSessionModePanels();
         }
@@ -1949,6 +2030,89 @@ function handleServerMessage(message: ServerMessage): void {
         markCodeViewDirty();
         renderCodePanelIfNeeded(true);
       }
+      break;
+    case "conflict.snapshot": {
+      if (!shouldAcceptConflictSnapshot(message.repos)) break;
+      conflictLoadingScan = false;
+      clearConflictMagicWandPreview();
+      clearConflictAgentResult();
+      conflictRepos = message.repos;
+      conflictError = null;
+      const selectedRepo = conflictRepos.find(repo => repo.repoId === conflictSelectedRepoId) ?? conflictRepos[0] ?? null;
+      conflictSelectedRepoId = selectedRepo?.repoId ?? null;
+      if (selectedRepo) conflictRoot = selectedRepo.root;
+      if (selectedRepo && selectedRepo.files.length > 0) {
+        const selectedFile = selectedRepo.files.find(file => file.path === conflictSelectedPath) ?? selectedRepo.files[0];
+        conflictSelectedPath = selectedFile.path;
+        requestConflictFile(selectedRepo.repoId, selectedFile.path);
+      } else {
+        conflictSelectedPath = null;
+        resetConflictDraftState();
+      }
+      markConflictViewDirty();
+      renderConflictPanelIfNeeded(true);
+      break;
+    }
+    case "conflict.file":
+      if (!isSelectedConflictFile(message.file.repoId, message.file.path)) break;
+      conflictLoadingFile = false;
+      conflictFile = message.file;
+      conflictSelectedRepoId = message.file.repoId;
+      conflictSelectedPath = message.file.path;
+      conflictError = null;
+      conflictSaving = false;
+      conflictStaging = false;
+      clearConflictMagicWandPreview();
+      clearConflictAgentResult();
+      conflictResultDraft = message.file.result?.text ?? "";
+      conflictSelectedConflictId = message.file.conflicts[0]?.id ?? null;
+      conflictStatus = "Conflict file refreshed from disk.";
+      conflictEditorSelection = null;
+      markConflictViewDirty();
+      renderConflictPanelIfNeeded(true);
+      break;
+    case "conflict.magicWandPreview":
+      if (!isSelectedConflictFile(message.preview.repoId, message.preview.path)) break;
+      if (conflictFile?.version !== message.preview.sourceVersion) break;
+      conflictPreviewingMagicWand = false;
+      conflictMagicWandPreview = message.preview;
+      conflictError = null;
+      conflictStatus = message.preview.summary;
+      markConflictViewDirty();
+      renderConflictPanelIfNeeded(true);
+      break;
+    case "conflict.agentResult":
+      if (!isSelectedConflictFile(message.result.repoId, message.result.path)) break;
+      if (conflictFile?.version !== message.result.sourceVersion) break;
+      conflictRequestingAgentAssistance = false;
+      conflictAgentResult = message.result;
+      conflictError = null;
+      conflictStatus = message.result.summary;
+      markConflictViewDirty();
+      renderConflictPanelIfNeeded(true);
+      break;
+    case "conflict.status":
+      if (!message.path || !isSelectedConflictFile(message.repoId, message.path)) break;
+      conflictSaving = false;
+      conflictStaging = false;
+      clearConflictMagicWandPreview();
+      clearConflictAgentResult();
+      conflictStatus = message.message;
+      markConflictViewDirty();
+      renderConflictPanelIfNeeded(true);
+      break;
+    case "conflict.error":
+      if (message.path && message.repoId && !isSelectedConflictFile(message.repoId, message.path)) break;
+      if (!message.path && activeDesktopDockviewMode !== "conflictResolver") break;
+      conflictLoadingScan = false;
+      conflictLoadingFile = false;
+      conflictSaving = false;
+      conflictStaging = false;
+      clearConflictMagicWandPreview();
+      clearConflictAgentResult();
+      conflictError = message.path ? `${message.path}: ${message.message}` : message.message;
+      markConflictViewDirty();
+      renderConflictPanelIfNeeded(true);
       break;
     case "code.error":
       if (!message.workspaceId || codeWorkspace?.workspaceId === message.workspaceId) {
@@ -2961,15 +3125,29 @@ function visibleSessions(): SessionSummary[] {
 function currentSessionSummary(sessionId: string): SessionSummary | undefined {
   return sessions.find(session => session.sessionId === sessionId);
 }
+function activeSessionSummary(): SessionSummary | undefined {
+  return activeSessionId ? (projections.get(activeSessionId)?.summary ?? currentSessionSummary(activeSessionId)) : undefined;
+}
+
+function activeConflictResolverSessionId(): string | null {
+  return workspaceMode === "session" && activeSessionId === conflictResolverSessionId ? activeSessionId : null;
+}
 
 function requestSessionActivation(session: SessionSummary): boolean {
+  if (
+    activeDesktopDockviewMode === "conflictResolver"
+    && (activeSessionId !== session.sessionId || workspaceMode !== "session")
+    && !confirmDiscardConflictDraft("switching sessions")
+  ) {
+    return false;
+  }
   const sent = send(sessionOpenOrAttachMessage(session));
   if (!sent) {
     pendingSessionSelectionId = session.sessionId;
     return false;
   }
   pendingSessionSelectionId = null;
-  activateSession(session.sessionId);
+  activateSession(session.sessionId, { skipConflictDiscardPrompt: true });
   return true;
 }
 
@@ -3283,6 +3461,7 @@ function renderActiveSession(): void {
     abortButton.disabled = true;
     stopButton.disabled = true;
     deleteSessionButton.disabled = true;
+    conflictResolverButton.disabled = false;
     syncActiveCategoryEditor(undefined);
     const isWorking = controlStatusState.status === "working";
     promptInput.disabled = isWorking;
@@ -3297,24 +3476,26 @@ function renderActiveSession(): void {
   }
 
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
+  const summary = projection?.summary ?? activeSessionSummary();
   const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
 
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
   deleteSessionButton.disabled = !activeSessionId;
+  conflictResolverButton.disabled = false;
   syncActiveCategoryEditor(projection);
   promptInput.disabled = !activeSessionId || hasBusyDraft;
   sendButton.disabled = !activeSessionId || hasBusyDraft;
 
-  if (!activeSessionId || !projection) {
+  if (!activeSessionId || !summary) {
     sessionTitle.textContent = "No session selected";
     sessionMeta.textContent = "Create or attach to a session to begin.";
     promptInput.placeholder = "Select a session first";
   } else {
-    sessionTitle.textContent = projection.summary.title || `Session ${shortId(activeSessionId)}`;
-    const category = normalizedCategory(projection.summary.category);
+    sessionTitle.textContent = summary.title || `Session ${shortId(activeSessionId)}`;
+    const category = normalizedCategory(summary.category);
     const categoryPart = category ? ` · ${category}` : "";
-    sessionMeta.textContent = `${sessionKindLabel(projection.summary.kind)} · ${sessionStatusLabel(projection.summary)}${categoryPart} · ${projection.summary.cwd ?? "no dir"}`;
+    sessionMeta.textContent = `${sessionKindLabel(summary.kind)} · ${sessionStatusLabel(summary)}${categoryPart} · ${summary.cwd ?? "no dir"}`;
     promptInput.placeholder = "Send a prompt… (type / for commands)";
   }
 
@@ -3334,6 +3515,442 @@ function markToolsViewDirty(): void {
 
 function markCodeViewDirty(): void {
   codePanelDirty = true;
+}
+
+function markConflictViewDirty(): void {
+  conflictPanelDirty = true;
+}
+
+function activeConflictResolverRoot(): string | null {
+  const sessionId = activeConflictResolverSessionId();
+  if (!sessionId) return null;
+  const summary = projections.get(sessionId)?.summary ?? currentSessionSummary(sessionId);
+  return summary?.worktree?.path || summary?.cwd || null;
+}
+
+function activeConflictResolverState(): ConflictResolverState {
+  return {
+    root: conflictRoot,
+    repos: conflictRepos,
+    selectedRepoId: conflictSelectedRepoId,
+    selectedPath: conflictSelectedPath,
+    file: conflictFile,
+    draftResult: conflictResultDraft,
+    selectedConflictId: conflictSelectedConflictId,
+    draftDirty: conflictDraftDirty(),
+    saving: conflictSaving,
+    staging: conflictStaging,
+    previewingMagicWand: conflictPreviewingMagicWand,
+    wandPreview: conflictMagicWandPreview,
+    requestingAgentAssistance: conflictRequestingAgentAssistance,
+    agentInstructions: conflictAgentInstructions,
+    agentResult: conflictAgentResult,
+    status: conflictStatus,
+    loadingScan: conflictLoadingScan,
+    loadingFile: conflictLoadingFile,
+    error: conflictError,
+  };
+}
+
+function conflictDraftDirty(): boolean {
+  return Boolean(conflictFile && conflictResultDraft !== (conflictFile.result?.text ?? ""));
+}
+
+function clearConflictMagicWandPreview(): void {
+  conflictPreviewingMagicWand = false;
+  conflictMagicWandPreview = null;
+}
+
+function clearConflictAgentResult(): void {
+  conflictRequestingAgentAssistance = false;
+  conflictAgentResult = null;
+}
+
+
+function resetConflictDraftState(): void {
+  conflictFile = null;
+  conflictResultDraft = "";
+  conflictSelectedConflictId = null;
+  conflictSaving = false;
+  conflictStaging = false;
+  clearConflictMagicWandPreview();
+  clearConflictAgentResult();
+  conflictStatus = null;
+  conflictEditorSelection = null;
+}
+
+
+function shouldAcceptConflictSnapshot(repos: ConflictRepositorySummary[]): boolean {
+  if (activeDesktopDockviewMode !== "conflictResolver") return false;
+  if (!conflictRoot) return false;
+  const requestedRoot = conflictRoot;
+  return repos.length === 0 || repos.some(repo => conflictRootMatchesRepo(requestedRoot, repo.root));
+}
+
+function conflictRootMatchesRepo(requestedRoot: string, repoRoot: string): boolean {
+  const normalizedRequested = requestedRoot.replaceAll("\\", "/").replace(/\/+$/, "");
+  const normalizedRepo = repoRoot.replaceAll("\\", "/").replace(/\/+$/, "");
+  return normalizedRequested === normalizedRepo
+    || normalizedRequested.startsWith(`${normalizedRepo}/`);
+}
+
+function isSelectedConflictFile(repoId: string, path: string): boolean {
+  return activeDesktopDockviewMode === "conflictResolver"
+    && conflictSelectedRepoId === repoId
+    && conflictSelectedPath === path;
+}
+
+function confirmDiscardConflictDraft(reason: string): boolean {
+  if (!conflictDraftDirty()) return true;
+  return window.confirm(`Discard unsaved conflict result before ${reason}?`);
+}
+function handleConflictResolverButtonClick(): void {
+  if (activeConflictResolverSessionId()) {
+    toggleConflictResolver();
+    return;
+  }
+  openCwdPicker("conflict");
+}
+
+
+function toggleConflictResolver(): void {
+  if (activeDesktopDockviewMode === "conflictResolver") {
+    leaveConflictResolver();
+    return;
+  }
+
+  openConflictResolver();
+}
+
+function openConflictResolver(): void {
+  const root = activeConflictResolverRoot();
+  setActiveDesktopDockviewMode("conflictResolver");
+  desktopDockview?.activatePanel("conflictResolver");
+  if (!root) {
+    conflictRoot = null;
+    conflictRepos = [];
+    conflictSelectedRepoId = null;
+    conflictSelectedPath = null;
+    resetConflictDraftState();
+    conflictLoadingScan = false;
+    conflictLoadingFile = false;
+    conflictError = "Open the session created for Conflict Resolver before opening this tool.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  beginConflictResolverScan(root);
+}
+
+function leaveConflictResolver(): void {
+  if (!confirmDiscardConflictDraft("leaving Conflict Resolver")) return;
+  if (activeDesktopDockviewMode === "conflictResolver") {
+    activeDesktopDockviewMode = null;
+  }
+  conflictRoot = null;
+  syncSessionModePanels();
+  renderActiveDockviewPanel(activeSessionId ? projections.get(activeSessionId) : undefined);
+}
+function beginConflictResolverScan(root: string): void {
+  conflictRoot = root;
+  conflictRepos = [];
+  conflictSelectedRepoId = null;
+  conflictSelectedPath = null;
+  conflictLoadingScan = true;
+  conflictLoadingFile = false;
+  conflictError = null;
+  resetConflictDraftState();
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+  send({ type: "conflict.scan", root });
+}
+
+
+function requestConflictScan(): void {
+  if (!confirmDiscardConflictDraft("refreshing conflict scan")) return;
+  const root = activeConflictResolverRoot() ?? conflictRoot?.trim() ?? "";
+  if (!root) {
+    conflictError = "Open the session created for Conflict Resolver before refreshing this tool.";
+    conflictLoadingScan = false;
+    resetConflictDraftState();
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  beginConflictResolverScan(root);
+}
+
+function requestConflictFile(repoId: string, path: string): void {
+  const switchingFile = conflictSelectedRepoId !== repoId || conflictSelectedPath !== path;
+  if (switchingFile && !confirmDiscardConflictDraft("opening another conflicted file")) return;
+  conflictSelectedRepoId = repoId;
+  conflictSelectedPath = path;
+  conflictLoadingFile = true;
+  conflictError = null;
+  clearConflictMagicWandPreview();
+  clearConflictAgentResult();
+  conflictStatus = null;
+  conflictEditorSelection = null;
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+  send({ type: "conflict.file.open", repoId, path });
+}
+
+function updateConflictResultDraft(text: string, selection: DraftSelectionState): void {
+  conflictResultDraft = text;
+  conflictEditorSelection = selection;
+  clearConflictMagicWandPreview();
+  clearConflictAgentResult();
+  conflictStatus = null;
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+}
+
+function updateConflictAgentInstructions(text: string): void {
+  conflictAgentInstructions = text;
+}
+
+
+function selectConflictBlock(conflictId: string): void {
+  conflictSelectedConflictId = conflictId;
+  const range = conflictSelectionRange(conflictResultDraft, conflictId);
+  conflictEditorSelection = range
+    ? {
+        selectionStart: range.start,
+        selectionEnd: range.end,
+        scrollTop: conflictEditorSelection?.scrollTop ?? 0,
+        focused: true,
+      }
+    : conflictEditorSelection;
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+}
+
+function shiftConflictBlock(offset: -1 | 1): void {
+  const nextId = adjacentConflictId(conflictResultDraft, conflictSelectedConflictId, offset);
+  if (!nextId) return;
+  selectConflictBlock(nextId);
+}
+
+function resolveSelectedConflictBlock(mode: ConflictResolutionMode): void {
+  const resolved = resolveDraftConflict(conflictResultDraft, conflictSelectedConflictId, mode);
+  if (!resolved.resolved) {
+    conflictStatus = "No resolvable conflict marker is selected.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  conflictResultDraft = resolved.text;
+  clearConflictMagicWandPreview();
+  clearConflictAgentResult();
+  const remainingRange = conflictSelectionRange(conflictResultDraft, conflictSelectedConflictId);
+  conflictEditorSelection = remainingRange
+    ? {
+        selectionStart: remainingRange.start,
+        selectionEnd: remainingRange.end,
+        scrollTop: conflictEditorSelection?.scrollTop ?? 0,
+        focused: true,
+      }
+    : conflictEditorSelection;
+  conflictStatus = "Conflict block updated in draft. Save result to write it to disk.";
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+}
+
+function previewConflictMagicWand(): void {
+  if (!conflictFile) return;
+  if (conflictDraftDirty()) {
+    conflictStatus = "Save or discard draft edits before previewing the magic wand.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  if (!containsConflictMarkerLines(conflictResultDraft)) {
+    conflictStatus = "No conflict markers remain in the saved conflict result.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  conflictPreviewingMagicWand = true;
+  conflictMagicWandPreview = null;
+  conflictError = null;
+  conflictStatus = "Building magic wand preview…";
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+  send({
+    type: "conflict.file.previewMagicWand",
+    repoId: conflictFile.repoId,
+    path: conflictFile.path,
+    expectedVersion: conflictFile.version,
+  });
+}
+
+function applyConflictMagicWandPreview(): void {
+  if (!conflictFile || !conflictMagicWandPreview) return;
+  if (conflictMagicWandPreview.sourceVersion !== conflictFile.version) {
+    conflictStatus = "Magic wand preview is stale. Refresh the file and preview again.";
+    clearConflictMagicWandPreview();
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  conflictResultDraft = conflictMagicWandPreview.content;
+  conflictSelectedConflictId = draftConflictRegions(conflictResultDraft)[0]?.id ?? null;
+  const range = conflictSelectionRange(conflictResultDraft, conflictSelectedConflictId);
+  conflictEditorSelection = range
+    ? {
+        selectionStart: range.start,
+        selectionEnd: range.end,
+        scrollTop: conflictEditorSelection?.scrollTop ?? 0,
+        focused: true,
+      }
+    : null;
+  clearConflictMagicWandPreview();
+  clearConflictAgentResult();
+  conflictStatus = "Magic wand preview applied to the draft. Save result to write it to disk.";
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+}
+
+function discardConflictMagicWandPreview(): void {
+  if (!conflictMagicWandPreview && !conflictPreviewingMagicWand) return;
+  clearConflictMagicWandPreview();
+  conflictStatus = "Magic wand preview discarded.";
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+}
+
+function requestConflictAgentAssistance(mode: ConflictAgentMode, scope: ConflictAgentScope): void {
+  if (!conflictFile) return;
+  const sessionId = activeConflictResolverSessionId();
+  if (!sessionId) {
+    conflictStatus = "Conflict Resolver agent assistance requires the session opened from this tool.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  if (conflictDraftDirty()) {
+    conflictStatus = "Save or discard draft edits before asking the agent.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  if (!containsConflictMarkerLines(conflictResultDraft)) {
+    conflictStatus = "No conflict markers remain in the saved conflict result.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  const selectedConflictId = scope === "selectedConflict"
+    ? (conflictSelectedConflictId ?? draftConflictRegions(conflictResultDraft)[0]?.id ?? null)
+    : null;
+  if (scope === "selectedConflict" && !selectedConflictId) {
+    conflictStatus = "Select a complete conflict block before asking the agent about it.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  conflictRequestingAgentAssistance = true;
+  conflictAgentResult = null;
+  conflictError = null;
+  conflictStatus = mode === "explain"
+    ? "Requesting agent explanation…"
+    : "Requesting agent proposal preview…";
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+  send({
+    type: "conflict.agent.run",
+    sessionId: sessionId,
+    repoId: conflictFile.repoId,
+    path: conflictFile.path,
+    expectedVersion: conflictFile.version,
+    mode,
+    scope,
+    conflictId: selectedConflictId,
+    instructions: conflictAgentInstructions,
+  });
+}
+
+function applyConflictAgentResult(): void {
+  if (!conflictFile || !conflictAgentResult?.content) return;
+  if (conflictAgentResult.sourceVersion !== conflictFile.version) {
+    conflictStatus = "Agent result is stale. Refresh the file and ask again.";
+    clearConflictAgentResult();
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  conflictResultDraft = conflictAgentResult.content;
+  conflictSelectedConflictId = draftConflictRegions(conflictResultDraft)[0]?.id ?? null;
+  const range = conflictSelectionRange(conflictResultDraft, conflictSelectedConflictId);
+  conflictEditorSelection = range
+    ? {
+        selectionStart: range.start,
+        selectionEnd: range.end,
+        scrollTop: conflictEditorSelection?.scrollTop ?? 0,
+        focused: true,
+      }
+    : null;
+  clearConflictAgentResult();
+  conflictStatus = "Agent result applied to the draft. Save result to write it to disk.";
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+}
+
+function discardConflictAgentResult(): void {
+  if (!conflictAgentResult && !conflictRequestingAgentAssistance) return;
+  clearConflictAgentResult();
+  conflictStatus = "Agent result discarded.";
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+}
+
+
+function saveConflictResult(): void {
+  if (!conflictFile || !conflictDraftDirty()) return;
+  conflictSaving = true;
+  clearConflictMagicWandPreview();
+  clearConflictAgentResult();
+  conflictStatus = "Saving conflict result…";
+  conflictError = null;
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+  send({
+    type: "conflict.file.writeResult",
+    repoId: conflictFile.repoId,
+    path: conflictFile.path,
+    content: conflictResultDraft,
+    expectedVersion: conflictFile.version,
+  });
+}
+
+function stageResolvedConflictFile(): void {
+  if (!conflictFile) return;
+  if (containsConflictMarkerLines(conflictResultDraft)) {
+    conflictStatus = "Remove all conflict markers before marking the file resolved.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  if (conflictDraftDirty()) {
+    conflictStatus = "Save the current conflict result before marking the file resolved.";
+    markConflictViewDirty();
+    renderConflictPanelIfNeeded(true);
+    return;
+  }
+  conflictStaging = true;
+  clearConflictMagicWandPreview();
+  clearConflictAgentResult();
+  conflictStatus = "Marking file resolved…";
+  conflictError = null;
+  markConflictViewDirty();
+  renderConflictPanelIfNeeded(true);
+  send({
+    type: "conflict.file.stageResolved",
+    repoId: conflictFile.repoId,
+    path: conflictFile.path,
+    expectedVersion: conflictFile.version,
+  });
 }
 
 function resetCodeViewForSession(sessionId: string | null): void {
@@ -3650,6 +4267,10 @@ function openDiffFileInCode(state: DiffReviewableState, filePath: string): void 
 
 function renderActiveDockviewPanel(projection: SessionProjection | undefined): void {
   syncSessionModePanels();
+  if (activeDesktopDockviewMode === "conflictResolver") {
+    renderConflictPanelIfNeeded();
+    return;
+  }
   renderTranscriptPanelIfNeeded(projection);
   renderToolsPanelIfNeeded(projection);
   if (desktopDockview?.isPanelActive("diffs") && shouldRenderDiffsView(projection)) {
@@ -3752,6 +4373,46 @@ function renderCodePanelIfNeeded(force = false): void {
   });
   if (!rendered) return;
   codePanelDirty = false;
+}
+
+function renderConflictPanelIfNeeded(force = false): void {
+  if (!conflictDesktopDockview?.panelMounted("conflictResolver")) return;
+  if (!force && !conflictPanelDirty) return;
+  const rendered = conflictDesktopDockview.withPanel("conflictResolver", container => {
+    renderConflictResolver(container, activeConflictResolverState(), {
+      refresh: requestConflictScan,
+      selectFile: requestConflictFile,
+      leave: leaveConflictResolver,
+      updateResult: updateConflictResultDraft,
+      selectConflict: selectConflictBlock,
+      shiftConflict: shiftConflictBlock,
+      resolveConflict: resolveSelectedConflictBlock,
+      previewMagicWand: previewConflictMagicWand,
+      applyMagicWandPreview: applyConflictMagicWandPreview,
+      discardMagicWandPreview: discardConflictMagicWandPreview,
+      updateAgentInstructions: updateConflictAgentInstructions,
+      requestAgentExplain: () => requestConflictAgentAssistance("explain", "selectedConflict"),
+      requestAgentProposeConflict: () => requestConflictAgentAssistance("propose", "selectedConflict"),
+      requestAgentProposeFile: () => requestConflictAgentAssistance("propose", "file"),
+      applyAgentResult: applyConflictAgentResult,
+      discardAgentResult: discardConflictAgentResult,
+      saveResult: saveConflictResult,
+      stageResolved: stageResolvedConflictFile,
+    });
+    const textarea = container.querySelector<HTMLTextAreaElement>(".conflict-result-editor");
+    if (textarea && conflictEditorSelection) {
+      textarea.scrollTop = conflictEditorSelection.scrollTop;
+      if (conflictEditorSelection.focused && !textarea.disabled) {
+        textarea.focus();
+        textarea.setSelectionRange(
+          conflictEditorSelection.selectionStart,
+          conflictEditorSelection.selectionEnd,
+        );
+      }
+    }
+  });
+  if (!rendered) return;
+  conflictPanelDirty = false;
 }
 
 // --- Panel render functions ---
@@ -4412,13 +5073,17 @@ function activeSessionUsesDiffReviewWorkspace(): boolean {
   return summary?.sessionMode === "diffReview";
 }
 
-function setActiveDesktopDockviewMode(mode: "normal" | "diffReview"): boolean {
-  const nextDockview = mode === "diffReview" ? diffReviewDesktopDockview : normalDesktopDockview;
+function setActiveDesktopDockviewMode(mode: "normal" | "diffReview" | "conflictResolver"): boolean {
+  const nextDockview = mode === "conflictResolver"
+    ? conflictDesktopDockview
+    : mode === "diffReview" ? diffReviewDesktopDockview : normalDesktopDockview;
   if (!nextDockview) return false;
   const normalHost = document.getElementById("normalWorkspacePanelHost");
   const reviewHost = document.getElementById("diffReviewWorkspacePanelHost");
+  const conflictHost = document.getElementById("conflictResolverWorkspacePanelHost");
   normalHost?.classList.toggle("workspace-panel-host-active", mode === "normal");
   reviewHost?.classList.toggle("workspace-panel-host-active", mode === "diffReview");
+  conflictHost?.classList.toggle("workspace-panel-host-active", mode === "conflictResolver");
   desktopDockview = nextDockview;
   if (activeDesktopDockviewMode !== mode) {
     activeDesktopDockviewMode = mode;
@@ -4429,11 +5094,14 @@ function setActiveDesktopDockviewMode(mode: "normal" | "diffReview"): boolean {
     codePanelDirty = true;
     diffPanelDirty = true;
     comparePanelDirty = true;
+    conflictPanelDirty = true;
   }
+  conflictResolverButton.setAttribute("aria-pressed", String(mode === "conflictResolver"));
   return true;
 }
 
 function syncSessionModePanels(activateCreatedDiffReview = false): void {
+  if (activeDesktopDockviewMode === "conflictResolver" && workspaceMode === "session") return;
   const isDiffReview = activeSessionUsesDiffReviewWorkspace();
   const nextMode = isDiffReview ? "diffReview" : "normal";
   const modeChanged = activeDesktopDockviewMode !== nextMode;
@@ -5929,6 +6597,7 @@ function initDesktopWorkspace(): void {
       if (id === "sessionChanges") markDiffsViewDirty();
       if (id === "compare") markComparePanelDirty();
       if (id === "code") markCodeViewDirty();
+      if (id === "conflictResolver") markConflictViewDirty();
     },
     onPanelActivated: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
       const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
@@ -5943,6 +6612,10 @@ function initDesktopWorkspace(): void {
       if (id === "code") {
         ensureActiveCodeWorkspace();
         renderCodePanelIfNeeded(true);
+        return;
+      }
+      if (id === "conflictResolver") {
+        renderConflictPanelIfNeeded(true);
         return;
       }
       if (id === "diffs" || id === "sessionChanges") {
@@ -5992,6 +6665,12 @@ function initDesktopWorkspace(): void {
     host: requireElement<HTMLDivElement>("diffReviewWorkspacePanelHost"),
     layoutMode: "diffReview",
     storageKey: "fura.dockview.diffReview.layout",
+    ...createDockviewCallbacks(),
+  });
+  conflictDesktopDockview = initDesktopDockview({
+    host: requireElement<HTMLDivElement>("conflictResolverWorkspacePanelHost"),
+    layoutMode: "conflictResolver",
+    storageKey: "fura.dockview.conflictResolver.layout",
     ...createDockviewCallbacks(),
   });
   syncSessionModePanels();
@@ -6159,6 +6838,9 @@ function setCwdPickerError(message: string | null): void {
 function setCwdPickerCreatePending(pending: boolean, requestId: string | null = null): void {
   cwdPickerCreatePending = pending;
   cwdPickerPendingRequestId = pending ? requestId : null;
+  cwdPickerSessionTab.disabled = pending;
+  cwdPickerDiffTab.disabled = pending;
+  cwdPickerConflictTab.disabled = pending;
   cwdPickerNameInput.disabled = pending;
   cwdPickerInput.disabled = pending;
   cwdPickerWorktreeEnabled.disabled = pending;
@@ -6166,13 +6848,25 @@ function setCwdPickerCreatePending(pending: boolean, requestId: string | null = 
   cwdPickerWorktreeBase.disabled = pending;
   cwdPickerWorktreeBranch.disabled = pending;
   cwdPickerProposedModel.disabled = pending;
+  cwdPickerDiffRepo.disabled = pending;
+  cwdPickerDiffBase.disabled = pending;
+  cwdPickerDiffHead.disabled = pending;
+  cwdPickerDiffMode.disabled = pending;
+  cwdPickerDiffAgentSession.disabled = pending;
+  cwdPickerConflictRepo.disabled = pending;
   cwdPickerClose.disabled = pending;
   cwdPickerCancel.disabled = pending;
   cwdPickerCreate.disabled = pending;
-  cwdPickerCreate.textContent = pending ? (cwdPickerMode === "diff" ? "Opening…" : "Creating…") : (cwdPickerMode === "diff" ? "Open diff" : "Create session");
+  const actionLabel = cwdPickerMode === "diff" ? "Open diff" : cwdPickerMode === "conflict" ? "Create session for Conflict Resolver" : "Create session";
+  cwdPickerCreate.textContent = pending ? (cwdPickerMode === "diff" ? "Opening…" : "Creating…") : actionLabel;
   cwdPickerCreate.toggleAttribute("aria-busy", pending);
   if (pending) {
-    setCwdPickerStatus(cwdPickerMode === "diff" ? "Opening diff…" : "Creating session…", "loading");
+    const status = cwdPickerMode === "diff"
+      ? "Opening diff…"
+      : cwdPickerMode === "conflict"
+        ? "Creating session for Conflict Resolver…"
+        : "Creating session…";
+    setCwdPickerStatus(status, "loading");
   }
 }
 
@@ -6188,6 +6882,8 @@ function handleCwdPickerCreateError(requestId: string | null, message: string): 
     return false;
   }
   pendingCreatedSessionBaseline = null;
+  pendingDiffCreate = null;
+  pendingConflictResolverCreate = false;
   setCwdPickerCreatePending(false);
   setCwdPickerError(message);
   cwdPickerOverlay.hidden = false;
@@ -6253,16 +6949,37 @@ function syncCwdPickerWorktreeFields(): void {
   }
 }
 
-function setCwdPickerMode(mode: "session" | "diff"): void {
+function setCwdPickerMode(mode: "session" | "diff" | "conflict"): void {
   cwdPickerMode = mode;
   const sessionMode = mode === "session";
+  const diffMode = mode === "diff";
+  const conflictMode = mode === "conflict";
   cwdPickerSessionTab.classList.toggle("active", sessionMode);
-  cwdPickerDiffTab.classList.toggle("active", !sessionMode);
+  cwdPickerDiffTab.classList.toggle("active", diffMode);
+  cwdPickerConflictTab.classList.toggle("active", conflictMode);
   cwdPickerSessionTab.setAttribute("aria-selected", String(sessionMode));
-  cwdPickerDiffTab.setAttribute("aria-selected", String(!sessionMode));
+  cwdPickerDiffTab.setAttribute("aria-selected", String(diffMode));
+  cwdPickerConflictTab.setAttribute("aria-selected", String(conflictMode));
   cwdPickerSessionBody.hidden = !sessionMode;
-  cwdPickerDiffBody.hidden = sessionMode;
-  if (!cwdPickerCreatePending) cwdPickerCreate.textContent = mode === "diff" ? "Open diff" : "Create session";
+  cwdPickerDiffBody.hidden = !diffMode;
+  cwdPickerConflictBody.hidden = !conflictMode;
+  if (sessionMode) {
+    cwdPickerTitle.textContent = "New session";
+    cwdPickerDescription.textContent = "Choose the working directory for the new OMP session. Optionally create a git worktree first.";
+  } else if (diffMode) {
+    cwdPickerTitle.textContent = "Diff";
+    cwdPickerDescription.textContent = "Open a repository comparison directly or create a dedicated diff-review session.";
+  } else {
+    cwdPickerTitle.textContent = "Conflict Resolver";
+    cwdPickerDescription.textContent = "Create a normal OMP session for resolving conflicts in a specific repository.";
+  }
+  if (!cwdPickerCreatePending) {
+    cwdPickerCreate.textContent = diffMode
+      ? "Open diff"
+      : conflictMode
+        ? "Create session for Conflict Resolver"
+        : "Create session";
+  }
 }
 
 function syncCwdPickerDiffDefaults(): void {
@@ -6274,9 +6991,15 @@ function syncCwdPickerDiffDefaults(): void {
   cwdPickerDiffAgentSession.checked = true;
 }
 
-function openCwdPicker(): void {
+function syncCwdPickerConflictDefaults(): void {
+  cwdPickerConflictRepo.value = serverConfig?.defaultCwd ?? "";
+}
+
+function openCwdPicker(initialMode: "session" | "diff" | "conflict" = "session"): void {
   const config = requireServerConfig();
   if (!config) return;
+  pendingDiffCreate = null;
+  pendingConflictResolverCreate = false;
   cwdPickerNameInput.value = "";
   cwdPickerCategoryInput.value = "";
   hideCategoryCombobox(cwdCategoryCombobox);
@@ -6296,9 +7019,18 @@ function openCwdPicker(): void {
   renderCwdProposedModelOptions();
   syncCwdPickerWorktreeFields();
   syncCwdPickerDiffDefaults();
-  setCwdPickerMode("session");
+  syncCwdPickerConflictDefaults();
+  setCwdPickerMode(initialMode);
   cwdPickerOverlay.hidden = false;
-  window.setTimeout(() => cwdPickerNameInput.focus(), 0);
+  window.setTimeout(() => {
+    const focusTarget = initialMode === "diff"
+      ? cwdPickerDiffRepo
+      : initialMode === "conflict"
+        ? cwdPickerConflictRepo
+        : cwdPickerNameInput;
+    focusTarget.focus();
+    focusTarget.select();
+  }, 0);
 }
 
 function closeCwdPicker(): void {
@@ -6370,12 +7102,47 @@ function submitCwdPickerDiff(): void {
   }
 }
 
+function submitCwdPickerConflict(requestId: string): void {
+  if (cwdPickerCreatePending) return;
+  const repoRoot = cwdPickerConflictRepo.value.trim();
+  if (!repoRoot) {
+    setCwdPickerError("Repository root is required for Conflict Resolver.");
+    cwdPickerConflictRepo.focus();
+    return;
+  }
+  const result = resolveSessionCreateMessage({
+    requestId,
+    name: `conflicts: ${repoRoot.split(/[/\\]/).filter(Boolean).at(-1) ?? "repo"}`,
+    cwd: repoRoot,
+    worktree: { enabled: false, sourceRepo: repoRoot, directory: repoRoot, baseBranch: "", branchName: undefined },
+  });
+  if (result.type === "invalid") {
+    setCwdPickerError(result.message);
+    cwdPickerConflictRepo.focus();
+    return;
+  }
+  pendingConflictResolverCreate = true;
+  conflictResolverSessionId = null;
+  pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
+  setCwdPickerCreatePending(true, requestId);
+  if (!send(result.message)) {
+    pendingCreatedSessionBaseline = null;
+    pendingConflictResolverCreate = false;
+    setCwdPickerCreatePending(false);
+    setCwdPickerError("Not connected to the Fura bridge.");
+  }
+}
+
 function submitCwdPicker(): void {
   if (cwdPickerCreatePending) return;
   if (!requireServerConfig()) return;
   const requestId = nextClientRequestId("session-create");
   if (cwdPickerMode === "diff") {
     submitCwdPickerDiff();
+    return;
+  }
+  if (cwdPickerMode === "conflict") {
+    submitCwdPickerConflict(requestId);
     return;
   }
   const result = resolveSessionCreateMessage({
@@ -6397,6 +7164,7 @@ function submitCwdPicker(): void {
     focusCwdPickerCreateTarget(result.target);
     return;
   }
+  pendingConflictResolverCreate = false;
   pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
   setCwdPickerCreatePending(true, requestId);
   const message = result.message;

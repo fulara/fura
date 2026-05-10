@@ -13,10 +13,11 @@ use tokio::{
 use tracing::warn;
 
 use crate::{
-    CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode, DiffFileSelector,
-    DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, PlanModeProjection, PreparedDiff,
-    ProposedModelConfig, ServerMessage, SessionKind, SessionMode, SessionRecord, SessionStatus,
-    ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand, save_fura_config,
+    ActiveConflictContext, CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode,
+    DiffFileSelector, DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot,
+    PlanModeProjection, PreparedDiff, ProposedModelConfig, ServerMessage, SessionKind, SessionMode,
+    SessionRecord, SessionStatus, ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection,
+    VoiceCommand, save_fura_config,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -38,6 +39,7 @@ pub(crate) struct AppState {
     pub(crate) diff_jobs: Arc<RwLock<DiffJobRegistry>>,
     pub(crate) review_comment_db_path: PathBuf,
     pub(crate) active_review_contexts: Arc<RwLock<HashMap<String, ActiveReviewContext>>>,
+    pub(crate) active_conflict_contexts: Arc<RwLock<HashMap<String, ActiveConflictContext>>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,
     pub(crate) session_host_tools: Arc<RwLock<HashMap<String, Vec<Value>>>>,
     pub(crate) rpc_config: Arc<RpcConfig>,

@@ -256,6 +256,49 @@ pub(crate) async fn handle_client_message(
             query,
             limit,
         } => handle_code_file_search(state, workspace_id, base_path, query, limit).await,
+        ClientMessage::ConflictScan { root } => handle_conflict_scan(root).await,
+        ClientMessage::ConflictFileOpen { repo_id, path } => {
+            handle_conflict_file_open(repo_id, path).await
+        }
+        ClientMessage::ConflictFilePreviewMagicWand {
+            repo_id,
+            path,
+            expected_version,
+        } => handle_conflict_file_preview_magic_wand(repo_id, path, expected_version).await,
+        ClientMessage::ConflictFileWriteResult {
+            repo_id,
+            path,
+            content,
+            expected_version,
+        } => handle_conflict_file_write_result(repo_id, path, content, expected_version).await,
+        ClientMessage::ConflictFileStageResolved {
+            repo_id,
+            path,
+            expected_version,
+        } => handle_conflict_file_stage_resolved(repo_id, path, expected_version).await,
+        ClientMessage::ConflictAgentRun {
+            session_id,
+            repo_id,
+            path,
+            expected_version,
+            mode,
+            scope,
+            conflict_id,
+            instructions,
+        } => {
+            handle_conflict_agent_run(
+                state,
+                session_id,
+                repo_id,
+                path,
+                expected_version,
+                mode,
+                scope,
+                conflict_id,
+                instructions,
+            )
+            .await
+        }
         ClientMessage::PlanApprove {
             session_id,
             plan_file_path,
@@ -1189,6 +1232,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
 pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<ServerMessage> {
     info!(action = "session.stop", session_id = %session_id);
     clear_review_contexts_for_session(state, &session_id).await;
+    clear_conflict_contexts_for_session(state, &session_id, None).await;
     if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
         if let Some(removed) = state
             .session_runtime
@@ -1227,6 +1271,7 @@ pub(crate) async fn delete_session(
 ) -> Vec<ServerMessage> {
     info!(action = "session.delete", session_id = %session_id, delete_worktree);
     clear_review_contexts_for_session(state, &session_id).await;
+    clear_conflict_contexts_for_session(state, &session_id, None).await;
 
     // Stop managed child if running.
     if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
@@ -2074,6 +2119,164 @@ pub(crate) async fn handle_review_agent_review_start(
         }
     }
 }
+fn conflict_root_matches_repo(requested_root: &str, repo_root: &str) -> bool {
+    let normalized_requested = requested_root
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    let normalized_repo = repo_root
+        .replace('\\', "/")
+        .trim_end_matches('/')
+        .to_string();
+    normalized_requested == normalized_repo
+        || normalized_requested.starts_with(&format!("{normalized_repo}/"))
+}
+
+pub(crate) async fn handle_conflict_agent_run(
+    state: &AppState,
+    session_id: String,
+    repo_id: String,
+    path: String,
+    expected_version: String,
+    mode: ConflictAgentMode,
+    scope: ConflictAgentScope,
+    conflict_id: Option<String>,
+    instructions: String,
+) -> Vec<ServerMessage> {
+    let context_id = uuid::Uuid::new_v4().to_string();
+    let prepared = match prepare_conflict_agent_request(
+        &context_id,
+        &repo_id,
+        &path,
+        &expected_version,
+        mode,
+        scope,
+        conflict_id.as_deref(),
+        &instructions,
+    ) {
+        Ok(prepared) => prepared,
+        Err(message) => {
+            return vec![ServerMessage::ConflictError {
+                repo_id: Some(repo_id),
+                path: Some(path),
+                message,
+            }];
+        }
+    };
+    let session = {
+        let sessions = state.sessions.read().await;
+        sessions.get(&session_id).cloned()
+    };
+    let Some(session) = session else {
+        return vec![unknown_session_error(session_id)];
+    };
+
+    let session_root = session
+        .worktree
+        .as_ref()
+        .map(|worktree| worktree.path.as_str())
+        .or(session.cwd.as_deref());
+    let Some(session_root) = session_root else {
+        return vec![ServerMessage::ConflictError {
+            repo_id: Some(prepared.repo_id),
+            path: Some(prepared.path),
+            message: "The session opened from Conflict Resolver has no repository root."
+                .to_string(),
+        }];
+    };
+    if !conflict_root_matches_repo(session_root, &prepared.repo_root) {
+        return vec![ServerMessage::ConflictError {
+            repo_id: Some(prepared.repo_id),
+            path: Some(prepared.path),
+            message:
+                "The session opened from Conflict Resolver does not match the requested conflicted repository."
+                    .to_string(),
+        }];
+    }
+    if !state.active_conflict_contexts.read().await.is_empty() {
+        return vec![ServerMessage::ConflictError {
+            repo_id: Some(prepared.repo_id),
+            path: Some(prepared.path),
+            message: "Conflict Resolver agent assistance is already in progress.".to_string(),
+        }];
+    }
+    let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await else {
+        return vec![ServerMessage::ConflictError {
+            repo_id: Some(prepared.repo_id),
+            path: Some(prepared.path),
+            message: format!("session {session_id} has no live RPC child"),
+        }];
+    };
+    let previous_host_tools = state
+        .session_host_tools
+        .read()
+        .await
+        .get(&transport_session_id)
+        .cloned()
+        .unwrap_or_default();
+    let next_host_tools = conflict_host_tools_with_submission_tool(&previous_host_tools);
+    let set_host_tools_command_id = next_rpc_id();
+    let prompt_command_id = next_rpc_id();
+    let context = ActiveConflictContext {
+        transport_session_id: transport_session_id.clone(),
+        session_id: session_id.clone(),
+        repo_root: prepared.repo_root,
+        repo_id: prepared.repo_id.clone(),
+        path: prepared.path.clone(),
+        source_version: prepared.source_version,
+        mode: prepared.mode,
+        scope: prepared.scope,
+        conflict_id: prepared.conflict_id,
+        original_content: prepared.original_content,
+        original_conflict_count: prepared.original_conflict_count,
+        selected_conflict_byte_start: prepared.selected_conflict_byte_start,
+        selected_conflict_byte_end: prepared.selected_conflict_byte_end,
+        previous_host_tools: previous_host_tools.clone(),
+        set_host_tools_command_id: set_host_tools_command_id.clone(),
+        prompt_command_id: prompt_command_id.clone(),
+    };
+    state
+        .active_conflict_contexts
+        .write()
+        .await
+        .insert(context_id.clone(), context);
+
+    let setup_result = async {
+        send_rpc_command(
+            state,
+            &transport_session_id,
+            review_set_host_tools_command(set_host_tools_command_id, next_host_tools.clone()),
+        )
+        .await?;
+        send_rpc_command(
+            state,
+            &transport_session_id,
+            prompt_command(prompt_command_id, prepared.prompt, None, None),
+        )
+        .await
+    }
+    .await;
+
+    match setup_result {
+        Ok(()) => {
+            remember_session_host_tools(state, &transport_session_id, next_host_tools).await;
+            Vec::new()
+        }
+        Err(message) => {
+            state
+                .active_conflict_contexts
+                .write()
+                .await
+                .remove(&context_id);
+            remember_session_host_tools(state, &transport_session_id, previous_host_tools).await;
+            vec![ServerMessage::ConflictError {
+                repo_id: Some(prepared.repo_id),
+                path: Some(prepared.path),
+                message,
+            }]
+        }
+    }
+}
 
 pub(crate) async fn remove_review_contexts_for_session(
     state: &AppState,
@@ -2125,7 +2328,86 @@ pub(crate) async fn clear_review_context_for_command(
     false
 }
 
-pub(crate) async fn handle_review_host_tool_call(
+pub(crate) async fn remove_conflict_contexts_for_session(
+    state: &AppState,
+    session_id: &str,
+) -> Vec<ActiveConflictContext> {
+    let mut contexts = state.active_conflict_contexts.write().await;
+    let mut removed = Vec::new();
+    contexts.retain(|_, context| {
+        if context.transport_session_id == session_id || context.session_id == session_id {
+            removed.push(context.clone());
+            false
+        } else {
+            true
+        }
+    });
+    removed
+}
+
+pub(crate) async fn clear_conflict_contexts_for_session(
+    state: &AppState,
+    session_id: &str,
+    message: Option<&str>,
+) {
+    let removed = remove_conflict_contexts_for_session(state, session_id).await;
+    if let Some(context) = removed.iter().last() {
+        restore_session_host_tools(
+            state,
+            &context.transport_session_id,
+            context.previous_host_tools.clone(),
+        )
+        .await;
+    }
+    if let Some(message) = message {
+        for context in removed {
+            let _ = state.events.send(ServerMessage::ConflictError {
+                repo_id: Some(context.repo_id),
+                path: Some(context.path),
+                message: message.to_string(),
+            });
+        }
+    }
+}
+
+pub(crate) async fn clear_conflict_context_for_command(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+) -> bool {
+    let mut contexts = state.active_conflict_contexts.write().await;
+    let mut restored_tools: Option<Vec<Value>> = None;
+    contexts.retain(|_, context| {
+        let matches_session = context.transport_session_id == session_id;
+        let matches_command = context.set_host_tools_command_id == command_id
+            || context.prompt_command_id == command_id;
+        if matches_session && matches_command {
+            restored_tools = Some(context.previous_host_tools.clone());
+            false
+        } else {
+            true
+        }
+    });
+    drop(contexts);
+    if let Some(previous_host_tools) = restored_tools {
+        restore_session_host_tools(state, session_id, previous_host_tools).await;
+        return true;
+    }
+    false
+}
+
+async fn take_conflict_context_by_id(
+    state: &AppState,
+    context_id: &str,
+) -> Option<ActiveConflictContext> {
+    state
+        .active_conflict_contexts
+        .write()
+        .await
+        .remove(context_id)
+}
+
+pub(crate) async fn handle_session_host_tool_call(
     state: &AppState,
     transport_session_id: &str,
     frame_id: String,
@@ -2133,17 +2415,23 @@ pub(crate) async fn handle_review_host_tool_call(
     tool_name: String,
     arguments: Value,
 ) {
-    let result =
-        match dispatch_review_host_tool(state, transport_session_id, &tool_name, arguments).await {
-            Ok(text) => review_host_tool_result_frame(frame_id, text, false),
-            Err(message) => review_host_tool_result_frame(frame_id, message, true),
-        };
+    let result = match dispatch_session_host_tool(
+        state,
+        transport_session_id,
+        &tool_name,
+        arguments,
+    )
+    .await
+    {
+        Ok(text) => review_host_tool_result_frame(frame_id, text, false),
+        Err(message) => review_host_tool_result_frame(frame_id, message, true),
+    };
     if let Err(message) = send_rpc_command(state, transport_session_id, result).await {
-        warn!(tool_call_id = %tool_call_id, tool_name = %tool_name, %message, "failed to send review host tool result");
+        warn!(tool_call_id = %tool_call_id, tool_name = %tool_name, %message, "failed to send session host tool result");
     }
 }
 
-async fn dispatch_review_host_tool(
+async fn dispatch_session_host_tool(
     state: &AppState,
     transport_session_id: &str,
     tool_name: &str,
@@ -2153,7 +2441,10 @@ async fn dispatch_review_host_tool(
         "fura_add_review_comment" => {
             add_agent_review_comment(state, transport_session_id, arguments).await
         }
-        _ => Err(format!("unknown Fura review tool: {tool_name}")),
+        "fura_submit_conflict_assistance" => {
+            add_conflict_agent_result(state, transport_session_id, arguments).await
+        }
+        _ => Err(format!("unknown Fura session tool: {tool_name}")),
     }
 }
 
@@ -2254,6 +2545,65 @@ async fn add_agent_review_comment(
     ))
 }
 
+async fn add_conflict_agent_result(
+    state: &AppState,
+    transport_session_id: &str,
+    arguments: Value,
+) -> Result<String, String> {
+    let context_id = required_string(&arguments, "conflictContextId")?;
+    let risk = match required_string(&arguments, "risk")?.as_str() {
+        "low" => ConflictAgentRisk::Low,
+        "medium" => ConflictAgentRisk::Medium,
+        "high" => ConflictAgentRisk::High,
+        value => return Err(format!("risk must be low, medium, or high, got {value}")),
+    };
+    let summary = required_string(&arguments, "summary")?;
+    let explanation = required_string(&arguments, "explanation")?;
+    let proposed_content = match arguments.get("proposedContent") {
+        Some(Value::String(text)) => Some(text.clone()),
+        Some(Value::Null) | None => None,
+        Some(_) => return Err("proposedContent must be a string when provided".to_string()),
+    };
+
+    let context = state
+        .active_conflict_contexts
+        .read()
+        .await
+        .get(&context_id)
+        .cloned()
+        .ok_or_else(|| "conflict context is not active".to_string())?;
+    let target_session_id = rpc_session_target_id(state, transport_session_id).await;
+    if target_session_id != context.session_id {
+        return Err(format!(
+            "conflict context belongs to session {}, but host tool call came from session {}",
+            context.session_id, target_session_id
+        ));
+    }
+    let result =
+        finalize_conflict_agent_result(&context, risk, summary, explanation, proposed_content)?;
+    let Some(removed_context) = take_conflict_context_by_id(state, &context_id).await else {
+        return Err("conflict context is no longer active".to_string());
+    };
+    restore_session_host_tools(
+        state,
+        &removed_context.transport_session_id,
+        removed_context.previous_host_tools.clone(),
+    )
+    .await;
+    let _ = state.events.send(ServerMessage::ConflictAgentResult {
+        result: result.clone(),
+    });
+    Ok(match result.mode {
+        ConflictAgentMode::Explain => format!(
+            "Stored conflict explanation for {} ({:?}).",
+            result.path, result.scope
+        ),
+        ConflictAgentMode::Propose => format!(
+            "Stored conflict proposal preview for {} ({:?}).",
+            result.path, result.scope
+        ),
+    })
+}
 fn required_string(arguments: &Value, key: &str) -> Result<String, String> {
     arguments
         .get(key)
@@ -2476,6 +2826,38 @@ fn review_tool_definition() -> Value {
     })
 }
 
+fn conflict_host_tools_with_submission_tool(previous_host_tools: &[Value]) -> Vec<Value> {
+    let mut tools = previous_host_tools
+        .iter()
+        .filter(|tool| {
+            tool.get("name").and_then(Value::as_str) != Some("fura_submit_conflict_assistance")
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    tools.push(conflict_tool_definition());
+    tools
+}
+
+fn conflict_tool_definition() -> Value {
+    json!({
+        "name": "fura_submit_conflict_assistance",
+        "label": "Submit Fura conflict assistance",
+        "description": "Submit the explanation or proposal for the active Fura Conflict Resolver request. Fura validates scope, risk label, and preview content before showing it to the user.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "conflictContextId": { "type": "string", "description": "The conflict context id supplied in the conflict prompt." },
+                "risk": { "type": "string", "enum": ["low", "medium", "high"], "description": "Risk label for this explanation or proposal." },
+                "summary": { "type": "string", "description": "One-sentence summary shown in Conflict Resolver." },
+                "explanation": { "type": "string", "description": "Concise explanation, assumptions, and risks." },
+                "proposedContent": { "type": "string", "description": "Full proposed file text. Required only for propose mode." }
+            },
+            "required": ["conflictContextId", "risk", "summary", "explanation"],
+            "additionalProperties": false
+        }
+    })
+}
+
 fn review_endpoint_label(endpoint: &DiffEndpoint) -> String {
     match endpoint {
         DiffEndpoint::SessionStartSnapshot { snapshot } => {
@@ -2550,6 +2932,12 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
     let command = abort_command(next_rpc_id());
     let send_result = send_rpc_command(state, &session_id, command).await;
     clear_review_contexts_for_session(state, &session_id).await;
+    clear_conflict_contexts_for_session(
+        state,
+        &session_id,
+        Some("Conflict Resolver agent run was aborted."),
+    )
+    .await;
 
     let mut sessions = state.sessions.write().await;
     match sessions.get_mut(&session_id) {
@@ -2574,8 +2962,8 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
 #[cfg(test)]
 mod review_comment_tests {
     use super::*;
-    use std::collections::HashSet;
-
+    use std::{collections::HashSet, fs, path::Path, process::Command};
+    use tempfile::TempDir;
     fn test_session_record(id: &str) -> SessionRecord {
         SessionRecord {
             id: id.to_string(),
@@ -2660,6 +3048,51 @@ mod review_comment_tests {
             patch: Some(patch.to_string()),
             review_worktree: None,
         }
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .expect("git command runs");
+        assert!(
+            output.status.success(),
+            "git {:?} failed\nstdout:\n{}\nstderr:\n{}",
+            args,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn create_conflict_agent_test_repo() -> TempDir {
+        let temp = TempDir::new().expect("temp repo created");
+        let root = temp.path();
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.email", "fura@example.invalid"]);
+        run_git(root, &["config", "user.name", "Fura Test"]);
+        fs::write(root.join("demo.txt"), "one\nbase\nthree\n").expect("base file written");
+        run_git(root, &["add", "demo.txt"]);
+        run_git(root, &["commit", "-m", "base"]);
+        run_git(root, &["checkout", "-b", "ours"]);
+        fs::write(root.join("demo.txt"), "one\nours\nthree\n").expect("ours file written");
+        run_git(root, &["commit", "-am", "ours"]);
+        run_git(root, &["checkout", "-b", "theirs", "master"]);
+        fs::write(root.join("demo.txt"), "one\ntheirs\nthree\n").expect("theirs file written");
+        run_git(root, &["commit", "-am", "theirs"]);
+        run_git(root, &["checkout", "ours"]);
+        let output = Command::new("git")
+            .current_dir(root)
+            .args(["merge", "theirs"])
+            .output()
+            .expect("git merge runs");
+        assert!(!output.status.success(), "merge should conflict");
+        temp
+    }
+
+    fn conflict_result_version(root: &Path, path: &str) -> String {
+        let bytes = fs::read(root.join(path)).expect("conflict result read");
+        format!("{}:{}", bytes.len(), blake3::hash(&bytes).to_hex())
     }
 
     #[tokio::test]
@@ -2869,11 +3302,131 @@ mod review_comment_tests {
                 .is_some_and(|record| matches!(record.status, SessionStatus::Busy))
         );
     }
+
+    #[tokio::test]
+    async fn conflict_agent_run_sets_tools_and_prompts_selected_conflict() {
+        let temp = create_conflict_agent_test_repo();
+        let root = temp.path().canonicalize().expect("repo root canonicalized");
+        let root_str = root.to_string_lossy().to_string();
+        let expected_version = conflict_result_version(&root, "demo.txt");
+        let state = crate::tests::test_state(8, None);
+        let session_id = "conflict-session";
+        let mut session = test_session_record(session_id);
+        session.cwd = Some(root_str.clone());
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session_id.to_string(), session);
+        let conflict_transport = "conflict-transport";
+        let mut stdin_rx =
+            crate::tests::register_test_transport(&state, conflict_transport, session_id, 8).await;
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::ConflictAgentRun {
+                session_id: session_id.to_string(),
+                repo_id: root_str,
+                path: "demo.txt".to_string(),
+                expected_version,
+                mode: ConflictAgentMode::Propose,
+                scope: ConflictAgentScope::SelectedConflict,
+                conflict_id: Some("conflict-1".to_string()),
+                instructions: "Prefer both branch-specific changes when safe.".to_string(),
+            },
+        )
+        .await;
+
+        assert!(responses.is_empty());
+        let set_host_tools = stdin_rx.recv().await.expect("set_host_tools command");
+        assert_eq!(set_host_tools["type"], "set_host_tools");
+        assert_eq!(
+            set_host_tools["tools"][0]["name"],
+            "fura_submit_conflict_assistance"
+        );
+        let prompt = stdin_rx.recv().await.expect("prompt command");
+        assert_eq!(prompt["type"], "prompt");
+        let text = prompt["message"].as_str().expect("prompt text");
+        assert!(text.contains("Conflict context id:"));
+        assert!(text.contains("Selected conflict: conflict-1"));
+        assert!(text.contains("Only the selected conflict block may change"));
+        assert!(text.contains("Prefer both branch-specific changes when safe."));
+        assert_eq!(state.active_conflict_contexts.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn conflict_host_tool_broadcasts_agent_result() {
+        let temp = create_conflict_agent_test_repo();
+        let root = temp.path().canonicalize().expect("repo root canonicalized");
+        let root_str = root.to_string_lossy().to_string();
+        let expected_version = conflict_result_version(&root, "demo.txt");
+        let prepared = prepare_conflict_agent_request(
+            "ctx",
+            &root_str,
+            "demo.txt",
+            &expected_version,
+            ConflictAgentMode::Propose,
+            ConflictAgentScope::SelectedConflict,
+            Some("conflict-1"),
+            "Keep the rest untouched.",
+        )
+        .expect("conflict request prepared");
+        let state = crate::tests::test_state(8, None);
+        crate::tests::map_test_transport(&state, "transport-1", "transport-1").await;
+        state.active_conflict_contexts.write().await.insert(
+            "ctx".to_string(),
+            ActiveConflictContext {
+                transport_session_id: "transport-1".to_string(),
+                session_id: "transport-1".to_string(),
+                repo_root: prepared.repo_root,
+                repo_id: prepared.repo_id,
+                path: prepared.path,
+                source_version: prepared.source_version,
+                mode: prepared.mode,
+                scope: prepared.scope,
+                conflict_id: prepared.conflict_id,
+                original_content: prepared.original_content,
+                original_conflict_count: prepared.original_conflict_count,
+                selected_conflict_byte_start: prepared.selected_conflict_byte_start,
+                selected_conflict_byte_end: prepared.selected_conflict_byte_end,
+                previous_host_tools: Vec::new(),
+                set_host_tools_command_id: "set-host".to_string(),
+                prompt_command_id: "prompt".to_string(),
+            },
+        );
+        let mut events = state.events.subscribe();
+
+        let result = dispatch_session_host_tool(
+            &state,
+            "transport-1",
+            "fura_submit_conflict_assistance",
+            json!({
+                "conflictContextId": "ctx",
+                "risk": "medium",
+                "summary": "Merged the selected conflict and kept the rest untouched.",
+                "explanation": "This resolves the selected conflict block while preserving the rest of the saved file.",
+                "proposedContent": "one\nresolved\nthree\n"
+            }),
+        )
+        .await
+        .expect("conflict result stored");
+
+        assert!(result.contains("Stored conflict proposal preview"));
+        let ServerMessage::ConflictAgentResult { result } =
+            events.recv().await.expect("conflict result broadcast")
+        else {
+            panic!("expected conflict result broadcast");
+        };
+        assert_eq!(result.risk, ConflictAgentRisk::Medium);
+        assert_eq!(result.conflict_id.as_deref(), Some("conflict-1"));
+        assert_eq!(result.content.as_deref(), Some("one\nresolved\nthree\n"));
+        assert!(state.active_conflict_contexts.read().await.is_empty());
+    }
     #[tokio::test]
     async fn review_host_tool_requires_active_context() {
         let state = crate::tests::test_state(8, None);
 
-        let error = dispatch_review_host_tool(
+        let error = dispatch_session_host_tool(
             &state,
             "s1",
             "fura_add_review_comment",
@@ -2922,7 +3475,7 @@ mod review_comment_tests {
         );
         let mut events = state.events.subscribe();
 
-        let result = dispatch_review_host_tool(
+        let result = dispatch_session_host_tool(
             &state,
             "s1",
             "fura_add_review_comment",
@@ -2977,7 +3530,7 @@ mod review_comment_tests {
         );
         let mut events = state.events.subscribe();
 
-        let result = dispatch_review_host_tool(
+        let result = dispatch_session_host_tool(
             &state,
             "s1",
             "fura_add_review_comment",
@@ -3022,7 +3575,7 @@ mod review_comment_tests {
             },
         );
 
-        let error = dispatch_review_host_tool(
+        let error = dispatch_session_host_tool(
             &state,
             "s1",
             "fura_add_review_comment",
@@ -3066,7 +3619,7 @@ mod review_comment_tests {
         );
         crate::tests::map_test_transport(&state, "transport-2", "s2").await;
 
-        let error = dispatch_review_host_tool(
+        let error = dispatch_session_host_tool(
             &state,
             "transport-2",
             "fura_add_review_comment",

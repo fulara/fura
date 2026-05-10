@@ -777,6 +777,61 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             path = ?path,
             bytes = message.len()
         ),
+        ServerMessage::ConflictSnapshot { repos } => info!(
+            direction = "bridge_to_client",
+            message_type = "conflict.snapshot",
+            repo_count = repos.len()
+        ),
+        ServerMessage::ConflictFile { file } => info!(
+            direction = "bridge_to_client",
+            message_type = "conflict.file",
+            repo_id = %file.repo_id,
+            path = %file.path,
+            conflict_count = file.conflicts.len()
+        ),
+        ServerMessage::ConflictMagicWandPreview { preview } => info!(
+            direction = "bridge_to_client",
+            message_type = "conflict.magicWandPreview",
+            repo_id = %preview.repo_id,
+            path = %preview.path,
+            source_version = %preview.source_version,
+            resolved_conflict_count = preview.resolved_conflict_count,
+            remaining_conflict_count = preview.remaining_conflict_count
+        ),
+        ServerMessage::ConflictAgentResult { result } => info!(
+            direction = "bridge_to_client",
+            message_type = "conflict.agentResult",
+            repo_id = %result.repo_id,
+            path = %result.path,
+            mode = ?result.mode,
+            scope = ?result.scope,
+            risk = ?result.risk,
+            has_content = result.content.is_some()
+        ),
+        ServerMessage::ConflictStatus {
+            repo_id,
+            path,
+            state,
+            message,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "conflict.status",
+            repo_id = %repo_id,
+            path = path.as_deref().unwrap_or(""),
+            state = %state,
+            bytes = message.len()
+        ),
+        ServerMessage::ConflictError {
+            repo_id,
+            path,
+            message,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "conflict.error",
+            repo_id = repo_id.as_deref().unwrap_or(""),
+            path = path.as_deref().unwrap_or(""),
+            bytes = message.len()
+        ),
         ServerMessage::RawOmp { session_id, frame } => info!(
             direction = "bridge_to_client",
             message_type = "raw.omp",

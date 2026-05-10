@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, ProposedModelConfig,
-    SessionMode, SessionProjection, SessionProjectionDelta, SessionSummary,
-    ThinkingVisibilityPreference,
+    ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, ConflictAgentMode,
+    ConflictAgentResult, ConflictAgentScope, ConflictFileState, ConflictMagicWandPreview,
+    ConflictRepositorySummary, ProposedModelConfig, SessionMode, SessionProjection,
+    SessionProjectionDelta, SessionSummary, ThinkingVisibilityPreference,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -762,6 +763,40 @@ pub(crate) enum ClientMessage {
         query: String,
         limit: Option<usize>,
     },
+    #[serde(rename = "conflict.scan")]
+    ConflictScan { root: String },
+    #[serde(rename = "conflict.file.open")]
+    ConflictFileOpen { repo_id: String, path: String },
+    #[serde(rename = "conflict.file.previewMagicWand")]
+    ConflictFilePreviewMagicWand {
+        repo_id: String,
+        path: String,
+        expected_version: String,
+    },
+    #[serde(rename = "conflict.file.writeResult")]
+    ConflictFileWriteResult {
+        repo_id: String,
+        path: String,
+        content: String,
+        expected_version: String,
+    },
+    #[serde(rename = "conflict.file.stageResolved")]
+    ConflictFileStageResolved {
+        repo_id: String,
+        path: String,
+        expected_version: String,
+    },
+    #[serde(rename = "conflict.agent.run")]
+    ConflictAgentRun {
+        session_id: String,
+        repo_id: String,
+        path: String,
+        expected_version: String,
+        mode: ConflictAgentMode,
+        scope: ConflictAgentScope,
+        conflict_id: Option<String>,
+        instructions: String,
+    },
     #[serde(rename = "plan.approve")]
     PlanApprove {
         session_id: String,
@@ -969,6 +1004,29 @@ pub(crate) enum ServerMessage {
     #[serde(rename = "code.error")]
     CodeError {
         workspace_id: Option<String>,
+        path: Option<String>,
+        message: String,
+    },
+    #[serde(rename = "conflict.snapshot")]
+    ConflictSnapshot {
+        repos: Vec<ConflictRepositorySummary>,
+    },
+    #[serde(rename = "conflict.file")]
+    ConflictFile { file: ConflictFileState },
+    #[serde(rename = "conflict.magicWandPreview")]
+    ConflictMagicWandPreview { preview: ConflictMagicWandPreview },
+    #[serde(rename = "conflict.agentResult")]
+    ConflictAgentResult { result: ConflictAgentResult },
+    #[serde(rename = "conflict.status")]
+    ConflictStatus {
+        repo_id: String,
+        path: Option<String>,
+        state: String,
+        message: String,
+    },
+    #[serde(rename = "conflict.error")]
+    ConflictError {
+        repo_id: Option<String>,
         path: Option<String>,
         message: String,
     },

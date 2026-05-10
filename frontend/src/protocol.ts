@@ -504,6 +504,98 @@ export type CodeFileContent = {
   version: number;
 };
 
+export type ConflictOperation = "merge" | "rebase" | "cherryPick" | "revert";
+export type ConflictFileKind =
+  | "bothModified"
+  | "addAdd"
+  | "deleteModify"
+  | "renameModify"
+  | "renameDelete"
+  | "bothDeleted"
+  | "unknown";
+
+export type ConflictFileSummary = {
+  path: string;
+  kind: ConflictFileKind;
+  supported: boolean;
+};
+
+export type ConflictRepositorySummary = {
+  repoId: string;
+  root: string;
+  operation?: ConflictOperation | null;
+  files: ConflictFileSummary[];
+};
+
+export type ConflictFileBuffer = {
+  label: string;
+  language: string;
+  text: string;
+  size: number;
+};
+
+export type ConflictRegion = {
+  id: string;
+  startLine: number;
+  separatorLine?: number | null;
+  endLine: number;
+};
+
+export type ConflictFileState = {
+  repoId: string;
+  path: string;
+  kind: ConflictFileKind;
+  base?: ConflictFileBuffer | null;
+  ours?: ConflictFileBuffer | null;
+  theirs?: ConflictFileBuffer | null;
+  result?: ConflictFileBuffer | null;
+  conflicts: ConflictRegion[];
+  version: string;
+};
+
+export type ConflictMagicWandRule =
+  | "identicalSides"
+  | "importListUnion"
+  | "linewiseIndependentEdits"
+  | "sameLineNonOverlappingEdits";
+
+export type ConflictMagicWandRuleApplication = {
+  conflictId: string;
+  rule: ConflictMagicWandRule;
+  summary: string;
+};
+
+export type ConflictMagicWandPreview = {
+  repoId: string;
+  path: string;
+  sourceVersion: string;
+  content: string;
+  resolvedConflictCount: number;
+  remainingConflictCount: number;
+  summary: string;
+  rules: ConflictMagicWandRuleApplication[];
+};
+
+export type ConflictAgentMode = "explain" | "propose";
+
+export type ConflictAgentScope = "selectedConflict" | "file";
+
+export type ConflictAgentRisk = "low" | "medium" | "high";
+
+export type ConflictAgentResult = {
+  repoId: string;
+  path: string;
+  sourceVersion: string;
+  mode: ConflictAgentMode;
+  scope: ConflictAgentScope;
+  conflictId?: string | null;
+  risk: ConflictAgentRisk;
+  summary: string;
+  explanation: string;
+  content?: string | null;
+  remainingConflictCount?: number | null;
+};
+
 export type ServerMessage =
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
   | { type: "config.updated"; config: ServerConfig }
@@ -525,6 +617,12 @@ export type ServerMessage =
   | { type: "code.file"; workspaceId: string; file: CodeFileContent }
   | { type: "code.file.searchResults"; workspaceId: string; basePath: string; query: string; entries: CodeTreeEntry[] }
   | { type: "code.error"; workspaceId?: string | null; path?: string | null; message: string }
+  | { type: "conflict.snapshot"; repos: ConflictRepositorySummary[] }
+  | { type: "conflict.file"; file: ConflictFileState }
+  | { type: "conflict.magicWandPreview"; preview: ConflictMagicWandPreview }
+  | { type: "conflict.agentResult"; result: ConflictAgentResult }
+  | { type: "conflict.status"; repoId: string; path?: string | null; state: "staged" | string; message: string }
+  | { type: "conflict.error"; repoId?: string | null; path?: string | null; message: string }
   | { type: "sessionChanges.summary"; state: SessionChangesSummaryState }
   | { type: "compareDiff.summary"; state: CompareDiffSummaryState }
   | { type: "diff.filePatch"; patch: DiffFilePatchState }
@@ -586,6 +684,22 @@ export type ClientMessage =
   | { type: "code.file.open"; workspaceId: string; path: string }
   | { type: "code.file.close"; workspaceId: string; path: string }
   | { type: "code.file.search"; workspaceId: string; basePath: string; query: string; limit?: number }
+  | { type: "conflict.scan"; root: string }
+  | { type: "conflict.file.open"; repoId: string; path: string }
+  | { type: "conflict.file.previewMagicWand"; repoId: string; path: string; expectedVersion: string }
+  | { type: "conflict.file.writeResult"; repoId: string; path: string; content: string; expectedVersion: string }
+  | { type: "conflict.file.stageResolved"; repoId: string; path: string; expectedVersion: string }
+  | {
+      type: "conflict.agent.run";
+      sessionId: string;
+      repoId: string;
+      path: string;
+      expectedVersion: string;
+      mode: ConflictAgentMode;
+      scope: ConflictAgentScope;
+      conflictId?: string | null;
+      instructions: string;
+    }
   | {
       type: "plan.approve";
       sessionId: string;

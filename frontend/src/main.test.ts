@@ -125,13 +125,19 @@ function installMocks(): void {
       diffPanel.id = "testDiffPanel";
       const transcriptPanel = document.createElement("div");
       transcriptPanel.id = "testTranscriptPanel";
-      document.body.append(diffPanel, transcriptPanel);
-      const panels: Record<string, HTMLElement> = { diffs: diffPanel, transcript: transcriptPanel };
+      const conflictResolverPanel = document.createElement("div");
+      conflictResolverPanel.id = "testConflictResolverPanel";
+      document.body.append(diffPanel, transcriptPanel, conflictResolverPanel);
+      const panels: Record<string, HTMLElement> = {
+        diffs: diffPanel,
+        transcript: transcriptPanel,
+        conflictResolver: conflictResolverPanel,
+      };
       return {
         panelMounted: (id: string) => Boolean(panels[id]),
         panelContains: (id: string, element: Element) => Boolean(panels[id]?.contains(element)),
-        isPanelActive: (id: string) => id === "diffs",
-        activatePanel: () => false,
+        isPanelActive: (id: string) => id === "diffs" || id === "conflictResolver",
+        activatePanel: () => true,
         withPanel: (id: string, render: (container: HTMLElement) => void) => {
           const panel = panels[id];
           if (!panel) return false;
@@ -164,6 +170,47 @@ async function createHarness() {
   connection.emit({ type: "hello", serverVersion: "test", protocolVersion: 1, config });
   return { connection };
 }
+
+describe("conflict resolver entry", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    connections = [];
+    vi.useRealTimers();
+  });
+
+  it("creates a Conflict Resolver session before opening the tool", async () => {
+    const { connection } = await createHarness();
+    const resolverButton = document.querySelector<HTMLButtonElement>("#conflictResolverButton");
+    expect(resolverButton?.disabled).toBe(false);
+    resolverButton?.click();
+    expect(connection.sent).not.toContainEqual({ type: "conflict.scan", root: "/repo" });
+    expect(document.querySelector("#cwdPickerOverlay")?.hasAttribute("hidden")).toBe(false);
+    expect(document.querySelector("#cwdPickerConflictBody")?.hasAttribute("hidden")).toBe(false);
+
+    const repoInput = document.querySelector<HTMLInputElement>("#cwdPickerConflictRepo");
+    if (!repoInput) throw new Error("conflict repo input missing");
+    repoInput.value = "/custom/repo";
+    document.querySelector<HTMLButtonElement>("#cwdPickerCreate")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "session.create",
+      requestId: expect.any(String),
+      name: "conflicts: repo",
+      cwd: "/custom/repo",
+    });
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("conflict", { cwd: "/custom/repo" })] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "conflict",
+      state: { ...projection("conflict"), summary: summary("conflict", { cwd: "/custom/repo" }) },
+    });
+    expect(connection.sent).toContainEqual({ type: "conflict.scan", root: "/custom/repo" });
+  });
+
+});
+
 
 describe("desktop cog options", () => {
   beforeEach(() => {
@@ -496,5 +543,94 @@ describe("desktop cog options", () => {
     expect(transcriptPanel.scrollTop).toBe(320);
     expect(transcriptPanel.querySelector('[data-message-id="message-0"] .transcript-review-body')).toBeTruthy();
     expect(transcriptPanel.querySelector<HTMLElement>('[data-message-id="message-1"]')).toBe(untouchedBubble);
+  });
+
+  it("requests and applies conflict resolver agent proposal previews", async () => {
+    const { connection } = await createHarness();
+    const conflicted = [
+      "const value = 1;",
+      "<<<<<<< HEAD",
+      "const picked = ours();",
+      "||||||| base",
+      "const picked = base();",
+      "=======",
+      "const picked = theirs();",
+      ">>>>>>> incoming",
+      "",
+    ].join("\n");
+    document.querySelector<HTMLButtonElement>("#conflictResolverButton")?.click();
+    const repoInput = document.querySelector<HTMLInputElement>("#cwdPickerConflictRepo");
+    if (!repoInput) throw new Error("conflict repo input missing");
+    repoInput.value = "/repo";
+    document.querySelector<HTMLButtonElement>("#cwdPickerCreate")?.click();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live"),
+    });
+    expect(connection.sent).toContainEqual({ type: "conflict.scan", root: "/repo" });
+    connection.emit({
+      type: "conflict.snapshot",
+      repos: [{
+        repoId: "/repo",
+        root: "/repo",
+        operation: "merge",
+        files: [{ path: "src/main.ts", kind: "bothModified", supported: true }],
+      }],
+    });
+    connection.emit({
+      type: "conflict.file",
+      file: {
+        repoId: "/repo",
+        path: "src/main.ts",
+        kind: "bothModified",
+        base: { label: "Common ancestor", language: "typescript", text: "const picked = base();\n", size: 22 },
+        ours: { label: "Current branch", language: "typescript", text: "const picked = ours();\n", size: 22 },
+        theirs: { label: "Incoming change", language: "typescript", text: "const picked = theirs();\n", size: 24 },
+        result: { label: "Result", language: "typescript", text: conflicted, size: conflicted.length },
+        conflicts: [{ id: "conflict-1", startLine: 2, separatorLine: 6, endLine: 8 }],
+        version: "1:9",
+      },
+    });
+    const instructions = document.querySelector<HTMLTextAreaElement>("#testConflictResolverPanel .conflict-agent-instructions");
+    if (!instructions) throw new Error("conflict resolver agent instructions missing");
+    instructions.value = "Prefer the smallest safe change.";
+    instructions.dispatchEvent(new Event("input", { bubbles: true }));
+    const proposeButton = [...document.querySelectorAll<HTMLButtonElement>("#testConflictResolverPanel button")]
+      .find(button => button.textContent === "Propose conflict");
+    proposeButton?.click();
+    const request = connection.sent.find(message => message.type === "conflict.agent.run");
+    expect(request).toMatchObject({
+      sessionId: "live",
+      type: "conflict.agent.run",
+      repoId: "/repo",
+      path: "src/main.ts",
+      expectedVersion: "1:9",
+      mode: "propose",
+      scope: "selectedConflict",
+      conflictId: "conflict-1",
+      instructions: "Prefer the smallest safe change.",
+    });
+    connection.emit({
+      type: "conflict.agentResult",
+      result: {
+        repoId: "/repo",
+        path: "src/main.ts",
+        sourceVersion: "1:9",
+        mode: "propose",
+        scope: "selectedConflict",
+        conflictId: "conflict-1",
+        risk: "medium",
+        summary: "Merged the selected conflict and left the rest untouched.",
+        explanation: "This keeps the surrounding file unchanged and resolves only the selected conflict block.",
+        content: "const merged = true;\n",
+        remainingConflictCount: 0,
+      },
+    });
+    const applyButton = [...document.querySelectorAll<HTMLButtonElement>("#testConflictResolverPanel button")]
+      .find(button => button.textContent === "Apply agent result");
+    applyButton?.click();
+    expect(document.querySelector<HTMLTextAreaElement>("#testConflictResolverPanel .conflict-result-editor")?.value).toBe("const merged = true;\n");
   });
 });

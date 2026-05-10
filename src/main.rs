@@ -21,6 +21,7 @@ mod catalog;
 mod code;
 mod commands;
 mod config;
+mod conflict;
 mod control;
 mod diff;
 mod omp_rpc;
@@ -38,6 +39,7 @@ use catalog::*;
 use code::*;
 use commands::*;
 use config::*;
+use conflict::*;
 use control::*;
 use diff::*;
 use omp_rpc::*;
@@ -156,6 +158,7 @@ async fn main() -> anyhow::Result<()> {
         session_host_tools: Arc::new(RwLock::new(HashMap::new())),
         review_comment_db_path,
         active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
+        active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
         events,
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
@@ -679,6 +682,7 @@ pub(crate) mod tests {
             diff_jobs: Arc::new(RwLock::new(DiffJobRegistry::default())),
             review_comment_db_path: database_path_from_config(None),
             active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
+            active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
             events,
             session_host_tools: Arc::new(RwLock::new(HashMap::new())),
             rpc_config: Arc::new(RpcConfig {
@@ -2538,6 +2542,93 @@ pub(crate) mod tests {
                 && head_value == "feature"
                 && commit_oid == "abc"
                 && selected_file.new_path == "src/main.rs"
+        ));
+    }
+
+    #[test]
+    fn parses_conflict_messages() {
+        let scan: ClientMessage =
+            serde_json::from_str(r#"{"type":"conflict.scan","root":"/repo"}"#)
+                .expect("scan parses");
+        assert!(matches!(
+            scan,
+            ClientMessage::ConflictScan { ref root } if root == "/repo"
+        ));
+
+        let open: ClientMessage = serde_json::from_str(
+            r#"{"type":"conflict.file.open","repoId":"/repo","path":"src/main.rs"}"#,
+        )
+        .expect("open parses");
+        assert!(matches!(
+            open,
+            ClientMessage::ConflictFileOpen { ref repo_id, ref path }
+                if repo_id == "/repo" && path == "src/main.rs"
+        ));
+
+        let preview: ClientMessage = serde_json::from_str(
+            r#"{"type":"conflict.file.previewMagicWand","repoId":"/repo","path":"src/main.rs","expectedVersion":"1:9"}"#,
+        )
+        .expect("preview parses");
+        assert!(matches!(
+            preview,
+            ClientMessage::ConflictFilePreviewMagicWand {
+                ref repo_id,
+                ref path,
+                ref expected_version,
+            } if repo_id == "/repo" && path == "src/main.rs" && expected_version == "1:9"
+        ));
+
+        let write: ClientMessage = serde_json::from_str(
+            r#"{"type":"conflict.file.writeResult","repoId":"/repo","path":"src/main.rs","content":"resolved\n","expectedVersion":"1:9"}"#,
+        )
+        .expect("write parses");
+        assert!(matches!(
+            write,
+            ClientMessage::ConflictFileWriteResult {
+                ref repo_id,
+                ref path,
+                ref content,
+                ref expected_version,
+            } if repo_id == "/repo"
+                && path == "src/main.rs"
+                && content == "resolved\n"
+                && expected_version == "1:9"
+        ));
+
+        let stage: ClientMessage = serde_json::from_str(
+            r#"{"type":"conflict.file.stageResolved","repoId":"/repo","path":"src/main.rs","expectedVersion":"1:9"}"#,
+        )
+        .expect("stage parses");
+        assert!(matches!(
+            stage,
+            ClientMessage::ConflictFileStageResolved {
+                ref repo_id,
+                ref path,
+                ref expected_version,
+            } if repo_id == "/repo" && path == "src/main.rs" && expected_version == "1:9"
+        ));
+
+        let agent: ClientMessage = serde_json::from_str(
+            r#"{"type":"conflict.agent.run","sessionId":"conflict-session","repoId":"/repo","path":"src/main.rs","expectedVersion":"1:9","mode":"propose","scope":"selectedConflict","conflictId":"conflict-1","instructions":"Resolve only the selected block."}"#,
+        )
+        .expect("agent parses");
+        assert!(matches!(
+            agent,
+            ClientMessage::ConflictAgentRun {
+                ref session_id,
+                ref repo_id,
+                ref path,
+                ref expected_version,
+                mode: ConflictAgentMode::Propose,
+                scope: ConflictAgentScope::SelectedConflict,
+                conflict_id: Some(ref conflict_id),
+                ref instructions,
+            } if session_id == "conflict-session"
+                && repo_id == "/repo"
+                && path == "src/main.rs"
+                && expected_version == "1:9"
+                && conflict_id == "conflict-1"
+                && instructions == "Resolve only the selected block."
         ));
     }
 

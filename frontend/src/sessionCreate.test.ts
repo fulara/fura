@@ -162,6 +162,7 @@ describe("resolveSessionCreateMessage", () => {
     });
   });
 
+
   it("allows unnamed cwd-based sessions", () => {
     expect(resolveSessionCreateMessage({ requestId: "r1", cwd: "/repo" })).toEqual({
       type: "message",
