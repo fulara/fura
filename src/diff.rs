@@ -1179,6 +1179,7 @@ async fn build_session_changes_summary(
         &prepared.right_tree_or_commit,
     )
     .await?;
+    let (patch, patch_truncated) = aggregate_patch_for_summary(&prepared).await?;
     Ok((
         ServerMessage::SessionChangesSummary {
             state: SessionChangesSummaryState::Ready {
@@ -1192,6 +1193,8 @@ async fn build_session_changes_summary(
                 summary,
                 review: prepared.review.clone(),
                 review_worktree: prepared.review_worktree.clone(),
+                patch,
+                patch_truncated,
             },
         },
         prepared,
@@ -1298,6 +1301,7 @@ async fn build_compare_summary(
         &prepared.right_tree_or_commit,
     )
     .await?;
+    let (patch, patch_truncated) = aggregate_patch_for_summary(&prepared).await?;
     Ok((
         ServerMessage::CompareDiffSummary {
             state: CompareDiffSummaryState {
@@ -1309,6 +1313,8 @@ async fn build_compare_summary(
                 summary,
                 review: prepared.review.clone(),
                 review_worktree: prepared.review_worktree.clone(),
+                patch,
+                patch_truncated,
             },
         },
         prepared,
@@ -1596,6 +1602,41 @@ async fn build_summary_payload(
     })
 }
 
+async fn aggregate_patch_for_summary(
+    prepared: &PreparedDiff,
+) -> anyhow::Result<(Option<String>, Option<bool>)> {
+    if prepared.comparison.detail_mode != DiffDetailMode::FilePatch
+        || prepared.comparison.selected_file.is_some()
+    {
+        return Ok((None, None));
+    }
+    let (patch, truncated) = generate_aggregate_patch(
+        &prepared.repo_root,
+        &prepared.left_tree_or_commit,
+        &prepared.right_tree_or_commit,
+    )
+    .await?;
+    Ok((Some(patch), Some(truncated)))
+}
+
+async fn generate_aggregate_patch(
+    repo_root: &Path,
+    left_tree_or_commit: &str,
+    right_tree_or_commit: &str,
+) -> anyhow::Result<(String, bool)> {
+    git_stdout_limited(
+        repo_root,
+        &[
+            "diff",
+            "--find-renames",
+            left_tree_or_commit,
+            right_tree_or_commit,
+        ],
+        MAX_DIFF_BYTES,
+    )
+    .await
+}
+
 async fn send_file_patch_for_prepared(
     state: &AppState,
     client_id: String,
@@ -1858,14 +1899,14 @@ async fn list_commits(
     .await?;
     let mut commits = Vec::new();
     for oid in revs.lines().filter(|line| !line.trim().is_empty()) {
-        let format = "%H%x00%h%x00%s%x00%an%x00%ae%x00%cI%x00%P";
+        let format = "%H%x00%h%x00%s%x00%an%x00%ae%x00%cI%x00%P%x00%B";
         let output = git_stdout(
             repo_root,
             &["show", "--no-patch", &format!("--format={format}"), oid],
             MAX_GIT_OUTPUT_BYTES,
         )
         .await?;
-        let mut parts = output.trim_end().split('\0');
+        let mut parts = output.trim_end_matches('\n').splitn(8, '\0');
         let full = parts.next().unwrap_or(oid).to_string();
         let short = parts.next().unwrap_or(oid).to_string();
         let subject = parts.next().unwrap_or("").to_string();
@@ -1878,16 +1919,18 @@ async fn list_commits(
             .filter(|value| !value.is_empty())
             .map(str::to_string);
         let committed_at = parts.next().unwrap_or("").to_string();
-        let parent_oids: Vec<String> = parts
+        let parents = parts.next().unwrap_or("");
+        let parent_oids: Vec<String> = parents.split_whitespace().map(str::to_string).collect();
+        let message = parts
             .next()
-            .unwrap_or("")
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+            .filter(|value| !value.is_empty())
+            .unwrap_or(subject.as_str())
+            .to_string();
         commits.push(DiffCommitSummary {
             oid: full,
             short_oid: short,
             subject,
+            message,
             author_name,
             author_email,
             committed_at,
@@ -2533,6 +2576,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compare_summary_includes_aggregate_patch_only_for_all_files_file_patch_mode() {
+        let (_temp, repo, base, head) = test_repo();
+        let app_state = crate::tests::test_state(8, None);
+        let file_patch_request = DiffRequestIdentity::CompareDiff {
+            client_id: "client-1".into(),
+            diff_id: test_diff_id(),
+            repo_root: repo.display().to_string(),
+            base: DiffRefInput::GitRef {
+                value: base.clone(),
+            },
+            head: DiffRefInput::GitRef {
+                value: head.clone(),
+            },
+            detail_mode: DiffDetailMode::FilePatch,
+            merge_base: Some(false),
+            current_commit_oid: None,
+            selected_file: None,
+        };
+        let (message, _prepared) = build_compare_summary(
+            &app_state,
+            "client-1".into(),
+            test_diff_id(),
+            repo.display().to_string(),
+            DiffRefInput::GitRef {
+                value: base.clone(),
+            },
+            DiffRefInput::GitRef {
+                value: head.clone(),
+            },
+            DiffDetailMode::FilePatch,
+            Some(false),
+            None,
+            None,
+            file_patch_request,
+        )
+        .await
+        .unwrap();
+        let ServerMessage::CompareDiffSummary {
+            state: summary_state,
+        } = message
+        else {
+            panic!("expected compare diff summary");
+        };
+        let patch = summary_state.patch.as_deref().expect("aggregate patch");
+        assert_eq!(summary_state.patch_truncated, Some(false));
+        assert!(
+            patch.contains("diff --git a/src/lib.rs b/src/lib.rs"),
+            "{patch}"
+        );
+        assert!(
+            patch.contains("diff --git a/src/new.rs b/src/new.rs"),
+            "{patch}"
+        );
+
+        let stat_request = DiffRequestIdentity::CompareDiff {
+            client_id: "client-1".into(),
+            diff_id: test_diff_id(),
+            repo_root: repo.display().to_string(),
+            base: DiffRefInput::GitRef {
+                value: base.clone(),
+            },
+            head: DiffRefInput::GitRef {
+                value: head.clone(),
+            },
+            detail_mode: DiffDetailMode::StatOnly,
+            merge_base: Some(false),
+            current_commit_oid: None,
+            selected_file: None,
+        };
+        let (message, _prepared) = build_compare_summary(
+            &app_state,
+            "client-1".into(),
+            test_diff_id(),
+            repo.display().to_string(),
+            DiffRefInput::GitRef { value: base },
+            DiffRefInput::GitRef { value: head },
+            DiffDetailMode::StatOnly,
+            Some(false),
+            None,
+            None,
+            stat_request,
+        )
+        .await
+        .unwrap();
+        let ServerMessage::CompareDiffSummary {
+            state: summary_state,
+        } = message
+        else {
+            panic!("expected compare diff summary");
+        };
+        assert!(summary_state.patch.is_none());
+        assert!(summary_state.patch_truncated.is_none());
+    }
+
+    #[tokio::test]
+    async fn listed_commit_message_includes_subject_and_body() {
+        let (_temp, repo, _base, head) = test_repo();
+        write_file(
+            &repo,
+            "src/body.rs",
+            "pub fn body() -> &'static str { \"body\" }\n",
+        );
+        git(&repo, &["add", "."]);
+        git(
+            &repo,
+            &["commit", "-m", "body subject", "-m", "Detailed body line"],
+        );
+        let body_commit = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let commits = list_commits(&repo, &head, &body_commit).await.unwrap();
+        assert_eq!(commits.len(), 1);
+        assert_eq!(commits[0].subject, "body subject");
+        assert!(
+            commits[0].message.contains("body subject"),
+            "{:?}",
+            commits[0].message
+        );
+        assert!(
+            commits[0].message.contains("Detailed body line"),
+            "{:?}",
+            commits[0].message
+        );
+    }
+
+    #[tokio::test]
     async fn reports_missing_ref_and_truncates_large_diff() {
         let (_temp, repo, base, head) = test_repo();
         assert!(
@@ -2618,6 +2786,8 @@ mod tests {
             review,
             repos,
             summary,
+            patch,
+            patch_truncated,
             ..
         } = state
         else {
@@ -2636,6 +2806,8 @@ mod tests {
             matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == snapshot_ref)
         );
         assert_eq!(review.current_commit_oid, None);
+        assert!(patch.is_none());
+        assert!(patch_truncated.is_none());
         let stat = summary.stat.as_deref().unwrap_or("");
         assert!(stat.contains("src/lib.rs"), "{}", stat);
         assert!(stat.contains("src/new.rs"), "{}", stat);
@@ -3152,22 +3324,44 @@ mod tests {
             responses.is_empty(),
             "unexpected direct responses: {responses:?}"
         );
+        let mut saw_aggregate_summary = false;
         loop {
             let message = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
                 .await
                 .expect("summary timeout")
                 .expect("summary event");
-            if matches!(
-                message,
+            match message {
+                ServerMessage::SessionChangesSummary {
+                    state:
+                        SessionChangesSummaryState::Ready {
+                            patch,
+                            patch_truncated,
+                            ..
+                        },
+                } => {
+                    let patch = patch.expect("aggregate patch");
+                    assert_eq!(patch_truncated, Some(false));
+                    assert!(
+                        patch.contains("diff --git a/src/lib.rs b/src/lib.rs"),
+                        "{patch}"
+                    );
+                    assert!(
+                        patch.contains("diff --git a/src/new.rs b/src/new.rs"),
+                        "{patch}"
+                    );
+                    saw_aggregate_summary = true;
+                }
                 ServerMessage::DiffComplete {
                     ref diff_id,
                     scope: DiffScope::SessionChanges,
                     ..
-                } if diff_id == &test_diff_id()
-            ) {
-                break;
+                } if diff_id == &test_diff_id() => {
+                    break;
+                }
+                _ => {}
             }
         }
+        assert!(saw_aggregate_summary);
         write_file(&repo, "src/lib.rs", "pub fn value() -> i32 { 4 }\n");
         let responses = handle_session_changes_request(
             &state,

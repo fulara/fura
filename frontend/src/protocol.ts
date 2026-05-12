@@ -216,6 +216,7 @@ export type DiffCommitSummary = {
   oid: string;
   shortOid: string;
   subject: string;
+  message: string;
   authorName?: string | null;
   authorEmail?: string | null;
   committedAt: string;
@@ -319,6 +320,7 @@ export type SessionChangesSummaryState =
       review: CommitStepState;
       reviewWorktree?: DiffReviewWorktree | null;
       patch?: string | null;
+      patchTruncated?: boolean | null;
     }
   | {
       status: "missingRepo";
@@ -350,6 +352,8 @@ export type CompareDiffSummaryState = {
   summary: DiffSummaryPayload;
   review: CommitStepState;
   reviewWorktree?: DiffReviewWorktree | null;
+  patch?: string | null;
+  patchTruncated?: boolean | null;
 };
 
 export type DiffFilePatchState = {
@@ -368,6 +372,7 @@ export type DiffReviewableState = {
   summary: DiffSummaryPayload;
   review: CommitStepState;
   patch?: string | null;
+  patchTruncated?: boolean | null;
   reviewWorktree?: DiffReviewWorktree | null;
 };
 

@@ -999,7 +999,7 @@ function clearCurrentCompareDiff(reason: "replaced" | "closed" | "sessionChanged
 function selectedDiffFilePath(key: string, state: DiffReviewableState, filePaths: string[]): string | null {
   const requestedPath = state.comparison.selectedFile?.newPath ?? null;
   const rememberedPath = sessionChangesSelectedFiles.get(key) ?? null;
-  const nextPath = [requestedPath, rememberedPath, filePaths[0] ?? null].find(
+  const nextPath = [requestedPath, rememberedPath].find(
     (candidate): candidate is string => candidate !== null && filePaths.includes(candidate),
   ) ?? null;
   if (nextPath) sessionChangesSelectedFiles.set(key, nextPath);
@@ -6107,6 +6107,19 @@ function renderReviewableDiffMainContent(
   commits.textContent = state.review.currentCommitOid ? `Commit ${(state.review.currentCommitIndex ?? 0) + 1}/${state.review.commits.length}` : `Range · ${state.review.commits.length} commit${state.review.commits.length === 1 ? "" : "s"}`;
   summary.append(comparison, commits);
   main.append(summary);
+  const selectedCommit = selectedFilePath === null && state.review.currentCommitOid
+    ? state.review.commits.find(commit => commit.oid === state.review.currentCommitOid) ?? null
+    : null;
+  if (selectedCommit) {
+    const messageBlock = mkEl("section");
+    messageBlock.className = "diff-commit-message";
+    const heading = mkEl("strong");
+    heading.textContent = "Commit message";
+    const messageText = mkEl("pre");
+    messageText.textContent = selectedCommit.message || selectedCommit.subject;
+    messageBlock.append(heading, messageText);
+    main.append(messageBlock);
+  }
 
   const toolbar = mkEl("div");
   toolbar.className = "diffs-actions diff-step-actions";
@@ -6257,19 +6270,16 @@ function renderReviewableDiffMainContent(
   const body = mkEl("div");
   body.className = "diffs-main-body";
   const filePatchError = selectedFilePath ? selectedDiffFilePatchError(annotationKey, selectedFilePath) : null;
-  const selectedRows = cachedPatch?.patch ? parseDiffRows(cachedPatch.patch) : [];
-  if (cachedPatch?.truncated) {
+  let renderedRows: ReturnType<typeof parseDiffRows> = [];
+  const aggregatePatchLoaded = state.patch !== null && state.patch !== undefined;
+  const showTruncationWarning = selectedFilePath ? Boolean(cachedPatch?.truncated) : Boolean(state.patchTruncated);
+  if (showTruncationWarning) {
     const warning = mkEl("p");
     warning.className = "diffs-warning";
     warning.textContent = "Diff output is truncated by Fura's safety limit.";
     body.append(warning);
   }
-  if (!selectedFilePath) {
-    const empty = mkEl("p");
-    empty.className = "empty diffs-empty";
-    empty.textContent = "No changes for this comparison.";
-    body.append(empty);
-  } else if (state.comparison.detailMode !== "filePatch") {
+  if (state.comparison.detailMode !== "filePatch") {
     const note = mkEl("p");
     note.className = "diffs-stat-note";
     note.textContent = "Stat-only payload: select File patch for line comments, questions, and Code actions.";
@@ -6277,6 +6287,23 @@ function renderReviewableDiffMainContent(
     pre.className = "diff-stat-output";
     pre.textContent = state.summary.stat ?? "";
     body.append(note, pre);
+  } else if (!selectedFilePath) {
+    if (!aggregatePatchLoaded) {
+      const loading = mkEl("p");
+      loading.className = "empty diffs-empty";
+      loading.textContent = "Loading diff patch…";
+      body.append(loading);
+    } else {
+      renderedRows = parseDiffRows(state.patch ?? "");
+      if (renderedRows.length === 0) {
+        const empty = mkEl("p");
+        empty.className = "empty diffs-empty";
+        empty.textContent = "No changes for this comparison.";
+        body.append(empty);
+      } else {
+        renderDiffRows(body, annotationKey, state, renderedRows, annotations, comments, key, allowPromptActions);
+      }
+    }
   } else if (!cachedPatch) {
     if (!filePatchError) requestSelectedFilePatch(annotationKey, state, selectedFilePath, requestMode);
     const loading = mkEl("p");
@@ -6286,13 +6313,14 @@ function renderReviewableDiffMainContent(
       : `Loading patch for ${selectedFilePath}…`;
     body.append(loading);
   } else {
+    renderedRows = parseDiffRows(cachedPatch.patch);
     const reviewState = { ...state, patch: cachedPatch.patch };
-    renderDiffRows(body, annotationKey, reviewState, selectedRows, annotations, comments, key, allowPromptActions);
+    renderDiffRows(body, annotationKey, reviewState, renderedRows, annotations, comments, key, allowPromptActions);
   }
   renderReviewCommentsSection(
     body,
     comments,
-    selectedRows,
+    renderedRows,
     key,
     selectedFilePath,
     new Set(state.summary.files.map(file => file.newPath)),
@@ -6317,6 +6345,7 @@ function diffRequestModeForAnnotationKey(annotationKey: string): "sessionChanges
 }
 
 function updateDesktopModifiedFileSelection(root: HTMLElement, selectedFilePath: string | null): void {
+  root.querySelector<HTMLButtonElement>(".diffs-all-files-jump")?.classList.toggle("active", selectedFilePath === null);
   for (const jump of root.querySelectorAll<HTMLButtonElement>(".diffs-file-jump[data-diff-file-path]")) {
     jump.classList.toggle("active", jump.dataset.diffFilePath === selectedFilePath);
   }
@@ -6420,6 +6449,27 @@ function renderDesktopModifiedFiles(
   const filesTitle = mkEl("strong");
   filesTitle.textContent = `Modified files (${files.length})`;
   filesSection.append(filesTitle);
+  const allFiles = mkEl("button");
+  allFiles.type = "button";
+  allFiles.className = `diffs-file-jump diffs-all-files-jump${selectedFilePath === null ? " active" : ""}`;
+  allFiles.title = "Show all changed files in one patch.";
+  const allName = mkEl("code");
+  allName.textContent = "All files";
+  const allMeta = mkEl("span");
+  allMeta.textContent = `${files.length} file${files.length === 1 ? "" : "s"}`;
+  allFiles.append(allName, allMeta);
+  allFiles.addEventListener("click", () => {
+    openDiffFileMenu = null;
+    sessionChangesSelectedFiles.delete(annotationKey);
+    const root = allFiles.closest<HTMLElement>(".diffs-view, .compare-view");
+    if (!rerenderSelectedDiffFileContent(annotationKey, root)) {
+      markDiffsViewDirty();
+      markComparePanelDirty();
+      if (annotationKey === "compareDiff") renderComparePanelIfActive();
+      else renderDiffsViewIfActive(annotationKey);
+    }
+  });
+  filesSection.append(allFiles);
   if (visibleFiles.length === 0) {
     const empty = mkEl("p");
     empty.className = "diffs-filter-empty";
@@ -6520,7 +6570,7 @@ function renderReviewCommentsSection(
   list.className = "diff-review-comments-list";
   for (const comment of comments) {
     const missingFromCurrentDiff = !currentFilePaths.has(comment.anchor.newPath);
-    const selectedFileMismatch = selectedFilePath !== comment.anchor.newPath;
+    const selectedFileMismatch = selectedFilePath !== null && selectedFilePath !== comment.anchor.newPath;
     const stale = comment.stale
       || missingFromCurrentDiff
       || (!selectedFileMismatch && rows.length > 0 && !isReviewCommentMatched(rows, key, comment));

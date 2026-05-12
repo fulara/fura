@@ -106,6 +106,7 @@ function sessionChangesState(sessionId: string): SessionChangesSummaryState {
     review: { commits: [], currentCommitOid: null, currentCommitIndex: null, previousCommitOid: null },
     reviewWorktree: null,
     patch: null,
+    patchTruncated: null,
   };
 }
 
@@ -407,6 +408,200 @@ describe("desktop cog options", () => {
     }));
   });
 
+  it("does not rerender the diff panel for transcript-only session snapshots", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile },
+        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: " src/main.ts | 2 +-\n", truncated: false },
+      },
+    });
+
+    const diffRoot = document.querySelector<HTMLElement>("#testDiffPanel .diffs-view");
+    const diffMain = document.querySelector<HTMLElement>("#testDiffPanel .diffs-main");
+    if (!diffRoot || !diffMain) throw new Error("diff panel missing");
+    diffMain.scrollTop = 42;
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [{
+          kind: "message",
+          id: "assistant-1",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "new transcript output" }],
+          timestamp: null,
+          isNew: true,
+        }],
+      }),
+    });
+    expect(document.querySelector<HTMLElement>("#testDiffPanel .diffs-view")).toBe(diffRoot);
+    expect(document.querySelector<HTMLElement>("#testDiffPanel .diffs-main")).toBe(diffMain);
+    expect(diffMain.scrollTop).toBe(42);
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "other",
+      state: projection("other", {
+        transcript: [{
+          kind: "message",
+          id: "assistant-other",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "other session output" }],
+          timestamp: null,
+          isNew: true,
+        }],
+      }),
+    });
+    expect(document.querySelector<HTMLElement>("#testDiffPanel .diffs-view")).toBe(diffRoot);
+    expect(document.querySelector<HTMLElement>("#testDiffPanel .diffs-main")).toBe(diffMain);
+    expect(diffMain.scrollTop).toBe(42);
+  });
+
+  it("renders aggregate patch by default and drills down without refetching all files", async () => {
+    const { connection } = await createHarness();
+    const aggregatePatch = [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "@@ -1 +1 @@",
+      "-export const a = 'old';",
+      "+export const a = 'new a';",
+      "diff --git a/src/b.ts b/src/b.ts",
+      "@@ -1 +1 @@",
+      "-export const b = 'old';",
+      "+export const b = 'new b';",
+    ].join("\n");
+    const singlePatch = [
+      "diff --git a/src/b.ts b/src/b.ts",
+      "@@ -1 +1 @@",
+      "-export const b = 'old';",
+      "+export const b = 'single b';",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.sent.length = 0;
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: null },
+        summary: {
+          files: [
+            { oldPath: null, newPath: "src/a.ts", status: "modified", added: 1, removed: 1 },
+            { oldPath: null, newPath: "src/b.ts", status: "modified", added: 1, removed: 1 },
+          ],
+          stat: null,
+          truncated: false,
+        },
+        patch: aggregatePatch,
+        patchTruncated: false,
+      },
+    });
+
+    expect(document.querySelector<HTMLButtonElement>("#testDiffPanel .diffs-all-files-jump")?.classList.contains("active")).toBe(true);
+    expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("new a");
+    expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("new b");
+    expect(connection.sent.some(message => message.type === "sessionChanges.request" && message.selectedFile)).toBe(false);
+
+    document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/b.ts"]')?.click();
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "sessionChanges.request",
+      selectedFile: { oldPath: null, newPath: "src/b.ts" },
+    }));
+    connection.emit({
+      type: "diff.filePatch",
+      patch: {
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        scope: "sessionChanges",
+        comparisonKey: "key",
+        file: { oldPath: null, newPath: "src/b.ts" },
+        patch: singlePatch,
+        truncated: false,
+        generatedAt: "now",
+      },
+    });
+    expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).not.toContain("new a");
+    expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("single b");
+
+    connection.sent.length = 0;
+    document.querySelector<HTMLButtonElement>("#testDiffPanel .diffs-all-files-jump")?.click();
+    expect(document.querySelector<HTMLButtonElement>("#testDiffPanel .diffs-all-files-jump")?.classList.contains("active")).toBe(true);
+    expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("new a");
+    expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("new b");
+    expect(connection.sent.some(message => message.type === "sessionChanges.request")).toBe(false);
+  });
+
+  it("shows commit messages only for explicit single-commit aggregate views", async () => {
+    const { connection } = await createHarness();
+    const commitOid = "b".repeat(40);
+    const aggregatePatch = [
+      "diff --git a/src/main.ts b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-console.log('old')",
+      "+console.log('new')",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    const commonState: Extract<SessionChangesSummaryState, { status: "ready" }> = {
+      ...baseState,
+      targetClientId: request.clientId,
+      diffId: request.diffId,
+      request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null },
+      comparison: { ...baseState.comparison, detailMode: "filePatch", currentCommitOid: null, selectedFile: null },
+      summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
+      review: {
+        commits: [{ oid: commitOid, shortOid: "bbbbbbbbbbbb", subject: "Add logging", message: "Add logging\n\nDetailed body.", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
+        currentCommitOid: null,
+        currentCommitIndex: null,
+        previousCommitOid: null,
+      },
+      patch: aggregatePatch,
+      patchTruncated: false,
+    };
+
+    connection.emit({ type: "sessionChanges.summary", state: commonState });
+    expect(document.querySelector("#testDiffPanel .diff-commit-message")).toBeNull();
+
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...commonState,
+        request: { ...commonState.request, currentCommitOid: commitOid },
+        comparison: { ...commonState.comparison, currentCommitOid: commitOid },
+        review: { ...commonState.review, currentCommitOid: commitOid, currentCommitIndex: 0, previousCommitOid: "a".repeat(40) },
+      },
+    });
+    expect(document.querySelector("#testDiffPanel .diff-commit-message")?.textContent).toContain("Detailed body.");
+
+    document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
+    expect(document.querySelector("#testDiffPanel .diff-commit-message")).toBeNull();
+  });
+
   it("sends edited Diffs question preview text", async () => {
     const { connection } = await createHarness();
     const prompt = vi.spyOn(window, "prompt").mockReturnValue("Should this become a helper?");
@@ -508,7 +703,7 @@ describe("desktop cog options", () => {
     const main = document.querySelector<HTMLElement>("#testDiffPanel .diffs-main");
     if (!sidebar || !main) throw new Error("diff layout missing");
     sidebar.scrollTop = 77;
-    const fileButtons = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel .diffs-file-jump")];
+    const fileButtons = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel .diffs-file-jump[data-diff-file-path]")];
     expect(fileButtons.map(button => button.dataset.diffFilePath)).toEqual(["src/a.ts", "src/b.ts"]);
 
     fileButtons[1]?.click();

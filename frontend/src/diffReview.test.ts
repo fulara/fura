@@ -42,7 +42,7 @@ const state: DiffReviewableState = {
   summary: { files: [], stat: null, truncated: false },
   patch,
   review: {
-    commits: [{ oid: "b".repeat(40), shortOid: "bbbbbbbbbbbb", subject: "change value", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
+    commits: [{ oid: "b".repeat(40), shortOid: "bbbbbbbbbbbb", subject: "change value", message: "change value", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
     currentCommitOid: "b".repeat(40),
     currentCommitIndex: 0,
     previousCommitOid: "a".repeat(40),

@@ -319,6 +319,7 @@ pub(crate) struct DiffCommitSummary {
     pub(crate) oid: String,
     pub(crate) short_oid: String,
     pub(crate) subject: String,
+    pub(crate) message: String,
     pub(crate) author_name: Option<String>,
     pub(crate) author_email: Option<String>,
     pub(crate) committed_at: String,
@@ -420,6 +421,8 @@ pub(crate) enum SessionChangesSummaryState {
         summary: DiffSummaryPayload,
         review: CommitStepState,
         review_worktree: Option<DiffReviewWorktree>,
+        patch: Option<String>,
+        patch_truncated: Option<bool>,
     },
     MissingRepo {
         target_client_id: String,
@@ -452,6 +455,8 @@ pub(crate) struct CompareDiffSummaryState {
     pub(crate) summary: DiffSummaryPayload,
     pub(crate) review: CommitStepState,
     pub(crate) review_worktree: Option<DiffReviewWorktree>,
+    pub(crate) patch: Option<String>,
+    pub(crate) patch_truncated: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
