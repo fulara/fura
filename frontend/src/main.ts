@@ -226,8 +226,6 @@ app.innerHTML = `
 
       <section class="sidebar-actions">
         <button id="createSessionButton" type="button">New</button>
-        <button id="openDiffButton" type="button">Diff</button>
-        <button id="conflictResolverButton" class="conflict-resolver-toggle" type="button" aria-pressed="false">Conflict Resolver</button>
       </section>
 
       <section class="category-filter-card" aria-label="Session category filter">
@@ -486,7 +484,7 @@ app.innerHTML = `
       <div id="cwdPickerConflictBody" class="cwd-picker-body" role="tabpanel" aria-labelledby="cwdPickerConflictTab" hidden>
         <label for="cwdPickerConflictRepo">Repository root</label>
         <input id="cwdPickerConflictRepo" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
-        <p class="field-help">Create a dedicated OMP session for Conflict Resolver using this conflicted repository root.</p>
+        <p class="field-help">Create a normal OMP session for Conflict Resolver using this conflicted repository root.</p>
       </div>
       <footer class="modal-footer">
         <span id="cwdPickerStatus" class="modal-status" aria-live="polite" aria-atomic="true"></span>
@@ -637,11 +635,9 @@ const authStatus = requireElement<HTMLParagraphElement>("authStatus");
 const authSubmit = requireElement<HTMLButtonElement>("authSubmit");
 const connectionStatus = requireElement<HTMLSpanElement>("connectionStatus");
 const createSessionButton = requireElement<HTMLButtonElement>("createSessionButton");
-const openDiffButton = requireElement<HTMLButtonElement>("openDiffButton");
 const sessionsList = requireElement<HTMLElement>("sessionsList");
 const sessionCategoryFilter = requireElement<HTMLSelectElement>("sessionCategoryFilter");
 const askFuraButton = requireElement<HTMLButtonElement>("askFuraButton");
-const conflictResolverButton = requireElement<HTMLButtonElement>("conflictResolverButton");
 const workspaceOptionsToggle = requireElement<HTMLButtonElement>("workspaceOptionsToggle");
 const workspaceOptionsMenu = requireElement<HTMLDivElement>("workspaceOptionsMenu");
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
@@ -1147,12 +1143,8 @@ connectionStatus.addEventListener("keydown", event => {
 });
 
 askFuraButton.addEventListener("click", activateControllerWorkspace);
-conflictResolverButton.addEventListener("click", handleConflictResolverButtonClick);
 createSessionButton.addEventListener("click", () => {
   openCwdPicker();
-});
-openDiffButton.addEventListener("click", () => {
-  openCwdPicker("diff");
 });
 sessionCategoryFilter.addEventListener("change", () => {
   selectedCategoryFilter = sessionCategoryFilter.value;
@@ -3528,7 +3520,6 @@ function renderActiveSession(): void {
     abortButton.disabled = true;
     stopButton.disabled = true;
     deleteSessionButton.disabled = true;
-    conflictResolverButton.disabled = false;
     syncActiveCategoryEditor(undefined);
     const isWorking = controlStatusState.status === "working";
     promptInput.disabled = isWorking;
@@ -3549,7 +3540,6 @@ function renderActiveSession(): void {
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
   deleteSessionButton.disabled = !activeSessionId;
-  conflictResolverButton.disabled = false;
   syncActiveCategoryEditor(projection);
   promptInput.disabled = !activeSessionId || hasBusyDraft;
   sendButton.disabled = !activeSessionId || hasBusyDraft;
@@ -3670,23 +3660,6 @@ function isSelectedConflictFile(repoId: string, path: string): boolean {
 function confirmDiscardConflictDraft(reason: string): boolean {
   if (!conflictDraftDirty()) return true;
   return window.confirm(`Discard unsaved conflict result before ${reason}?`);
-}
-function handleConflictResolverButtonClick(): void {
-  if (activeConflictResolverSessionId()) {
-    toggleConflictResolver();
-    return;
-  }
-  openCwdPicker("conflict");
-}
-
-
-function toggleConflictResolver(): void {
-  if (activeDesktopDockviewMode === "conflictResolver") {
-    leaveConflictResolver();
-    return;
-  }
-
-  openConflictResolver();
 }
 
 function openConflictResolver(): void {
@@ -5163,7 +5136,6 @@ function setActiveDesktopDockviewMode(mode: "normal" | "diffReview" | "conflictR
     comparePanelDirty = true;
     conflictPanelDirty = true;
   }
-  conflictResolverButton.setAttribute("aria-pressed", String(mode === "conflictResolver"));
   return true;
 }
 

@@ -3556,16 +3556,6 @@ h2 {
   color: #ffbf69;
 }
 
-.conflict-resolver-toggle {
-  border-color: rgba(127, 140, 255, 0.35);
-  background: rgba(127, 140, 255, 0.1);
-}
-
-.conflict-resolver-toggle[aria-pressed="true"] {
-  border-color: rgba(127, 220, 255, 0.55);
-  background: rgba(127, 220, 255, 0.18);
-  color: #d8f6ff;
-}
 
 .conflict-resolver {
   display: grid;

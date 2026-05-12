@@ -181,9 +181,10 @@ describe("conflict resolver entry", () => {
 
   it("creates a Conflict Resolver session before opening the tool", async () => {
     const { connection } = await createHarness();
-    const resolverButton = document.querySelector<HTMLButtonElement>("#conflictResolverButton");
-    expect(resolverButton?.disabled).toBe(false);
-    resolverButton?.click();
+    expect(document.querySelector<HTMLButtonElement>("#conflictResolverButton")).toBeNull();
+    expect(document.querySelector<HTMLButtonElement>("#openDiffButton")).toBeNull();
+    document.querySelector<HTMLButtonElement>("#createSessionButton")?.click();
+    document.querySelector<HTMLButtonElement>("#cwdPickerConflictTab")?.click();
     expect(connection.sent).not.toContainEqual({ type: "conflict.scan", root: "/repo" });
     expect(document.querySelector("#cwdPickerOverlay")?.hasAttribute("hidden")).toBe(false);
     expect(document.querySelector("#cwdPickerConflictBody")?.hasAttribute("hidden")).toBe(false);
@@ -594,7 +595,8 @@ describe("desktop cog options", () => {
       ">>>>>>> incoming",
       "",
     ].join("\n");
-    document.querySelector<HTMLButtonElement>("#conflictResolverButton")?.click();
+    document.querySelector<HTMLButtonElement>("#createSessionButton")?.click();
+    document.querySelector<HTMLButtonElement>("#cwdPickerConflictTab")?.click();
     const repoInput = document.querySelector<HTMLInputElement>("#cwdPickerConflictRepo");
     if (!repoInput) throw new Error("conflict repo input missing");
     repoInput.value = "/repo";
