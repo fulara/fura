@@ -410,6 +410,7 @@ export type ReviewComment = {
   anchor: DiffLineLocation;
   createdAt: string;
   updatedAt: string;
+  flushedAt?: string | null;
 };
 
 export type ModelSummary = {
@@ -718,6 +719,7 @@ export type ClientMessage =
   | { type: "review.comments.list"; sessionId: string; comparisonKey?: string | null }
   | { type: "review.comment.create"; sessionId: string; repoRoot: string; comparisonKey: string; anchor: DiffLineLocation; body: string }
   | { type: "review.comment.update"; id: string; body: string }
+  | { type: "review.comment.markFlushed"; comments: { id: string; updatedAt: string }[] }
   | { type: "review.comment.delete"; id: string }
   | { type: "review.agentReview.start"; sessionId: string; state: DiffReviewableState; instructions: string }
   | { type: "session.fork"; sessionId: string; name: string }

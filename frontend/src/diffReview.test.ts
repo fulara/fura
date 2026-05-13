@@ -78,12 +78,13 @@ describe("diffReview", () => {
     const comment = createDiffReviewAnnotation({ id: "c", kind: "comment", state, location: addLocation, text: "Please keep the exported name stable.", createdAt: "now" });
     const prompt = buildDiffCommentPrompt(state, [comment]);
 
-    expect(prompt).toContain("I reviewed a repository diff in Fura's Diff view");
+    expect(prompt.split("\n")[0]).toBe("I have read the code and have some comments please read them and address them");
     expect(prompt).toContain("Do not edit files, generate patches, or modify a checkout");
     expect(prompt).toContain("Repository: /repo");
     expect(prompt).toContain("Base: main (aaaaaaaaaaaa)");
     expect(prompt).toContain("Head: feature (bbbbbbbbbbbb)");
     expect(prompt).toContain("Review mode: single commit bbbbbbbbbbbb — change value.");
+    expect(prompt).toContain("File: src/main.ts");
     expect(prompt).toContain("Location: src/main.ts RIGHT new:2");
     expect(prompt).toContain("Comment: Please keep the exported name stable.");
     expect(prompt).toContain("```diff\n@@ -1,3 +1,3 @@\n const same = true;\n-const value = 'old';\n+const value = 'new';\n export { value };\n```");

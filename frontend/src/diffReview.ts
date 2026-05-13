@@ -236,6 +236,7 @@ function buildAnnotationSection(annotation: DiffReviewAnnotation, index: number,
   const label = annotation.kind === "question" ? "Question" : "Comment";
   return [
     `### ${label} ${index + 1}`,
+    `File: ${pathForDiffLocation(annotation.anchor)}`,
     `Location: ${formatDiffLocation(annotation)}`,
     annotation.anchor.hunk ? `Hunk: ${annotation.anchor.hunk}` : undefined,
     `Diff line: ${annotation.anchor.text}`,
@@ -259,6 +260,7 @@ export function prepareDiffAnnotationPrompt(
   const key = comparisonKey(state);
   const selectedAnnotations = annotations.filter(annotation => annotation.comparisonKey === key);
   const missingFiles = new Set<string>();
+  const allComments = selectedAnnotations.length > 0 && selectedAnnotations.every(annotation => annotation.kind === "comment");
   const sections = selectedAnnotations
     .map((annotation, index) => {
       const patch = patchForAnnotation?.(annotation) ?? reviewPatchText(state);
@@ -283,9 +285,11 @@ export function prepareDiffAnnotationPrompt(
   return {
     ok: true,
     prompt: [
-      promptMode === "sessionChanges"
-        ? "I reviewed changes in Fura's Diffs view and left notes/questions on specific diff lines."
-        : "I reviewed a repository diff in Fura's Diff view and left comments/questions on specific diff lines.",
+      allComments
+        ? "I have read the code and have some comments please read them and address them"
+        : promptMode === "sessionChanges"
+          ? "I reviewed changes in Fura's Diffs view and left notes/questions on specific diff lines."
+          : "I reviewed a repository diff in Fura's Diff view and left comments/questions on specific diff lines.",
       reviewHelperInstruction(promptMode),
       ...comparisonLines(state),
       "",

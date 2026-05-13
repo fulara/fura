@@ -1425,6 +1425,28 @@ describe("mountMobileApp", () => {
 
     expect(document.querySelector("#mobileDiff")?.textContent).toContain("Please avoid console logging.");
     expect(document.querySelector(".mobile-diff-file-item")?.textContent).toContain("1 comment");
+
+    [...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
+      .find(button => button.textContent === "Preview & flush (1)")
+      ?.click();
+    const preview = document.querySelector<HTMLTextAreaElement>("#mobileDiffPreviewText");
+    expect(preview?.value.split("\n")[0]).toBe("I have read the code and have some comments please read them and address them");
+    expect(preview?.value).toContain("Comment: Please avoid console logging.");
+    if (!preview) throw new Error("mobile diff preview missing");
+    preview.value = "Please replace the raw console logging.";
+    document.querySelector<HTMLButtonElement>("#mobileDiffPreviewSend")?.click();
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "prompt.send",
+      sessionId: "live",
+      text: "Please replace the raw console logging.",
+    }));
+    expect(connection.sent).toContainEqual({
+      type: "review.comment.markFlushed",
+      comments: [{ id: "c1", updatedAt: "now" }],
+    });
+    expect([...document.querySelectorAll<HTMLButtonElement>(".mobile-diff-actions button")]
+      .some(button => button.textContent === "Preview & flush (0)")).toBe(true);
+    expect(document.querySelector("#mobileDiff")?.textContent).toContain("flushed");
   });
 
   it("keeps mobile diff questions queued until busy prompt follow-up is sent", () => {

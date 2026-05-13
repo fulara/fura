@@ -6,13 +6,15 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::{
-    DiffLineKind, DiffLineLocation, DiffSide, ReviewComment, ReviewCommentAuthor, Timestamp,
+    DiffLineKind, DiffLineLocation, DiffSide, ReviewComment, ReviewCommentAuthor,
+    ReviewCommentFlushMarker, Timestamp,
 };
 
 const MAX_COMMENT_BODY_CHARS: usize = 8_000;
 
-const MIGRATION_ARRAY: &[M] = &[M::up(
-    r#"
+const MIGRATION_ARRAY: &[M] = &[
+    M::up(
+        r#"
     CREATE TABLE review_comments (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL,
@@ -38,7 +40,9 @@ const MIGRATION_ARRAY: &[M] = &[M::up(
     CREATE INDEX review_comments_comparison_idx ON review_comments(session_id, comparison_key);
     CREATE INDEX review_comments_file_idx ON review_comments(session_id, comparison_key, new_path);
     "#,
-)];
+    ),
+    M::up("ALTER TABLE review_comments ADD COLUMN flushed_at TEXT;"),
+];
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 #[derive(Debug, Clone)]
@@ -107,6 +111,7 @@ pub(crate) fn create_comment(
         anchor: input.anchor,
         created_at: now.clone(),
         updated_at: now,
+        flushed_at: None,
     };
 
     debug!(
@@ -174,7 +179,7 @@ pub(crate) fn list_comments(
         r#"
         SELECT id, session_id, repo_root, comparison_key, author, body, stale, stale_reason,
                old_path, new_path, hunk, side, line_kind, old_line, new_line, line_text,
-               created_at, updated_at
+               created_at, updated_at, flushed_at
         FROM review_comments
         WHERE session_id = ?1 AND comparison_key = ?2
         ORDER BY created_at ASC, id ASC
@@ -183,7 +188,7 @@ pub(crate) fn list_comments(
         r#"
         SELECT id, session_id, repo_root, comparison_key, author, body, stale, stale_reason,
                old_path, new_path, hunk, side, line_kind, old_line, new_line, line_text,
-               created_at, updated_at
+               created_at, updated_at, flushed_at
         FROM review_comments
         WHERE session_id = ?1
         ORDER BY created_at ASC, id ASC
@@ -216,7 +221,7 @@ pub(crate) fn update_comment(path: &Path, id: &str, body: String) -> Result<Revi
     let conn = connection(path)?;
     let changed = conn
         .execute(
-            "UPDATE review_comments SET body = ?1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE review_comments SET body = ?1, updated_at = ?2, flushed_at = NULL WHERE id = ?3",
             params![body, updated_at, id],
         )
         .map_err(|error| format!("failed to update review comment: {error}"))?;
@@ -224,6 +229,40 @@ pub(crate) fn update_comment(path: &Path, id: &str, body: String) -> Result<Revi
         return Err("review comment not found".to_string());
     }
     get_comment(path, id)?.ok_or_else(|| "updated review comment could not be loaded".to_string())
+}
+
+pub(crate) fn mark_comments_flushed(
+    path: &Path,
+    markers: &[ReviewCommentFlushMarker],
+) -> Result<Vec<ReviewComment>, String> {
+    if markers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let flushed_at = Timestamp::now().millis().to_string();
+    let mut conn = connection(path)?;
+    let tx = conn
+        .transaction()
+        .map_err(|error| format!("failed to start review comment flush transaction: {error}"))?;
+    let mut comments = Vec::with_capacity(markers.len());
+    for marker in markers {
+        validate_required("comment id", &marker.id)?;
+        validate_required("comment updatedAt", &marker.updated_at)?;
+        let changed = tx
+            .execute(
+                "UPDATE review_comments SET flushed_at = ?1 WHERE id = ?2 AND updated_at = ?3",
+                params![flushed_at, marker.id, marker.updated_at],
+            )
+            .map_err(|error| format!("failed to mark review comment flushed: {error}"))?;
+        if changed == 0 {
+            continue;
+        }
+        let comment = get_comment_with_connection(&tx, &marker.id)?
+            .ok_or_else(|| format!("flushed review comment could not be loaded: {}", marker.id))?;
+        comments.push(comment);
+    }
+    tx.commit()
+        .map_err(|error| format!("failed to commit review comment flush: {error}"))?;
+    Ok(comments)
 }
 
 pub(crate) fn delete_comment(path: &Path, id: &str) -> Result<(String, String), String> {
@@ -250,11 +289,18 @@ pub(crate) fn delete_comment(path: &Path, id: &str) -> Result<(String, String), 
 
 fn get_comment(path: &Path, id: &str) -> Result<Option<ReviewComment>, String> {
     let conn = connection(path)?;
+    get_comment_with_connection(&conn, id)
+}
+
+fn get_comment_with_connection(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<ReviewComment>, String> {
     conn.query_row(
         r#"
         SELECT id, session_id, repo_root, comparison_key, author, body, stale, stale_reason,
                old_path, new_path, hunk, side, line_kind, old_line, new_line, line_text,
-               created_at, updated_at
+               created_at, updated_at, flushed_at
         FROM review_comments
         WHERE id = ?1
         "#,
@@ -323,6 +369,7 @@ fn row_to_comment(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewComment> {
         },
         created_at: row.get(16)?,
         updated_at: row.get(17)?,
+        flushed_at: row.get(18)?,
     })
 }
 
@@ -441,6 +488,39 @@ mod tests {
         assert_eq!(updated.body, "Updated body");
         assert!(updated.updated_at >= created.updated_at);
         assert_eq!(updated.anchor, created.anchor);
+    }
+
+    #[test]
+    fn mark_flushed_persists_and_update_clears_marker() {
+        let path = db_path();
+        initialize_database(&path).expect("db initializes");
+        let created = create_comment(&path, new_comment()).expect("comment created");
+        assert!(created.flushed_at.is_none());
+
+        let flushed = mark_comments_flushed(
+            &path,
+            &[ReviewCommentFlushMarker {
+                id: created.id.clone(),
+                updated_at: created.updated_at.clone(),
+            }],
+        )
+        .expect("marked flushed");
+        assert_eq!(flushed.len(), 1);
+        assert!(flushed[0].flushed_at.is_some());
+        let stale_marker = mark_comments_flushed(
+            &path,
+            &[ReviewCommentFlushMarker {
+                id: created.id.clone(),
+                updated_at: "older-version".to_string(),
+            }],
+        )
+        .expect("stale marker ignored");
+        assert!(stale_marker.is_empty());
+
+        let updated =
+            update_comment(&path, &created.id, "Edited body".to_string()).expect("updated");
+        assert_eq!(updated.body, "Edited body");
+        assert!(updated.flushed_at.is_none());
     }
 
     #[test]

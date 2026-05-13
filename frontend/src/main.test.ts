@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection } from "./connection";
-import type { ClientMessage, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
+import type { ClientMessage, ReviewComment, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
 
 class FakeConnection implements FuraConnection {
   sent: ClientMessage[] = [];
@@ -154,12 +154,12 @@ function installMocks(): void {
   }));
 }
 
-async function createHarness() {
+async function createHarness(options: { preserveLocalStorage?: boolean } = {}) {
   vi.resetModules();
   vi.restoreAllMocks();
   connections = [];
   document.body.innerHTML = `<div id="app"></div>`;
-  window.localStorage.clear();
+  if (!options.preserveLocalStorage) window.localStorage.clear();
   window.sessionStorage.clear();
   window.sessionStorage.setItem(FURA_TOKEN_STORAGE_KEY, "dev");
   window.history.replaceState(null, "", "/");
@@ -664,6 +664,118 @@ describe("desktop cog options", () => {
     }));
   });
 
+
+  it("previews and sends persisted Diffs comments to the agent", async () => {
+    const { connection } = await createHarness();
+    const patch = [
+      "diff --git a/src/main.ts b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-console.log('old')",
+      "+console.log('new')",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
+        patch: null,
+      },
+    });
+    connection.emit({
+      type: "diff.filePatch",
+      patch: {
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        scope: "sessionChanges",
+        comparisonKey: "key",
+        file: { oldPath: null, newPath: "src/main.ts" },
+        patch,
+        truncated: false,
+        generatedAt: "now",
+      },
+    });
+    const persisted: ReviewComment = {
+      id: "comment-1",
+      sessionId: "live",
+      repoRoot: "/repo",
+      comparisonKey: "key",
+      author: "user",
+      body: "Please avoid raw console logging here.",
+      stale: false,
+      staleReason: null,
+      anchor: {
+        oldPath: "src/main.ts",
+        newPath: "src/main.ts",
+        hunk: "@@ -1 +1 @@",
+        side: "right",
+        kind: "add",
+        oldLine: null,
+        newLine: 1,
+        text: "+console.log('new')",
+      },
+      createdAt: "now",
+      updatedAt: "now",
+    };
+    connection.emit({ type: "review.comments.snapshot", sessionId: "live", comments: [persisted] });
+
+    [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .find(button => button.textContent === "Preview comments (1)")
+      ?.click();
+
+    const preview = document.querySelector<HTMLTextAreaElement>("#diffPreviewText");
+    expect(preview?.value.split("\n")[0]).toBe("I have read the code and have some comments please read them and address them");
+    expect(preview?.value).toContain("File: src/main.ts");
+    expect(preview?.value).toContain("Comment: Please avoid raw console logging here.");
+    if (!preview) throw new Error("diff preview missing");
+    preview.value = "Please replace the raw console logging.";
+    document.querySelector<HTMLButtonElement>("#diffPreviewSend")?.click();
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "prompt.send",
+      sessionId: "live",
+      text: "Please replace the raw console logging.",
+    }));
+    expect(connection.sent).toContainEqual({
+      type: "review.comment.markFlushed",
+      comments: [{ id: "comment-1", updatedAt: "now" }],
+    });
+    expect([...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .some(button => button.textContent === "Preview comments (1)")).toBe(false);
+    expect(document.querySelector("#testDiffPanel")?.textContent).toContain("flushed");
+
+    const reloaded = await createHarness({ preserveLocalStorage: true });
+    reloaded.connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    reloaded.connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const reloadRequest = reloaded.connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!reloadRequest || reloadRequest.type !== "sessionChanges.request") throw new Error("reloaded session changes request missing");
+    reloaded.connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: reloadRequest.clientId,
+        diffId: reloadRequest.diffId,
+        request: { scope: "sessionChanges", clientId: reloadRequest.clientId, diffId: reloadRequest.diffId, sessionId: "live", repoId: reloadRequest.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
+        patch,
+      },
+    });
+    reloaded.connection.emit({ type: "review.comments.snapshot", sessionId: "live", comments: [{ ...persisted, flushedAt: "flushed" }] });
+    expect([...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .some(button => button.textContent === "Preview comments (1)")).toBe(false);
+  });
   it("keeps the diff file list mounted when selecting another file", async () => {
     const { connection } = await createHarness();
     const secondPatch = [

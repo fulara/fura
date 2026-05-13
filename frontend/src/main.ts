@@ -1011,6 +1011,7 @@ let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
+
 let agentReviewDraft: { sessionId: string; state: DiffReviewableState } | null = null;
 const codeComments = new Map<string, SessionCodeComments>();
 let codePreviewDraft: CodePreviewDraft | null = null;
@@ -5156,6 +5157,19 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
   }
 }
 
+function restoreScrollTopAcrossDiffRender(element: HTMLElement | null, scrollTop: number): void {
+  if (!element) return;
+  element.scrollTop = scrollTop;
+  let frames = 0;
+  const restore = () => {
+    if (!element.isConnected || frames >= 24) return;
+    element.scrollTop = scrollTop;
+    frames += 1;
+    requestAnimationFrame(restore);
+  };
+  requestAnimationFrame(restore);
+}
+
 function rerenderDiffsViewPreservingScroll(sessionId: string): void {
   if (sessionId === "compareDiff") {
     markComparePanelDirty();
@@ -5175,8 +5189,8 @@ function rerenderDiffsViewPreservingScroll(sessionId: string): void {
 
     const nextMainBody = container.querySelector<HTMLElement>(".diffs-main-body");
     const nextSidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
-    if (nextMainBody) nextMainBody.scrollTop = mainScrollTop;
-    if (nextSidebarScroll) nextSidebarScroll.scrollTop = sidebarScrollTop;
+    restoreScrollTopAcrossDiffRender(nextMainBody, mainScrollTop);
+    restoreScrollTopAcrossDiffRender(nextSidebarScroll, sidebarScrollTop);
     restoreDiffFilterFocus(container, filterFocus);
   });
 }
@@ -5194,8 +5208,8 @@ function rerenderComparePanelPreservingScroll(): void {
 
     const nextMainBody = container.querySelector<HTMLElement>(".diffs-main-body");
     const nextSidebarScroll = container.querySelector<HTMLElement>(".diffs-sidebar-scroll");
-    if (nextMainBody) nextMainBody.scrollTop = mainScrollTop;
-    if (nextSidebarScroll) nextSidebarScroll.scrollTop = sidebarScrollTop;
+    restoreScrollTopAcrossDiffRender(nextMainBody, mainScrollTop);
+    restoreScrollTopAcrossDiffRender(nextSidebarScroll, sidebarScrollTop);
     restoreDiffFilterFocus(container, filterFocus);
   });
 }
@@ -5379,8 +5393,14 @@ function reviewCommentAsAnnotation(comment: ReviewComment): DiffReviewAnnotation
     anchor: comment.anchor,
     text: comment.body,
     status: "sent",
-    createdAt: comment.createdAt,
+    createdAt: comment.updatedAt,
   };
+}
+
+function flushableReviewCommentAnnotations(comments: ReviewComment[], key: string): DiffReviewAnnotation[] {
+  return comments
+    .filter(comment => comment.author === "user" && !comment.stale && !comment.flushedAt && comment.comparisonKey === key)
+    .map(reviewCommentAsAnnotation);
 }
 
 
@@ -5560,6 +5580,13 @@ function renderReviewCommentItem(comment: ReviewComment, stale: boolean, options
     badge.textContent = "stale/unmatched";
     meta.append(badge);
   }
+  if (comment.flushedAt) {
+    const badge = mkEl("span");
+    badge.className = "review-comment-flushed-badge";
+    badge.textContent = "flushed";
+    badge.title = "Already sent to the agent";
+    meta.append(badge);
+  }
   const controls = mkEl("div");
   controls.className = "review-comment-actions";
   const edit = mkEl("button");
@@ -5672,7 +5699,21 @@ function sendDiffAnnotations(
 ): void {
   if (annotationsToFlush.length === 0) return;
   const flushedIds = new Set(annotationsToFlush.map(annotation => annotation.id));
+  const flushedPersistedComments = annotationsToFlush
+    .filter(annotation => annotation.kind === "comment" && annotation.status === "sent")
+    .map(annotation => ({ id: annotation.id, updatedAt: annotation.createdAt }));
   const clearFlushedAnnotations = () => {
+    if (flushedPersistedComments.length > 0) {
+      const flushedAt = String(Date.now());
+      const flushedPersistedIds = new Set(flushedPersistedComments.map(comment => comment.id));
+      reviewComments.set(
+        sessionId,
+        (reviewComments.get(sessionId) ?? []).map(comment =>
+          flushedPersistedIds.has(comment.id) ? { ...comment, flushedAt } : comment,
+        ),
+      );
+      send({ type: "review.comment.markFlushed", comments: flushedPersistedComments });
+    }
     diffAnnotations.set(
       sessionId,
       (diffAnnotations.get(sessionId) ?? []).filter(annotation => !flushedIds.has(annotation.id)),
@@ -5690,14 +5731,13 @@ function sendDiffAnnotations(
   });
 }
 
-function previewDiffAnnotations(
+function previewDiffAnnotationList(
   sessionId: string,
   state: DiffReviewableState,
-  kind: "comment" | "question" | undefined,
+  annotationsToFlush: DiffReviewAnnotation[],
   promptMode: DiffAnnotationPromptMode,
 ): void {
   const key = comparisonKey(state);
-  const annotationsToFlush = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, kind);
   if (annotationsToFlush.length === 0) return;
   const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffPatchForAnnotation(state, annotation), promptMode);
   const isQuestionPreview = annotationsToFlush.every(annotation => annotation.kind === "question");
@@ -5728,6 +5768,16 @@ function previewDiffAnnotations(
   diffPreviewOverlay.hidden = false;
   diffPreviewText.scrollTop = 0;
   diffPreviewSend.focus();
+}
+
+function previewDiffAnnotations(
+  sessionId: string,
+  state: DiffReviewableState,
+  kind: "comment" | "question" | undefined,
+  promptMode: DiffAnnotationPromptMode,
+): void {
+  const key = comparisonKey(state);
+  previewDiffAnnotationList(sessionId, state, selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key, kind), promptMode);
 }
 
 function previewAgentDiffReview(sessionId: string, state: DiffReviewableState): void {
@@ -6238,14 +6288,16 @@ function renderReviewableDiffMainContent(
     toolbar.append(code);
   }
   if (allowPromptActions) {
-    const promptMode: DiffAnnotationPromptMode = requestMode === "sessionChanges" ? "sessionChanges" : "comparisonReview";
-    const queuedComments = selectedDiffAnnotations(annotations, key, "comment");
+    const promptMode: DiffAnnotationPromptMode = requestMode === "sessionChanges" || annotationKey !== "compareDiff" ? "sessionChanges" : "comparisonReview";
+    const queuedDraftComments = selectedDiffAnnotations(annotations, key, "comment");
+    const queuedPersistedComments = flushableReviewCommentAnnotations(comments, key);
+    const queuedComments = [...queuedDraftComments, ...queuedPersistedComments];
     const queuedQuestions = selectedDiffAnnotations(annotations, key, "question");
     if (queuedComments.length > 0) {
       const flushComments = mkEl("button");
       flushComments.type = "button";
-      flushComments.textContent = `Preview notes (${queuedComments.length})`;
-      flushComments.addEventListener("click", () => flushDiffAnnotations(annotationKey, state, "comment", promptMode));
+      flushComments.textContent = `Preview comments (${queuedComments.length})`;
+      flushComments.addEventListener("click", () => previewDiffAnnotationList(annotationKey, state, queuedComments, promptMode));
       toolbar.append(flushComments);
     }
     const flushQuestions = mkEl("button");

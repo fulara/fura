@@ -238,6 +238,14 @@ pub(crate) struct ReviewComment {
     pub(crate) anchor: DiffLineLocation,
     pub(crate) created_at: String,
     pub(crate) updated_at: String,
+    pub(crate) flushed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewCommentFlushMarker {
+    pub(crate) id: String,
+    pub(crate) updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -829,6 +837,10 @@ pub(crate) enum ClientMessage {
     },
     #[serde(rename = "review.comment.update")]
     ReviewCommentUpdate { id: String, body: String },
+    #[serde(rename = "review.comment.markFlushed")]
+    ReviewCommentMarkFlushed {
+        comments: Vec<ReviewCommentFlushMarker>,
+    },
     #[serde(rename = "review.comment.delete")]
     ReviewCommentDelete { id: String },
     #[serde(rename = "review.agentReview.start")]

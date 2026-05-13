@@ -1528,7 +1528,8 @@ h2 {
   overflow-wrap: anywhere;
 }
 
-.review-comment-stale-badge {
+.review-comment-stale-badge,
+.review-comment-flushed-badge {
   flex-shrink: 0;
   padding: 0.1rem 0.35rem;
   border-radius: 999px;
@@ -1536,6 +1537,12 @@ h2 {
   color: #f4d35e;
   background: rgba(244, 211, 94, 0.08);
   font-size: 0.68rem;
+}
+
+.review-comment-flushed-badge {
+  border-color: rgba(91, 141, 239, 0.48);
+  color: #9ebcff;
+  background: rgba(91, 141, 239, 0.1);
 }
 
 .review-comment-body {

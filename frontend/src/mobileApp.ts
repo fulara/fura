@@ -648,6 +648,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return nextPath;
   }
   const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
+
   const reviewComments = new Map<string, ReviewComment[]>();
   const reviewCommentsRequested = new Set<string>();
   const reviewCommentsLoadInFlight = new Set<string>();
@@ -675,8 +676,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       anchor: comment.anchor,
       text: comment.body,
       status: "sent",
-      createdAt: comment.createdAt,
+      createdAt: comment.updatedAt,
     };
+  }
+
+  function flushableMobileReviewCommentAnnotations(comments: ReviewComment[], key: string): DiffReviewAnnotation[] {
+    return comments
+      .filter(comment => comment.author === "user" && !comment.stale && !comment.flushedAt && comment.comparisonKey === key)
+      .map(mobileReviewCommentAsAnnotation);
   }
   let pendingDiffComment: {
     sessionId: string;
@@ -1353,7 +1360,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     state: DiffReviewableState,
   ): void {
     const key = comparisonKey(state);
-    const annotationsToFlush = selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key);
+    const annotationsToFlush = [
+      ...selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key),
+      ...flushableMobileReviewCommentAnnotations(reviewCommentsForComparison(reviewComments.get(sessionId) ?? [], key), key),
+    ];
     if (annotationsToFlush.length === 0) return;
     const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedMobileDiffPatchForAnnotation(state, annotation), "sessionChanges");
     if (prompt.ok) {
@@ -1406,7 +1416,22 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function clearFlushedDiffAnnotations(
     sessionId: string,
     key: string,
+    annotations: DiffReviewAnnotation[],
   ): void {
+    const persistedComments = annotations
+      .filter(annotation => annotation.kind === "comment" && annotation.status === "sent")
+      .map(annotation => ({ id: annotation.id, updatedAt: annotation.createdAt }));
+    if (persistedComments.length > 0) {
+      const flushedAt = String(Date.now());
+      const persistedCommentIds = new Set(persistedComments.map(comment => comment.id));
+      reviewComments.set(
+        sessionId,
+        (reviewComments.get(sessionId) ?? []).map(comment =>
+          persistedCommentIds.has(comment.id) ? { ...comment, flushedAt } : comment,
+        ),
+      );
+      send({ type: "review.comment.markFlushed", comments: persistedComments });
+    }
     diffAnnotations.set(sessionId, removeSelectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key));
     renderActiveSession();
   }
@@ -1427,7 +1452,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       diffPreviewText.focus();
       return;
     }
-    const clearComments = () => clearFlushedDiffAnnotations(draft.sessionId, draft.comparisonKey);
+    const clearComments = () => clearFlushedDiffAnnotations(draft.sessionId, draft.comparisonKey, draft.annotations);
     if (projections.get(draft.sessionId)?.isBusy) {
       busyPromptDraft = createBusyPromptDraft({
         sessionId: draft.sessionId,
@@ -2956,8 +2981,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       diffLoadingSessions.has(sessionId),
       () => requestMobileSessionChangesRefresh(sessionId),
     );
+    const key = state.status === "ready" ? comparisonKey(state) : "";
     const queuedAnnotations = state.status === "ready"
-      ? selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], comparisonKey(state))
+      ? [
+        ...selectedDiffAnnotations(diffAnnotations.get(sessionId) ?? [], key),
+        ...flushableMobileReviewCommentAnnotations(reviewCommentsForComparison(reviewComments.get(sessionId) ?? [], key), key),
+      ]
       : [];
     const flushButton = renderDiffAction(
       `Preview & flush (${queuedAnnotations.length})`,
@@ -3243,7 +3272,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         const item = diffView.ownerDocument.createElement("article");
         item.className = `mobile-diff-comment mobile-diff-${comment.author}${stale ? " is-stale" : ""}`;
         const location = diffView.ownerDocument.createElement("code");
-        location.textContent = `${formatReviewCommentLocation(comment)}${stale ? " · stale/unmatched" : ""}`;
+        location.textContent = `${formatReviewCommentLocation(comment)}${stale ? " · stale/unmatched" : ""}${comment.flushedAt ? " · flushed" : ""}`;
         const body = diffView.ownerDocument.createElement("p");
         body.textContent = `${comment.author === "agent" ? "Agent" : "You"}: ${comment.body}`;
         const actions = diffView.ownerDocument.createElement("div");

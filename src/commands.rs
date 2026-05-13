@@ -352,6 +352,9 @@ pub(crate) async fn handle_client_message(
         ClientMessage::ReviewCommentUpdate { id, body } => {
             handle_review_comment_update(state, id, body).await
         }
+        ClientMessage::ReviewCommentMarkFlushed { comments } => {
+            handle_review_comment_mark_flushed(state, comments).await
+        }
         ClientMessage::ReviewCommentDelete { id } => handle_review_comment_delete(state, id).await,
         ClientMessage::ReviewAgentReviewStart {
             session_id,
@@ -1978,6 +1981,34 @@ pub(crate) async fn handle_review_comment_update(
         }
         Err(message) => {
             debug!(action = "review.comment.update.err", comment_id = %id, error = %message);
+            vec![ServerMessage::Error {
+                request_id: None,
+                message,
+            }]
+        }
+    }
+}
+
+pub(crate) async fn handle_review_comment_mark_flushed(
+    state: &AppState,
+    comments: Vec<ReviewCommentFlushMarker>,
+) -> Vec<ServerMessage> {
+    debug!(
+        action = "review.comment.mark_flushed",
+        count = comments.len(),
+        db_path = %state.review_comment_db_path.display()
+    );
+    match mark_comments_flushed(&state.review_comment_db_path, &comments) {
+        Ok(comments) => {
+            for comment in comments {
+                let _ = state
+                    .events
+                    .send(ServerMessage::ReviewCommentUpserted { comment });
+            }
+            Vec::new()
+        }
+        Err(message) => {
+            debug!(action = "review.comment.mark_flushed.err", error = %message);
             vec![ServerMessage::Error {
                 request_id: None,
                 message,
