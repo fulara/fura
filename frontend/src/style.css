@@ -1321,7 +1321,7 @@ h2 {
 
 .diff-line-hunk,
 .diff-line-meta {
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(0, 1fr) auto;
   color: #9edbff;
 }
 
@@ -1333,6 +1333,14 @@ h2 {
 
 .diff-line-hunk {
   color: #8bd3ff;
+}
+
+.diff-context-more {
+  align-self: center;
+  min-height: 1.45rem;
+  padding: 0.12rem 0.45rem;
+  font-family: inherit;
+  font-size: 0.72rem;
 }
 
 .diff-comment-btn,

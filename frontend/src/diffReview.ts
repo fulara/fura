@@ -1,5 +1,5 @@
-import { comparisonKey, parseDiffRows, resolvedRefLabel, type ParsedDiffRow } from "./diffState";
-import type { ClientMessage, DiffCheckoutTarget, DiffEndpoint, DiffLineLocation, DiffReviewAnnotation, DiffReviewableState, ReviewComment } from "./protocol";
+import { comparisonKey, resolvedRefLabel } from "./diffState";
+import type { ClientMessage, DiffCheckoutTarget, DiffEndpoint, DiffLineLocation, DiffReviewAnnotation, DiffReviewableState, DiffRow, ReviewComment } from "./protocol";
 
 export type DiffPreviewDraft = {
   sessionId: string;
@@ -108,7 +108,7 @@ export function reviewCommentsForComparison(comments: ReviewComment[], key: stri
   return comments.filter(comment => comment.comparisonKey === key);
 }
 
-export function isReviewCommentMatched(rows: ParsedDiffRow[], key: string, comment: ReviewComment): boolean {
+export function isReviewCommentMatched(rows: DiffRow[], key: string, comment: ReviewComment): boolean {
   return rows.some(row => row.type === "line" && isReviewCommentForLocation(comment, key, row.location));
 }
 
@@ -145,15 +145,15 @@ export function formatDiffLineLocation(location: DiffLineLocation): string {
   return parts.join(" ");
 }
 
-function diffRowText(row: ParsedDiffRow): string {
+function diffRowText(row: DiffRow): string {
   return row.type === "line" ? row.location.text : row.text;
 }
 
-function isAnnotationLocation(row: ParsedDiffRow, annotation: DiffReviewAnnotation): boolean {
+function isAnnotationLocation(row: DiffRow, annotation: DiffReviewAnnotation): boolean {
   return row.type === "line" && diffLocationIdentity(row.location) === diffLocationIdentity(annotation.anchor);
 }
 
-function buildDiffAnnotationContext(rows: ParsedDiffRow[], annotation: DiffReviewAnnotation): string {
+function buildDiffAnnotationContext(rows: DiffRow[], annotation: DiffReviewAnnotation): string {
   const index = rows.findIndex(row => isAnnotationLocation(row, annotation));
   if (index === -1) {
     return [annotation.anchor.hunk, annotation.anchor.text].filter((line): line is string => Boolean(line)).join("\n");
@@ -195,8 +195,8 @@ function buildDiffAnnotationContext(rows: ParsedDiffRow[], annotation: DiffRevie
   return targetRow ? [...before, diffRowText(targetRow), ...after].join("\n") : annotation.anchor.text;
 }
 
-function reviewPatchText(state: DiffReviewableState): string {
-  return state.patch ?? state.summary.stat ?? "";
+function reviewRows(state: DiffReviewableState): DiffRow[] {
+  return state.patchRows ?? [];
 }
 function reviewModeLine(state: DiffReviewableState): string {
   if (state.review.currentCommitOid) {
@@ -232,7 +232,7 @@ function reviewHelperInstruction(promptMode: DiffAnnotationPromptMode): string {
   ].join(" ");
 }
 
-function buildAnnotationSection(annotation: DiffReviewAnnotation, index: number, rows: ParsedDiffRow[]): string {
+function buildAnnotationSection(annotation: DiffReviewAnnotation, index: number, rows: DiffRow[]): string {
   const label = annotation.kind === "question" ? "Question" : "Comment";
   return [
     `### ${label} ${index + 1}`,
@@ -254,7 +254,7 @@ function buildAnnotationSection(annotation: DiffReviewAnnotation, index: number,
 export function prepareDiffAnnotationPrompt(
   state: DiffReviewableState,
   annotations: DiffReviewAnnotation[],
-  patchForAnnotation?: (annotation: DiffReviewAnnotation) => string | null,
+  rowsForAnnotation?: (annotation: DiffReviewAnnotation) => DiffRow[] | null,
   promptMode: DiffAnnotationPromptMode = "comparisonReview",
 ): DiffAnnotationPromptResult {
   const key = comparisonKey(state);
@@ -263,12 +263,12 @@ export function prepareDiffAnnotationPrompt(
   const allComments = selectedAnnotations.length > 0 && selectedAnnotations.every(annotation => annotation.kind === "comment");
   const sections = selectedAnnotations
     .map((annotation, index) => {
-      const patch = patchForAnnotation?.(annotation) ?? reviewPatchText(state);
-      if (!patch) {
+      const rows = rowsForAnnotation?.(annotation) ?? reviewRows(state);
+      if (rows.length === 0) {
         missingFiles.add(pathForDiffLocation(annotation.anchor));
         return null;
       }
-      return buildAnnotationSection(annotation, index, parseDiffRows(patch));
+      return buildAnnotationSection(annotation, index, rows);
     })
     .filter((section): section is string => Boolean(section))
     .join("\n\n");
@@ -307,13 +307,13 @@ export function prepareDiffAnnotationPrompt(
 export function prepareDiffCommentPrompt(
   state: DiffReviewableState,
   comments: DiffReviewAnnotation[],
-  patchForComment?: (comment: DiffReviewAnnotation) => string | null,
+  rowsForComment?: (comment: DiffReviewAnnotation) => DiffRow[] | null,
   promptMode: DiffAnnotationPromptMode = "comparisonReview",
 ): DiffAnnotationPromptResult {
   return prepareDiffAnnotationPrompt(
     state,
     comments.filter(annotation => annotation.kind === "comment"),
-    patchForComment,
+    rowsForComment,
     promptMode,
   );
 }
@@ -324,7 +324,7 @@ export function buildDiffCommentPrompt(state: DiffReviewableState, comments: Dif
 }
 
 export function buildDiffQuestionPrompt(state: DiffReviewableState, question: DiffReviewAnnotation, promptMode: DiffAnnotationPromptMode = "comparisonReview"): string {
-  const rows = parseDiffRows(reviewPatchText(state));
+  const rows = reviewRows(state);
   return [
     promptMode === "sessionChanges"
       ? "I used the ? action in Fura's Diffs view on this exact diff line."

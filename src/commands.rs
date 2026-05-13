@@ -154,6 +154,7 @@ pub(crate) async fn handle_client_message(
             detail_mode,
             current_commit_oid,
             selected_file,
+            context_lines,
         } => {
             handle_session_changes_request(
                 state,
@@ -164,6 +165,7 @@ pub(crate) async fn handle_client_message(
                 detail_mode,
                 current_commit_oid,
                 selected_file,
+                context_lines,
             )
             .await
         }
@@ -178,6 +180,7 @@ pub(crate) async fn handle_client_message(
             detail_mode,
             current_commit_oid,
             selected_file,
+            context_lines,
         } => {
             handle_session_changes_snapshot(
                 state,
@@ -191,6 +194,7 @@ pub(crate) async fn handle_client_message(
                 detail_mode.unwrap_or(DiffDetailMode::StatOnly),
                 current_commit_oid,
                 selected_file,
+                context_lines,
             )
             .await
         }
@@ -204,6 +208,7 @@ pub(crate) async fn handle_client_message(
             merge_base,
             current_commit_oid,
             selected_file,
+            context_lines,
         } => {
             handle_compare_diff_request(
                 state,
@@ -216,6 +221,28 @@ pub(crate) async fn handle_client_message(
                 merge_base,
                 current_commit_oid,
                 selected_file,
+                context_lines,
+            )
+            .await
+        }
+        ClientMessage::DiffContentRequest {
+            client_id,
+            diff_id,
+            scope,
+            session_id,
+            comparison_key,
+            selected_file,
+            context_lines,
+        } => {
+            handle_diff_content_request(
+                state,
+                client_id,
+                diff_id,
+                scope,
+                session_id,
+                comparison_key,
+                selected_file,
+                context_lines,
             )
             .await
         }
@@ -2557,6 +2584,7 @@ async fn add_agent_review_comment(
         &context.left_tree_or_commit,
         &context.right_tree_or_commit,
         &selector,
+        3,
     )
     .await
     {
@@ -3087,6 +3115,7 @@ mod review_comment_tests {
                     old_path: None,
                     new_path: "src/new.ts".to_string(),
                 }),
+                context_lines: 3,
                 generated_at: "2026-05-06T00:00:00Z".to_string(),
                 comparison_key: "cmp".to_string(),
             },
@@ -3109,6 +3138,8 @@ mod review_comment_tests {
                 previous_commit_oid: None,
             },
             patch: Some(patch.to_string()),
+            patch_rows: None,
+            patch_context_lines: None,
             review_worktree: None,
         }
     }

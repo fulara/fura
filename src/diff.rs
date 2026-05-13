@@ -20,6 +20,8 @@ const GIT_TIMEOUT: Duration = Duration::from_secs(12);
 const MAX_DIFF_BYTES: usize = 2_000_000;
 const MAX_DIFF_FILE_PATCH_BYTES: usize = 1_000_000;
 const MAX_GIT_OUTPUT_BYTES: usize = 4_000_000;
+const DEFAULT_DIFF_CONTEXT_LINES: u32 = 3;
+const MAX_DIFF_CONTEXT_LINES: u32 = 200;
 
 #[derive(Debug, Default)]
 pub(crate) struct DiffReviewWorktreeRegistry {
@@ -36,6 +38,7 @@ pub(crate) async fn handle_session_changes_request(
     detail_mode: DiffDetailMode,
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
+    context_lines: Option<u32>,
 ) -> Vec<ServerMessage> {
     if let Err(error) = validate_diff_id(&diff_id) {
         return vec![diff_error(
@@ -55,23 +58,8 @@ pub(crate) async fn handle_session_changes_request(
         detail_mode,
         current_commit_oid: current_commit_oid.clone(),
         selected_file: selected_file.clone(),
+        context_lines,
     };
-    if selected_file.is_some()
-        && current_diff_id(state, &client_id, DiffScope::SessionChanges)
-            .await
-            .as_deref()
-            == Some(diff_id.as_str())
-    {
-        start_session_changes_file_patch_job(
-            state,
-            client_id,
-            diff_id,
-            session_id,
-            selected_file.expect("checked selected file"),
-        )
-        .await;
-        return Vec::new();
-    }
     start_session_changes_generation_job(
         state,
         client_id,
@@ -82,6 +70,7 @@ pub(crate) async fn handle_session_changes_request(
         current_commit_oid,
         selected_file,
         request,
+        context_lines,
     )
     .await;
     Vec::new()
@@ -99,6 +88,7 @@ pub(crate) async fn handle_session_changes_snapshot(
     detail_mode: DiffDetailMode,
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
+    context_lines: Option<u32>,
 ) -> Vec<ServerMessage> {
     if let Err(error) = validate_diff_id(&diff_id) {
         return vec![diff_error(
@@ -132,6 +122,7 @@ pub(crate) async fn handle_session_changes_snapshot(
             detail_mode,
             current_commit_oid,
             selected_file,
+            context_lines,
         },
     );
     let mut command = serde_json::json!({
@@ -169,6 +160,7 @@ pub(crate) async fn handle_compare_diff_request(
     merge_base: Option<bool>,
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
+    context_lines: Option<u32>,
 ) -> Vec<ServerMessage> {
     if let Err(error) = validate_diff_id(&diff_id) {
         return vec![diff_error(
@@ -190,23 +182,8 @@ pub(crate) async fn handle_compare_diff_request(
         merge_base,
         current_commit_oid: current_commit_oid.clone(),
         selected_file: selected_file.clone(),
+        context_lines,
     };
-    if selected_file.is_some()
-        && current_diff_id(state, &client_id, DiffScope::CompareDiff)
-            .await
-            .as_deref()
-            == Some(diff_id.as_str())
-    {
-        start_compare_file_patch_job(
-            state,
-            client_id,
-            diff_id,
-            repo_root,
-            selected_file.expect("checked selected file"),
-        )
-        .await;
-        return Vec::new();
-    }
     start_compare_generation_job(
         state,
         client_id,
@@ -219,6 +196,7 @@ pub(crate) async fn handle_compare_diff_request(
         current_commit_oid,
         selected_file,
         request,
+        context_lines,
     )
     .await;
     Vec::new()
@@ -239,6 +217,75 @@ fn validate_diff_id(diff_id: &str) -> anyhow::Result<()> {
     Uuid::parse_str(diff_id)
         .map(|_| ())
         .with_context(|| format!("invalid diffId UUID: {diff_id}"))
+}
+
+pub(crate) async fn handle_diff_content_request(
+    state: &AppState,
+    client_id: String,
+    diff_id: String,
+    scope: DiffScope,
+    session_id: Option<String>,
+    comparison_key: String,
+    selected_file: Option<DiffFileSelector>,
+    context_lines: Option<u32>,
+) -> Vec<ServerMessage> {
+    if let Err(error) = validate_diff_id(&diff_id) {
+        return vec![diff_error(
+            Some(client_id),
+            Some(diff_id),
+            match scope {
+                DiffScope::SessionChanges => DiffErrorScope::SessionChanges,
+                DiffScope::CompareDiff => DiffErrorScope::CompareDiff,
+            },
+            session_id.clone(),
+            None,
+            error,
+        )];
+    }
+    let Some(prepared) = current_prepared_diff(state, &client_id, scope, &diff_id).await else {
+        return vec![diff_error(
+            Some(client_id),
+            Some(diff_id),
+            match scope {
+                DiffScope::SessionChanges => DiffErrorScope::SessionChanges,
+                DiffScope::CompareDiff => DiffErrorScope::CompareDiff,
+            },
+            session_id.clone(),
+            None,
+            anyhow!("diff summary is not ready for content loading"),
+        )];
+    };
+    if prepared.comparison.comparison_key != comparison_key {
+        return vec![diff_error(
+            Some(client_id),
+            Some(diff_id),
+            match scope {
+                DiffScope::SessionChanges => DiffErrorScope::SessionChanges,
+                DiffScope::CompareDiff => DiffErrorScope::CompareDiff,
+            },
+            session_id.clone(),
+            Some(prepared.repo_root.display().to_string()),
+            anyhow!("diff content request does not match the prepared comparison"),
+        )];
+    }
+    start_diff_content_job(
+        state,
+        client_id,
+        diff_id,
+        scope,
+        session_id,
+        prepared,
+        selected_file,
+        context_lines,
+    )
+    .await;
+    Vec::new()
+}
+
+fn normalize_diff_context_lines(context_lines: Option<u32>) -> u32 {
+    context_lines
+        .unwrap_or(DEFAULT_DIFF_CONTEXT_LINES)
+        .clamp(0, MAX_DIFF_CONTEXT_LINES)
 }
 
 fn diff_error(
@@ -314,13 +361,6 @@ async fn next_diff_job_token(state: &AppState) -> u64 {
     let mut jobs = state.diff_jobs.write().await;
     jobs.next_token = jobs.next_token.saturating_add(1);
     jobs.next_token
-}
-
-async fn current_diff_id(state: &AppState, client_id: &str, scope: DiffScope) -> Option<String> {
-    let jobs = state.diff_jobs.read().await;
-    jobs.state_generations
-        .get(&(client_id.to_string(), scope))
-        .map(|job| job.diff_id.clone())
 }
 
 async fn current_prepared_diff(
@@ -538,6 +578,11 @@ fn file_patch_key(file: &DiffFileSelector) -> String {
     )
 }
 
+fn diff_content_key(file: Option<&DiffFileSelector>) -> String {
+    file.map(file_patch_key)
+        .unwrap_or_else(|| "\0aggregate".to_string())
+}
+
 pub(crate) async fn start_session_changes_generation_job(
     state: &AppState,
     client_id: String,
@@ -548,6 +593,7 @@ pub(crate) async fn start_session_changes_generation_job(
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
     request: DiffRequestIdentity,
+    context_lines: Option<u32>,
 ) {
     let generation_token = next_diff_job_token(state).await;
     let job_state = state.clone();
@@ -566,6 +612,7 @@ pub(crate) async fn start_session_changes_generation_job(
             current_commit_oid,
             selected_file.clone(),
             request.clone(),
+            context_lines,
         )
         .await;
         match result {
@@ -582,19 +629,6 @@ pub(crate) async fn start_session_changes_generation_job(
                 .await
                 {
                     let _ = job_state.events.send(message);
-                    if detail_mode == DiffDetailMode::FilePatch {
-                        if let Some(file) = selected_file {
-                            send_file_patch_for_prepared(
-                                &job_state,
-                                job_client_id.clone(),
-                                job_diff_id.clone(),
-                                DiffScope::SessionChanges,
-                                prepared,
-                                file,
-                            )
-                            .await;
-                        }
-                    }
                     let _ = job_state.events.send(ServerMessage::DiffComplete {
                         target_client_id: job_client_id,
                         diff_id: job_diff_id,
@@ -644,43 +678,35 @@ pub(crate) async fn start_session_changes_generation_job(
     .await;
 }
 
-async fn start_session_changes_file_patch_job(
+async fn start_diff_content_job(
     state: &AppState,
     client_id: String,
     diff_id: String,
-    session_id: String,
-    selected_file: DiffFileSelector,
+    scope: DiffScope,
+    session_id: Option<String>,
+    prepared: Arc<PreparedDiff>,
+    selected_file: Option<DiffFileSelector>,
+    context_lines: Option<u32>,
 ) {
-    let Some(prepared) =
-        current_prepared_diff(state, &client_id, DiffScope::SessionChanges, &diff_id).await
-    else {
-        let _ = state.events.send(diff_error(
-            Some(client_id),
-            Some(diff_id),
-            DiffErrorScope::SessionChanges,
-            Some(session_id),
-            None,
-            anyhow!("diff summary is not ready for the selected file"),
-        ));
-        return;
-    };
     let key = (
         client_id.clone(),
-        DiffScope::SessionChanges,
+        scope,
         diff_id.clone(),
-        file_patch_key(&selected_file),
+        diff_content_key(selected_file.as_ref()),
     );
     let token = next_diff_job_token(state).await;
     let job_state = state.clone();
     let key_for_task = key.clone();
     let handle = tokio::spawn(async move {
-        send_file_patch_for_prepared(
+        send_diff_content_for_prepared(
             &job_state,
             client_id,
             diff_id,
-            DiffScope::SessionChanges,
+            scope,
+            session_id,
             prepared,
             selected_file,
+            context_lines,
         )
         .await;
         finish_file_patch_job(&job_state, &key_for_task, token).await;
@@ -700,6 +726,7 @@ async fn start_compare_generation_job(
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
     request: DiffRequestIdentity,
+    context_lines: Option<u32>,
 ) {
     let generation_token = next_diff_job_token(state).await;
     let job_state = state.clone();
@@ -720,6 +747,7 @@ async fn start_compare_generation_job(
             current_commit_oid,
             selected_file.clone(),
             request,
+            context_lines,
         )
         .await;
         match result {
@@ -736,19 +764,6 @@ async fn start_compare_generation_job(
                 .await
                 {
                     let _ = job_state.events.send(message);
-                    if detail_mode == DiffDetailMode::FilePatch {
-                        if let Some(file) = selected_file {
-                            send_file_patch_for_prepared(
-                                &job_state,
-                                job_client_id.clone(),
-                                job_diff_id.clone(),
-                                DiffScope::CompareDiff,
-                                prepared,
-                                file,
-                            )
-                            .await;
-                        }
-                    }
                     let _ = job_state.events.send(ServerMessage::DiffComplete {
                         target_client_id: job_client_id,
                         diff_id: job_diff_id,
@@ -795,50 +810,6 @@ async fn start_compare_generation_job(
         handle,
     )
     .await;
-}
-
-async fn start_compare_file_patch_job(
-    state: &AppState,
-    client_id: String,
-    diff_id: String,
-    repo_root: String,
-    selected_file: DiffFileSelector,
-) {
-    let Some(prepared) =
-        current_prepared_diff(state, &client_id, DiffScope::CompareDiff, &diff_id).await
-    else {
-        let _ = state.events.send(diff_error(
-            Some(client_id),
-            Some(diff_id),
-            DiffErrorScope::CompareDiff,
-            None,
-            Some(repo_root),
-            anyhow!("diff summary is not ready for the selected file"),
-        ));
-        return;
-    };
-    let key = (
-        client_id.clone(),
-        DiffScope::CompareDiff,
-        diff_id.clone(),
-        file_patch_key(&selected_file),
-    );
-    let token = next_diff_job_token(state).await;
-    let job_state = state.clone();
-    let key_for_task = key.clone();
-    let handle = tokio::spawn(async move {
-        send_file_patch_for_prepared(
-            &job_state,
-            client_id,
-            diff_id,
-            DiffScope::CompareDiff,
-            prepared,
-            selected_file,
-        )
-        .await;
-        finish_file_patch_job(&job_state, &key_for_task, token).await;
-    });
-    register_file_patch_job(state, key, token, handle).await;
 }
 
 fn select_session_repo(
@@ -1160,6 +1131,7 @@ async fn build_session_changes_summary(
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
     request: DiffRequestIdentity,
+    context_lines: Option<u32>,
 ) -> anyhow::Result<(ServerMessage, PreparedDiff)> {
     let (repos, selected_repo_id, prepared) = prepare_session_changes_diff(
         state,
@@ -1171,6 +1143,7 @@ async fn build_session_changes_summary(
         current_commit_oid,
         selected_file,
         request.clone(),
+        context_lines,
     )
     .await?;
     let summary = build_summary_payload(
@@ -1179,7 +1152,6 @@ async fn build_session_changes_summary(
         &prepared.right_tree_or_commit,
     )
     .await?;
-    let (patch, patch_truncated) = aggregate_patch_for_summary(&prepared).await?;
     Ok((
         ServerMessage::SessionChangesSummary {
             state: SessionChangesSummaryState::Ready {
@@ -1193,8 +1165,6 @@ async fn build_session_changes_summary(
                 summary,
                 review: prepared.review.clone(),
                 review_worktree: prepared.review_worktree.clone(),
-                patch,
-                patch_truncated,
             },
         },
         prepared,
@@ -1211,6 +1181,7 @@ async fn prepare_session_changes_diff(
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
     request: DiffRequestIdentity,
+    context_lines: Option<u32>,
 ) -> anyhow::Result<(Vec<SessionRepoCandidate>, String, PreparedDiff)> {
     let candidates = session_repo_candidates(state, &session_id).await?;
     if candidates.is_empty() {
@@ -1263,6 +1234,7 @@ async fn prepare_session_changes_diff(
         false,
         current_commit_oid,
         selected_file,
+        context_lines,
     )
     .await?;
     Ok((candidates, selected.id, prepared))
@@ -1280,6 +1252,7 @@ async fn build_compare_summary(
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
     request: DiffRequestIdentity,
+    context_lines: Option<u32>,
 ) -> anyhow::Result<(ServerMessage, PreparedDiff)> {
     let (refs, prepared) = prepare_compare_diff(
         state,
@@ -1293,6 +1266,7 @@ async fn build_compare_summary(
         current_commit_oid,
         selected_file,
         request.clone(),
+        context_lines,
     )
     .await?;
     let summary = build_summary_payload(
@@ -1301,7 +1275,6 @@ async fn build_compare_summary(
         &prepared.right_tree_or_commit,
     )
     .await?;
-    let (patch, patch_truncated) = aggregate_patch_for_summary(&prepared).await?;
     Ok((
         ServerMessage::CompareDiffSummary {
             state: CompareDiffSummaryState {
@@ -1313,8 +1286,6 @@ async fn build_compare_summary(
                 summary,
                 review: prepared.review.clone(),
                 review_worktree: prepared.review_worktree.clone(),
-                patch,
-                patch_truncated,
             },
         },
         prepared,
@@ -1333,6 +1304,7 @@ async fn prepare_compare_diff(
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
     _request: DiffRequestIdentity,
+    context_lines: Option<u32>,
 ) -> anyhow::Result<(Vec<GitRefSummary>, PreparedDiff)> {
     let repo_root = discover_repo_root(&repo_root)?;
     let refs = list_refs(&repo_root).await?;
@@ -1351,6 +1323,7 @@ async fn prepare_compare_diff(
         merge_base.unwrap_or(false),
         current_commit_oid,
         selected_file,
+        context_lines,
     )
     .await?;
     Ok((refs, prepared))
@@ -1367,6 +1340,7 @@ async fn prepare_diff_range(
     merge_base: bool,
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
+    context_lines: Option<u32>,
 ) -> anyhow::Result<PreparedDiff> {
     let range_base_oid =
         effective_merge_base_oid(&repo_root, &base_resolved, &head_resolved, merge_base).await?;
@@ -1398,6 +1372,7 @@ async fn prepare_diff_range(
         ResolvedDiffRef::GitRef { oid, .. } => oid.clone(),
     };
     let generated_at = Timestamp::now().millis().to_string();
+    let context_lines = normalize_diff_context_lines(context_lines);
     let comparison_key = format!(
         "{}:{}:{}:{:?}",
         repo_root.display(),
@@ -1414,6 +1389,7 @@ async fn prepare_diff_range(
         detail_mode,
         current_commit_oid: current_commit_oid.clone(),
         selected_file,
+        context_lines,
         generated_at,
         comparison_key,
     };
@@ -1602,33 +1578,19 @@ async fn build_summary_payload(
     })
 }
 
-async fn aggregate_patch_for_summary(
-    prepared: &PreparedDiff,
-) -> anyhow::Result<(Option<String>, Option<bool>)> {
-    if prepared.comparison.detail_mode != DiffDetailMode::FilePatch
-        || prepared.comparison.selected_file.is_some()
-    {
-        return Ok((None, None));
-    }
-    let (patch, truncated) = generate_aggregate_patch(
-        &prepared.repo_root,
-        &prepared.left_tree_or_commit,
-        &prepared.right_tree_or_commit,
-    )
-    .await?;
-    Ok((Some(patch), Some(truncated)))
-}
-
 async fn generate_aggregate_patch(
     repo_root: &Path,
     left_tree_or_commit: &str,
     right_tree_or_commit: &str,
+    context_lines: u32,
 ) -> anyhow::Result<(String, bool)> {
+    let context_arg = format!("--unified={context_lines}");
     git_stdout_limited(
         repo_root,
         &[
             "diff",
             "--find-renames",
+            context_arg.as_str(),
             left_tree_or_commit,
             right_tree_or_commit,
         ],
@@ -1637,25 +1599,44 @@ async fn generate_aggregate_patch(
     .await
 }
 
-async fn send_file_patch_for_prepared(
+async fn send_diff_content_for_prepared(
     state: &AppState,
     client_id: String,
     diff_id: String,
     scope: DiffScope,
+    session_id: Option<String>,
     prepared: Arc<PreparedDiff>,
-    file: DiffFileSelector,
+    file: Option<DiffFileSelector>,
+    context_lines: Option<u32>,
 ) {
-    let result = generate_file_patch(
-        &prepared.repo_root,
-        &prepared.left_tree_or_commit,
-        &prepared.right_tree_or_commit,
-        &file,
-    )
-    .await;
+    let context_lines =
+        normalize_diff_context_lines(context_lines).max(prepared.comparison.context_lines);
+    let result = match file.as_ref() {
+        Some(file) => {
+            generate_file_patch(
+                &prepared.repo_root,
+                &prepared.left_tree_or_commit,
+                &prepared.right_tree_or_commit,
+                file,
+                context_lines,
+            )
+            .await
+        }
+        None => {
+            generate_aggregate_patch(
+                &prepared.repo_root,
+                &prepared.left_tree_or_commit,
+                &prepared.right_tree_or_commit,
+                context_lines,
+            )
+            .await
+        }
+    };
     match result {
         Ok((patch, truncated)) => {
-            let _ = state.events.send(ServerMessage::DiffFilePatch {
-                patch: DiffFilePatchState {
+            let rows = parse_diff_rows(&patch);
+            let _ = state.events.send(ServerMessage::DiffContent {
+                content: DiffContentState {
                     target_client_id: client_id,
                     diff_id,
                     scope,
@@ -1663,6 +1644,8 @@ async fn send_file_patch_for_prepared(
                     file,
                     patch,
                     truncated,
+                    rows,
+                    context_lines,
                     generated_at: Timestamp::now().millis().to_string(),
                 },
             });
@@ -1675,7 +1658,7 @@ async fn send_file_patch_for_prepared(
                     DiffScope::SessionChanges => DiffErrorScope::SessionChanges,
                     DiffScope::CompareDiff => DiffErrorScope::CompareDiff,
                 },
-                None,
+                session_id,
                 Some(prepared.repo_root.display().to_string()),
                 error,
             ));
@@ -1688,11 +1671,14 @@ pub(crate) async fn generate_file_patch(
     left_tree_or_commit: &str,
     right_tree_or_commit: &str,
     file: &DiffFileSelector,
+    context_lines: u32,
 ) -> anyhow::Result<(String, bool)> {
+    let context_arg = format!("--unified={context_lines}");
     if let Some(old_path) = file.old_path.as_deref() {
         let combined = [
             "diff",
             "--find-renames",
+            context_arg.as_str(),
             left_tree_or_commit,
             right_tree_or_commit,
             "--",
@@ -1710,6 +1696,7 @@ pub(crate) async fn generate_file_patch(
     let args = [
         "diff",
         "--find-renames",
+        context_arg.as_str(),
         left_tree_or_commit,
         right_tree_or_commit,
         "--",
@@ -1724,12 +1711,191 @@ pub(crate) async fn generate_file_patch(
     let fallback = [
         "diff",
         "--find-renames",
+        context_arg.as_str(),
         left_tree_or_commit,
         right_tree_or_commit,
         "--",
         old_path,
     ];
     git_stdout_limited(repo_root, &fallback, MAX_DIFF_FILE_PATCH_BYTES).await
+}
+
+fn parse_diff_rows(diff_text: &str) -> Vec<DiffRow> {
+    let mut rows = Vec::new();
+    let mut old_path: Option<String> = None;
+    let mut new_path = String::new();
+    let mut hunk: Option<String> = None;
+    let mut old_line = 0_u32;
+    let mut new_line = 0_u32;
+
+    for text in diff_text.split('\n') {
+        if let Some((old, new)) = parse_diff_git_line(text) {
+            old_path = Some(old.to_string());
+            new_path = new.to_string();
+            hunk = None;
+            rows.push(DiffRow::File {
+                text: text.to_string(),
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                file_path: new_path.clone(),
+            });
+            continue;
+        }
+
+        if let Some(rename_from) = text.strip_prefix("rename from ") {
+            old_path = Some(rename_from.to_string());
+            if let Some(DiffRow::File {
+                old_path: row_old_path,
+                ..
+            }) = rows.last_mut()
+            {
+                *row_old_path = old_path.clone();
+            }
+            rows.push(DiffRow::Meta {
+                text: text.to_string(),
+            });
+            continue;
+        }
+
+        if let Some(rename_to) = text.strip_prefix("rename to ") {
+            new_path = rename_to.to_string();
+            if let Some(DiffRow::File {
+                new_path: row_new_path,
+                file_path,
+                ..
+            }) = rows.last_mut()
+            {
+                *row_new_path = new_path.clone();
+                *file_path = new_path.clone();
+            }
+            rows.push(DiffRow::Meta {
+                text: text.to_string(),
+            });
+            continue;
+        }
+
+        if text.starts_with("Binary files ") {
+            rows.push(DiffRow::Meta {
+                text: text.to_string(),
+            });
+            continue;
+        }
+
+        if let Some(path) = text.strip_prefix("--- ") {
+            old_path = parse_diff_header_path(path, "a/");
+            rows.push(DiffRow::Meta {
+                text: text.to_string(),
+            });
+            continue;
+        }
+
+        if let Some(path) = text.strip_prefix("+++ ") {
+            if let Some(path) = parse_diff_header_path(path, "b/") {
+                new_path = path;
+            }
+            rows.push(DiffRow::Meta {
+                text: text.to_string(),
+            });
+            continue;
+        }
+
+        if let Some((old_start, new_start)) = parse_hunk_header(text) {
+            old_line = old_start;
+            new_line = new_start;
+            hunk = Some(text.to_string());
+            rows.push(DiffRow::Hunk {
+                text: text.to_string(),
+                old_path: old_path.clone(),
+                new_path: new_path.clone(),
+                file_path: new_path.clone(),
+                hunk: text.to_string(),
+            });
+            continue;
+        }
+
+        if text.starts_with('+') && !text.starts_with("+++") {
+            rows.push(DiffRow::Line {
+                prefix: "+".to_string(),
+                location: DiffLineLocation {
+                    old_path: old_path.clone(),
+                    new_path: new_path.clone(),
+                    hunk: hunk.clone(),
+                    side: DiffSide::Right,
+                    kind: DiffLineKind::Add,
+                    old_line: None,
+                    new_line: Some(new_line),
+                    text: text.to_string(),
+                },
+            });
+            new_line = new_line.saturating_add(1);
+            continue;
+        }
+
+        if text.starts_with('-') && !text.starts_with("---") {
+            rows.push(DiffRow::Line {
+                prefix: "-".to_string(),
+                location: DiffLineLocation {
+                    old_path: old_path.clone(),
+                    new_path: new_path.clone(),
+                    hunk: hunk.clone(),
+                    side: DiffSide::Left,
+                    kind: DiffLineKind::Remove,
+                    old_line: Some(old_line),
+                    new_line: None,
+                    text: text.to_string(),
+                },
+            });
+            old_line = old_line.saturating_add(1);
+            continue;
+        }
+
+        if text.starts_with(' ') {
+            rows.push(DiffRow::Line {
+                prefix: " ".to_string(),
+                location: DiffLineLocation {
+                    old_path: old_path.clone(),
+                    new_path: new_path.clone(),
+                    hunk: hunk.clone(),
+                    side: DiffSide::Right,
+                    kind: DiffLineKind::Context,
+                    old_line: Some(old_line),
+                    new_line: Some(new_line),
+                    text: text.to_string(),
+                },
+            });
+            old_line = old_line.saturating_add(1);
+            new_line = new_line.saturating_add(1);
+            continue;
+        }
+
+        rows.push(DiffRow::Meta {
+            text: text.to_string(),
+        });
+    }
+
+    rows
+}
+
+fn parse_diff_git_line(text: &str) -> Option<(&str, &str)> {
+    let rest = text.strip_prefix("diff --git a/")?;
+    rest.split_once(" b/")
+}
+
+fn parse_diff_header_path(text: &str, prefix: &str) -> Option<String> {
+    if text == "/dev/null" {
+        None
+    } else {
+        text.strip_prefix(prefix).map(str::to_string)
+    }
+}
+
+fn parse_hunk_header(text: &str) -> Option<(u32, u32)> {
+    let rest = text.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once(" +")?;
+    let (new_part, _) = rest.split_once(" @@")?;
+    let old_start = old_part.split(',').next()?.parse().ok()?;
+    let new_start = new_part.split(',').next()?.parse().ok()?;
+    Some((old_start, new_start))
 }
 
 async fn current_review_worktree(state: &AppState, repo_root: &Path) -> Option<DiffReviewWorktree> {
@@ -2481,6 +2647,7 @@ mod tests {
             DiffDetailMode::StatOnly,
             None,
             None,
+            None,
         )
         .await;
         assert!(
@@ -2593,8 +2760,9 @@ mod tests {
             merge_base: Some(false),
             current_commit_oid: None,
             selected_file: None,
+            context_lines: Some(3),
         };
-        let (message, _prepared) = build_compare_summary(
+        let (message, prepared) = build_compare_summary(
             &app_state,
             "client-1".into(),
             test_diff_id(),
@@ -2610,6 +2778,7 @@ mod tests {
             None,
             None,
             file_patch_request,
+            Some(3),
         )
         .await
         .unwrap();
@@ -2619,8 +2788,19 @@ mod tests {
         else {
             panic!("expected compare diff summary");
         };
-        let patch = summary_state.patch.as_deref().expect("aggregate patch");
-        assert_eq!(summary_state.patch_truncated, Some(false));
+        assert_eq!(
+            summary_state.comparison.detail_mode,
+            DiffDetailMode::FilePatch
+        );
+        let (patch, truncated) = generate_aggregate_patch(
+            &prepared.repo_root,
+            &prepared.left_tree_or_commit,
+            &prepared.right_tree_or_commit,
+            prepared.comparison.context_lines,
+        )
+        .await
+        .unwrap();
+        assert!(!truncated);
         assert!(
             patch.contains("diff --git a/src/lib.rs b/src/lib.rs"),
             "{patch}"
@@ -2644,6 +2824,7 @@ mod tests {
             merge_base: Some(false),
             current_commit_oid: None,
             selected_file: None,
+            context_lines: Some(3),
         };
         let (message, _prepared) = build_compare_summary(
             &app_state,
@@ -2657,6 +2838,7 @@ mod tests {
             None,
             None,
             stat_request,
+            Some(3),
         )
         .await
         .unwrap();
@@ -2666,8 +2848,10 @@ mod tests {
         else {
             panic!("expected compare diff summary");
         };
-        assert!(summary_state.patch.is_none());
-        assert!(summary_state.patch_truncated.is_none());
+        assert_eq!(
+            summary_state.comparison.detail_mode,
+            DiffDetailMode::StatOnly
+        );
     }
 
     #[tokio::test]
@@ -2786,8 +2970,6 @@ mod tests {
             review,
             repos,
             summary,
-            patch,
-            patch_truncated,
             ..
         } = state
         else {
@@ -2806,8 +2988,7 @@ mod tests {
             matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == snapshot_ref)
         );
         assert_eq!(review.current_commit_oid, None);
-        assert!(patch.is_none());
-        assert!(patch_truncated.is_none());
+        assert_eq!(comparison.detail_mode, DiffDetailMode::StatOnly);
         let stat = summary.stat.as_deref().unwrap_or("");
         assert!(stat.contains("src/lib.rs"), "{}", stat);
         assert!(stat.contains("src/new.rs"), "{}", stat);
@@ -2968,6 +3149,7 @@ mod tests {
             DiffDetailMode::StatOnly,
             None,
             None,
+            None,
         )
         .await;
         assert!(
@@ -3023,6 +3205,7 @@ mod tests {
             DiffDetailMode::FilePatch,
             Some("commit-1".into()),
             None,
+            None,
         )
         .await;
 
@@ -3070,6 +3253,7 @@ mod tests {
             Some(repo.display().to_string()),
             Some("HEAD~1".into()),
             DiffDetailMode::StatOnly,
+            None,
             None,
             None,
         )
@@ -3126,6 +3310,7 @@ mod tests {
             merge_base: Some(false),
             current_commit_oid: Some(third.clone()),
             selected_file: Some(selector.clone()),
+            context_lines: Some(3),
         };
         let (_refs, prepared) = prepare_compare_diff(
             &state,
@@ -3143,6 +3328,7 @@ mod tests {
             Some(third.clone()),
             Some(selector.clone()),
             request,
+            Some(3),
         )
         .await
         .unwrap();
@@ -3165,6 +3351,7 @@ mod tests {
             &prepared.left_tree_or_commit,
             &prepared.right_tree_or_commit,
             &selector,
+            3,
         )
         .await
         .unwrap();
@@ -3212,6 +3399,7 @@ mod tests {
                 old_path: summary.old_path.clone(),
                 new_path: summary.new_path.clone(),
             },
+            3,
         )
         .await
         .unwrap();
@@ -3318,6 +3506,7 @@ mod tests {
             DiffDetailMode::FilePatch,
             None,
             None,
+            None,
         )
         .await;
         assert!(
@@ -3325,6 +3514,7 @@ mod tests {
             "unexpected direct responses: {responses:?}"
         );
         let mut saw_aggregate_summary = false;
+        let mut comparison_key = String::new();
         loop {
             let message = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
                 .await
@@ -3332,23 +3522,10 @@ mod tests {
                 .expect("summary event");
             match message {
                 ServerMessage::SessionChangesSummary {
-                    state:
-                        SessionChangesSummaryState::Ready {
-                            patch,
-                            patch_truncated,
-                            ..
-                        },
+                    state: SessionChangesSummaryState::Ready { comparison, .. },
                 } => {
-                    let patch = patch.expect("aggregate patch");
-                    assert_eq!(patch_truncated, Some(false));
-                    assert!(
-                        patch.contains("diff --git a/src/lib.rs b/src/lib.rs"),
-                        "{patch}"
-                    );
-                    assert!(
-                        patch.contains("diff --git a/src/new.rs b/src/new.rs"),
-                        "{patch}"
-                    );
+                    assert_eq!(comparison.detail_mode, DiffDetailMode::FilePatch);
+                    comparison_key = comparison.comparison_key.clone();
                     saw_aggregate_summary = true;
                 }
                 ServerMessage::DiffComplete {
@@ -3362,19 +3539,58 @@ mod tests {
             }
         }
         assert!(saw_aggregate_summary);
+        let responses = handle_diff_content_request(
+            &state,
+            "test-client".into(),
+            diff_id.clone(),
+            DiffScope::SessionChanges,
+            Some("s1".into()),
+            comparison_key.clone(),
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            responses.is_empty(),
+            "unexpected direct responses: {responses:?}"
+        );
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("aggregate patch timeout")
+                .expect("aggregate patch event");
+            if let ServerMessage::DiffContent { content } = message {
+                assert!(content.file.is_none());
+                assert!(
+                    content
+                        .patch
+                        .contains("diff --git a/src/lib.rs b/src/lib.rs"),
+                    "{}",
+                    content.patch
+                );
+                assert!(
+                    content
+                        .patch
+                        .contains("diff --git a/src/new.rs b/src/new.rs"),
+                    "{}",
+                    content.patch
+                );
+                break;
+            }
+        }
         write_file(&repo, "src/lib.rs", "pub fn value() -> i32 { 4 }\n");
-        let responses = handle_session_changes_request(
+        let responses = handle_diff_content_request(
             &state,
             "test-client".into(),
             diff_id,
-            "s1".into(),
-            None,
-            DiffDetailMode::FilePatch,
-            None,
+            DiffScope::SessionChanges,
+            Some("s1".into()),
+            comparison_key,
             Some(DiffFileSelector {
                 old_path: None,
                 new_path: "src/lib.rs".into(),
             }),
+            None,
         )
         .await;
         assert!(
@@ -3386,16 +3602,20 @@ mod tests {
                 .await
                 .expect("patch timeout")
                 .expect("patch event");
-            if let ServerMessage::DiffFilePatch { patch } = message {
-                assert!(
-                    patch.patch.contains("+pub fn value() -> i32 { 3 }"),
-                    "{}",
-                    patch.patch
+            if let ServerMessage::DiffContent { content } = message {
+                assert_eq!(
+                    content.file.as_ref().map(|file| file.new_path.as_str()),
+                    Some("src/lib.rs")
                 );
                 assert!(
-                    !patch.patch.contains("+pub fn value() -> i32 { 4 }"),
+                    content.patch.contains("+pub fn value() -> i32 { 3 }"),
                     "{}",
-                    patch.patch
+                    content.patch
+                );
+                assert!(
+                    !content.patch.contains("+pub fn value() -> i32 { 4 }"),
+                    "{}",
+                    content.patch
                 );
                 break;
             }

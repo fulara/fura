@@ -2546,7 +2546,7 @@ pub(crate) mod tests {
     #[test]
     fn parses_typed_compare_diff_request_message() {
         let msg: ClientMessage = serde_json::from_str(
-            r#"{"type":"compareDiff.request","clientId":"client-1","diffId":"550e8400-e29b-41d4-a716-446655440000","repoRoot":"/repo","base":{"kind":"gitRef","value":"main"},"head":{"kind":"gitRef","value":"feature"},"detailMode":"filePatch","mergeBase":true,"currentCommitOid":"abc","selectedFile":{"newPath":"src/main.rs"}}"#,
+            r#"{"type":"compareDiff.request","clientId":"client-1","diffId":"550e8400-e29b-41d4-a716-446655440000","repoRoot":"/repo","base":{"kind":"gitRef","value":"main"},"head":{"kind":"gitRef","value":"feature"},"detailMode":"filePatch","mergeBase":true,"currentCommitOid":"abc","selectedFile":{"newPath":"src/main.rs"},"contextLines":12}"#,
         )
         .expect("parse failed");
         assert!(matches!(
@@ -2561,6 +2561,7 @@ pub(crate) mod tests {
                 merge_base: Some(true),
                 current_commit_oid: Some(ref commit_oid),
                 selected_file: Some(ref selected_file),
+                context_lines: Some(12),
             } if client_id == "client-1"
                 && diff_id == "550e8400-e29b-41d4-a716-446655440000"
                 && repo_root == "/repo"

@@ -53,7 +53,6 @@ import {
   diffRefInputText,
   formatDiffRepoLabel,
   sessionChangesRefreshOptions,
-  parseDiffRows,
   resolvedRefLabel,
   summarizeWireDiffFiles,
 } from "./diffState";
@@ -169,6 +168,7 @@ import type {
   DiffReviewAnnotation,
   DiffReviewWorktree,
   DiffReviewableState,
+  DiffRow,
   FrontendControlAction,
   FrontendUiSnapshot,
   ConflictAgentMode,
@@ -851,8 +851,8 @@ let compareDiffLoading = false;
 let compareRepoRoot = "";
 let compareBaseRef = "HEAD";
 let compareHeadRef = "WORKTREE";
-type PendingDiffFilePatchRequest = { diffId: string; comparisonKey: string; filePath: string };
-type DiffFilePatchError = { filePath: string; message: string };
+type PendingDiffFilePatchRequest = { diffId: string; comparisonKey: string; filePath: string | null };
+type DiffFilePatchError = { filePath: string | null; message: string };
 let comparePayloadKind: DiffDetailMode = "filePatch";
 let comparePanelDirty = true;
 const diffFileFilters = new Map<string, string>();
@@ -880,7 +880,7 @@ const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
-type CachedDiffPatch = { patch: string; truncated: boolean };
+type CachedDiffPatch = { patch: string; truncated: boolean; rows: DiffRow[]; contextLines: number };
 const diffPatchCache = new Map<string, CachedDiffPatch>();
 const pendingDiffFilePatches = new Map<string, PendingDiffFilePatchRequest>();
 const diffFilePatchErrors = new Map<string, DiffFilePatchError>();
@@ -899,8 +899,8 @@ function newDiffId(): string {
   return crypto.randomUUID();
 }
 
-function diffPatchCacheKey(comparisonKey: string, filePath: string): string {
-  return `${comparisonKey}\0${filePath}`;
+function diffPatchCacheKey(comparisonKey: string, filePath: string | null): string {
+  return `${comparisonKey}\0${filePath ?? ""}`;
 }
 
 function patchCacheComparisonKey(cacheKey: string): string {
@@ -922,6 +922,13 @@ function pruneDiffPatchCache(keepKeys = currentDiffComparisonKeys()): void {
   }
 }
 
+function clearDiffPatchCacheForComparison(comparisonKey: string | null | undefined): void {
+  if (!comparisonKey) return;
+  for (const cacheKey of [...diffPatchCache.keys()]) {
+    if (patchCacheComparisonKey(cacheKey) === comparisonKey) diffPatchCache.delete(cacheKey);
+  }
+}
+
 function rememberDiffPatch(key: string, value: CachedDiffPatch): void {
   diffPatchCache.set(key, value);
   let totalBytes = 0;
@@ -935,7 +942,7 @@ function rememberDiffPatch(key: string, value: CachedDiffPatch): void {
   }
 }
 
-function pendingDiffFilePatchMatches(panelKey: string, diffId: string, key: string, filePath: string): boolean {
+function pendingDiffFilePatchMatches(panelKey: string, diffId: string, key: string, filePath: string | null): boolean {
   const pending = pendingDiffFilePatches.get(panelKey);
   return Boolean(pending && pending.diffId === diffId && pending.comparisonKey === key && pending.filePath === filePath);
 }
@@ -946,12 +953,10 @@ function clearPendingDiffFilePatch(panelKey: string, diffId?: string): void {
   pendingDiffFilePatches.delete(panelKey);
 }
 
-function selectedDiffFilePatchError(panelKey: string, filePath: string): string | null {
+function selectedDiffFilePatchError(panelKey: string, filePath: string | null): string | null {
   const error = diffFilePatchErrors.get(panelKey);
   return error?.filePath === filePath ? error.message : null;
 }
-let diffRowsRenderRevision = 0;
-
 function setCurrentSessionChangesRequest(sessionId: string, diffId: string, reason: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed"): void {
   if (currentSessionChangesRequest && currentSessionChangesRequest.diffId !== diffId) {
     send({ type: "diff.cancel", clientId: diffClientId, diffId: currentSessionChangesRequest.diffId, scope: "sessionChanges", reason });
@@ -1784,20 +1789,21 @@ function handleServerMessage(message: ServerMessage): void {
       if (activeDiffReviewSessionId) renderDiffsViewIfActive(activeDiffReviewSessionId);
       break;
     }
-    case "diff.filePatch": {
-      const patch = message.patch;
-      if (patch.targetClientId !== diffClientId) break;
-      if (patch.scope === "compareDiff") {
-        if (compareDiffId !== patch.diffId || compareDiffState?.comparison.comparisonKey !== patch.comparisonKey) break;
-        rememberDiffPatch(diffPatchCacheKey(patch.comparisonKey, patch.file.newPath), { patch: patch.patch, truncated: patch.truncated });
-        clearPendingDiffFilePatch("compareDiff", patch.diffId);
-        if (diffFilePatchErrors.get("compareDiff")?.filePath === patch.file.newPath) diffFilePatchErrors.delete("compareDiff");
+    case "diff.content": {
+      const content = message.content;
+      if (content.targetClientId !== diffClientId) break;
+      const filePath = content.file?.newPath ?? null;
+      if (content.scope === "compareDiff") {
+        if (compareDiffId !== content.diffId || compareDiffState?.comparison.comparisonKey !== content.comparisonKey) break;
+        rememberDiffPatch(diffPatchCacheKey(content.comparisonKey, filePath), { patch: content.patch, truncated: content.truncated, rows: content.rows, contextLines: content.contextLines });
+        clearPendingDiffFilePatch("compareDiff", content.diffId);
+        if (diffFilePatchErrors.get("compareDiff")?.filePath === filePath) diffFilePatchErrors.delete("compareDiff");
         const activeDiffReviewSessionId = activeSessionId && projections.get(activeSessionId)?.summary.sessionMode === "diffReview"
           ? activeSessionId
           : null;
         if (activeDiffReviewSessionId) {
-          clearPendingDiffFilePatch(activeDiffReviewSessionId, patch.diffId);
-          if (diffFilePatchErrors.get(activeDiffReviewSessionId)?.filePath === patch.file.newPath) diffFilePatchErrors.delete(activeDiffReviewSessionId);
+          clearPendingDiffFilePatch(activeDiffReviewSessionId, content.diffId);
+          if (diffFilePatchErrors.get(activeDiffReviewSessionId)?.filePath === filePath) diffFilePatchErrors.delete(activeDiffReviewSessionId);
         }
         markComparePanelDirty();
         if (!rerenderSelectedDiffFileContentIfActive("compareDiff")) renderComparePanelIfActive();
@@ -1810,15 +1816,15 @@ function handleServerMessage(message: ServerMessage): void {
         const state = sessionId ? sessionChangesStates.get(sessionId) : undefined;
         if (
           !sessionId ||
-          currentSessionChangesRequest?.diffId !== patch.diffId ||
+          currentSessionChangesRequest?.diffId !== content.diffId ||
           state?.status !== "ready" ||
-          state.comparison.comparisonKey !== patch.comparisonKey
+          state.comparison.comparisonKey !== content.comparisonKey
         ) {
           break;
         }
-        rememberDiffPatch(diffPatchCacheKey(patch.comparisonKey, patch.file.newPath), { patch: patch.patch, truncated: patch.truncated });
-        clearPendingDiffFilePatch(sessionId, patch.diffId);
-        if (diffFilePatchErrors.get(sessionId)?.filePath === patch.file.newPath) diffFilePatchErrors.delete(sessionId);
+        rememberDiffPatch(diffPatchCacheKey(content.comparisonKey, filePath), { patch: content.patch, truncated: content.truncated, rows: content.rows, contextLines: content.contextLines });
+        clearPendingDiffFilePatch(sessionId, content.diffId);
+        if (diffFilePatchErrors.get(sessionId)?.filePath === filePath) diffFilePatchErrors.delete(sessionId);
         markDiffsViewDirty();
         if (!rerenderSelectedDiffFileContentIfActive(sessionId)) renderDiffsViewIfActive(sessionId);
       }
@@ -4808,6 +4814,8 @@ function requestSessionChangesRefresh(
   options: { repoId?: string | null; payloadKind?: DiffDetailMode | null; currentCommitOid?: string | null } = {},
 ): void {
   if (diffLoadingSessions.has(sessionId)) return;
+  const previousState = sessionChangesStates.get(sessionId);
+  if (previousState?.status === "ready") clearDiffPatchCacheForComparison(previousState.comparison.comparisonKey);
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
@@ -4964,6 +4972,7 @@ function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?
   const base = diffRefInputFromText(compareBaseRef, { kind: "gitRef", value: "HEAD" });
   const head = diffRefInputFromText(compareHeadRef, { kind: "workingTree" });
   diffErrors.delete("compareDiff");
+  clearDiffPatchCacheForComparison(compareDiffState?.comparison.comparisonKey);
   const diffId = newDiffId();
   setCurrentCompareDiff(diffId, overrides.repoRoot ? "repoChanged" : overrides.base || overrides.head || overrides.currentCommitOid ? "refsChanged" : overrides.payloadKind ? "payloadChanged" : "replaced");
   compareDiffState = null;
@@ -5158,16 +5167,7 @@ function syncSessionModePanels(activateCreatedDiffReview = false): void {
 }
 
 function restoreScrollTopAcrossDiffRender(element: HTMLElement | null, scrollTop: number): void {
-  if (!element) return;
-  element.scrollTop = scrollTop;
-  let frames = 0;
-  const restore = () => {
-    if (!element.isConnected || frames >= 24) return;
-    element.scrollTop = scrollTop;
-    frames += 1;
-    requestAnimationFrame(restore);
-  };
-  requestAnimationFrame(restore);
+  if (element) element.scrollTop = scrollTop;
 }
 
 function rerenderDiffsViewPreservingScroll(sessionId: string): void {
@@ -5676,8 +5676,11 @@ function askDiffQuestion(
   rerenderDiffsViewPreservingScroll(sessionId);
 }
 
-function cachedDiffPatchForAnnotation(state: DiffReviewableState, annotation: DiffReviewAnnotation): string | null {
-  return diffPatchCache.get(diffPatchCacheKey(comparisonKey(state), annotation.anchor.newPath))?.patch ?? null;
+function cachedDiffRowsForAnnotation(state: DiffReviewableState, annotation: DiffReviewAnnotation): DiffRow[] | null {
+  const key = comparisonKey(state);
+  return diffPatchCache.get(diffPatchCacheKey(key, annotation.anchor.newPath))?.rows
+    ?? diffPatchCache.get(diffPatchCacheKey(key, null))?.rows
+    ?? null;
 }
 
 function diffAnnotationFlushEditorText(annotations: DiffReviewAnnotation[]): string {
@@ -5739,7 +5742,7 @@ function previewDiffAnnotationList(
 ): void {
   const key = comparisonKey(state);
   if (annotationsToFlush.length === 0) return;
-  const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffPatchForAnnotation(state, annotation), promptMode);
+  const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffRowsForAnnotation(state, annotation), promptMode);
   const isQuestionPreview = annotationsToFlush.every(annotation => annotation.kind === "question");
   if (prompt.ok) {
     diffPreviewDraft = { sessionId, state, comparisonKey: key, annotations: annotationsToFlush };
@@ -5902,7 +5905,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   refresh.type = "button";
   refresh.textContent = diffLoadingSessions.has(sessionId) ? "Loading…" : "Refresh";
   refresh.disabled = diffLoadingSessions.has(sessionId);
-  refresh.addEventListener("click", () => requestSessionChangesRefresh(sessionId));
+  refresh.addEventListener("click", () => requestSessionChangesRefresh(sessionId, sessionChangesRefreshOptions(state, sessionChangesPayloadKinds.get(sessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE)));
   actions.append(refresh);
   const snapshot = mkEl("button");
   snapshot.type = "button";
@@ -6062,25 +6065,23 @@ function renderDiffMessage(main: HTMLElement, message: string, error: boolean): 
   main.append(body);
 }
 
-function requestSelectedFilePatch(annotationKey: string, state: DiffReviewableState, filePath: string, requestMode: "sessionChanges" | "compareDiff"): void {
-  const file = state.summary.files.find(candidate => candidate.newPath === filePath);
-  if (!file) return;
+function requestDiffContent(annotationKey: string, state: DiffReviewableState, filePath: string | null, requestMode: "sessionChanges" | "compareDiff", contextLines?: number): void {
+  const file = filePath ? state.summary.files.find(candidate => candidate.newPath === filePath) : null;
+  if (filePath && !file) return;
   const key = comparisonKey(state);
   if (requestMode === "compareDiff") {
     if (!compareDiffId || !compareDiffState || pendingDiffFilePatchMatches(annotationKey, compareDiffId, key, filePath)) return;
     pendingDiffFilePatches.set(annotationKey, { diffId: compareDiffId, comparisonKey: key, filePath });
     diffFilePatchErrors.delete(annotationKey);
     const sent = send({
-      type: "compareDiff.request",
+      type: "diff.content.request",
       clientId: diffClientId,
       diffId: compareDiffId,
-      repoRoot: compareDiffState.comparison.repoRoot,
-      base: compareDiffState.request.scope === "compareDiff" ? compareDiffState.request.base : state.comparison.base.kind === "workingTree" ? { kind: "workingTree" } : { kind: "gitRef", value: state.comparison.leftTreeOrCommit },
-      head: compareDiffState.request.scope === "compareDiff" ? compareDiffState.request.head : { kind: "workingTree" },
-      detailMode: "filePatch",
-      mergeBase: compareDiffState.request.scope === "compareDiff" ? Boolean(compareDiffState.request.mergeBase) : false,
-      currentCommitOid: state.review.currentCommitOid ?? null,
-      selectedFile: { oldPath: file.oldPath ?? null, newPath: file.newPath },
+      scope: "compareDiff",
+      sessionId: null,
+      comparisonKey: key,
+      selectedFile: file ? { oldPath: file.oldPath ?? null, newPath: file.newPath } : null,
+      contextLines,
     });
     if (sent) return;
     clearPendingDiffFilePatch(annotationKey, compareDiffId);
@@ -6099,20 +6100,27 @@ function requestSelectedFilePatch(annotationKey: string, state: DiffReviewableSt
   pendingDiffFilePatches.set(annotationKey, { diffId, comparisonKey: key, filePath });
   diffFilePatchErrors.delete(annotationKey);
   const sent = send({
-    type: "sessionChanges.request",
+    type: "diff.content.request",
     clientId: diffClientId,
     diffId,
+    scope: "sessionChanges",
     sessionId: annotationKey,
-    repoId: summary.status === "ready" ? summary.selectedRepoId : null,
-    detailMode: "filePatch",
-    currentCommitOid: state.review.currentCommitOid ?? null,
-    selectedFile: { oldPath: file.oldPath ?? null, newPath: file.newPath },
+    comparisonKey: key,
+    selectedFile: file ? { oldPath: file.oldPath ?? null, newPath: file.newPath } : null,
+    contextLines,
   });
   if (sent) return;
   clearPendingDiffFilePatch(annotationKey, diffId);
   diffFilePatchErrors.set(annotationKey, { filePath, message: "Not connected to the Fura bridge." });
   markDiffsViewDirty();
   renderDiffsViewIfActive(annotationKey);
+}
+
+function requestWiderDiffContext(annotationKey: string, state: DiffReviewableState, filePath: string, requestMode: "sessionChanges" | "compareDiff"): void {
+  const key = comparisonKey(state);
+  const cached = diffPatchCache.get(diffPatchCacheKey(key, filePath));
+  const currentContext = cached?.contextLines ?? state.comparison.contextLines ?? 3;
+  requestDiffContent(annotationKey, state, filePath, requestMode, Math.min(currentContext + 10, 200));
 }
 
 
@@ -6149,6 +6157,7 @@ function renderReviewableDiffMainContent(
   const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
   const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
   const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
+  const aggregatePatch = selectedFilePath ? undefined : diffPatchCache.get(diffPatchCacheKey(key, null));
   const summary = mkEl("section");
   summary.className = "diffs-summary";
   const comparison = mkEl("p");
@@ -6321,10 +6330,10 @@ function renderReviewableDiffMainContent(
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
-  const filePatchError = selectedFilePath ? selectedDiffFilePatchError(annotationKey, selectedFilePath) : null;
-  let renderedRows: ReturnType<typeof parseDiffRows> = [];
-  const aggregatePatchLoaded = state.patch !== null && state.patch !== undefined;
-  const showTruncationWarning = selectedFilePath ? Boolean(cachedPatch?.truncated) : Boolean(state.patchTruncated);
+  const filePatchError = selectedDiffFilePatchError(annotationKey, selectedFilePath);
+  let renderedRows: DiffRow[] = [];
+  const activePatch = selectedFilePath ? cachedPatch : aggregatePatch;
+  const showTruncationWarning = Boolean(activePatch?.truncated);
   if (showTruncationWarning) {
     const warning = mkEl("p");
     warning.className = "diffs-warning";
@@ -6340,24 +6349,28 @@ function renderReviewableDiffMainContent(
     pre.textContent = state.summary.stat ?? "";
     body.append(note, pre);
   } else if (!selectedFilePath) {
-    if (!aggregatePatchLoaded) {
+    if (!aggregatePatch) {
+      if (!filePatchError) requestDiffContent(annotationKey, state, null, requestMode);
       const loading = mkEl("p");
-      loading.className = "empty diffs-empty";
-      loading.textContent = "Loading diff patch…";
+      loading.className = `empty diffs-empty ${filePatchError ? "diffs-error" : ""}`;
+      loading.textContent = filePatchError
+        ? `Failed to load diff patch: ${filePatchError}`
+        : "Loading diff patch…";
       body.append(loading);
     } else {
-      renderedRows = parseDiffRows(state.patch ?? "");
+      renderedRows = aggregatePatch.rows;
+      const reviewState = { ...state, patch: aggregatePatch.patch, patchRows: aggregatePatch.rows, patchContextLines: aggregatePatch.contextLines };
       if (renderedRows.length === 0) {
         const empty = mkEl("p");
         empty.className = "empty diffs-empty";
         empty.textContent = "No changes for this comparison.";
         body.append(empty);
       } else {
-        renderDiffRows(body, annotationKey, state, renderedRows, annotations, comments, key, allowPromptActions);
+        renderDiffRows(body, annotationKey, reviewState, renderedRows, annotations, comments, key, allowPromptActions, requestMode);
       }
     }
   } else if (!cachedPatch) {
-    if (!filePatchError) requestSelectedFilePatch(annotationKey, state, selectedFilePath, requestMode);
+    if (!filePatchError) requestDiffContent(annotationKey, state, selectedFilePath, requestMode);
     const loading = mkEl("p");
     loading.className = `empty diffs-empty ${filePatchError ? "diffs-error" : ""}`;
     loading.textContent = filePatchError
@@ -6365,9 +6378,9 @@ function renderReviewableDiffMainContent(
       : `Loading patch for ${selectedFilePath}…`;
     body.append(loading);
   } else {
-    renderedRows = parseDiffRows(cachedPatch.patch);
-    const reviewState = { ...state, patch: cachedPatch.patch };
-    renderDiffRows(body, annotationKey, reviewState, renderedRows, annotations, comments, key, allowPromptActions);
+    renderedRows = cachedPatch.rows;
+    const reviewState = { ...state, patch: cachedPatch.patch, patchRows: cachedPatch.rows, patchContextLines: cachedPatch.contextLines };
+    renderDiffRows(body, annotationKey, reviewState, renderedRows, annotations, comments, key, allowPromptActions, requestMode);
   }
   renderReviewCommentsSection(
     body,
@@ -6410,7 +6423,8 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
   setRenderDocument(root.ownerDocument);
   const selectedFilePath = sessionChangesSelectedFiles.get(annotationKey) ?? null;
   updateDesktopModifiedFileSelection(root, selectedFilePath);
-  main.replaceChildren();
+  const preservedHeader = [...main.children].find((child): child is HTMLElement => child instanceof HTMLElement && child.classList.contains("diffs-toolbar")) ?? null;
+  main.replaceChildren(...(preservedHeader ? [preservedHeader] : []));
   renderReviewableDiffMainContent(
     annotationKey,
     state,
@@ -6594,7 +6608,7 @@ function renderDesktopModifiedFiles(
 function renderReviewCommentsSection(
   container: HTMLElement,
   comments: ReviewComment[],
-  rows: ReturnType<typeof parseDiffRows>,
+  rows: DiffRow[],
   key: string,
   selectedFilePath: string | null,
   currentFilePaths: Set<string>,
@@ -6636,28 +6650,18 @@ function renderReviewCommentsSection(
 }
 
 
-function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: ReturnType<typeof parseDiffRows>, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean): void {
-  const revision = ++diffRowsRenderRevision;
+function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: DiffRow[], annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff"): void {
   const diff = mkEl("div");
   diff.className = "diff-lines";
+  const fragment = document.createDocumentFragment();
+  for (const row of rows) {
+    appendDiffRow(fragment, row, annotationKey, state, annotations, comments, key, allowPromptActions, requestMode);
+  }
+  diff.append(fragment);
   container.append(diff);
-  let index = 0;
-  const renderBatch = () => {
-    if (revision !== diffRowsRenderRevision) return;
-    const fragment = document.createDocumentFragment();
-    const started = performance.now();
-    let count = 0;
-    while (index < rows.length && count < 150 && performance.now() - started < 8) {
-      appendDiffRow(fragment, rows[index++]!, annotationKey, state, annotations, comments, key, allowPromptActions);
-      count += 1;
-    }
-    diff.append(fragment);
-    if (index < rows.length) requestAnimationFrame(renderBatch);
-  };
-  renderBatch();
 }
 
-function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typeof parseDiffRows>[number], annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean): void {
+function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff"): void {
   if (row.type === "line") {
     const lineComments = reviewCommentsForDiffLocation(comments, key, row.location);
     const lineQuestions = annotationsForDiffLocation(annotations, key, row.location).filter(annotation => annotation.kind === "question");
@@ -6723,6 +6727,15 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: ReturnType<typ
   const text = mkEl("code");
   text.textContent = row.text;
   line.append(spacer, text);
+  if (row.type === "hunk") {
+    const more = mkEl("button");
+    more.type = "button";
+    more.className = "diff-context-more";
+    more.textContent = "Show more context";
+    more.title = "Ask Fura to reload this file with wider git diff context.";
+    more.addEventListener("click", () => requestWiderDiffContext(annotationKey, state, row.filePath, requestMode));
+    line.append(more);
+  }
 
   diff.append(line);
 }

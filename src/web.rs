@@ -642,14 +642,14 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             repo_root = %state.comparison.repo_root,
             file_count = state.summary.files.len()
         ),
-        ServerMessage::DiffFilePatch { patch } => info!(
+        ServerMessage::DiffContent { content } => info!(
             direction = "bridge_to_client",
-            message_type = "diff.filePatch",
-            target_client_id = %patch.target_client_id,
-            diff_id = %patch.diff_id,
-            scope = ?patch.scope,
-            file = %patch.file.new_path,
-            patch_bytes = patch.patch.len()
+            message_type = "diff.content",
+            target_client_id = %content.target_client_id,
+            diff_id = %content.diff_id,
+            scope = ?content.scope,
+            file = content.file.as_ref().map(|file| file.new_path.as_str()).unwrap_or("<aggregate>"),
+            patch_bytes = content.patch.len()
         ),
         ServerMessage::DiffComplete {
             target_client_id,

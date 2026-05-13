@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { comparisonKey, parseDiffRows } from "./diffState";
+import { comparisonKey } from "./diffState";
 import {
   buildDiffCommentPrompt,
   buildDiffQuestionPrompt,
@@ -16,16 +16,16 @@ import {
   reviewCommentsForDiffLocation,
   reviewCommentsForComparison,
 } from "./diffReview";
-import type { DiffLineLocation, DiffReviewableState, ReviewComment } from "./protocol";
+import type { DiffLineLocation, DiffReviewableState, DiffRow, ReviewComment } from "./protocol";
 
-const patch = [
-  "diff --git a/src/main.ts b/src/main.ts",
-  "@@ -1,3 +1,3 @@",
-  " const same = true;",
-  "-const value = 'old';",
-  "+const value = 'new';",
-  " export { value };",
-].join("\n");
+const rows: DiffRow[] = [
+  { type: "file", text: "diff --git a/src/main.ts b/src/main.ts", oldPath: "src/main.ts", newPath: "src/main.ts", filePath: "src/main.ts" },
+  { type: "hunk", text: "@@ -1,3 +1,3 @@", oldPath: "src/main.ts", newPath: "src/main.ts", filePath: "src/main.ts", hunk: "@@ -1,3 +1,3 @@" },
+  { type: "line", prefix: " ", location: { oldPath: "src/main.ts", newPath: "src/main.ts", hunk: "@@ -1,3 +1,3 @@", side: "right", kind: "context", oldLine: 1, newLine: 1, text: " const same = true;" } },
+  { type: "line", prefix: "-", location: { oldPath: "src/main.ts", newPath: "src/main.ts", hunk: "@@ -1,3 +1,3 @@", side: "left", kind: "remove", oldLine: 2, text: "-const value = 'old';" } },
+  { type: "line", prefix: "+", location: { oldPath: "src/main.ts", newPath: "src/main.ts", hunk: "@@ -1,3 +1,3 @@", side: "right", kind: "add", newLine: 2, text: "+const value = 'new';" } },
+  { type: "line", prefix: " ", location: { oldPath: "src/main.ts", newPath: "src/main.ts", hunk: "@@ -1,3 +1,3 @@", side: "right", kind: "context", oldLine: 3, newLine: 3, text: " export { value };" } },
+];
 
 const state: DiffReviewableState = {
   comparison: {
@@ -36,11 +36,12 @@ const state: DiffReviewableState = {
     rightTreeOrCommit: "b".repeat(40),
     detailMode: "filePatch",
     currentCommitOid: "b".repeat(40),
+    contextLines: 3,
     generatedAt: "1",
     comparisonKey: "/repo|commit",
   },
   summary: { files: [], stat: null, truncated: false },
-  patch,
+  patchRows: rows,
   review: {
     commits: [{ oid: "b".repeat(40), shortOid: "bbbbbbbbbbbb", subject: "change value", message: "change value", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
     currentCommitOid: "b".repeat(40),
@@ -49,8 +50,8 @@ const state: DiffReviewableState = {
   },
 };
 
-const addLocation: DiffLineLocation = parseDiffRows(patch).find((row): row is Extract<ReturnType<typeof parseDiffRows>[number], { type: "line" }> => row.type === "line" && row.location.kind === "add")!.location;
-const removeLocation: DiffLineLocation = parseDiffRows(patch).find((row): row is Extract<ReturnType<typeof parseDiffRows>[number], { type: "line" }> => row.type === "line" && row.location.kind === "remove")!.location;
+const addLocation: DiffLineLocation = rows.find((row): row is Extract<DiffRow, { type: "line" }> => row.type === "line" && row.location.kind === "add")!.location;
+const removeLocation: DiffLineLocation = rows.find((row): row is Extract<DiffRow, { type: "line" }> => row.type === "line" && row.location.kind === "remove")!.location;
 
 describe("diffReview", () => {
   it("tracks comments and questions separately", () => {
@@ -132,10 +133,10 @@ describe("diffReview", () => {
       anchor: { ...addLocation, text: "+const value = 'other';" },
     };
 
-    const rows = parseDiffRows(patch);
+    const currentRows = rows;
     expect(reviewCommentsForComparison([comment, stale], comparisonKey(state))).toEqual([comment, stale]);
     expect(reviewCommentsForDiffLocation([comment, stale], comparisonKey(state), addLocation)).toEqual([comment]);
-    expect(isReviewCommentMatched(rows, comparisonKey(state), comment)).toBe(true);
+    expect(isReviewCommentMatched(currentRows, comparisonKey(state), comment)).toBe(true);
     expect(isReviewCommentMatched(rows, comparisonKey(state), stale)).toBe(false);
   });
 
@@ -154,7 +155,7 @@ describe("diffReview", () => {
       updatedAt: "now",
     };
     expect(reviewCommentsForDiffLocation([persisted], comparisonKey(state), addLocation)).toEqual([persisted]);
-    expect(isReviewCommentMatched(parseDiffRows(patch), comparisonKey(state), persisted)).toBe(true);
+    expect(isReviewCommentMatched(rows, comparisonKey(state), persisted)).toBe(true);
   });
 
   it("matches persisted comments even if hunk metadata differs", () => {
@@ -172,7 +173,7 @@ describe("diffReview", () => {
       updatedAt: "now",
     };
     expect(reviewCommentsForDiffLocation([persisted], comparisonKey(state), addLocation)).toEqual([persisted]);
-    expect(isReviewCommentMatched(parseDiffRows(patch), comparisonKey(state), persisted)).toBe(true);
+    expect(isReviewCommentMatched(rows, comparisonKey(state), persisted)).toBe(true);
   });
 
   it("formats labels and exposes implementation boundary guidance", () => {

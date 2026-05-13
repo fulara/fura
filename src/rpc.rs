@@ -1058,6 +1058,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     detail_mode: pending.detail_mode,
                     current_commit_oid: pending.current_commit_oid.clone(),
                     selected_file: pending.selected_file.clone(),
+                    context_lines: pending.context_lines,
                 };
                 start_session_changes_generation_job(
                     state,
@@ -1069,6 +1070,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     pending.current_commit_oid,
                     pending.selected_file,
                     request,
+                    pending.context_lines,
                 )
                 .await;
                 let _ = state.events.send(notice(

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection } from "./connection";
-import type { ClientMessage, ReviewComment, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
+import type { ClientMessage, DiffRow, ReviewComment, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
 
 class FakeConnection implements FuraConnection {
   sent: ClientMessage[] = [];
@@ -86,7 +86,7 @@ function sessionChangesState(sessionId: string): SessionChangesSummaryState {
     status: "ready",
     targetClientId: "client-1",
     diffId: "diff-1",
-    request: { scope: "sessionChanges", clientId: "client-1", diffId: "diff-1", sessionId, repoId: "/repo", detailMode: "statOnly", currentCommitOid: null, selectedFile: null },
+    request: { scope: "sessionChanges", clientId: "client-1", diffId: "diff-1", sessionId, repoId: "/repo", detailMode: "statOnly", currentCommitOid: null, selectedFile: null, contextLines: 3 },
     comparison: {
       repoRoot: "/repo",
       base: { kind: "sessionStartSnapshot", snapshot: { entryId: "snap-start", label: "session-start", createdAt: "now", refName: "refs/omp/diff-snapshots/start", tree: "tree", commit: "a".repeat(40) } },
@@ -96,6 +96,7 @@ function sessionChangesState(sessionId: string): SessionChangesSummaryState {
       detailMode: "statOnly",
       currentCommitOid: null,
       selectedFile: null,
+      contextLines: 3,
       generatedAt: "now",
       comparisonKey: "key",
     },
@@ -105,9 +106,52 @@ function sessionChangesState(sessionId: string): SessionChangesSummaryState {
     summary: { files: [], stat: "", truncated: false },
     review: { commits: [], currentCommitOid: null, currentCommitIndex: null, previousCommitOid: null },
     reviewWorktree: null,
-    patch: null,
-    patchTruncated: null,
   };
+}
+
+function simpleDiffRows(patch: string): DiffRow[] {
+  const rows: DiffRow[] = [];
+  let oldPath: string | null = null;
+  let newPath = "";
+  let hunk: string | null = null;
+  let oldLine = 0;
+  let newLine = 0;
+  for (const text of patch.split("\n")) {
+    const fileMatch = /^diff --git a\/(.+?) b\/(.+)$/u.exec(text);
+    if (fileMatch) {
+      oldPath = fileMatch[1] ?? null;
+      newPath = fileMatch[2] ?? fileMatch[1] ?? "";
+      hunk = null;
+      rows.push({ type: "file", text, oldPath, newPath, filePath: newPath });
+      continue;
+    }
+    const hunkMatch = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/u.exec(text);
+    if (hunkMatch) {
+      oldLine = Number(hunkMatch[1]);
+      newLine = Number(hunkMatch[2]);
+      hunk = text;
+      rows.push({ type: "hunk", text, oldPath, newPath, filePath: newPath, hunk });
+      continue;
+    }
+    if (text.startsWith("+") && !text.startsWith("+++")) {
+      rows.push({ type: "line", prefix: "+", location: { oldPath, newPath, hunk, side: "right", kind: "add", newLine, text } });
+      newLine += 1;
+      continue;
+    }
+    if (text.startsWith("-") && !text.startsWith("---")) {
+      rows.push({ type: "line", prefix: "-", location: { oldPath, newPath, hunk, side: "left", kind: "remove", oldLine, text } });
+      oldLine += 1;
+      continue;
+    }
+    if (text.startsWith(" ")) {
+      rows.push({ type: "line", prefix: " ", location: { oldPath, newPath, hunk, side: "right", kind: "context", oldLine, newLine, text } });
+      oldLine += 1;
+      newLine += 1;
+      continue;
+    }
+    rows.push({ type: "meta", text });
+  }
+  return rows;
 }
 
 let connections: FakeConnection[] = [];
@@ -329,7 +373,7 @@ describe("desktop cog options", () => {
         ...sessionChangesState("live"),
         targetClientId: request.clientId,
         diffId: request.diffId,
-        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile },
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile, contextLines: request.contextLines ?? 3 },
       },
     });
     connection.sent.length = 0;
@@ -370,7 +414,7 @@ describe("desktop cog options", () => {
         ...sessionChangesState("live"),
         targetClientId: request.clientId,
         diffId: request.diffId,
-        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile },
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile, contextLines: request.contextLines ?? 3 },
       },
     });
     connection.sent.length = 0;
@@ -423,7 +467,7 @@ describe("desktop cog options", () => {
         ...baseState,
         targetClientId: request.clientId,
         diffId: request.diffId,
-        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile },
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile, contextLines: request.contextLines ?? 3 },
         summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: " src/main.ts | 2 +-\n", truncated: false },
       },
     });
@@ -488,6 +532,12 @@ describe("desktop cog options", () => {
       "-export const b = 'old';",
       "+export const b = 'single b';",
     ].join("\n");
+    const singlePatchRows: DiffRow[] = [
+      { type: "file", text: "diff --git a/src/b.ts b/src/b.ts", oldPath: "src/b.ts", newPath: "src/b.ts", filePath: "src/b.ts" },
+      { type: "hunk", text: "@@ -1 +1 @@", oldPath: "src/b.ts", newPath: "src/b.ts", filePath: "src/b.ts", hunk: "@@ -1 +1 @@" },
+      { type: "line", prefix: "-", location: { oldPath: "src/b.ts", newPath: "src/b.ts", hunk: "@@ -1 +1 @@", side: "left", kind: "remove", oldLine: 1, text: "-export const b = 'old';" } },
+      { type: "line", prefix: "+", location: { oldPath: "src/b.ts", newPath: "src/b.ts", hunk: "@@ -1 +1 @@", side: "right", kind: "add", newLine: 1, text: "+export const b = 'single b';" } },
+    ];
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
@@ -502,8 +552,8 @@ describe("desktop cog options", () => {
         ...baseState,
         targetClientId: request.clientId,
         diffId: request.diffId,
-        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null },
-        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: null },
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null, contextLines: 3 },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: null, contextLines: 3 },
         summary: {
           files: [
             { oldPath: null, newPath: "src/a.ts", status: "modified", added: 1, removed: 1 },
@@ -512,8 +562,26 @@ describe("desktop cog options", () => {
           stat: null,
           truncated: false,
         },
+      },
+    });
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "diff.content.request",
+      scope: "sessionChanges",
+      selectedFile: null,
+    }));
+    connection.emit({
+      type: "diff.content",
+      content: {
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        scope: "sessionChanges",
+        comparisonKey: "key",
+        file: null,
         patch: aggregatePatch,
-        patchTruncated: false,
+        truncated: false,
+        rows: simpleDiffRows(aggregatePatch),
+        contextLines: 3,
+        generatedAt: "now",
       },
     });
 
@@ -524,12 +592,12 @@ describe("desktop cog options", () => {
 
     document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/b.ts"]')?.click();
     expect(connection.sent).toContainEqual(expect.objectContaining({
-      type: "sessionChanges.request",
+      type: "diff.content.request",
       selectedFile: { oldPath: null, newPath: "src/b.ts" },
     }));
     connection.emit({
-      type: "diff.filePatch",
-      patch: {
+      type: "diff.content",
+      content: {
         targetClientId: request.clientId,
         diffId: request.diffId,
         scope: "sessionChanges",
@@ -537,12 +605,21 @@ describe("desktop cog options", () => {
         file: { oldPath: null, newPath: "src/b.ts" },
         patch: singlePatch,
         truncated: false,
+        rows: singlePatchRows,
+        contextLines: 3,
         generatedAt: "now",
       },
     });
     expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).not.toContain("new a");
     expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("single b");
 
+    connection.sent.length = 0;
+    document.querySelector<HTMLButtonElement>("#testDiffPanel .diff-context-more")?.click();
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "diff.content.request",
+      selectedFile: { oldPath: null, newPath: "src/b.ts" },
+      contextLines: 13,
+    }));
     connection.sent.length = 0;
     document.querySelector<HTMLButtonElement>("#testDiffPanel .diffs-all-files-jump")?.click();
     expect(document.querySelector<HTMLButtonElement>("#testDiffPanel .diffs-all-files-jump")?.classList.contains("active")).toBe(true);
@@ -554,12 +631,6 @@ describe("desktop cog options", () => {
   it("shows commit messages only for explicit single-commit aggregate views", async () => {
     const { connection } = await createHarness();
     const commitOid = "b".repeat(40);
-    const aggregatePatch = [
-      "diff --git a/src/main.ts b/src/main.ts",
-      "@@ -1 +1 @@",
-      "-console.log('old')",
-      "+console.log('new')",
-    ].join("\n");
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
@@ -571,8 +642,8 @@ describe("desktop cog options", () => {
       ...baseState,
       targetClientId: request.clientId,
       diffId: request.diffId,
-      request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null },
-      comparison: { ...baseState.comparison, detailMode: "filePatch", currentCommitOid: null, selectedFile: null },
+      request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null, contextLines: 3 },
+      comparison: { ...baseState.comparison, detailMode: "filePatch", currentCommitOid: null, selectedFile: null, contextLines: 3 },
       summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
       review: {
         commits: [{ oid: commitOid, shortOid: "bbbbbbbbbbbb", subject: "Add logging", message: "Add logging\n\nDetailed body.", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
@@ -580,8 +651,6 @@ describe("desktop cog options", () => {
         currentCommitIndex: null,
         previousCommitOid: null,
       },
-      patch: aggregatePatch,
-      patchTruncated: false,
     };
 
     connection.emit({ type: "sessionChanges.summary", state: commonState });
@@ -600,6 +669,80 @@ describe("desktop cog options", () => {
 
     document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
     expect(document.querySelector("#testDiffPanel .diff-commit-message")).toBeNull();
+  });
+
+  it("refreshes session changes with the current repo, mode, and commit", async () => {
+    const { connection } = await createHarness();
+    const commitOid = "b".repeat(40);
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        selectedRepoId: "repo-2",
+        request: { ...baseState.request, clientId: request.clientId, diffId: request.diffId, detailMode: "filePatch", currentCommitOid: commitOid },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", currentCommitOid: commitOid },
+        review: { ...baseState.review, currentCommitOid: commitOid, currentCommitIndex: 0, previousCommitOid: "a".repeat(40) },
+      },
+    });
+    connection.emit({
+      type: "diff.content",
+      content: {
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        scope: "sessionChanges",
+        comparisonKey: "key",
+        file: null,
+        patch: "diff --git a/src/main.ts b/src/main.ts\n@@ -1 +1 @@\n-old\n+cached",
+        truncated: false,
+        rows: simpleDiffRows("diff --git a/src/main.ts b/src/main.ts\n@@ -1 +1 @@\n-old\n+cached"),
+        contextLines: 3,
+        generatedAt: "now",
+      },
+    });
+    connection.sent.length = 0;
+
+    const buttonTexts = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")].map(button => button.textContent);
+    expect(buttonTexts).toContain("Refresh");
+    const refreshButton = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .find(button => button.textContent === "Refresh");
+    expect(refreshButton?.disabled).toBe(false);
+    refreshButton?.click();
+
+    const refreshRequest = connection.sent.find(message => message.type === "sessionChanges.request");
+    expect(refreshRequest).toEqual(expect.objectContaining({
+      type: "sessionChanges.request",
+      repoId: "repo-2",
+      detailMode: "filePatch",
+      currentCommitOid: commitOid,
+      selectedFile: null,
+    }));
+    if (!refreshRequest || refreshRequest.type !== "sessionChanges.request") throw new Error("refresh request missing");
+    connection.sent.length = 0;
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: refreshRequest.clientId,
+        diffId: refreshRequest.diffId,
+        selectedRepoId: "repo-2",
+        request: { ...baseState.request, clientId: refreshRequest.clientId, diffId: refreshRequest.diffId, detailMode: "filePatch", currentCommitOid: commitOid },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", currentCommitOid: commitOid },
+        review: { ...baseState.review, currentCommitOid: commitOid, currentCommitIndex: 0, previousCommitOid: "a".repeat(40) },
+      },
+    });
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "diff.content.request",
+      selectedFile: null,
+    }));
   });
 
   it("sends edited Diffs question preview text", async () => {
@@ -624,15 +767,14 @@ describe("desktop cog options", () => {
         ...baseState,
         targetClientId: request.clientId,
         diffId: request.diffId,
-        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" } },
-        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" }, contextLines: 3 },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" }, contextLines: 3 },
         summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
-        patch: null,
       },
     });
     connection.emit({
-      type: "diff.filePatch",
-      patch: {
+      type: "diff.content",
+      content: {
         targetClientId: request.clientId,
         diffId: request.diffId,
         scope: "sessionChanges",
@@ -640,6 +782,8 @@ describe("desktop cog options", () => {
         file: { oldPath: null, newPath: "src/main.ts" },
         patch,
         truncated: false,
+        rows: simpleDiffRows(patch),
+        contextLines: 3,
         generatedAt: "now",
       },
     });
@@ -661,6 +805,75 @@ describe("desktop cog options", () => {
       type: "prompt.send",
       sessionId: "live",
       text: "Please extract the repeated console logging into a helper.",
+    }));
+  });
+
+  it("creates persisted Diffs comments anchored to the clicked diff line", async () => {
+    const { connection } = await createHarness();
+    const patch = [
+      "diff --git a/src/main.ts b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-console.log('old')",
+      "+console.log('new')",
+    ].join("\n");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" }, contextLines: 3 },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" }, contextLines: 3 },
+        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
+      },
+    });
+    connection.emit({
+      type: "diff.content",
+      content: {
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        scope: "sessionChanges",
+        comparisonKey: "key",
+        file: { oldPath: null, newPath: "src/main.ts" },
+        patch,
+        truncated: false,
+        rows: simpleDiffRows(patch),
+        contextLines: 3,
+        generatedAt: "now",
+      },
+    });
+    const addedLine = [...document.querySelectorAll<HTMLElement>("#testDiffPanel .diff-line-wrap")]
+      .find(line => line.textContent?.includes("+console.log('new')"));
+    if (!addedLine) throw new Error("added diff line missing");
+    addedLine.querySelector<HTMLButtonElement>(".diff-comment-btn")?.click();
+    const composer = document.querySelector<HTMLFormElement>("#testDiffPanel .review-comment-composer-create");
+    const textarea = composer?.querySelector<HTMLTextAreaElement>("textarea");
+    if (!composer || !textarea) throw new Error("comment composer missing");
+    textarea.value = "Use structured logging here.";
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    composer.querySelector<HTMLButtonElement>('button[type="submit"]')?.click();
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "review.comment.create",
+      sessionId: "live",
+      repoRoot: "/repo",
+      comparisonKey: "key",
+      body: "Use structured logging here.",
+      anchor: expect.objectContaining({
+        oldPath: "src/main.ts",
+        newPath: "src/main.ts",
+        side: "right",
+        kind: "add",
+        newLine: 1,
+        text: "+console.log('new')",
+      }),
     }));
   });
 
@@ -686,15 +899,14 @@ describe("desktop cog options", () => {
         ...baseState,
         targetClientId: request.clientId,
         diffId: request.diffId,
-        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" } },
-        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" }, contextLines: 3 },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" }, contextLines: 3 },
         summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
-        patch: null,
       },
     });
     connection.emit({
-      type: "diff.filePatch",
-      patch: {
+      type: "diff.content",
+      content: {
         targetClientId: request.clientId,
         diffId: request.diffId,
         scope: "sessionChanges",
@@ -702,6 +914,8 @@ describe("desktop cog options", () => {
         file: { oldPath: null, newPath: "src/main.ts" },
         patch,
         truncated: false,
+        rows: simpleDiffRows(patch),
+        contextLines: 3,
         generatedAt: "now",
       },
     });
@@ -766,10 +980,9 @@ describe("desktop cog options", () => {
         ...baseState,
         targetClientId: reloadRequest.clientId,
         diffId: reloadRequest.diffId,
-        request: { scope: "sessionChanges", clientId: reloadRequest.clientId, diffId: reloadRequest.diffId, sessionId: "live", repoId: reloadRequest.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" } },
-        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" } },
+        request: { scope: "sessionChanges", clientId: reloadRequest.clientId, diffId: reloadRequest.diffId, sessionId: "live", repoId: reloadRequest.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: { oldPath: null, newPath: "src/main.ts" }, contextLines: 3 },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: { oldPath: null, newPath: "src/main.ts" }, contextLines: 3 },
         summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
-        patch,
       },
     });
     reloaded.connection.emit({ type: "review.comments.snapshot", sessionId: "live", comments: [{ ...persisted, flushedAt: "flushed" }] });
@@ -784,6 +997,7 @@ describe("desktop cog options", () => {
       "-export const value = 'old b';",
       "+export const value = 'new b';",
     ].join("\n");
+    const secondPatchRows = simpleDiffRows(secondPatch);
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
@@ -797,8 +1011,8 @@ describe("desktop cog options", () => {
         ...baseState,
         targetClientId: request.clientId,
         diffId: request.diffId,
-        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null },
-        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: null },
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null, contextLines: 3 },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", selectedFile: null, contextLines: 3 },
         summary: {
           files: [
             { oldPath: null, newPath: "src/a.ts", status: "modified", added: 1, removed: 1 },
@@ -807,7 +1021,6 @@ describe("desktop cog options", () => {
           stat: null,
           truncated: false,
         },
-        patch: null,
       },
     });
 
@@ -825,13 +1038,13 @@ describe("desktop cog options", () => {
     expect(sidebar.scrollTop).toBe(77);
     expect(fileButtons[1]?.classList.contains("active")).toBe(true);
     expect(connection.sent.some(message =>
-      message.type === "sessionChanges.request" &&
+      message.type === "diff.content.request" &&
       message.selectedFile?.newPath === "src/b.ts"
     )).toBe(true);
 
     connection.emit({
-      type: "diff.filePatch",
-      patch: {
+      type: "diff.content",
+      content: {
         targetClientId: request.clientId,
         diffId: request.diffId,
         scope: "sessionChanges",
@@ -839,6 +1052,8 @@ describe("desktop cog options", () => {
         file: { oldPath: null, newPath: "src/b.ts" },
         patch: secondPatch,
         truncated: false,
+        rows: secondPatchRows,
+        contextLines: 3,
         generatedAt: "now",
       },
     });

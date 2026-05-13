@@ -730,6 +730,7 @@ pub(crate) struct PendingSessionChangesSnapshot {
     pub(crate) detail_mode: DiffDetailMode,
     pub(crate) current_commit_oid: Option<String>,
     pub(crate) selected_file: Option<DiffFileSelector>,
+    pub(crate) context_lines: Option<u32>,
 }
 
 #[derive(Default)]
