@@ -4816,20 +4816,34 @@ function requestSessionChangesRefresh(
   if (diffLoadingSessions.has(sessionId)) return;
   const previousState = sessionChangesStates.get(sessionId);
   if (previousState?.status === "ready") clearDiffPatchCacheForComparison(previousState.comparison.comparisonKey);
+  const repoId = options.repoId !== undefined
+    ? options.repoId
+    : previousState?.status === "ready"
+      ? previousState.selectedRepoId
+      : null;
+  const detailMode = options.payloadKind
+    ?? (previousState?.status === "ready"
+      ? previousState.comparison.detailMode
+      : sessionChangesPayloadKinds.get(sessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE);
+  const currentCommitOid = options.currentCommitOid !== undefined
+    ? options.currentCommitOid
+    : previousState?.status === "ready"
+      ? previousState.review.currentCommitOid ?? null
+      : null;
   diffErrors.delete(sessionId);
   diffLoadingSessions.add(sessionId);
   markDiffsViewDirty();
   const diffId = newDiffId();
-  setCurrentSessionChangesRequest(sessionId, diffId, options.payloadKind ? "payloadChanged" : options.currentCommitOid ? "refsChanged" : "refreshed");
+  setCurrentSessionChangesRequest(sessionId, diffId, options.payloadKind ? "payloadChanged" : options.currentCommitOid !== undefined ? "refsChanged" : "refreshed");
   sessionChangesDiffIds.set(sessionId, diffId);
   const sent = send({
     type: "sessionChanges.request",
     clientId: diffClientId,
     diffId,
     sessionId,
-    repoId: options.repoId ?? null,
-    detailMode: options.payloadKind ?? sessionChangesPayloadKinds.get(sessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE,
-    currentCommitOid: options.currentCommitOid ?? null,
+    repoId,
+    detailMode,
+    currentCommitOid,
     selectedFile: null,
   });
   if (!sent) {

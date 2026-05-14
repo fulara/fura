@@ -678,6 +678,52 @@ describe("desktop cog options", () => {
     expect(document.querySelector("#testDiffPanel .diff-commit-message")).toBeNull();
   });
 
+  it("preserves selected snapshot repository when changing commits", async () => {
+    const { connection } = await createHarness();
+    const commitOid = "b".repeat(40);
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        selectedRepoId: "snapshot-entry",
+        repos: [
+          ...baseState.repos,
+          { id: "snapshot-entry", repoRoot: "/repo", label: "snapshot · historical", source: "snapshot", hasSessionStartSnapshot: true, sessionStartSnapshot: { entryId: "snapshot-entry", label: "historical", createdAt: "now", refName: "refs/omp/diff-snapshots/historical", tree: "tree", commit: "a".repeat(40) } },
+        ],
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: "snapshot-entry", detailMode: "filePatch", currentCommitOid: null, selectedFile: null, contextLines: 3 },
+        comparison: { ...baseState.comparison, detailMode: "filePatch", currentCommitOid: null },
+        review: {
+          commits: [{ oid: commitOid, shortOid: "bbbbbbbbbbbb", subject: "Add logging", message: "Add logging", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
+          currentCommitOid: null,
+          currentCommitIndex: null,
+          previousCommitOid: null,
+        },
+      },
+    });
+    connection.sent.length = 0;
+
+    const commitSelect = document.querySelector<HTMLSelectElement>("#testDiffPanel .diff-commit-select");
+    if (!commitSelect) throw new Error("commit selector missing");
+    commitSelect.value = commitOid;
+    commitSelect.dispatchEvent(new Event("change"));
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "sessionChanges.request",
+      repoId: "snapshot-entry",
+      detailMode: "filePatch",
+      currentCommitOid: commitOid,
+    }));
+  });
+
   it("refreshes session changes with the current repo, mode, and commit", async () => {
     const { connection } = await createHarness();
     const commitOid = "b".repeat(40);
