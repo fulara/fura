@@ -464,10 +464,73 @@ pub(crate) mod tests {
             context_window: None,
             context_percent: None,
             plan_mode: None,
+            goal_mode: None,
             pending_plan_review: None,
         }
     }
 
+    #[test]
+    fn maps_goal_mode_projection_from_omp_state() {
+        let value = serde_json::json!({
+            "enabled": true,
+            "mode": "active",
+            "goal": {
+                "id": "goal-1",
+                "objective": "Ship the release",
+                "status": "budget-limited",
+                "tokenBudget": 1000,
+                "tokensUsed": 1200,
+                "timeUsedSeconds": 45,
+                "createdAt": 10,
+                "updatedAt": 20
+            }
+        });
+
+        let projection = map_goal_mode_projection(&value).expect("goal mode should map");
+
+        assert!(projection.enabled);
+        assert_eq!(projection.mode, GoalModeRuntimeMode::Active);
+        assert_eq!(projection.goal.objective, "Ship the release");
+        assert_eq!(projection.goal.status, GoalStatusProjection::BudgetLimited);
+        assert_eq!(projection.goal.token_budget, Some(1000));
+        assert_eq!(projection.goal.tokens_used, 1200);
+    }
+
+    #[test]
+    fn rpc_state_update_clears_goal_mode_when_reported_absent() {
+        let mut record = test_record();
+        record.goal_mode = Some(GoalModeProjection {
+            enabled: true,
+            mode: GoalModeRuntimeMode::Active,
+            reason: None,
+            goal: GoalProjection {
+                id: "goal-1".to_string(),
+                objective: "Ship".to_string(),
+                status: GoalStatusProjection::Active,
+                token_budget: None,
+                tokens_used: 0,
+                time_used_seconds: 0,
+                created_at: 1,
+                updated_at: 1,
+            },
+        });
+
+        apply_rpc_state_to_record(
+            &mut record,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(None),
+            None,
+        );
+
+        assert!(record.goal_mode.is_none());
+    }
     fn discovered_session(id: &str, title: Option<&str>, session_file: &Path) -> DiscoveredSession {
         DiscoveredSession {
             id: id.into(),
@@ -821,6 +884,7 @@ pub(crate) mod tests {
                 context_window: Some(100),
                 context_percent: Some(10.0),
                 plan_mode: None,
+                goal_mode: None,
                 todo_phases: None,
             },
         )

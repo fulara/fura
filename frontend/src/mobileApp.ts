@@ -55,6 +55,7 @@ import {
 import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
 import { catalogContainsProposedModel, filterCatalogModels, formatCatalogModelLabel, formatProposedModelDetails, normalizeSelectedProposedModelId, proposedModelIdFromName, removeProposedModel, upsertProposedModel, validateProposedModels } from "./proposedModels";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
+import { goalModeBadgeLabel, renderGoalModeCard } from "./goalMode";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
 import { renderMessage } from "./transcriptView";
 import {
@@ -188,6 +189,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </form>
         </section>
       </header>
+      <section id="mobileGoalModeCardHost" class="mobile-goal-mode-card-host" hidden></section>
 
       <section class="mobile-main" aria-label="Mobile workspace">
         <div id="mobileController" class="mobile-transcript mobile-controller" role="region" aria-label="Ask Fura" hidden></div>
@@ -395,6 +397,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const promptInput = requireElement<HTMLTextAreaElement>(document, "mobilePromptInput");
   const sendButton = requireElement<HTMLButtonElement>(document, "mobileSendButton");
   const statusBar = requireElement<HTMLDivElement>(document, "mobileStatusBar");
+  const goalModeCardHost = requireElement<HTMLElement>(document, "mobileGoalModeCardHost");
   const imagePreviews = requireElement<HTMLDivElement>(document, "mobileImagePreviews");
   const imageInput = requireElement<HTMLInputElement>(document, "mobileImageInput");
   const composerStatus = requireElement<HTMLSpanElement>(document, "mobileComposerStatus");
@@ -1443,6 +1446,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       parts.push(mobileStatusPart(projection.model ?? "model unknown", "model"));
       parts.push(mobileStatusPart(projection.thinkingLevel ?? "thinking inherit", "thinking"));
       if (projection.planMode?.enabled) parts.push(mobileStatusPart("Plan", "mode"));
+      if (projection.goalMode?.goal) parts.push(mobileStatusPart(goalModeBadgeLabel(projection.goalMode) ?? "Goal", "mode"));
     } else {
       parts.push(mobileStatusPart("Loading session", "muted"));
     }
@@ -2018,8 +2022,19 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       visibleSessions: filteredSessions,
       selectedCategoryFilter,
       activeSessionId,
+      sessionGoalLabels: goalLabelsForSessions(),
       unreadSessionIds: unreadSessions,
     });
+  }
+
+  function goalLabelsForSessions(): ReadonlyMap<string, string> {
+    const labels = new Map<string, string>();
+    for (const session of sessions) {
+      const goalMode = projections.get(session.sessionId)?.goalMode ?? session.goalMode;
+      const label = goalModeBadgeLabel(goalMode);
+      if (label) labels.set(session.sessionId, label);
+    }
+    return labels;
   }
 
   function reviewCommentsForMessage(sessionId: string, messageId: string): TranscriptReviewComment[] {
@@ -2172,6 +2187,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       renderMobileImagePreviews();
       promptInput.placeholder = isWorking ? "Ask Fura is working…" : "Ask Fura about sessions…";
       updateMobileControlStatusBar();
+      renderGoalModeStatus(undefined);
       updateComposerStatus();
       renderControllerView();
       renderBusyPromptChoice();
@@ -2189,6 +2205,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       promptInput.placeholder = "Select a session first";
       composerStatus.textContent = "No active session";
       updateMobileStatusBar(undefined);
+      renderGoalModeStatus(undefined);
       renderMobileImagePreviews();
       closeReviewPreview();
       renderTranscript(undefined);
@@ -2202,6 +2219,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     sessionMeta.hidden = true;
     sessionMeta.textContent = "";
     updateMobileStatusBar(projection, summary);
+    renderGoalModeStatus(projection);
     promptInput.disabled = !projection || hasPendingPlan;
     sendButton.disabled = !projection || hasPendingPlan;
     imageInput.disabled = !projection || hasPendingPlan;
@@ -2210,6 +2228,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     updateComposerStatus();
     renderTranscript(projection);
     renderBusyPromptChoice();
+  }
+
+  function renderGoalModeStatus(projection: SessionProjection | undefined): void {
+    goalModeCardHost.replaceChildren();
+    const card = renderGoalModeCard(goalModeCardHost.ownerDocument, projection?.goalMode, "mobile");
+    goalModeCardHost.hidden = !card;
+    if (card) goalModeCardHost.append(card);
   }
 
   function renderTranscript(projection: SessionProjection | undefined): void {

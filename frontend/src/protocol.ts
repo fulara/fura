@@ -89,6 +89,26 @@ export type SessionWorktreeSummary = {
   path: string;
 };
 
+export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
+
+export type GoalProjection = {
+  id: string;
+  objective: string;
+  status: GoalStatus;
+  tokenBudget?: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type GoalModeProjection = {
+  enabled: boolean;
+  mode: "active" | "exiting";
+  reason?: "completed" | null;
+  goal: GoalProjection;
+};
+
 export type SessionSummary = {
   kind: "managed" | "available";
   sessionMode: SessionMode;
@@ -103,6 +123,7 @@ export type SessionSummary = {
   timestamp?: string | null;
   category?: string | null;
   worktree?: SessionWorktreeSummary | null;
+  goalMode?: GoalModeProjection | null;
 };
 
 export type PlanModeProjection = {
@@ -131,6 +152,7 @@ export type SessionProjection = {
   contextPercent?: number | null;
   planMode?: PlanModeProjection | null;
   pendingPlanReview?: PendingPlanReviewProjection | null;
+  goalMode?: GoalModeProjection | null;
   todoPhases: TodoPhase[];
 };
 
@@ -148,6 +170,7 @@ export type SessionProjectionDelta = {
   contextPercent?: number | null;
   planMode?: PlanModeProjection | null;
   pendingPlanReview?: PendingPlanReviewProjection | null;
+  goalMode?: GoalModeProjection | null;
   todoPhases: TodoPhase[];
 };
 

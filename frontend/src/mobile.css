@@ -6,7 +6,7 @@ body {
 
 .mobile-shell {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   height: 100dvh;
   background:
     radial-gradient(circle at top left, rgba(89, 117, 255, 0.14), transparent 22rem),
@@ -188,6 +188,27 @@ body {
   font-size: 0.82rem;
 }
 
+
+.mobile-goal-mode-card-host {
+  border-bottom: 1px solid #252a35;
+  background: rgba(16, 19, 26, 0.9);
+  padding: 0.55rem 0.75rem;
+}
+
+.mobile-goal-mode-card-host[hidden] {
+  display: none;
+}
+
+.goal-mode-card-mobile {
+  padding: 0.65rem;
+}
+
+.goal-mode-card-mobile .goal-mode-card-header,
+.goal-mode-card-mobile .goal-mode-meta {
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 0.35rem;
+}
 .mobile-create-drawer {
   border: 1px solid #252a35;
   border-radius: 0.9rem;
@@ -427,6 +448,10 @@ body {
 .mobile-status-part.separator,
 .mobile-status-part.muted {
   color: #6f7a8d;
+}
+
+.mobile-status-part.mode {
+  color: #9fb0ff;
 }
 
 .mobile-image-previews {

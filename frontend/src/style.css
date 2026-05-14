@@ -294,6 +294,25 @@ h2 {
   letter-spacing: 0.01em;
 }
 
+.session-goal-badge {
+  justify-self: start;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid rgba(21, 183, 255, 0.28);
+  border-radius: 999px;
+  background: rgba(21, 183, 255, 0.12);
+  color: #9edbff;
+  padding: 0.12rem 0.45rem;
+  font-size: 0.68rem;
+  font-weight: 650;
+}
+
+.session-goal-badge[hidden] {
+  display: none;
+}
+
 .session-status::before {
   content: '';
   display: inline-block;
@@ -373,6 +392,74 @@ h2 {
   gap: 1rem;
   border-bottom: 1px solid #252a35;
   padding: 1rem;
+}
+
+.goal-mode-card-host {
+  border-bottom: 1px solid #252a35;
+  background: rgba(17, 21, 29, 0.98);
+  padding: 0.75rem 1rem;
+}
+
+.goal-mode-card-host[hidden] {
+  display: none;
+}
+
+.goal-mode-card {
+  display: grid;
+  gap: 0.55rem;
+  border: 1px solid rgba(21, 183, 255, 0.28);
+  border-radius: 0.9rem;
+  background: linear-gradient(135deg, rgba(21, 183, 255, 0.12), rgba(127, 140, 255, 0.08));
+  padding: 0.75rem 0.85rem;
+}
+
+.goal-mode-card[data-status=\"budget-limited\"] {
+  border-color: rgba(255, 196, 87, 0.42);
+  background: rgba(255, 196, 87, 0.1);
+}
+
+.goal-mode-card[data-status=\"complete\"] {
+  border-color: rgba(130, 230, 170, 0.34);
+  background: rgba(60, 179, 113, 0.11);
+}
+
+.goal-mode-card[data-status=\"paused\"],
+.goal-mode-card[data-status=\"dropped\"] {
+  border-color: rgba(155, 164, 181, 0.3);
+  background: rgba(155, 164, 181, 0.08);
+}
+
+.goal-mode-card-header,
+.goal-mode-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.goal-mode-card-header strong {
+  color: #eef1f8;
+}
+
+.goal-mode-badge {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(21, 183, 255, 0.16);
+  color: #9edbff;
+  padding: 0.16rem 0.5rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+.goal-mode-objective {
+  color: #d7dce8;
+}
+
+.goal-mode-meta {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  color: #9ba4b5;
+  font-size: 0.78rem;
 }
 
 .workspace-actions {
@@ -1633,6 +1720,10 @@ h2 {
 
 .status-part.context {
   color: #a8d8a8;
+}
+
+.status-part.mode {
+  color: #9fb0ff;
 }
 
 

@@ -50,6 +50,20 @@ let currentSessionName = "Mock RPC Session";
 let forkCount = 0;
 let planExecutionCount = 0;
 let planMode = null;
+let goalMode = {
+  enabled: true,
+  mode: "active",
+  goal: {
+    id: `mock-goal-${processSeed}`,
+    objective: "Keep the mock Fura session aligned with OMP Goal Mode.",
+    status: "active",
+    tokenBudget: 50000,
+    tokensUsed: 3200,
+    timeUsedSeconds: 180,
+    createdAt: Date.now() - 180000,
+    updatedAt: Date.now(),
+  },
+};
 let hostTools = [];
 let activeTools = [];
 const todoPhases = [
@@ -126,6 +140,7 @@ for await (const line of rl) {
         sessionFile: currentSessionFile,
         sessionName: currentSessionName,
         planMode,
+        goalMode,
         todoPhases,
       });
       break;

@@ -43,6 +43,7 @@ pub(crate) struct SessionRecord {
     pub(crate) context_window: Option<u64>,
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<PlanModeProjection>,
+    pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
 }
 
@@ -62,6 +63,7 @@ impl SessionRecord {
             timestamp: self.timestamp.clone(),
             category: self.category.clone(),
             worktree: self.worktree.clone(),
+            goal_mode: self.goal_mode.clone(),
         }
     }
 
@@ -139,6 +141,7 @@ impl SessionRecord {
             context_percent: self.context_percent,
             plan_mode: self.plan_mode.clone(),
             pending_plan_review: self.pending_plan_review.clone(),
+            goal_mode: self.goal_mode.clone(),
             todo_phases: self.effective_todo_phases(),
         }
     }
@@ -186,6 +189,7 @@ pub(crate) struct SessionSummary {
     pub(crate) timestamp: Option<String>,
     pub(crate) category: Option<String>,
     pub(crate) worktree: Option<SessionWorktreeSummary>,
+    pub(crate) goal_mode: Option<GoalModeProjection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -209,6 +213,7 @@ pub(crate) struct SessionProjection {
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<PlanModeProjection>,
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
+    pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
 }
 
@@ -228,6 +233,7 @@ pub(crate) struct SessionProjectionDelta {
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<PlanModeProjection>,
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
+    pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
 }
 
@@ -250,6 +256,7 @@ impl SessionProjectionDelta {
             context_percent: projection.context_percent,
             plan_mode: projection.plan_mode.clone(),
             pending_plan_review: projection.pending_plan_review.clone(),
+            goal_mode: projection.goal_mode.clone(),
             todo_phases: projection.todo_phases.clone(),
         }
     }
@@ -262,6 +269,51 @@ pub(crate) struct PlanModeProjection {
     pub(crate) plan_file_path: String,
     pub(crate) workflow: Option<String>,
     pub(crate) discussion: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoalModeProjection {
+    pub(crate) enabled: bool,
+    pub(crate) mode: GoalModeRuntimeMode,
+    pub(crate) reason: Option<GoalModeReason>,
+    pub(crate) goal: GoalProjection,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum GoalModeRuntimeMode {
+    Active,
+    Exiting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GoalModeReason {
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GoalProjection {
+    pub(crate) id: String,
+    pub(crate) objective: String,
+    pub(crate) status: GoalStatusProjection,
+    pub(crate) token_budget: Option<u64>,
+    pub(crate) tokens_used: u64,
+    pub(crate) time_used_seconds: u64,
+    pub(crate) created_at: u64,
+    pub(crate) updated_at: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum GoalStatusProjection {
+    Active,
+    Paused,
+    BudgetLimited,
+    Complete,
+    Dropped,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -437,6 +489,7 @@ mod tests {
             timestamp: None,
             category: None,
             worktree: None,
+            goal_mode: None,
         }
     }
 
@@ -458,6 +511,7 @@ mod tests {
             context_window: Some(100),
             context_percent: Some(10.0),
             plan_mode: None,
+            goal_mode: None,
             pending_plan_review: None,
             todo_phases: Vec::new(),
         };

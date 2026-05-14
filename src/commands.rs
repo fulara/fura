@@ -1173,6 +1173,7 @@ pub(crate) fn opened_session_record(
         context_window: existing.and_then(|record| record.context_window),
         context_percent: existing.and_then(|record| record.context_percent),
         plan_mode: existing.and_then(|record| record.plan_mode.clone()),
+        goal_mode: existing.and_then(|record| record.goal_mode.clone()),
         pending_plan_review: existing.and_then(|record| record.pending_plan_review.clone()),
     }
 }
@@ -3097,6 +3098,7 @@ mod review_comment_tests {
             context_window: None,
             context_percent: None,
             plan_mode: None,
+            goal_mode: None,
             pending_plan_review: None,
         }
     }

@@ -65,6 +65,7 @@ export function applySessionDelta(
     contextPercent: delta.contextPercent,
     planMode: delta.planMode,
     pendingPlanReview: delta.pendingPlanReview,
+    goalMode: delta.goalMode,
     todoPhases: delta.todoPhases,
   };
   return applySessionSnapshot(sessions, projections, sessionId, projection);

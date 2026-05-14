@@ -15,9 +15,9 @@ use tracing::warn;
 use crate::{
     ActiveConflictContext, CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode,
     DiffFileSelector, DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot,
-    PlanModeProjection, PreparedDiff, ProposedModelConfig, ServerMessage, SessionKind, SessionMode,
-    SessionRecord, SessionStatus, ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection,
-    VoiceCommand, save_fura_config,
+    GoalModeProjection, PlanModeProjection, PreparedDiff, ProposedModelConfig, ServerMessage,
+    SessionKind, SessionMode, SessionRecord, SessionStatus, ThinkingVisibilityPreference,
+    Timestamp, TodoPhaseProjection, VoiceCommand, save_fura_config,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -404,6 +404,7 @@ pub(crate) fn apply_rpc_state_to_record(
     context_window: Option<u64>,
     context_percent: Option<f64>,
     plan_mode: Option<Option<PlanModeProjection>>,
+    goal_mode: Option<Option<GoalModeProjection>>,
     todo_phases: Option<Vec<TodoPhaseProjection>>,
 ) {
     record.status = SessionStatus::Idle;
@@ -433,6 +434,9 @@ pub(crate) fn apply_rpc_state_to_record(
             record.pending_plan_review = None;
         }
     }
+    if let Some(goal_mode) = goal_mode {
+        record.goal_mode = goal_mode;
+    }
     if let Some(todo_phases) = todo_phases {
         record.todo_phases = Some(todo_phases);
     }
@@ -449,6 +453,7 @@ pub(crate) struct RpcStateUpdate {
     pub(crate) context_window: Option<u64>,
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<Option<PlanModeProjection>>,
+    pub(crate) goal_mode: Option<Option<GoalModeProjection>>,
     pub(crate) todo_phases: Option<Vec<TodoPhaseProjection>>,
 }
 
@@ -588,6 +593,7 @@ pub(crate) async fn apply_get_state_update(
                         context_window: None,
                         context_percent: None,
                         plan_mode: None,
+                        goal_mode: None,
                         pending_plan_review: None,
                     }
                 });
@@ -604,6 +610,7 @@ pub(crate) async fn apply_get_state_update(
                     update.context_window,
                     update.context_percent,
                     update.plan_mode.clone(),
+                    update.goal_mode.clone(),
                     update.todo_phases.clone(),
                 );
             }
@@ -627,6 +634,7 @@ pub(crate) async fn apply_get_state_update(
                     update.context_window,
                     update.context_percent,
                     update.plan_mode,
+                    update.goal_mode,
                     update.todo_phases,
                 );
             }

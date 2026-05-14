@@ -480,6 +480,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             | OmpRpcFrame::ToolExecutionUpdate { .. }
             | OmpRpcFrame::ToolExecutionEnd { .. }
             | OmpRpcFrame::PlanReview { .. }
+            | OmpRpcFrame::GoalUpdated { .. }
             | OmpRpcFrame::Unknown => {}
         }
         return;
@@ -801,6 +802,24 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 let _ = state.events.send(delta);
             }
         }
+        OmpRpcFrame::GoalUpdated {
+            state: goal_state, ..
+        } => {
+            let goal_mode = goal_state.as_ref().and_then(map_goal_mode_projection);
+            let snapshot = {
+                let mut sessions = state.sessions.write().await;
+                sessions.get_mut(&target_session_id).map(|record| {
+                    record.goal_mode = goal_mode;
+                    ServerMessage::SessionSnapshot {
+                        session_id: target_session_id.clone(),
+                        state: record.projection(),
+                    }
+                })
+            };
+            if let Some(snapshot) = snapshot {
+                let _ = state.events.send(snapshot);
+            }
+        }
         OmpRpcFrame::Response(response) => {
             let _ = response.is_error();
             let _ = response.payload();
@@ -854,6 +873,59 @@ pub(crate) fn map_plan_mode_projection(value: &Value) -> Option<PlanModeProjecti
             .get("discussion")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
+    })
+}
+
+fn map_goal_runtime_mode(value: &str) -> Option<GoalModeRuntimeMode> {
+    match value {
+        "active" => Some(GoalModeRuntimeMode::Active),
+        "exiting" => Some(GoalModeRuntimeMode::Exiting),
+        _ => None,
+    }
+}
+
+fn map_goal_reason(value: &str) -> Option<GoalModeReason> {
+    match value {
+        "completed" => Some(GoalModeReason::Completed),
+        _ => None,
+    }
+}
+
+fn map_goal_status(value: &str) -> Option<GoalStatusProjection> {
+    match value {
+        "active" => Some(GoalStatusProjection::Active),
+        "paused" => Some(GoalStatusProjection::Paused),
+        "budget-limited" => Some(GoalStatusProjection::BudgetLimited),
+        "complete" => Some(GoalStatusProjection::Complete),
+        "dropped" => Some(GoalStatusProjection::Dropped),
+        _ => None,
+    }
+}
+
+pub(crate) fn map_goal_mode_projection(value: &Value) -> Option<GoalModeProjection> {
+    if value.is_null() {
+        return None;
+    }
+    let goal = value.get("goal")?;
+    Some(GoalModeProjection {
+        enabled: value
+            .get("enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        mode: value_str(value, "mode")
+            .and_then(map_goal_runtime_mode)
+            .unwrap_or(GoalModeRuntimeMode::Active),
+        reason: value_str(value, "reason").and_then(map_goal_reason),
+        goal: GoalProjection {
+            id: value_str(goal, "id")?.to_string(),
+            objective: value_str(goal, "objective")?.to_string(),
+            status: value_str(goal, "status").and_then(map_goal_status)?,
+            token_budget: goal.get("tokenBudget").and_then(|v| v.as_u64()),
+            tokens_used: goal.get("tokensUsed").and_then(|v| v.as_u64())?,
+            time_used_seconds: goal.get("timeUsedSeconds").and_then(|v| v.as_u64())?,
+            created_at: goal.get("createdAt").and_then(|v| v.as_u64())?,
+            updated_at: goal.get("updatedAt").and_then(|v| v.as_u64())?,
+        },
     })
 }
 
@@ -1239,6 +1311,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let plan_mode = data
                 .and_then(|d| d.get("planMode"))
                 .map(map_plan_mode_projection);
+            let goal_mode = data.map(|d| d.get("goalMode").and_then(map_goal_mode_projection));
             let todo_phases = data.and_then(|d| d.get("todoPhases")).map(|value| {
                 parse_todo_phases_value(value).unwrap_or_else(|error| {
                     warn!(session_id = %current_session_id, %error, "invalid todoPhases in get_state response");
@@ -1259,6 +1332,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     context_window,
                     context_percent,
                     plan_mode,
+                    goal_mode,
                     todo_phases,
                 },
             )

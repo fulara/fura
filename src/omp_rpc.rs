@@ -63,6 +63,11 @@ pub(crate) enum OmpRpcFrame {
         #[serde(rename = "isError")]
         is_error: Option<bool>,
     },
+    #[serde(rename = "goal_updated")]
+    GoalUpdated {
+        goal: Option<Value>,
+        state: Option<Value>,
+    },
     #[serde(rename = "extension_ui_request")]
     ExtensionUiRequest {
         id: String,
@@ -130,6 +135,7 @@ pub(crate) struct OmpSessionState {
     pub(crate) message_count: usize,
     pub(crate) queued_message_count: usize,
     pub(crate) plan_mode: Option<OmpPlanModeState>,
+    pub(crate) goal_mode: Option<OmpGoalModeState>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) context_usage: Option<OmpContextUsage>,
 }
@@ -140,6 +146,28 @@ pub(crate) struct OmpPlanModeState {
     pub(crate) enabled: bool,
     pub(crate) plan_file_path: String,
     pub(crate) workflow: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OmpGoalModeState {
+    pub(crate) enabled: bool,
+    pub(crate) mode: String,
+    pub(crate) reason: Option<String>,
+    pub(crate) goal: OmpGoal,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OmpGoal {
+    pub(crate) id: String,
+    pub(crate) objective: String,
+    pub(crate) status: String,
+    pub(crate) token_budget: Option<u64>,
+    pub(crate) tokens_used: u64,
+    pub(crate) time_used_seconds: u64,
+    pub(crate) created_at: u64,
+    pub(crate) updated_at: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]

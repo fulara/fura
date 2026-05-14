@@ -104,6 +104,7 @@ import {
   validateProposedModels,
 } from "./proposedModels";
 import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
+import { goalModeBadgeLabel, renderGoalModeCard } from "./goalMode";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import {
   createCategoryCombobox,
@@ -271,6 +272,8 @@ app.innerHTML = `
           <button id="deleteSessionButton" class="danger-action" type="button">Delete session</button>
         </div>
       </header>
+
+      <div id="goalModeCardHost" class="goal-mode-card-host" hidden></div>
 
       <div id="workspacePanelHost" class="workspace-panel-stack">
         <div id="normalWorkspacePanelHost" class="workspace-panel-host workspace-panel-host-active"></div>
@@ -644,6 +647,7 @@ const workspaceOptionsMenu = requireElement<HTMLDivElement>("workspaceOptionsMen
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
 const sessionMeta = requireElement<HTMLParagraphElement>("sessionMeta");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
+const goalModeCardHost = requireElement<HTMLDivElement>("goalModeCardHost");
 const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
 const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
@@ -3185,6 +3189,16 @@ function renderCategoryFilter(): void {
   );
 }
 
+function goalLabelsForSessions(): ReadonlyMap<string, string> {
+  const labels = new Map<string, string>();
+  for (const session of sessions) {
+    const goalMode = projections.get(session.sessionId)?.goalMode ?? session.goalMode;
+    const label = goalModeBadgeLabel(goalMode);
+    if (label) labels.set(session.sessionId, label);
+  }
+  return labels;
+}
+
 function visibleSessions(): SessionSummary[] {
   return filterVisibleSessions(sessions, selectedCategoryFilter);
 }
@@ -3237,6 +3251,7 @@ function renderSessions(): void {
     visibleSessions: visibleSessions(),
     selectedCategoryFilter,
     activeSessionId: workspaceMode === "session" ? activeSessionId : null,
+    sessionGoalLabels: goalLabelsForSessions(),
     unreadSessionIds: unreadSessions,
   });
 }
@@ -3536,6 +3551,7 @@ function renderActiveSession(): void {
     sessionMeta.textContent = "Fura controller session · can find, discuss, and open sessions.";
     promptInput.placeholder = isWorking ? "Ask Fura is working…" : "Ask Fura about sessions…";
     renderControllerStatusBar();
+    renderGoalModeStatus(undefined);
     renderBusyPromptChoice();
     renderActiveDockviewPanel(undefined);
     return;
@@ -3565,8 +3581,16 @@ function renderActiveSession(): void {
   }
 
   renderStatusBar(projection);
+  renderGoalModeStatus(projection);
   renderBusyPromptChoice();
   renderActiveDockviewPanel(projection);
+}
+
+function renderGoalModeStatus(projection: SessionProjection | undefined): void {
+  goalModeCardHost.replaceChildren();
+  const card = renderGoalModeCard(goalModeCardHost.ownerDocument, projection?.goalMode, "desktop");
+  goalModeCardHost.hidden = !card;
+  if (card) goalModeCardHost.append(card);
 }
 
 function markTranscriptViewDirty(options: { resetCache?: boolean } = {}): void {
@@ -6882,6 +6906,7 @@ function renderStatusBar(projection?: SessionProjection): void {
   parts.push(statusPart(projection.model ?? "model unknown", "model"));
   parts.push(statusPart(projection.thinkingLevel ?? "thinking inherit", "thinking"));
   if (projection.planMode?.enabled) parts.push(statusPart("Plan", "mode"));
+  if (projection.goalMode?.goal) parts.push(statusPart(goalModeBadgeLabel(projection.goalMode) ?? "Goal", "mode"));
   parts.push(statusPart(`📁 ${shortPath(cwd)}`, "cwd"));
   parts.push(statusPart(formatTokens(projection.tokensTotal), "tokens"));
   parts.push(statusPart(formatCost(projection.costUsd), "cost"));

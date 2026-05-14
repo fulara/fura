@@ -113,6 +113,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                         context_window: None,
                         context_percent: None,
                         plan_mode: None,
+                        goal_mode: None,
                         pending_plan_review: None,
                     },
                 );
