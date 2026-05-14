@@ -6169,16 +6169,6 @@ function renderReviewableDiffMainContent(
   const selectedCommit = selectedFilePath === null && state.review.currentCommitOid
     ? state.review.commits.find(commit => commit.oid === state.review.currentCommitOid) ?? null
     : null;
-  if (selectedCommit) {
-    const messageBlock = mkEl("section");
-    messageBlock.className = "diff-commit-message";
-    const heading = mkEl("strong");
-    heading.textContent = "Commit message";
-    const messageText = mkEl("pre");
-    messageText.textContent = selectedCommit.message || selectedCommit.subject;
-    messageBlock.append(heading, messageText);
-    main.append(messageBlock);
-  }
 
   const toolbar = mkEl("div");
   toolbar.className = "diffs-actions diff-step-actions";
@@ -6330,6 +6320,16 @@ function renderReviewableDiffMainContent(
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
+  if (selectedCommit) {
+    const messageBlock = mkEl("section");
+    messageBlock.className = "diff-commit-message";
+    const heading = mkEl("strong");
+    heading.textContent = "Commit message";
+    const messageText = mkEl("pre");
+    messageText.textContent = selectedCommit.message || selectedCommit.subject;
+    messageBlock.append(heading, messageText);
+    body.append(messageBlock);
+  }
   const filePatchError = selectedDiffFilePatchError(annotationKey, selectedFilePath);
   let renderedRows: DiffRow[] = [];
   const activePatch = selectedFilePath ? cachedPatch : aggregatePatch;

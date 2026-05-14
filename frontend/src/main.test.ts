@@ -669,7 +669,10 @@ describe("desktop cog options", () => {
         review: { ...commonState.review, currentCommitOid: commitOid, currentCommitIndex: 0, previousCommitOid: "a".repeat(40) },
       },
     });
-    expect(document.querySelector("#testDiffPanel .diff-commit-message")?.textContent).toContain("Detailed body.");
+    const commitMessage = document.querySelector("#testDiffPanel .diff-commit-message");
+    expect(commitMessage?.textContent).toContain("Detailed body.");
+    expect(commitMessage?.parentElement?.classList.contains("diffs-main-body")).toBe(true);
+    expect(document.querySelector("#testDiffPanel .diff-step-actions")?.contains(commitMessage as Node)).toBe(false);
 
     document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
     expect(document.querySelector("#testDiffPanel .diff-commit-message")).toBeNull();
