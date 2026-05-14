@@ -25,9 +25,14 @@ describe("plan review helpers", () => {
       finalPlanFilePath: "local://FINAL.md",
       title: "Migration",
       content: "Plan body",
+      approvalMode: "execute",
+    });
+
+    expect(createApprovePlanReviewMessage(review, "compact")).toMatchObject({
+      type: "plan.approve",
+      approvalMode: "compact",
     });
   });
-
   it("builds the discuss-plan command for the originating session", () => {
     const review = pendingPlanReviewFromMessage({
       type: "plan.review",
@@ -65,11 +70,15 @@ describe("plan review helpers", () => {
       "Second item",
     ]);
     expect(card.querySelector(".plan-review-markdown pre")).toBeNull();
-    card.querySelector<HTMLButtonElement>(".plan-review-approve")?.click();
+    card.querySelector<HTMLButtonElement>(".plan-review-approve-execute")?.click();
+    card.querySelector<HTMLButtonElement>(".plan-review-approve-compact")?.click();
+    card.querySelector<HTMLButtonElement>(".plan-review-approve-keep")?.click();
     card.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
     card.querySelector<HTMLButtonElement>(".plan-review-discuss")?.click();
 
-    expect(onApprove).toHaveBeenCalledWith(review);
+    expect(onApprove).toHaveBeenCalledWith(review, "execute");
+    expect(onApprove).toHaveBeenCalledWith(review, "compact");
+    expect(onApprove).toHaveBeenCalledWith(review, "keep");
     expect(onRefine).toHaveBeenCalledWith(review);
     expect(onDiscuss).toHaveBeenCalledWith(review);
   });

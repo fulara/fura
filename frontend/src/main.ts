@@ -178,6 +178,7 @@ import type {
   ConflictMagicWandPreview,
   ConflictRepositorySummary,
   ModelSummary,
+  PlanApprovalMode,
   ProposedModelConfig,
   ProposedThinkingLevel,
   ReviewComment,
@@ -2448,8 +2449,8 @@ function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" 
   }
 }
 
-function approvePendingPlanReview(review: PendingPlanReview): void {
-  const accepted = send(createApprovePlanReviewMessage(review));
+function approvePendingPlanReview(review: PendingPlanReview, approvalMode: PlanApprovalMode = "execute"): void {
+  const accepted = send(createApprovePlanReviewMessage(review, approvalMode));
   if (!accepted) return;
   visiblePlanReviews.delete(review.sessionId);
   markTranscriptViewDirty();

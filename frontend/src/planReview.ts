@@ -1,7 +1,7 @@
 import { mkEl } from "./dom";
 import { renderMarkdown, renderMessage } from "./transcriptView";
 import { buildTranscriptReviewPrompt, type TranscriptReviewComment, type TranscriptReviewLine } from "./transcriptReview";
-import type { ClientMessage, ServerMessage, TranscriptMessage } from "./protocol";
+import type { ClientMessage, PlanApprovalMode, ServerMessage, TranscriptMessage } from "./protocol";
 
 export type PlanReviewMessage = Extract<ServerMessage, { type: "plan.review" }>;
 export type PendingPlanReview = Omit<PlanReviewMessage, "type">;
@@ -29,7 +29,7 @@ export function pendingPlanReviewFromMessage(message: PlanReviewMessage): Pendin
   };
 }
 
-export function createApprovePlanReviewMessage(review: PendingPlanReview): ClientMessage {
+export function createApprovePlanReviewMessage(review: PendingPlanReview, approvalMode: PlanApprovalMode = "execute"): ClientMessage {
   return {
     type: "plan.approve",
     sessionId: review.sessionId,
@@ -37,6 +37,7 @@ export function createApprovePlanReviewMessage(review: PendingPlanReview): Clien
     finalPlanFilePath: review.finalPlanFilePath,
     title: review.title,
     content: review.content,
+    approvalMode,
   };
 }
 
@@ -72,7 +73,7 @@ export function buildPlanReviewPrompt(review: PendingPlanReview, comments: Trans
 export function renderPlanReviewCard(
   review: PendingPlanReview,
   actions: {
-    onApprove: (review: PendingPlanReview) => void;
+    onApprove: (review: PendingPlanReview, approvalMode: PlanApprovalMode) => void;
     onRefine: (review: PendingPlanReview) => void;
     onDiscuss: (review: PendingPlanReview) => void;
   },
@@ -106,7 +107,7 @@ export function renderPlanReviewCard(
   body.className = "plan-review-body";
   const explanation = mkEl("p");
   explanation.textContent = mode === "pending"
-    ? "This session is waiting for your plan decision. Prompts stay disabled until you approve execution, refine the plan, or switch into discussion."
+    ? "This session is waiting for your plan decision. Execute starts a fresh execution session; compact keeps the current session but distills planning context first; keep context executes in this session without compaction."
     : mode === "refining"
       ? "Use the composer below to tell the agent what to change. This plan stays visible as reference while you refine it."
       : "Use the composer below to ask questions about the plan. The agent should discuss it without rewriting the plan unless you ask for changes.";
@@ -132,10 +133,24 @@ export function renderPlanReviewCard(
   if (mode === "pending") {
     const approve = mkEl("button");
     approve.type = "button";
-    approve.className = "plan-review-approve";
+    approve.className = "plan-review-approve plan-review-approve-execute";
     approve.textContent = "Approve and execute";
-    approve.addEventListener("click", () => actions.onApprove(review));
+    approve.title = "Start a fresh execution session with this plan as the source of truth.";
+    approve.addEventListener("click", () => actions.onApprove(review, "execute"));
 
+    const compact = mkEl("button");
+    compact.type = "button";
+    compact.className = "plan-review-approve plan-review-approve-compact";
+    compact.textContent = "Approve and compact context";
+    compact.title = "Keep this session, compact the planning discussion first, then execute the approved plan.";
+    compact.addEventListener("click", () => actions.onApprove(review, "compact"));
+
+    const keep = mkEl("button");
+    keep.type = "button";
+    keep.className = "plan-review-approve plan-review-approve-keep";
+    keep.textContent = "Approve and keep context";
+    keep.title = "Keep this session and execute with the full planning discussion still in context.";
+    keep.addEventListener("click", () => actions.onApprove(review, "keep"));
     const refine = mkEl("button");
     refine.type = "button";
     refine.className = "plan-review-refine";
@@ -147,7 +162,7 @@ export function renderPlanReviewCard(
     discuss.className = "plan-review-discuss";
     discuss.textContent = "Discuss plan";
     discuss.addEventListener("click", () => actions.onDiscuss(review));
-    footer.append(approve, refine, discuss);
+    footer.append(approve, compact, keep, refine, discuss);
   } else {
     const status = mkEl("p");
     status.className = "plan-review-refining-status";

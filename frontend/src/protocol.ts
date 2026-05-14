@@ -664,6 +664,7 @@ export type WorktreeCreateOptions = {
   branchName?: string;
 };
 
+export type PlanApprovalMode = "execute" | "compact" | "keep";
 export type ClientMessage =
   | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; sessionMode?: SessionMode; args?: string[]; worktree?: WorktreeCreateOptions; proposedModelId?: string }
   | { type: "session.setCategory"; sessionId: string; category?: string }
@@ -723,6 +724,7 @@ export type ClientMessage =
       finalPlanFilePath: string;
       title?: string | null;
       content: string;
+      approvalMode?: PlanApprovalMode;
     }
   | { type: "plan.discuss"; sessionId: string }
   | { type: "raw.rpc"; sessionId: string; command: unknown }

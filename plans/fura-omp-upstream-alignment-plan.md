@@ -132,6 +132,14 @@ Medium-term alignment:
 
 Do not resurrect `exit_plan_mode`. It is now the wrong abstraction because upstream's canonical preview/apply mechanism is `resolve`.
 
+#### Why the three approval choices matter
+
+- **Approve and execute** is the safest default when planning has produced a lot of exploratory or contradictory context. OMP starts a fresh execution session, writes the approved plan into that new session's `local://` artifact root, and the executor sees the plan as the source of truth rather than the full planning debate.
+- **Approve and compact context** is the upstream-favored middle path for long plans. It keeps the current session identity/history, but first asks OMP to distill the planning conversation. The executor keeps useful context while dropping most negotiation/noise. This is better than the old single approve path when the plan took many turns to settle.
+- **Approve and keep context** is useful when the planning conversation contains details that should not be compressed away: user constraints, examples, domain terminology, or unresolved nuance. It is more token-heavy and can carry stale discussion into execution, so it should be deliberate rather than the only approve behavior.
+
+The old Fura behavior effectively had one browser button and one execution shape. Upstream's split is more useful because the right context policy depends on how the plan was created: clean short plan -> fresh execute; long noisy planning -> compact; context-rich domain plan -> keep.
+
 ### 3. Upstreamable RPC capability set
 
 The fork-only RPC commands should be converted into small upstream PRs where possible:

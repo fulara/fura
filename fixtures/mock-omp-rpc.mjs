@@ -143,10 +143,18 @@ for await (const line of rl) {
     }
     case "approve_plan_mode": {
       planMode = null;
-      planExecutionCount += 1;
-      currentSessionId = `mock-session-plan-execution-${planExecutionCount}-${processSeed}`;
-      currentSessionFile = `${currentSessionId}.jsonl`;
-      success(command, { finalPlanFilePath: command.finalPlanFilePath });
+      const contextPreserved = command.preserveContext === true;
+      if (!contextPreserved) {
+        planExecutionCount += 1;
+        currentSessionId = `mock-session-plan-execution-${planExecutionCount}-${processSeed}`;
+        currentSessionFile = `${currentSessionId}.jsonl`;
+      }
+      success(command, {
+        finalPlanFilePath: command.finalPlanFilePath,
+        contextPreserved,
+        compactionOutcome: command.compactBeforeExecute === true ? "ok" : undefined,
+        executionDispatched: true,
+      });
       break;
     }
     case "get_messages": {

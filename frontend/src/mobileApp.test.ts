@@ -514,6 +514,7 @@ describe("mountMobileApp", () => {
       finalPlanFilePath: "local://FINAL.md",
       title: "Recovered review",
       content: "Recovered plan body",
+      approvalMode: "execute",
     });
   });
 
@@ -983,6 +984,7 @@ describe("mountMobileApp", () => {
       finalPlanFilePath: "local://FINAL.md",
       title: "Review me",
       content: "Plan body",
+      approvalMode: "execute",
     });
   });
   it("renders prompt busy choices and sends steer behavior", () => {
