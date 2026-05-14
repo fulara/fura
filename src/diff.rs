@@ -1351,6 +1351,8 @@ async fn prepare_diff_range(
         range_base_oid.as_deref(),
     )
     .await?;
+    let current_commit_oid =
+        current_commit_oid.filter(|oid| commits.iter().any(|commit| commit.oid == *oid));
     let commit_patch = match current_commit_oid.as_deref() {
         Some(oid) => Some(selected_commit_patch_refs(
             oid,
@@ -3356,6 +3358,56 @@ mod tests {
         .await
         .unwrap();
         assert!(patch.contains("+pub fn value() -> i32 { 4 }"), "{}", patch);
+    }
+
+    #[tokio::test]
+    async fn stale_selected_commit_falls_back_to_full_range() {
+        let (_temp, repo, base, head) = test_repo();
+        let state = crate::tests::test_state(8, None);
+        let stale_commit = "a20553a8d05573dc81c4b41f69d0a6abcaefd811".to_string();
+        let request = DiffRequestIdentity::CompareDiff {
+            client_id: "client-1".into(),
+            diff_id: test_diff_id(),
+            repo_root: repo.display().to_string(),
+            base: DiffRefInput::GitRef {
+                value: base.clone(),
+            },
+            head: DiffRefInput::GitRef {
+                value: head.clone(),
+            },
+            detail_mode: DiffDetailMode::FilePatch,
+            merge_base: Some(false),
+            current_commit_oid: Some(stale_commit.clone()),
+            selected_file: None,
+            context_lines: Some(3),
+        };
+
+        let (_refs, prepared) = prepare_compare_diff(
+            &state,
+            "client-1".into(),
+            test_diff_id(),
+            repo.display().to_string(),
+            DiffRefInput::GitRef {
+                value: base.clone(),
+            },
+            DiffRefInput::GitRef {
+                value: head.clone(),
+            },
+            DiffDetailMode::FilePatch,
+            Some(false),
+            Some(stale_commit),
+            None,
+            request,
+            Some(3),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(prepared.review.current_commit_oid, None);
+        assert_eq!(prepared.review.current_commit_index, None);
+        assert_eq!(prepared.review.previous_commit_oid, None);
+        assert_eq!(prepared.left_tree_or_commit, base);
+        assert_eq!(prepared.right_tree_or_commit, head);
     }
 
     #[test]
