@@ -332,6 +332,7 @@ pub(crate) async fn handle_client_message(
             final_plan_file_path,
             title,
             content,
+            approval_mode,
         } => {
             handle_plan_approve(
                 state,
@@ -340,6 +341,7 @@ pub(crate) async fn handle_client_message(
                 final_plan_file_path,
                 title,
                 content,
+                approval_mode,
             )
             .await
         }
@@ -865,6 +867,7 @@ async fn handle_plan_approve(
     final_plan_file_path: String,
     title: Option<String>,
     content: String,
+    approval_mode: Option<PlanApprovalMode>,
 ) -> Vec<ServerMessage> {
     info!(action = "plan.approve", session_id = %session_id, bytes = content.len());
     let source_title = {
@@ -875,29 +878,39 @@ async fn handle_plan_approve(
             .or_else(|| title.clone())
             .unwrap_or_else(|| format!("Session {}", short_session_id(&session_id)))
     };
+    let approval_mode = approval_mode.unwrap_or(PlanApprovalMode::Execute);
+    let (preserve_context, compact_before_execute) = match approval_mode {
+        PlanApprovalMode::Execute => (false, false),
+        PlanApprovalMode::Compact => (true, true),
+        PlanApprovalMode::Keep => (true, false),
+    };
     let execution_title = format!("Execution - {source_title}");
-    state
-        .session_runtime
-        .set_plan_execution_carryover(
-            session_id.clone(),
-            PlanExecutionCarryover {
-                execution_title: execution_title.clone(),
-                plan_title: title,
-                plan_file_path: plan_file_path.clone(),
-                final_plan_file_path: final_plan_file_path.clone(),
-                content,
-            },
-        )
-        .await;
-    state
-        .session_runtime
-        .set_pending_session_name(session_id.clone(), execution_title)
-        .await;
+    if !preserve_context {
+        state
+            .session_runtime
+            .set_plan_execution_carryover(
+                session_id.clone(),
+                PlanExecutionCarryover {
+                    execution_title: execution_title.clone(),
+                    plan_title: title,
+                    plan_file_path: plan_file_path.clone(),
+                    final_plan_file_path: final_plan_file_path.clone(),
+                    content,
+                },
+            )
+            .await;
+        state
+            .session_runtime
+            .set_pending_session_name(session_id.clone(), execution_title)
+            .await;
+    }
     let command = serde_json::json!({
         "id": next_rpc_id(),
         "type": "approve_plan_mode",
         "planFilePath": plan_file_path,
         "finalPlanFilePath": final_plan_file_path,
+        "preserveContext": preserve_context,
+        "compactBeforeExecute": compact_before_execute,
     });
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => {

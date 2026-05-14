@@ -35,6 +35,7 @@ import type {
   FrontendUiSnapshot,
   ServerConfig,
   ModelSummary,
+  PlanApprovalMode,
   ProposedModelConfig,
   ServerMessage,
   SessionProjection,
@@ -987,8 +988,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     renderSessions();
   }
 
-  function approvePendingPlanReview(review: PendingPlanReview): void {
-    const accepted = send(createApprovePlanReviewMessage(review));
+  function approvePendingPlanReview(review: PendingPlanReview, approvalMode: PlanApprovalMode = "execute"): void {
+    const accepted = send(createApprovePlanReviewMessage(review, approvalMode));
     if (!accepted) return;
     visiblePlanReviews.delete(review.sessionId);
     renderActiveSession();

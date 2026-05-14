@@ -1499,6 +1499,7 @@ pub(crate) mod tests {
                 final_plan_file_path: "local://APPROVED.md".to_string(),
                 title: Some("APPROVED".to_string()),
                 content: "# Approved plan\n\n- Do the work".to_string(),
+                approval_mode: None,
             },
         )
         .await;
@@ -1507,6 +1508,18 @@ pub(crate) mod tests {
         assert_eq!(
             approve.get("type").and_then(|value| value.as_str()),
             Some("approve_plan_mode")
+        );
+        assert_eq!(
+            approve
+                .get("preserveContext")
+                .and_then(|value| value.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            approve
+                .get("compactBeforeExecute")
+                .and_then(|value| value.as_bool()),
+            Some(false)
         );
 
         apply_rpc_response(

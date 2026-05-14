@@ -631,6 +631,14 @@ pub(crate) struct ControlStatusProjection {
     pub(crate) message: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PlanApprovalMode {
+    Execute,
+    Compact,
+    Keep,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(
     tag = "type",
@@ -864,6 +872,7 @@ pub(crate) enum ClientMessage {
         final_plan_file_path: String,
         title: Option<String>,
         content: String,
+        approval_mode: Option<PlanApprovalMode>,
     },
     #[serde(rename = "plan.discuss")]
     PlanDiscuss { session_id: String },
