@@ -1319,7 +1319,6 @@ h2 {
   color: #f4d35e;
 }
 
-.diff-line-hunk,
 .diff-line-meta {
   grid-template-columns: auto minmax(0, 1fr) auto;
   color: #9edbff;
@@ -1332,6 +1331,7 @@ h2 {
 }
 
 .diff-line-hunk {
+  grid-template-columns: auto auto minmax(0, 1fr);
   color: #8bd3ff;
 }
 

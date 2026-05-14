@@ -613,8 +613,12 @@ describe("desktop cog options", () => {
     expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).not.toContain("new a");
     expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("single b");
 
+    const contextButton = document.querySelector<HTMLButtonElement>("#testDiffPanel .diff-context-more");
+    expect(contextButton?.previousElementSibling?.classList.contains("diff-comment-spacer")).toBe(true);
+    expect(contextButton?.nextElementSibling?.tagName).toBe("CODE");
+
     connection.sent.length = 0;
-    document.querySelector<HTMLButtonElement>("#testDiffPanel .diff-context-more")?.click();
+    contextButton?.click();
     expect(connection.sent).toContainEqual(expect.objectContaining({
       type: "diff.content.request",
       selectedFile: { oldPath: null, newPath: "src/b.ts" },

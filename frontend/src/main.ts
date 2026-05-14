@@ -6726,7 +6726,6 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
   spacer.className = "diff-comment-spacer";
   const text = mkEl("code");
   text.textContent = row.text;
-  line.append(spacer, text);
   if (row.type === "hunk") {
     const more = mkEl("button");
     more.type = "button";
@@ -6734,7 +6733,9 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
     more.textContent = "Show more context";
     more.title = "Ask Fura to reload this file with wider git diff context.";
     more.addEventListener("click", () => requestWiderDiffContext(annotationKey, state, row.filePath, requestMode));
-    line.append(more);
+    line.append(spacer, more, text);
+  } else {
+    line.append(spacer, text);
   }
 
   diff.append(line);
