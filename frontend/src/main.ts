@@ -274,8 +274,6 @@ app.innerHTML = `
         </div>
       </header>
 
-      <div id="goalModeCardHost" class="goal-mode-card-host" hidden></div>
-
       <div id="workspacePanelHost" class="workspace-panel-stack">
         <div id="normalWorkspacePanelHost" class="workspace-panel-host workspace-panel-host-active"></div>
         <div id="diffReviewWorkspacePanelHost" class="workspace-panel-host"></div>
@@ -648,7 +646,6 @@ const workspaceOptionsMenu = requireElement<HTMLDivElement>("workspaceOptionsMen
 const sessionTitle = requireElement<HTMLHeadingElement>("sessionTitle");
 const sessionMeta = requireElement<HTMLParagraphElement>("sessionMeta");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
-const goalModeCardHost = requireElement<HTMLDivElement>("goalModeCardHost");
 const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
 const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
@@ -3552,7 +3549,6 @@ function renderActiveSession(): void {
     sessionMeta.textContent = "Fura controller session · can find, discuss, and open sessions.";
     promptInput.placeholder = isWorking ? "Ask Fura is working…" : "Ask Fura about sessions…";
     renderControllerStatusBar();
-    renderGoalModeStatus(undefined);
     renderBusyPromptChoice();
     renderActiveDockviewPanel(undefined);
     return;
@@ -3582,7 +3578,6 @@ function renderActiveSession(): void {
   }
 
   renderStatusBar(projection);
-  renderGoalModeStatus(projection);
   renderBusyPromptChoice();
   renderActiveDockviewPanel(projection);
 }
@@ -3600,11 +3595,11 @@ function sendGoalBudget(sessionId: string, tokenBudget?: number): void {
   send({ type: "goal.setBudget", sessionId, tokenBudget });
 }
 
-function renderGoalModeStatus(projection: SessionProjection | undefined): void {
-  goalModeCardHost.replaceChildren();
+function renderGoalModePanel(container: HTMLElement, projection: SessionProjection | undefined): void {
+  container.replaceChildren();
   const sessionId = projection?.summary.sessionId;
   const card = renderGoalModeCard(
-    goalModeCardHost.ownerDocument,
+    container.ownerDocument,
     projection?.goalMode,
     "desktop",
     sessionId
@@ -3615,8 +3610,14 @@ function renderGoalModeStatus(projection: SessionProjection | undefined): void {
         }
       : undefined,
   );
-  goalModeCardHost.hidden = !card;
-  if (card) goalModeCardHost.append(card);
+  if (card) {
+    container.append(card);
+    return;
+  }
+  const empty = mkEl("p");
+  empty.className = "empty";
+  empty.textContent = "Select a session to view or start a goal.";
+  container.append(empty);
 }
 
 function markTranscriptViewDirty(options: { resetCache?: boolean } = {}): void {
@@ -4371,6 +4372,9 @@ function renderActiveDockviewPanel(projection: SessionProjection | undefined): v
   }
   renderTranscriptPanelIfNeeded(projection);
   renderToolsPanelIfNeeded(projection);
+  if (desktopDockview?.isPanelActive("goal")) {
+    desktopDockview.withPanel("goal", container => renderGoalModePanel(container, projection));
+  }
   if (desktopDockview?.isPanelActive("diffs") && shouldRenderDiffsView(projection)) {
     desktopDockview.withPanel("diffs", container => renderDiffsView(container, projection));
   }
@@ -6812,6 +6816,7 @@ function initDesktopWorkspace(): void {
   const createDockviewCallbacks = () => ({
     onPanelReady: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
       if (id === "transcript") markTranscriptViewDirty();
+      if (id === "goal") return;
       if (id === "tools") markToolsViewDirty();
       if (id === "diffs") markDiffsViewDirty();
       if (id === "sessionChanges") markDiffsViewDirty();
@@ -6823,6 +6828,10 @@ function initDesktopWorkspace(): void {
       const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
       if (id === "transcript") {
         renderTranscriptPanelIfNeeded(projection, true);
+        return;
+      }
+      if (id === "goal") {
+        desktopDockview?.withPanel("goal", container => renderGoalModePanel(container, projection));
         return;
       }
       if (id === "tools") {

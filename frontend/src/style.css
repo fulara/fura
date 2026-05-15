@@ -394,15 +394,6 @@ h2 {
   padding: 1rem;
 }
 
-.goal-mode-card-host {
-  border-bottom: 1px solid #252a35;
-  background: rgba(17, 21, 29, 0.98);
-  padding: 0.75rem 1rem;
-}
-
-.goal-mode-card-host[hidden] {
-  display: none;
-}
 
 .goal-mode-card {
   display: grid;

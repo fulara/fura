@@ -155,6 +155,7 @@ function simpleDiffRows(patch: string): DiffRow[] {
 }
 
 let connections: FakeConnection[] = [];
+let desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
 
 function installMocks(): void {
   vi.doMock("./connection", () => ({
@@ -170,18 +171,21 @@ function installMocks(): void {
       diffPanel.id = "testDiffPanel";
       const transcriptPanel = document.createElement("div");
       transcriptPanel.id = "testTranscriptPanel";
+      const goalPanel = document.createElement("div");
+      goalPanel.id = "testGoalPanel";
       const conflictResolverPanel = document.createElement("div");
       conflictResolverPanel.id = "testConflictResolverPanel";
-      document.body.append(diffPanel, transcriptPanel, conflictResolverPanel);
+      document.body.append(diffPanel, transcriptPanel, goalPanel, conflictResolverPanel);
       const panels: Record<string, HTMLElement> = {
         diffs: diffPanel,
         transcript: transcriptPanel,
+        goal: goalPanel,
         conflictResolver: conflictResolverPanel,
       };
       return {
         panelMounted: (id: string) => Boolean(panels[id]),
         panelContains: (id: string, element: Element) => Boolean(panels[id]?.contains(element)),
-        isPanelActive: (id: string) => id === "diffs" || id === "conflictResolver",
+        isPanelActive: (id: string) => desktopMockActivePanelIds.has(id),
         activatePanel: () => true,
         withPanel: (id: string, render: (container: HTMLElement) => void) => {
           const panel = panels[id];
@@ -202,6 +206,7 @@ async function createHarness(options: { preserveLocalStorage?: boolean } = {}) {
   vi.resetModules();
   vi.restoreAllMocks();
   connections = [];
+  desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
   document.body.innerHTML = `<div id="app"></div>`;
   if (!options.preserveLocalStorage) window.localStorage.clear();
   window.sessionStorage.clear();
@@ -255,6 +260,47 @@ describe("conflict resolver entry", () => {
     expect(connection.sent).toContainEqual({ type: "conflict.scan", root: "/custom/repo" });
   });
 
+});
+
+describe("desktop Goal Mode panel", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    connections = [];
+    vi.useRealTimers();
+  });
+
+  it("renders Goal Mode inside the normal Dockview goal panel", async () => {
+    const { connection } = await createHarness();
+    desktopMockActivePanelIds.add("goal");
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        goalMode: {
+          enabled: true,
+          mode: "active",
+          goal: {
+            id: "goal-1",
+            objective: "Keep Goal Mode in the Dockview workspace",
+            status: "active",
+            tokenBudget: 50000,
+            tokensUsed: 12500,
+            timeUsedSeconds: 95,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        },
+      }),
+    });
+
+    expect(document.querySelector("#goalModeCardHost")).toBeNull();
+    const goalPanel = document.querySelector("#testGoalPanel");
+    expect(goalPanel?.querySelector(".goal-mode-card-desktop")?.textContent).toContain("Keep Goal Mode in the Dockview workspace");
+    expect(goalPanel?.querySelector(".goal-mode-badge")?.textContent).toBe("Goal active");
+  });
 });
 
 describe("desktop extension dialogs", () => {

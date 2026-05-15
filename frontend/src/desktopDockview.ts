@@ -1,7 +1,7 @@
 import "dockview-core/dist/styles/dockview.css";
 import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
 
-export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "code" | "tools" | "diffs" | "compare" | "conflictResolver";
+export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare" | "conflictResolver";
 
 export type DesktopDockviewLayoutMode = "normal" | "diffReview" | "conflictResolver";
 
@@ -251,6 +251,14 @@ function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLa
     renderer: "always",
   });
   api.addPanel({
+    id: "goal",
+    component: "goal",
+    title: "Goal",
+    position: { referencePanel: "transcript", direction: "within" },
+    inactive: true,
+    renderer: "always",
+  });
+  api.addPanel({
     id: "code",
     component: "code",
     title: "Code",
@@ -280,6 +288,7 @@ function ensureRequiredPanels(api: DockviewComponent, layoutMode: DesktopDockvie
     return;
   }
   ensureTranscriptPanel(api);
+  if (layoutMode === "normal") ensureGoalPanel(api);
   ensureCodePanel(api);
   ensureToolsPanel(api);
   if (layoutMode === "diffReview") {
@@ -327,6 +336,19 @@ function ensureCodePanel(api: DockviewComponent): void {
     id: "code",
     component: "code",
     title: "Code",
+    position: { referencePanel: "transcript", direction: "within" },
+    inactive: true,
+    renderer: "always",
+  });
+}
+
+function ensureGoalPanel(api: DockviewComponent): void {
+  const hasGoalPanel = api.panels.some(panel => panel.id === "goal");
+  if (hasGoalPanel) return;
+  api.addPanel({
+    id: "goal",
+    component: "goal",
+    title: "Goal",
     position: { referencePanel: "transcript", direction: "within" },
     inactive: true,
     renderer: "always",
@@ -383,7 +405,7 @@ function ensureConflictResolverPanel(api: DockviewComponent): void {
 }
 
 function desktopPanelId(name: string): DesktopDockviewPanelId | null {
-  return name === "sessionChanges" || name === "transcript" || name === "code" || name === "tools" || name === "diffs" || name === "compare" || name === "conflictResolver" ? name : null;
+  return name === "sessionChanges" || name === "transcript" || name === "goal" || name === "code" || name === "tools" || name === "diffs" || name === "compare" || name === "conflictResolver" ? name : null;
 }
 
 function copyStylesToPopout(owner: Document, popWin: Window): void {

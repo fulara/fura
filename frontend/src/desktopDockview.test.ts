@@ -179,13 +179,19 @@ describe("initDesktopDockview", () => {
     expect(dockview.activePanel).toBe(codePanel);
   });
 
-  it("does not add dynamic session changes or compare panels by default", () => {
+  it("adds Goal as a normal workspace panel without replacing Transcript", () => {
     initTestDockview();
 
-    const ids = dockviewMock.instances[0].panels.map(panel => panel.id);
+    const dockview = dockviewMock.instances[0];
+    const ids = dockview.panels.map(panel => panel.id);
+    const transcript = dockview.panels.find(panel => panel.id === "transcript");
+    const goal = dockview.panels.find(panel => panel.id === "goal");
+    expect(ids).toContain("goal");
     expect(ids).toContain("diffs");
     expect(ids).not.toContain("sessionChanges");
     expect(ids).not.toContain("compare");
+    expect(goal?.group).toBe(transcript?.group);
+    expect(dockview.activePanel?.id).toBe("transcript");
   });
 
   it("uses a separate diff-review layout with a dedicated Diff panel", () => {
@@ -199,6 +205,7 @@ describe("initDesktopDockview", () => {
     expect(ids).toContain("transcript");
     expect(ids).toContain("code");
     expect(ids).toContain("tools");
+    expect(ids).not.toContain("goal");
     expect(ids).not.toContain("diffs");
     expect(ids).not.toContain("compare");
   });
