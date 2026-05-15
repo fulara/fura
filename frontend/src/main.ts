@@ -3592,6 +3592,7 @@ function sendGoalStart(sessionId: string, objective: string, tokenBudget?: numbe
 }
 
 function sendGoalControl(sessionId: string, action: GoalControlAction): void {
+  if (action === "drop" && !window.confirm("Drop goal? This removes the goal record; accumulated usage stays in the session log.")) return;
   send({ type: "goal.control", sessionId, action });
 }
 

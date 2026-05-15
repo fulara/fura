@@ -645,7 +645,6 @@ pub(crate) enum GoalControlAction {
     Pause,
     Resume,
     Drop,
-    Complete,
 }
 
 #[derive(Debug, Deserialize)]

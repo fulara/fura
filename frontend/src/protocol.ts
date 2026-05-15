@@ -689,7 +689,7 @@ export type WorktreeCreateOptions = {
 
 export type PlanApprovalMode = "execute" | "compact" | "keep";
 
-export type GoalControlAction = "pause" | "resume" | "drop" | "complete";
+export type GoalControlAction = "pause" | "resume" | "drop";
 export type ClientMessage =
   | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; sessionMode?: SessionMode; args?: string[]; worktree?: WorktreeCreateOptions; proposedModelId?: string }
   | { type: "session.setCategory"; sessionId: string; category?: string }

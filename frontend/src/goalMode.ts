@@ -134,7 +134,6 @@ function renderActiveControls(ownerDocument: Document, section: HTMLElement, goa
 
   if (goalMode.enabled && (goalMode.goal.status === "active" || goalMode.goal.status === "budget-limited")) {
     appendActionButton(ownerDocument, actions, "Pause", "pause", controls);
-    appendActionButton(ownerDocument, actions, "Complete", "complete", controls);
   } else if (!goalMode.enabled && goalMode.goal.status === "paused") {
     appendActionButton(ownerDocument, actions, "Resume", "resume", controls);
   }

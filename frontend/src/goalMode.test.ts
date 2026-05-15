@@ -71,6 +71,7 @@ describe("goal mode rendering", () => {
 
     card?.querySelectorAll<HTMLButtonElement>("button")[0]?.click();
     expect(onControl).toHaveBeenCalledWith("pause");
+    expect(Array.from(card?.querySelectorAll<HTMLButtonElement>("button") ?? []).map(button => button.textContent)).not.toContain("Complete");
 
     const budget = card?.querySelector<HTMLInputElement>(".goal-mode-budget-input");
     budget!.value = "60000";

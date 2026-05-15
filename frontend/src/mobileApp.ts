@@ -75,7 +75,7 @@ import {
   type VisiblePlanReview,
 } from "./planReview";
 
-type MobileWindow = Pick<Window, "history" | "localStorage" | "sessionStorage" | "location" | "prompt" | "setTimeout">;
+type MobileWindow = Pick<Window, "history" | "localStorage" | "sessionStorage" | "location" | "prompt" | "confirm" | "setTimeout">;
 type MobileSessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 const MOBILE_ACTIVE_SESSION_STORAGE_KEY = "fura.mobile.activeSessionId";
@@ -2236,6 +2236,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   function sendGoalControl(sessionId: string, action: GoalControlAction): void {
+    if (action === "drop" && !window.confirm("Drop goal? This removes the goal record; accumulated usage stays in the session log.")) return;
     send({ type: "goal.control", sessionId, action });
   }
 

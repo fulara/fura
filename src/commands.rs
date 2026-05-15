@@ -1731,7 +1731,6 @@ pub(crate) async fn handle_goal_control(
         GoalControlAction::Pause => "pause",
         GoalControlAction::Resume => "resume",
         GoalControlAction::Drop => "drop",
-        GoalControlAction::Complete => "complete",
     };
     send_goal_rpc_command(
         state,

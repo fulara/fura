@@ -188,8 +188,6 @@ for await (const line of rl) {
         }
       } else if (command.op === "drop") {
         goalMode = null;
-      } else if (command.op === "complete") {
-        goalMode = null;
       } else if (command.op === "set_budget") {
         if (goalMode?.enabled && goalMode.goal) {
           goalMode = { ...goalMode, goal: { ...goalMode.goal, tokenBudget: command.tokenBudget, updatedAt: now } };
