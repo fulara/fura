@@ -13,6 +13,7 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   { name: "commands", description: "Alias for /help", support: "supported" },
   { name: "new", description: "Open directory picker and start a new OMP session", support: "supported" },
   { name: "abort", description: "Abort the current prompt", support: "supported" },
+  { name: "goal", description: "Start or control Goal Mode", usage: "[objective|pause|resume|drop|complete|budget n|budget off]", support: "supported" },
   { name: "compact", description: "Compact session context", usage: "[instructions]", support: "supported" },
   { name: "handoff", description: "Hand off session context to a new session", usage: "[focus instructions]", support: "supported" },
   { name: "rename", description: "Rename the current session", usage: "<title>", support: "supported" },

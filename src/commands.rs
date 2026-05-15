@@ -92,6 +92,18 @@ pub(crate) async fn handle_client_message(
             behavior,
         } => send_prompt(state, session_id, text, images, behavior).await,
         ClientMessage::PromptAbort { session_id } => abort_prompt(state, session_id).await,
+        ClientMessage::GoalStart {
+            session_id,
+            objective,
+            token_budget,
+        } => handle_goal_start(state, session_id, objective, token_budget).await,
+        ClientMessage::GoalControl { session_id, action } => {
+            handle_goal_control(state, session_id, action).await
+        }
+        ClientMessage::GoalSetBudget {
+            session_id,
+            token_budget,
+        } => handle_goal_set_budget(state, session_id, token_budget).await,
         ClientMessage::ControlPrompt {
             client_id,
             conversation_id,
@@ -1411,7 +1423,7 @@ pub(crate) async fn handle_slash_command(
         "help" | "commands" => vec![notice(
             session_id,
             NoticeLevel::Info,
-            "Supported commands: /help, /new, /abort, /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /fork, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
+            "Supported commands: /help, /new, /abort, /goal [objective|pause|resume|drop|complete|budget n|budget off], /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /fork, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
         )],
         "new" => {
             let (cwd, args) = {
@@ -1489,6 +1501,7 @@ pub(crate) async fn handle_slash_command(
             }
         }
         "plan" => handle_plan_slash_command(state, session_id, args).await,
+        "goal" => handle_goal_slash_command(state, session_id, args).await,
         "model" | "models" => handle_model_slash_command(state, session_id, args).await,
         "thinking" => handle_thinking_slash_command(state, session_id, args).await,
         "fork" => handle_fork_slash_command(state, session_id).await,
@@ -1676,6 +1689,147 @@ pub(crate) async fn handle_model_slash_command(
     }
 }
 
+pub(crate) async fn handle_goal_slash_command(
+    state: &AppState,
+    session_id: String,
+    args: &str,
+) -> Vec<ServerMessage> {
+    let trimmed = args.trim();
+    if trimmed.is_empty() || trimmed == "show" {
+        let status = {
+            let sessions = state.sessions.read().await;
+            sessions
+                .get(&session_id)
+                .and_then(|record| record.goal_mode.as_ref())
+                .map(goal_status_notice)
+                .unwrap_or_else(|| {
+                    "No goal is active. Use /goal <objective> to start one.".to_string()
+                })
+        };
+        return vec![notice(session_id, NoticeLevel::Info, status)];
+    }
+
+    let (first, rest) = split_first_word(trimmed);
+    match first.to_ascii_lowercase().as_str() {
+        "set" | "start" => handle_goal_start(state, session_id, rest.to_string(), None).await,
+        "pause" => handle_goal_control(state, session_id, GoalControlAction::Pause).await,
+        "resume" => handle_goal_control(state, session_id, GoalControlAction::Resume).await,
+        "drop" => handle_goal_control(state, session_id, GoalControlAction::Drop).await,
+        "complete" => handle_goal_control(state, session_id, GoalControlAction::Complete).await,
+        "budget" => match parse_goal_budget(rest) {
+            Ok(token_budget) => handle_goal_set_budget(state, session_id, token_budget).await,
+            Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+        },
+        _ => handle_goal_start(state, session_id, trimmed.to_string(), None).await,
+    }
+}
+
+fn goal_status_notice(goal_mode: &GoalModeProjection) -> String {
+    let goal = &goal_mode.goal;
+    let budget = goal
+        .token_budget
+        .map(|budget| format!("{} / {budget} tokens", goal.tokens_used))
+        .unwrap_or_else(|| format!("{} tokens used", goal.tokens_used));
+    format!(
+        "Goal: {} ({:?}). {budget}; {}s elapsed.",
+        goal.objective, goal.status, goal.time_used_seconds
+    )
+}
+
+fn parse_goal_budget(value: &str) -> Result<Option<u64>, String> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| "Usage: /goal budget <positive integer|off>".to_string())?;
+    if parsed == 0 {
+        return Err("Goal budget must be a positive integer.".to_string());
+    }
+    Ok(Some(parsed))
+}
+
+pub(crate) async fn handle_goal_start(
+    state: &AppState,
+    session_id: String,
+    objective: String,
+    token_budget: Option<u64>,
+) -> Vec<ServerMessage> {
+    let objective = objective.trim().to_string();
+    if objective.is_empty() {
+        return vec![notice(
+            session_id,
+            NoticeLevel::Error,
+            "Goal objective cannot be empty.",
+        )];
+    }
+    if token_budget == Some(0) {
+        return vec![notice(
+            session_id,
+            NoticeLevel::Error,
+            "Goal budget must be a positive integer.",
+        )];
+    }
+    send_goal_rpc_command(
+        state,
+        session_id,
+        goal_mode_command(next_rpc_id(), "create", Some(objective), token_budget),
+    )
+    .await
+}
+
+pub(crate) async fn handle_goal_control(
+    state: &AppState,
+    session_id: String,
+    action: GoalControlAction,
+) -> Vec<ServerMessage> {
+    let op = match action {
+        GoalControlAction::Pause => "pause",
+        GoalControlAction::Resume => "resume",
+        GoalControlAction::Drop => "drop",
+        GoalControlAction::Complete => "complete",
+    };
+    send_goal_rpc_command(
+        state,
+        session_id,
+        goal_mode_command(next_rpc_id(), op, None, None),
+    )
+    .await
+}
+
+pub(crate) async fn handle_goal_set_budget(
+    state: &AppState,
+    session_id: String,
+    token_budget: Option<u64>,
+) -> Vec<ServerMessage> {
+    if token_budget == Some(0) {
+        return vec![notice(
+            session_id,
+            NoticeLevel::Error,
+            "Goal budget must be a positive integer.",
+        )];
+    }
+    send_goal_rpc_command(
+        state,
+        session_id,
+        goal_mode_command(next_rpc_id(), "set_budget", None, token_budget),
+    )
+    .await
+}
+
+async fn send_goal_rpc_command(
+    state: &AppState,
+    session_id: String,
+    command: Value,
+) -> Vec<ServerMessage> {
+    info!(action = "goal.command", session_id = %session_id, command_type = command_type(&command));
+    match send_rpc_command(state, &session_id, command).await {
+        Ok(()) => Vec::new(),
+        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
 pub(crate) async fn handle_model_list_command(
     state: &AppState,
     session_id: String,
@@ -1755,6 +1909,13 @@ pub(crate) async fn send_slash_rpc_command(
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => vec![notice(session_id, NoticeLevel::Info, ok_text)],
         Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
+fn split_first_word(text: &str) -> (&str, &str) {
+    match text.find(char::is_whitespace) {
+        Some(index) => (&text[..index], text[index + 1..].trim()),
+        None => (text, ""),
     }
 }
 

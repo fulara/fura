@@ -1239,6 +1239,27 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 let _ = state.events.send(snapshot);
             }
         }
+        Some("goal_mode") => {
+            let goal_mode = frame
+                .get("data")
+                .or_else(|| frame.get("result"))
+                .and_then(|data| data.get("goalMode"))
+                .and_then(map_goal_mode_projection);
+            let snapshot = {
+                let mut sessions = state.sessions.write().await;
+                sessions.get_mut(&current_session_id).map(|record| {
+                    record.goal_mode = goal_mode;
+                    ServerMessage::SessionSnapshot {
+                        session_id: current_session_id.clone(),
+                        state: record.projection(),
+                    }
+                })
+            };
+            if let Some(snapshot) = snapshot {
+                let _ = state.events.send(snapshot);
+                broadcast_sessions_snapshot(state).await;
+            }
+        }
         Some("set_model") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
             apply_model_change_response(state, &current_session_id, data, None).await;

@@ -688,6 +688,8 @@ export type WorktreeCreateOptions = {
 };
 
 export type PlanApprovalMode = "execute" | "compact" | "keep";
+
+export type GoalControlAction = "pause" | "resume" | "drop" | "complete";
 export type ClientMessage =
   | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; sessionMode?: SessionMode; args?: string[]; worktree?: WorktreeCreateOptions; proposedModelId?: string }
   | { type: "session.setCategory"; sessionId: string; category?: string }
@@ -708,6 +710,9 @@ export type ClientMessage =
       behavior?: "steer" | "followUp";
     }
   | { type: "prompt.abort"; sessionId: string }
+  | { type: "goal.start"; sessionId: string; objective: string; tokenBudget?: number | null }
+  | { type: "goal.control"; sessionId: string; action: GoalControlAction }
+  | { type: "goal.setBudget"; sessionId: string; tokenBudget?: number | null }
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }

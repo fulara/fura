@@ -156,6 +156,49 @@ for await (const line of rl) {
       success(command, { planMode });
       break;
     }
+    case "goal_mode": {
+      const now = Date.now();
+      if (command.op === "create") {
+        const objective = String(command.objective ?? "").trim();
+        if (!objective) {
+          error(command, "objective is required when op=create");
+          break;
+        }
+        goalMode = {
+          enabled: true,
+          mode: "active",
+          goal: {
+            id: `mock-goal-${now}`,
+            objective,
+            status: "active",
+            tokenBudget: command.tokenBudget,
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+            createdAt: now,
+            updatedAt: now,
+          },
+        };
+      } else if (command.op === "pause") {
+        if (goalMode?.goal) {
+          goalMode = { ...goalMode, enabled: false, goal: { ...goalMode.goal, status: "paused", updatedAt: now } };
+        }
+      } else if (command.op === "resume") {
+        if (goalMode?.goal) {
+          goalMode = { ...goalMode, enabled: true, mode: "active", reason: undefined, goal: { ...goalMode.goal, status: "active", updatedAt: now } };
+        }
+      } else if (command.op === "drop") {
+        goalMode = null;
+      } else if (command.op === "complete") {
+        goalMode = null;
+      } else if (command.op === "set_budget") {
+        if (goalMode?.enabled && goalMode.goal) {
+          goalMode = { ...goalMode, goal: { ...goalMode.goal, tokenBudget: command.tokenBudget, updatedAt: now } };
+        }
+      }
+      success(command, { goalMode });
+      write({ type: "goal_updated", goal: goalMode?.goal ?? null, state: goalMode ?? undefined });
+      break;
+    }
     case "approve_plan_mode": {
       planMode = null;
       const contextPreserved = command.preserveContext === true;

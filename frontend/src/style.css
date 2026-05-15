@@ -462,6 +462,67 @@ h2 {
   font-size: 0.78rem;
 }
 
+.goal-mode-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.goal-mode-start-controls {
+  align-items: stretch;
+}
+
+.goal-mode-objective-input,
+.goal-mode-budget-input {
+  min-width: 10rem;
+  border: 1px solid #303646;
+  border-radius: 0.65rem;
+  background: rgba(6, 8, 13, 0.74);
+  color: #f4f7fb;
+  font: inherit;
+  padding: 0.45rem 0.55rem;
+}
+
+.goal-mode-objective-input {
+  flex: 1 1 18rem;
+  resize: vertical;
+}
+
+.goal-mode-budget-input {
+  flex: 0 1 12rem;
+}
+
+.goal-mode-controls button {
+  border: 1px solid rgba(21, 183, 255, 0.38);
+  border-radius: 999px;
+  background: rgba(21, 183, 255, 0.12);
+  color: #dff3ff;
+  cursor: pointer;
+  font: inherit;
+  padding: 0.45rem 0.75rem;
+}
+
+.goal-mode-controls button:hover:not(:disabled),
+.goal-mode-controls button:focus-visible {
+  border-color: #15b7ff;
+  color: #ffffff;
+  outline: none;
+}
+
+.goal-mode-controls button:disabled,
+.goal-mode-controls input:disabled,
+.goal-mode-controls textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.goal-mode-control-status {
+  margin: 0;
+  color: #ffc457;
+  font-size: 0.78rem;
+}
+
 .workspace-actions {
   display: flex;
   align-items: center;

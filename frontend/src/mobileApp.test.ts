@@ -1272,4 +1272,48 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileDiffCommentOverlay")).toBeNull();
     expect(connection.sent.some(message => message.type === "sessionChanges.request")).toBe(false);
   });
+
+  it("sends Goal Mode controls from the mobile goal card", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { goalMode: null }) });
+
+    const objective = document.querySelector<HTMLTextAreaElement>(".goal-mode-objective-input");
+    const budget = document.querySelector<HTMLInputElement>(".goal-mode-budget-input");
+    objective!.value = "Ship mobile Goal Mode controls";
+    budget!.value = "1234";
+    document.querySelector<HTMLFormElement>(".goal-mode-start-controls")?.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
+
+    expect(connection.sent).toContainEqual({
+      type: "goal.start",
+      sessionId: "live",
+      objective: "Ship mobile Goal Mode controls",
+      tokenBudget: 1234,
+    });
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        goalMode: {
+          enabled: true,
+          mode: "active",
+          goal: {
+            id: "goal-1",
+            objective: "Ship mobile Goal Mode controls",
+            status: "active",
+            tokenBudget: 1234,
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        },
+      }),
+    });
+    document.querySelector<HTMLButtonElement>(".goal-mode-action-controls button")?.click();
+
+    expect(connection.sent).toContainEqual({ type: "goal.control", sessionId: "live", action: "pause" });
+  });
 });

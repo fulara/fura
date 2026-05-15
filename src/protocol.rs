@@ -639,6 +639,15 @@ pub(crate) enum PlanApprovalMode {
     Keep,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum GoalControlAction {
+    Pause,
+    Resume,
+    Drop,
+    Complete,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(
     tag = "type",
@@ -697,6 +706,22 @@ pub(crate) enum ClientMessage {
     },
     #[serde(rename = "prompt.abort")]
     PromptAbort { session_id: String },
+    #[serde(rename = "goal.start")]
+    GoalStart {
+        session_id: String,
+        objective: String,
+        token_budget: Option<u64>,
+    },
+    #[serde(rename = "goal.control")]
+    GoalControl {
+        session_id: String,
+        action: GoalControlAction,
+    },
+    #[serde(rename = "goal.setBudget")]
+    GoalSetBudget {
+        session_id: String,
+        token_budget: Option<u64>,
+    },
     #[serde(rename = "control.prompt")]
     ControlPrompt {
         client_id: String,

@@ -497,6 +497,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn serializes_goal_mode_rpc_commands() {
+        assert_eq!(
+            goal_mode_command(
+                "goal-1".to_string(),
+                "create",
+                Some("Ship controls".to_string()),
+                Some(1000),
+            ),
+            serde_json::json!({
+                "id": "goal-1",
+                "type": "goal_mode",
+                "op": "create",
+                "objective": "Ship controls",
+                "tokenBudget": 1000
+            })
+        );
+
+        assert_eq!(
+            goal_mode_command("goal-2".to_string(), "set_budget", None, None),
+            serde_json::json!({
+                "id": "goal-2",
+                "type": "goal_mode",
+                "op": "set_budget"
+            })
+        );
+    }
+
+    #[test]
     fn rpc_state_update_clears_goal_mode_when_reported_absent() {
         let mut record = test_record();
         record.goal_mode = Some(GoalModeProjection {

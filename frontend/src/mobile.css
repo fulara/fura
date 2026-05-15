@@ -209,6 +209,17 @@ body {
   flex-direction: column;
   gap: 0.35rem;
 }
+
+.goal-mode-card-mobile .goal-mode-controls {
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.goal-mode-card-mobile .goal-mode-objective-input,
+.goal-mode-card-mobile .goal-mode-budget-input,
+.goal-mode-card-mobile .goal-mode-controls button {
+  width: 100%;
+}
 .mobile-create-drawer {
   border: 1px solid #252a35;
   border-radius: 0.9rem;

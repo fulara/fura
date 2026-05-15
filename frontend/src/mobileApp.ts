@@ -33,6 +33,7 @@ import type {
   ControlSuggestedAction,
   FrontendControlAction,
   FrontendUiSnapshot,
+  GoalControlAction,
   ServerConfig,
   ModelSummary,
   PlanApprovalMode,
@@ -2230,9 +2231,33 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     renderBusyPromptChoice();
   }
 
+  function sendGoalStart(sessionId: string, objective: string, tokenBudget?: number): void {
+    send({ type: "goal.start", sessionId, objective, tokenBudget });
+  }
+
+  function sendGoalControl(sessionId: string, action: GoalControlAction): void {
+    send({ type: "goal.control", sessionId, action });
+  }
+
+  function sendGoalBudget(sessionId: string, tokenBudget?: number): void {
+    send({ type: "goal.setBudget", sessionId, tokenBudget });
+  }
+
   function renderGoalModeStatus(projection: SessionProjection | undefined): void {
     goalModeCardHost.replaceChildren();
-    const card = renderGoalModeCard(goalModeCardHost.ownerDocument, projection?.goalMode, "mobile");
+    const sessionId = projection?.summary.sessionId;
+    const card = renderGoalModeCard(
+      goalModeCardHost.ownerDocument,
+      projection?.goalMode,
+      "mobile",
+      sessionId
+        ? {
+            onStart: (objective, tokenBudget) => sendGoalStart(sessionId, objective, tokenBudget),
+            onControl: action => sendGoalControl(sessionId, action),
+            onSetBudget: tokenBudget => sendGoalBudget(sessionId, tokenBudget),
+          }
+        : undefined,
+    );
     goalModeCardHost.hidden = !card;
     if (card) goalModeCardHost.append(card);
   }

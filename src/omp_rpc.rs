@@ -241,6 +241,15 @@ pub(crate) enum OmpRpcCommand {
     },
     #[serde(rename = "abort")]
     Abort { id: String },
+    #[serde(rename = "goal_mode")]
+    GoalMode {
+        id: String,
+        op: &'static str,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        objective: Option<String>,
+        #[serde(rename = "tokenBudget", skip_serializing_if = "Option::is_none")]
+        token_budget: Option<u64>,
+    },
 }
 
 impl OmpRpcCommand {
@@ -289,6 +298,21 @@ pub(crate) fn prompt_command(
         message,
         images,
         streaming_behavior: behavior.map(PromptBehavior::as_rpc_streaming_behavior),
+    }
+    .into_value()
+}
+
+pub(crate) fn goal_mode_command(
+    id: String,
+    op: &'static str,
+    objective: Option<String>,
+    token_budget: Option<u64>,
+) -> Value {
+    OmpRpcCommand::GoalMode {
+        id,
+        op,
+        objective,
+        token_budget,
     }
     .into_value()
 }
