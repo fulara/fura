@@ -66,6 +66,7 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) session_modes: Arc<RwLock<HashMap<String, SessionMode>>>,
     /// Metadata for a newly spawned RPC child before OMP reports its real session id.
     pub(crate) pending_created_sessions: Arc<RwLock<HashMap<String, PendingCreatedSession>>>,
+    pub(crate) recent_rpc_stderr: Arc<RwLock<HashMap<String, Vec<String>>>>,
     /// Name to apply to the next new session spawned by a fork or handoff on this transport.
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Approved plan metadata waiting for / attached to the execution session spawned by OMP.
@@ -90,6 +91,7 @@ impl SessionRuntimeState {
             session_modes: Arc::new(RwLock::new(session_modes)),
             pending_created_sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
+            recent_rpc_stderr: Arc::new(RwLock::new(HashMap::new())),
             plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -228,6 +230,30 @@ impl SessionRuntimeState {
             .write()
             .await
             .remove(transport_session_id)
+    }
+
+    pub(crate) async fn remember_rpc_stderr(
+        &self,
+        transport_session_id: &str,
+        line: String,
+        line_limit: usize,
+    ) {
+        let mut recent = self.recent_rpc_stderr.write().await;
+        let lines = recent
+            .entry(transport_session_id.to_string())
+            .or_insert_with(Vec::new);
+        if lines.len() == line_limit {
+            lines.remove(0);
+        }
+        lines.push(line);
+    }
+
+    pub(crate) async fn take_recent_rpc_stderr(&self, transport_session_id: &str) -> Vec<String> {
+        self.recent_rpc_stderr
+            .write()
+            .await
+            .remove(transport_session_id)
+            .unwrap_or_default()
     }
 
     #[cfg(test)]

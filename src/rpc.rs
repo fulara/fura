@@ -11,6 +11,9 @@ use tracing::{debug, info, warn};
 
 use crate::*;
 
+const RECENT_RPC_STDERR_LINE_COUNT: usize = 4;
+const RECENT_RPC_STDERR_LINE_BYTES: usize = 4096;
+
 pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Result<(), String> {
     send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await?;
     send_rpc_command(state, session_id, get_messages_command(next_rpc_id())).await?;
@@ -285,7 +288,7 @@ pub(crate) async fn spawn_rpc_child(
         session_id.clone(),
         BufReader::new(stdout),
     ));
-    tokio::spawn(read_rpc_stderr(
+    let stderr_join = tokio::spawn(read_rpc_stderr(
         state.clone(),
         session_id.clone(),
         BufReader::new(stderr),
@@ -300,6 +303,12 @@ pub(crate) async fn spawn_rpc_child(
             }
             status = child.wait() => status,
         };
+
+        let _ = stderr_join.await;
+        let recent_stderr = state
+            .session_runtime
+            .take_recent_rpc_stderr(&session_id)
+            .await;
 
         let target_session_id = state
             .session_runtime
@@ -348,11 +357,7 @@ pub(crate) async fn spawn_rpc_child(
                 if let Some(pending_create) = pending_create {
                     let _ = state.events.send(ServerMessage::Error {
                         request_id: pending_create.request_id,
-                        message: format!(
-                            "RPC child exited before reporting a session id (code {}).",
-                            code.map(|value| value.to_string())
-                                .unwrap_or_else(|| "unknown".to_string())
-                        ),
+                        message: pending_create_exit_message(code, &recent_stderr),
                     });
                 } else {
                     mark_status_and_broadcast(&state, &target_session_id, SessionStatus::Exited)
@@ -369,7 +374,7 @@ pub(crate) async fn spawn_rpc_child(
                 if let Some(pending_create) = pending_create {
                     let _ = state.events.send(ServerMessage::Error {
                         request_id: pending_create.request_id,
-                        message: format!("RPC child failed before reporting a session id: {error}"),
+                        message: pending_create_wait_error_message(&error, &recent_stderr),
                     });
                 } else {
                     mark_status_and_broadcast(&state, &target_session_id, SessionStatus::Error)
@@ -422,6 +427,11 @@ where
 {
     let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
+        let recent_line = truncate_recent_stderr_line(&line);
+        state
+            .session_runtime
+            .remember_rpc_stderr(&session_id, recent_line, RECENT_RPC_STDERR_LINE_COUNT)
+            .await;
         warn!(session_id = %session_id, bytes = line.len(), "RPC stderr line");
         let target_session_id = rpc_session_target_id(&state, &session_id).await;
         let _ = state.events.send(ServerMessage::LogStderr {
@@ -429,6 +439,40 @@ where
             text: line,
         });
     }
+}
+
+fn truncate_recent_stderr_line(line: &str) -> String {
+    if line.len() <= RECENT_RPC_STDERR_LINE_BYTES {
+        return line.to_string();
+    }
+
+    let mut end = RECENT_RPC_STDERR_LINE_BYTES;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &line[..end])
+}
+
+pub(crate) fn pending_create_exit_message(code: Option<i32>, stderr_lines: &[String]) -> String {
+    let mut message = format!(
+        "RPC child exited before reporting a session id (code {}).",
+        code.map(|value| value.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
+    );
+    if !stderr_lines.is_empty() {
+        message.push_str(" Recent stderr: ");
+        message.push_str(&stderr_lines.join(" | "));
+    }
+    message
+}
+
+fn pending_create_wait_error_message(error: &std::io::Error, stderr_lines: &[String]) -> String {
+    let mut message = format!("RPC child failed before reporting a session id: {error}");
+    if !stderr_lines.is_empty() {
+        message.push_str(" Recent stderr: ");
+        message.push_str(&stderr_lines.join(" | "));
+    }
+    message
 }
 
 pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &Value) {

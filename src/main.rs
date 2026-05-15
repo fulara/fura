@@ -3703,6 +3703,62 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_stderr_is_forwarded_and_buffered_for_startup_failures() {
+        let state = test_state(8, None);
+        let mut events = state.events.subscribe();
+
+        read_rpc_stderr(
+            state.clone(),
+            "transport-session".to_string(),
+            BufReader::new("first startup warning\nsecond startup failure\n".as_bytes()),
+        )
+        .await;
+
+        let recent = state
+            .session_runtime
+            .take_recent_rpc_stderr("transport-session")
+            .await;
+        assert_eq!(
+            recent,
+            vec![
+                "first startup warning".to_string(),
+                "second startup failure".to_string()
+            ]
+        );
+
+        match events.recv().await.expect("first stderr event") {
+            ServerMessage::LogStderr { session_id, text } => {
+                assert_eq!(session_id, "transport-session");
+                assert_eq!(text, "first startup warning");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        match events.recv().await.expect("second stderr event") {
+            ServerMessage::LogStderr { session_id, text } => {
+                assert_eq!(session_id, "transport-session");
+                assert_eq!(text, "second startup failure");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pending_create_exit_error_includes_recent_stderr() {
+        let message = pending_create_exit_message(
+            Some(1),
+            &[
+                "error: Bun runtime must be >= 1.2.22 (found v1.2.21). Please upgrade: bun upgrade"
+                    .to_string(),
+            ],
+        );
+
+        assert_eq!(
+            message,
+            "RPC child exited before reporting a session id (code 1). Recent stderr: error: Bun runtime must be >= 1.2.22 (found v1.2.21). Please upgrade: bun upgrade"
+        );
+    }
+
+    #[tokio::test]
     async fn pending_create_set_model_error_returns_request_scoped_error_and_stops_transport() {
         let state = test_state(8, None);
         let _commands =

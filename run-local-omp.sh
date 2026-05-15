@@ -42,6 +42,18 @@ if (( ${#native_addons[@]} == 0 )); then
   exit 1
 fi
 
+required_bun=$("${BUN_BIN}" -e 'const pkg = await Bun.file(Bun.argv[1]).json(); const raw = String(pkg.packageManager ?? pkg.engines?.bun ?? ""); const match = raw.match(/[0-9]+(?:\.[0-9]+){1,2}/); if (match) process.stdout.write(match[0]);' "${OMP_REPO}/package.json")
+current_bun=$("${BUN_BIN}" --version)
+if [[ -n "${required_bun}" ]]; then
+  if ! "${BUN_BIN}" -e 'process.exit(Bun.semver.order(Bun.argv[1], Bun.argv[2]) < 0 ? 1 : 0);' "${current_bun}" "${required_bun}"; then
+    echo "Bun at ${BUN_BIN} is too old for this OMP checkout." >&2
+    echo "Found Bun ${current_bun}; OMP requires Bun >= ${required_bun}." >&2
+    echo "Run: ${BUN_BIN} upgrade" >&2
+    exit 1
+  fi
+fi
+
+
 export FURA_TOKEN
 export FURA_BRIDGE_DEBUG_FILE
 export PATH="$(dirname -- "${BUN_BIN}"):${PATH}"
