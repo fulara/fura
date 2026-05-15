@@ -464,6 +464,29 @@ h2 {
   align-items: stretch;
 }
 
+.goal-mode-field {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 10rem;
+}
+
+.goal-mode-field-label {
+  color: #9ba4b5;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.goal-mode-objective-field {
+  flex: 1 1 18rem;
+}
+
+.goal-mode-budget-field {
+  flex: 0 1 12rem;
+}
+
+
 .goal-mode-objective-input,
 .goal-mode-budget-input {
   min-width: 10rem;
@@ -476,12 +499,12 @@ h2 {
 }
 
 .goal-mode-objective-input {
-  flex: 1 1 18rem;
   resize: vertical;
+  width: 100%;
 }
 
 .goal-mode-budget-input {
-  flex: 0 1 12rem;
+  width: 100%;
 }
 
 .goal-mode-controls button {

@@ -9,9 +9,10 @@ use serde_json::Value;
 use tracing::warn;
 
 use crate::{
-    AppState, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader, SessionKind,
-    SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard, TranscriptMessage,
-    is_controller_session_record, project_omp_transcript, save_fura_config,
+    AppState, GoalModeProjection, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader,
+    SessionKind, SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard,
+    TranscriptMessage, is_controller_session_record, map_goal_mode_projection,
+    project_omp_transcript, save_fura_config,
 };
 
 #[derive(Debug)]
@@ -27,6 +28,7 @@ pub(crate) struct DiscoveredSession {
     pub(crate) messages: Vec<TranscriptMessage>,
     pub(crate) tool_cards: Vec<ToolCard>,
     pub(crate) messages_loaded: bool,
+    pub(crate) goal_mode: Option<GoalModeProjection>,
 }
 
 pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
@@ -41,6 +43,16 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
         discovered_ids.insert(session.id.clone());
         let category = categories.get(&session.id).cloned();
         let session_mode = modes.get(&session.id).copied().unwrap_or_default();
+        let should_load_goal_mode = match sessions.get(&session.id) {
+            Some(record) if record.kind == SessionKind::Available => {
+                record.updated_at != session.updated_at
+            }
+            Some(_) => false,
+            None => true,
+        };
+        if should_load_goal_mode {
+            session.goal_mode = read_session_file_goal_mode(Path::new(&session.session_file));
+        }
         if should_preload_discovered_session_messages(&sessions, &session) {
             let path = Path::new(&session.session_file);
             let (messages, tool_cards) = read_session_file_messages(path);
@@ -64,6 +76,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                 }
                 record.category = category;
                 record.session_mode = session_mode;
+                record.goal_mode = session.goal_mode;
                 if should_reload_messages {
                     record.messages = session.messages.clone();
                     record.tool_cards = session.tool_cards.clone();
@@ -81,6 +94,9 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                 }
                 record.category = category;
                 record.session_mode = session_mode;
+                if record.goal_mode.is_none() {
+                    record.goal_mode = session.goal_mode;
+                }
             }
             None => {
                 sessions.insert(
@@ -113,7 +129,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                         context_window: None,
                         context_percent: None,
                         plan_mode: None,
-                        goal_mode: None,
+                        goal_mode: session.goal_mode,
                         pending_plan_review: None,
                     },
                 );
@@ -247,6 +263,25 @@ where
     probe
 }
 
+fn extract_goal_mode_change(entry: &Value) -> Option<Option<GoalModeProjection>> {
+    if entry.get("type").and_then(Value::as_str) != Some("mode_change") {
+        return None;
+    }
+    match entry.get("mode").and_then(Value::as_str)? {
+        "none" => Some(None),
+        "goal" | "goal_paused" => {
+            let goal = entry.get("data").and_then(|data| data.get("goal"))?;
+            let state = serde_json::json!({
+                "enabled": entry.get("mode").and_then(Value::as_str) == Some("goal"),
+                "mode": "active",
+                "goal": goal,
+            });
+            map_goal_mode_projection(&state).map(Some)
+        }
+        _ => None,
+    }
+}
+
 fn extract_first_user_prompt(entry: &Value) -> Option<String> {
     if entry.get("type").and_then(Value::as_str) != Some("message") {
         return None;
@@ -330,7 +365,31 @@ pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
         messages: Vec::new(),
         tool_cards: Vec::new(),
         messages_loaded: false,
+        goal_mode: None,
     })
+}
+
+pub(crate) fn read_session_file_goal_mode(path: &Path) -> Option<GoalModeProjection> {
+    let Ok(file) = fs::File::open(path) else {
+        return None;
+    };
+    let reader = StdBufReader::new(file);
+    let mut latest_goal_mode = None;
+    for (i, line) in reader.lines().enumerate() {
+        if i == 0 {
+            continue; // skip session header
+        }
+        let Ok(line) = line else {
+            continue;
+        };
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if let Some(goal_mode) = extract_goal_mode_change(&entry) {
+            latest_goal_mode = goal_mode;
+        }
+    }
+    latest_goal_mode
 }
 
 pub(crate) fn read_session_file_messages(path: &Path) -> (Vec<TranscriptMessage>, Vec<ToolCard>) {

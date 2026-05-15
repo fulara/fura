@@ -572,6 +572,7 @@ pub(crate) mod tests {
             messages: Vec::new(),
             tool_cards: Vec::new(),
             messages_loaded: false,
+            goal_mode: None,
         }
     }
 
@@ -1020,6 +1021,37 @@ pub(crate) mod tests {
         fs::write(path, format!("{header}\n{message}\n")).expect("session file should be written");
     }
 
+    fn write_test_goal_session(path: &Path, mode: &str, status: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("session dir should be created");
+        }
+        let header = serde_json::json!({
+            "type": "session",
+            "id": "goal-session",
+            "title": "Goal session",
+            "timestamp": "2026-04-29T00:00:00.000Z",
+            "cwd": "/workspace/project",
+        });
+        let goal_mode = serde_json::json!({
+            "type": "mode_change",
+            "mode": mode,
+            "data": {
+                "goal": {
+                    "id": "goal-1",
+                    "objective": "Keep this visible after reconnect",
+                    "status": status,
+                    "tokenBudget": 50000,
+                    "tokensUsed": 1200,
+                    "timeUsedSeconds": 90,
+                    "createdAt": 10,
+                    "updatedAt": 20
+                }
+            }
+        });
+        fs::write(path, format!("{header}\n{goal_mode}\n"))
+            .expect("goal session file should be written");
+    }
+
     fn write_test_subagent_session(path: &Path, id: &str, cwd: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("subagent session dir should be created");
@@ -1237,6 +1269,63 @@ pub(crate) mod tests {
         assert!(!saved_config.session_modes.contains_key("missing-session"));
 
         assert!(!refresh_session_catalog(&state).await);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn refresh_session_catalog_hydrates_persisted_goal_mode() {
+        let root = env::temp_dir().join(format!(
+            "fura-goal-session-catalog-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let session_path = root.join("project").join("goal-session.jsonl");
+        write_test_goal_session(&session_path, "goal", "active");
+        let mut state = test_state(8, None);
+        state.session_root = root.clone();
+
+        assert!(refresh_session_catalog(&state).await);
+        let sessions = state.sessions.read().await;
+        let record = sessions
+            .get("goal-session")
+            .expect("goal session should be discovered");
+        let goal_mode = record
+            .goal_mode
+            .as_ref()
+            .expect("persisted goal mode should hydrate");
+        assert!(goal_mode.enabled);
+        assert_eq!(goal_mode.mode, GoalModeRuntimeMode::Active);
+        assert_eq!(goal_mode.goal.status, GoalStatusProjection::Active);
+        assert_eq!(
+            goal_mode.goal.objective,
+            "Keep this visible after reconnect"
+        );
+        assert_eq!(
+            record
+                .summary()
+                .goal_mode
+                .as_ref()
+                .map(|mode| mode.goal.id.as_str()),
+            Some("goal-1")
+        );
+        drop(sessions);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_session_file_goal_mode_uses_latest_mode_change() {
+        let root = env::temp_dir().join(format!(
+            "fura-goal-session-header-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let session_path = root.join("project").join("goal-session.jsonl");
+        write_test_goal_session(&session_path, "goal_paused", "paused");
+
+        let goal_mode = read_session_file_goal_mode(&session_path)
+            .expect("persisted paused goal should hydrate");
+        assert!(!goal_mode.enabled);
+        assert_eq!(goal_mode.goal.status, GoalStatusProjection::Paused);
+
         let _ = fs::remove_dir_all(root);
     }
 

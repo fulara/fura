@@ -270,6 +270,14 @@ describe("desktop Goal Mode panel", () => {
     vi.useRealTimers();
   });
 
+  it("renders no-session Goal panel copy without implying background execution", async () => {
+    const { connection } = await createHarness();
+    desktopMockActivePanelIds.add("goal");
+    connection.emit({ type: "sessions.snapshot", sessions: [] });
+
+    expect(document.querySelector("#testGoalPanel")?.textContent).toContain("Select a session to view or set a goal.");
+  });
+
   it("renders Goal Mode inside the normal Dockview goal panel", async () => {
     const { connection } = await createHarness();
     desktopMockActivePanelIds.add("goal");
@@ -299,7 +307,7 @@ describe("desktop Goal Mode panel", () => {
     expect(document.querySelector("#goalModeCardHost")).toBeNull();
     const goalPanel = document.querySelector("#testGoalPanel");
     expect(goalPanel?.querySelector(".goal-mode-card-desktop")?.textContent).toContain("Keep Goal Mode in the Dockview workspace");
-    expect(goalPanel?.querySelector(".goal-mode-badge")?.textContent).toBe("Goal active");
+    expect(goalPanel?.querySelector(".goal-mode-badge")?.textContent).toBe("Goal set");
   });
 });
 

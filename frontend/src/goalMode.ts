@@ -1,7 +1,8 @@
 import type { GoalControlAction, GoalModeProjection, GoalStatus } from "./protocol";
 
-export type GoalModeCardVariant = "desktop" | "mobile";
+const GOAL_MODE_HELP_TEXT = "A goal is standing session context. It guides future prompts and progress tracking; it does not run work in the background.";
 
+export type GoalModeCardVariant = "desktop" | "mobile";
 export type GoalModeCardControls = {
   disabled?: boolean;
   onStart?: (objective: string, tokenBudget?: number) => void;
@@ -32,6 +33,7 @@ export function goalModeBadgeLabel(goalMode: GoalModeProjection | null | undefin
   if (!goalMode?.goal) return null;
   if (goalMode.mode === "exiting" && goalMode.reason === "completed") return "Goal complete";
   if (!goalMode.enabled && goalMode.goal.status === "paused") return "Goal paused";
+  if (goalMode.goal.status === "active") return "Goal set";
   return `Goal ${goalStatusLabel(goalMode.goal.status).toLowerCase()}`;
 }
 
@@ -74,6 +76,21 @@ function setStatus(ownerDocument: Document, container: HTMLElement, message: str
   status.textContent = message;
 }
 
+function goalControlField(
+  ownerDocument: Document,
+  labelText: string,
+  control: HTMLInputElement | HTMLTextAreaElement,
+  className?: string,
+): HTMLLabelElement {
+  const label = ownerDocument.createElement("label");
+  label.className = className ? `goal-mode-field ${className}` : "goal-mode-field";
+  const text = ownerDocument.createElement("span");
+  text.className = "goal-mode-field-label";
+  text.textContent = labelText;
+  label.append(text, control);
+  return label;
+}
+
 function renderStartControls(ownerDocument: Document, section: HTMLElement, controls: GoalModeCardControls): void {
   if (!controls.onStart) return;
   const form = ownerDocument.createElement("form");
@@ -93,10 +110,14 @@ function renderStartControls(ownerDocument: Document, section: HTMLElement, cont
 
   const start = ownerDocument.createElement("button");
   start.type = "submit";
-  start.textContent = "Start goal";
+  start.textContent = "Set goal";
   start.disabled = controls.disabled === true;
 
-  form.append(objective, budget, start);
+  form.append(
+    goalControlField(ownerDocument, "Objective", objective, "goal-mode-objective-field"),
+    goalControlField(ownerDocument, "Token budget", budget, "goal-mode-budget-field"),
+    start,
+  );
   form.addEventListener("submit", event => {
     event.preventDefault();
     const text = objective.value.trim();
@@ -112,7 +133,7 @@ function renderStartControls(ownerDocument: Document, section: HTMLElement, cont
     controls.onStart?.(text, parsed.value);
     objective.value = "";
     budget.value = "";
-    setStatus(ownerDocument, section, "Goal start requested.");
+    setStatus(ownerDocument, section, "Goal set for this session.");
   });
   section.append(form);
 }
@@ -172,7 +193,7 @@ function renderActiveControls(ownerDocument: Document, section: HTMLElement, goa
       budget.value = "";
       setStatus(ownerDocument, section, "Goal budget update requested.");
     });
-    actions.append(budget, apply);
+    actions.append(goalControlField(ownerDocument, "Token budget", budget, "goal-mode-budget-field"), apply);
 
     if (goalMode.goal.tokenBudget != null) {
       const clear = ownerDocument.createElement("button");
@@ -212,7 +233,8 @@ export function renderGoalModeCard(
     header.append(title, badge);
     const note = ownerDocument.createElement("p");
     note.className = "goal-mode-objective";
-    note.textContent = "Start a session goal from Fura; OMP remains authoritative for the goal lifecycle.";
+    // Keep this copy explicit: Goal Mode stores standing context, not an autonomous work loop.
+    note.textContent = GOAL_MODE_HELP_TEXT;
     section.append(header, note);
     renderStartControls(ownerDocument, section, controls);
     return section;

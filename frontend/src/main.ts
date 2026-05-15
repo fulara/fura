@@ -3616,7 +3616,7 @@ function renderGoalModePanel(container: HTMLElement, projection: SessionProjecti
   }
   const empty = mkEl("p");
   empty.className = "empty";
-  empty.textContent = "Select a session to view or start a goal.";
+  empty.textContent = "Select a session to view or set a goal.";
   container.append(empty);
 }
 

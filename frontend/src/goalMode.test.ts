@@ -26,7 +26,7 @@ describe("goal mode rendering", () => {
 
     expect(card).not.toBeNull();
     expect(card?.className).toContain("goal-mode-card-desktop");
-    expect(card?.querySelector(".goal-mode-badge")?.textContent).toBe("Goal active");
+    expect(card?.querySelector(".goal-mode-badge")?.textContent).toBe("Goal set");
     expect(card?.querySelector(".goal-mode-objective")?.textContent).toBe("Ship Goal Mode projection");
     expect(card?.textContent).toContain("12,500 / 50,000 tokens");
     expect(card?.textContent).toContain("1m 35s elapsed");
@@ -45,11 +45,18 @@ describe("goal mode rendering", () => {
     expect(goalModeBadgeLabel(goalMode({ enabled: false, mode: "exiting", reason: "completed", goal: { ...goalMode().goal, status: "complete" } }))).toBe("Goal complete");
   });
 
-  it("renders start controls and validates goal objective", () => {
+  it("renders set controls with standing-context guidance and validates goal objective", () => {
     const onStart = vi.fn();
     const card = renderGoalModeCard(document, null, "desktop", { onStart });
 
     expect(card).not.toBeNull();
+    expect(card?.textContent).toContain("A goal is standing session context.");
+    expect(card?.textContent).toContain("does not run work in the background");
+    expect(card?.querySelector<HTMLButtonElement>("button[type='submit']")?.textContent).toBe("Set goal");
+    expect(Array.from(card?.querySelectorAll(".goal-mode-field-label") ?? []).map(label => label.textContent)).toEqual([
+      "Objective",
+      "Token budget",
+    ]);
     const form = card?.querySelector<HTMLFormElement>("form");
     form?.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
     expect(onStart).not.toHaveBeenCalled();
@@ -62,6 +69,7 @@ describe("goal mode rendering", () => {
     form?.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
 
     expect(onStart).toHaveBeenCalledWith("Ship controls", 1234);
+    expect(card?.textContent).toContain("Goal set for this session.");
   });
 
   it("renders active controls and budget updates", () => {
@@ -74,6 +82,7 @@ describe("goal mode rendering", () => {
     expect(onControl).toHaveBeenCalledWith("pause");
     expect(buttons.map(button => button.textContent)).not.toContain("Complete");
 
+    expect(Array.from(card?.querySelectorAll(".goal-mode-field-label") ?? []).map(label => label.textContent)).toContain("Token budget");
     const budget = card?.querySelector<HTMLInputElement>(".goal-mode-budget-input");
     budget!.value = "60000";
     buttons.find(button => button.textContent === "Set budget")?.click();

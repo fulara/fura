@@ -75,11 +75,11 @@ describe("createSessionListView", () => {
     const sessions = [session({ sessionId: "goal-session", title: "Goal session" })];
     const { container } = renderList({
       sessions,
-      sessionGoalLabels: new Map([["goal-session", "Goal active"]]),
+      sessionGoalLabels: new Map([["goal-session", "Goal set"]]),
     });
 
     const badge = container.querySelector(".session-goal-badge");
-    expect(badge?.textContent).toBe("Goal active");
+    expect(badge?.textContent).toBe("Goal set");
     expect(badge?.hasAttribute("hidden")).toBe(false);
   });
 

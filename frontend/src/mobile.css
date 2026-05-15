@@ -215,6 +215,7 @@ body {
   flex-direction: column;
 }
 
+.goal-mode-card-mobile .goal-mode-field,
 .goal-mode-card-mobile .goal-mode-objective-input,
 .goal-mode-card-mobile .goal-mode-budget-input,
 .goal-mode-card-mobile .goal-mode-controls button {
