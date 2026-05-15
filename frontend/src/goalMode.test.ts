@@ -68,15 +68,36 @@ describe("goal mode rendering", () => {
     const onControl = vi.fn();
     const onSetBudget = vi.fn();
     const card = renderGoalModeCard(document, goalMode(), "desktop", { onControl, onSetBudget });
+    const buttons = Array.from(card?.querySelectorAll<HTMLButtonElement>("button") ?? []);
 
-    card?.querySelectorAll<HTMLButtonElement>("button")[0]?.click();
+    buttons.find(button => button.textContent === "Pause")?.click();
     expect(onControl).toHaveBeenCalledWith("pause");
-    expect(Array.from(card?.querySelectorAll<HTMLButtonElement>("button") ?? []).map(button => button.textContent)).not.toContain("Complete");
+    expect(buttons.map(button => button.textContent)).not.toContain("Complete");
 
     const budget = card?.querySelector<HTMLInputElement>(".goal-mode-budget-input");
     budget!.value = "60000";
-    const buttons = card?.querySelectorAll<HTMLButtonElement>("button");
-    buttons?.[buttons.length - 1]?.click();
+    buttons.find(button => button.textContent === "Set budget")?.click();
     expect(onSetBudget).toHaveBeenCalledWith(60000);
+
+    buttons.find(button => button.textContent === "Clear budget")?.click();
+    expect(onSetBudget).toHaveBeenCalledWith(undefined);
+  });
+
+  it("does not clear budget from an empty submit and hides controls for completed goals", () => {
+    const onSetBudget = vi.fn();
+    const activeCard = renderGoalModeCard(document, goalMode(), "desktop", { onSetBudget });
+    Array.from(activeCard?.querySelectorAll<HTMLButtonElement>("button") ?? [])
+      .find(button => button.textContent === "Set budget")
+      ?.click();
+    expect(onSetBudget).not.toHaveBeenCalled();
+    expect(activeCard?.textContent).toContain("Enter a budget value or use Clear budget.");
+
+    const completedCard = renderGoalModeCard(
+      document,
+      goalMode({ enabled: false, mode: "exiting", reason: "completed", goal: { ...goalMode().goal, status: "complete" } }),
+      "desktop",
+      { onControl: vi.fn(), onSetBudget: vi.fn() },
+    );
+    expect(Array.from(completedCard?.querySelectorAll<HTMLButtonElement>("button") ?? []).map(button => button.textContent)).toEqual([]);
   });
 });

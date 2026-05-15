@@ -53,14 +53,14 @@ export function goalElapsedText(seconds: number): string {
   return `${secs}s elapsed`;
 }
 
-function parseBudget(raw: string, emptyMeansClear: boolean): { ok: true; value?: number } | { ok: false; message: string } {
+function parseBudget(raw: string): { ok: true; value?: number; empty: boolean } | { ok: false; message: string } {
   const trimmed = raw.trim();
-  if (!trimmed) return emptyMeansClear ? { ok: true } : { ok: true, value: undefined };
+  if (!trimmed) return { ok: true, empty: true };
   const parsed = Number.parseInt(trimmed, 10);
   if (!Number.isInteger(parsed) || parsed <= 0 || String(parsed) !== trimmed) {
     return { ok: false, message: "Budget must be a positive integer." };
   }
-  return { ok: true, value: parsed };
+  return { ok: true, value: parsed, empty: false };
 }
 
 function setStatus(ownerDocument: Document, container: HTMLElement, message: string): void {
@@ -104,7 +104,7 @@ function renderStartControls(ownerDocument: Document, section: HTMLElement, cont
       setStatus(ownerDocument, section, "Goal objective cannot be empty.");
       return;
     }
-    const parsed = parseBudget(budget.value, false);
+    const parsed = parseBudget(budget.value);
     if (!parsed.ok) {
       setStatus(ownerDocument, section, parsed.message);
       return;
@@ -131,36 +131,61 @@ function renderActiveControls(ownerDocument: Document, section: HTMLElement, goa
   if (!controls.onControl && !controls.onSetBudget) return;
   const actions = ownerDocument.createElement("div");
   actions.className = "goal-mode-controls goal-mode-action-controls";
+  const isTransientTerminalState =
+    goalMode.mode === "exiting" || goalMode.goal.status === "complete" || goalMode.goal.status === "dropped";
+  const canManageGoal = !isTransientTerminalState && (
+    (goalMode.enabled && (goalMode.goal.status === "active" || goalMode.goal.status === "budget-limited")) ||
+    (!goalMode.enabled && goalMode.goal.status === "paused")
+  );
 
   if (goalMode.enabled && (goalMode.goal.status === "active" || goalMode.goal.status === "budget-limited")) {
     appendActionButton(ownerDocument, actions, "Pause", "pause", controls);
   } else if (!goalMode.enabled && goalMode.goal.status === "paused") {
     appendActionButton(ownerDocument, actions, "Resume", "resume", controls);
   }
-  appendActionButton(ownerDocument, actions, "Drop", "drop", controls);
+  if (canManageGoal) {
+    appendActionButton(ownerDocument, actions, "Drop", "drop", controls);
+  }
 
-  if (controls.onSetBudget) {
+  if (controls.onSetBudget && goalMode.enabled && !isTransientTerminalState) {
     const budget = ownerDocument.createElement("input");
     budget.className = "goal-mode-budget-input";
     budget.inputMode = "numeric";
     budget.placeholder = goalMode.goal.tokenBudget == null ? "No budget" : String(goalMode.goal.tokenBudget);
-    budget.disabled = controls.disabled === true || goalMode.enabled !== true;
+    budget.disabled = controls.disabled === true;
 
     const apply = ownerDocument.createElement("button");
     apply.type = "button";
     apply.textContent = "Set budget";
     apply.disabled = budget.disabled;
     apply.addEventListener("click", () => {
-      const parsed = parseBudget(budget.value, true);
+      const parsed = parseBudget(budget.value);
       if (!parsed.ok) {
         setStatus(ownerDocument, section, parsed.message);
         return;
       }
+      if (parsed.empty) {
+        setStatus(ownerDocument, section, "Enter a budget value or use Clear budget.");
+        return;
+      }
       controls.onSetBudget?.(parsed.value);
       budget.value = "";
-      setStatus(ownerDocument, section, parsed.value == null ? "Goal budget clear requested." : "Goal budget update requested.");
+      setStatus(ownerDocument, section, "Goal budget update requested.");
     });
     actions.append(budget, apply);
+
+    if (goalMode.goal.tokenBudget != null) {
+      const clear = ownerDocument.createElement("button");
+      clear.type = "button";
+      clear.textContent = "Clear budget";
+      clear.disabled = budget.disabled;
+      clear.addEventListener("click", () => {
+        controls.onSetBudget?.(undefined);
+        budget.value = "";
+        setStatus(ownerDocument, section, "Goal budget clear requested.");
+      });
+      actions.append(clear);
+    }
   }
 
   if (actions.hasChildNodes()) section.append(actions);
