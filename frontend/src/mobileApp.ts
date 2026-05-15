@@ -58,7 +58,7 @@ import { catalogContainsProposedModel, filterCatalogModels, formatCatalogModelLa
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import { goalModeBadgeLabel, renderGoalModeCard } from "./goalMode";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
-import { renderMessage } from "./transcriptView";
+import { canReuseTranscriptMessageRender, renderMessage, transcriptMessageRenderCacheKey } from "./transcriptView";
 import {
   buildTranscriptReviewPrompt,
   type TranscriptReviewComment,
@@ -90,6 +90,10 @@ type ControlChatMessage = {
   text: string;
   candidates?: ControlCandidate[];
   suggestedActions?: ControlSuggestedAction[];
+};
+
+type MobileTranscriptRenderCache = {
+  nodes: Map<string, { node: HTMLElement; message: TranscriptMessage }>;
 };
 
 export type MobileConnectionOptions = {
@@ -451,6 +455,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let sessions: SessionSummary[] = [];
   let activeSessionId: string | null = readStoredActiveSessionId(window.sessionStorage);
   let projections = new Map<string, SessionProjection>();
+  let transcriptRenderCache: MobileTranscriptRenderCache = { nodes: new Map() };
   const trackedSessionIds = readStoredTrackedSessionIds(window.sessionStorage);
   let pendingRestoreAfterSessionsSnapshot = false;
   const unreadSessions = new Set<string>();
@@ -2042,6 +2047,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     return (transcriptReviewComments.get(sessionId) ?? []).filter(comment => comment.messageId === messageId);
   }
 
+  function mobileTranscriptReviewRenderKey(sessionId: string, messageId: string): string {
+    const comments = reviewCommentsForMessage(sessionId, messageId)
+      .map(comment => [comment.id, comment.lineNumber, comment.lineText, comment.text]);
+    return JSON.stringify({
+      active: transcriptReviewActiveMessages.get(sessionId) === messageId,
+      comments,
+    });
+  }
+
   function startTranscriptReview(sessionId: string, message: TranscriptMessage): void {
     transcriptReviewActiveMessages.set(sessionId, message.id);
     renderActiveSession();
@@ -2273,16 +2287,32 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       empty.className = "mobile-empty-state";
       empty.textContent = "Select a session to load its transcript.";
       transcript.replaceChildren(empty);
+      transcriptRenderCache = { nodes: new Map() };
       return;
     }
 
     const fragment = transcript.ownerDocument.createDocumentFragment();
-    for (const entry of projection.transcript) {
+    const nextMessageNodes = new Map<string, { node: HTMLElement; message: TranscriptMessage }>();
+    for (let i = 0; i < projection.transcript.length; i++) {
+      const entry = projection.transcript[i];
       if (entry.kind === "message") {
-        fragment.append(renderMessage(entry, {
-          thinkingVisibilityMode,
-          review: activeSessionId ? transcriptReviewOptions(activeSessionId, entry) : undefined,
-        }));
+        const reviewKey = activeSessionId ? mobileTranscriptReviewRenderKey(activeSessionId, entry.id) : "";
+        const key = transcriptMessageRenderCacheKey(
+          projection.summary.sessionId,
+          entry.id,
+          i,
+          `${thinkingVisibilityMode}:${reviewKey}`,
+        );
+        const cachedEntry = transcriptRenderCache.nodes.get(key);
+        const node = cachedEntry?.node.ownerDocument === transcript.ownerDocument &&
+          canReuseTranscriptMessageRender(cachedEntry.message, entry)
+          ? cachedEntry.node
+          : renderMessage(entry, {
+            thinkingVisibilityMode,
+            review: activeSessionId ? transcriptReviewOptions(activeSessionId, entry) : undefined,
+          });
+        nextMessageNodes.set(key, { node, message: entry });
+        fragment.append(node);
       } else if (showToolBubbles) {
         fragment.append(renderToolCard(entry));
       }
@@ -2313,6 +2343,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     transcript.replaceChildren(fragment);
+    transcriptRenderCache = { nodes: nextMessageNodes };
     if (wasNearBottom) {
       transcript.scrollTop = transcript.scrollHeight;
     } else {

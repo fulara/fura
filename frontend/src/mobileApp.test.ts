@@ -317,6 +317,38 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Live");
   });
 
+  it("keeps mobile copy controls stable across unchanged active snapshots", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const copyButton = document.querySelector<HTMLButtonElement>('#mobileTranscript [data-message-id="message-live"] .message-actions button');
+    if (!copyButton) throw new Error("copy button missing");
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { tokensTotal: 15 }),
+    });
+    expect(document.querySelector<HTMLButtonElement>('#mobileTranscript [data-message-id="message-live"] .message-actions button')).toBe(copyButton);
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [{
+          kind: "message",
+          id: "message-live",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "Updated transcript" }],
+          timestamp: null,
+          isNew: false,
+        }],
+      }),
+    });
+    expect(document.querySelector<HTMLButtonElement>('#mobileTranscript [data-message-id="message-live"] .message-actions button')).not.toBe(copyButton);
+    expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Updated transcript");
+  });
+
   it("requests a full refresh when a mobile session delta cannot be applied", () => {
     const { connection } = createHarness();
 
