@@ -121,7 +121,7 @@ import {
 } from "./extensionDialog";
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { captureDiffFilterFocus, restoreDiffFilterFocus } from "./diffViewDom";
-import { messageText, renderMessage as renderTranscriptMessage } from "./transcriptView";
+import { canReuseTranscriptMessageRender, messageText, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey } from "./transcriptView";
 import {
   buildTranscriptReviewPrompt,
   type TranscriptReviewComment,
@@ -202,11 +202,20 @@ type WorkspaceMode = "session" | "controller";
 type PanelRenderItem = {
   key: string;
   render: () => HTMLElement;
+  cacheable?: boolean;
+  reuseToken?: unknown;
+  canReuse?(previousReuseToken: unknown): boolean;
 };
+
+type CachedPanelNode = {
+  node: HTMLElement;
+  reuseToken?: unknown;
+};
+
 
 type CachedPanelRenderState = {
   keys: string[];
-  nodes: Map<string, HTMLElement>;
+  nodes: Map<string, CachedPanelNode>;
   revision: number;
 };
 
@@ -4526,7 +4535,7 @@ function getCachedPanelRenderState(
 ): CachedPanelRenderState {
   let cache = caches.get(container);
   if (!cache) {
-    cache = { keys: [], nodes: new Map<string, HTMLElement>(), revision };
+    cache = { keys: [], nodes: new Map<string, CachedPanelNode>(), revision };
     caches.set(container, cache);
   }
   return cache;
@@ -4548,13 +4557,17 @@ function renderCachedPanelItems(
   const canReuseCache = cache.revision === revision;
 
   const fragment = mkFrag();
-  const nextNodes = new Map<string, HTMLElement>();
+  const nextNodes = new Map<string, CachedPanelNode>();
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const cachedNode = canReuseCache && i < items.length - 1 ? cache.nodes.get(item.key) : undefined;
-    const node = cachedNode?.ownerDocument === container.ownerDocument ? cachedNode : item.render();
-    nextNodes.set(item.key, node);
+    const cachedEntry = canReuseCache && (item.cacheable ?? i < items.length - 1) ? cache.nodes.get(item.key) : undefined;
+    const canReuseEntry = Boolean(
+      cachedEntry?.node.ownerDocument === container.ownerDocument &&
+      (!item.canReuse || item.canReuse(cachedEntry.reuseToken)),
+    );
+    const node = canReuseEntry && cachedEntry ? cachedEntry.node : item.render();
+    nextNodes.set(item.key, { node, reuseToken: item.reuseToken });
     fragment.append(node);
   }
 
@@ -4616,6 +4629,7 @@ function renderControlTranscriptMessage(message: ControlChatMessage, index: numb
 function renderControllerTranscriptView(container: HTMLElement, sessionChanged: boolean): void {
   setRenderDocument(container.ownerDocument);
   const cache = getCachedPanelRenderState(transcriptRenderCaches, container, transcriptRenderRevision);
+  if (sessionChanged) clearCachedPanelRenderState(cache);
   const wasNearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
   const items = buildControllerTranscriptRenderItems();
 
@@ -4679,7 +4693,15 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
 
     if (entry.kind === "message") {
       items.push({
-        key: `message:${entry.id}:${startIndex}:${transcriptReviewRenderKey(projection.summary.sessionId, entry.id)}`,
+        key: transcriptMessageRenderCacheKey(
+          projection.summary.sessionId,
+          entry.id,
+          startIndex,
+          transcriptReviewRenderKey(projection.summary.sessionId, entry.id),
+        ),
+        cacheable: true,
+        reuseToken: entry,
+        canReuse: previous => canReuseTranscriptMessageRender(previous, entry),
         render: () => renderMessage(entry, projection.summary.sessionId),
       });
       continue;
@@ -4771,7 +4793,7 @@ function renderTranscriptView(
   const wasNearBottom =
     container.scrollHeight - container.scrollTop - container.clientHeight < 120;
   const previousScrollTop = container.scrollTop;
-  const restoreThinkingOpenState = !skipThinkingOpenRestoreOnce;
+  const restoreThinkingOpenState = !skipThinkingOpenRestoreOnce && !sessionChanged;
   skipThinkingOpenRestoreOnce = false;
   const openThinking = new Set<string>();
   if (restoreThinkingOpenState) {
@@ -4788,6 +4810,7 @@ function renderTranscriptView(
     container.replaceChildren(empty);
     return;
   }
+  if (sessionChanged) clearCachedPanelRenderState(cache);
 
   const notices = activeSessionId ? (sessionNotices.get(activeSessionId) ?? []) : [];
   const noticeNodes = renderSessionNoticeNodes(notices);

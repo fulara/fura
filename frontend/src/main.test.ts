@@ -560,6 +560,47 @@ describe("desktop cog options", () => {
     expect(diffMain.scrollTop).toBe(42);
   });
 
+  it("keeps final transcript message controls stable across unchanged snapshots", async () => {
+    const { connection } = await createHarness();
+    const transcript = [{
+      kind: "message" as const,
+      id: "assistant-1",
+      role: "assistant" as const,
+      blocks: [{ kind: "text" as const, text: "copyable answer" }],
+      timestamp: null,
+      isNew: false,
+    }];
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { transcript }) });
+    const copyButton = document.querySelector<HTMLButtonElement>('#testTranscriptPanel [data-message-id="assistant-1"] .message-actions button');
+    if (!copyButton) throw new Error("copy button missing");
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript,
+        tokensTotal: 12,
+      }),
+    });
+    expect(document.querySelector<HTMLButtonElement>('#testTranscriptPanel [data-message-id="assistant-1"] .message-actions button')).toBe(copyButton);
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [{
+          ...transcript[0],
+          blocks: [{ kind: "text" as const, text: "copyable answer updated" }],
+        }],
+      }),
+    });
+    const updatedButton = document.querySelector<HTMLButtonElement>('#testTranscriptPanel [data-message-id="assistant-1"] .message-actions button');
+    expect(updatedButton).not.toBe(copyButton);
+    expect(document.querySelector<HTMLElement>('#testTranscriptPanel [data-message-id="assistant-1"]')?.textContent).toContain("copyable answer updated");
+  });
+
   it("renders aggregate patch by default and drills down without refetching all files", async () => {
     const { connection } = await createHarness();
     const aggregatePatch = [
