@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { messageText, renderBlock, renderCodeBlock, renderMarkdown, renderMessage } from "./transcriptView";
+import { messageText, renderBlock, renderCodeBlock, renderMarkdown, renderMessage, updateRenderedMessage } from "./transcriptView";
 import type { TranscriptMessage } from "./protocol";
 
 describe("messageText", () => {
@@ -98,6 +98,32 @@ describe("renderMessage", () => {
     vi.runAllTimers();
     expect(button?.textContent).toBe("Copy");
     vi.useRealTimers();
+  });
+
+  it("updates message body without replacing copy controls", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const node = renderMessage({
+      id: "m-streaming",
+      role: "assistant",
+      isNew: true,
+      blocks: [{ kind: "text", text: "First chunk" }],
+    }, { thinkingVisibilityMode: "auto" });
+    const button = node.querySelector<HTMLButtonElement>("header button");
+    if (!button) throw new Error("copy button missing");
+
+    updateRenderedMessage(node, {
+      id: "m-streaming",
+      role: "assistant",
+      isNew: true,
+      blocks: [{ kind: "text", text: "First chunk plus more" }],
+    }, { thinkingVisibilityMode: "auto" });
+
+    expect(node.querySelector<HTMLButtonElement>("header button")).toBe(button);
+    expect(node.textContent).toContain("First chunk plus more");
+    button.click();
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith("First chunk plus more");
   });
 
   it("renders transcript review mode with line comments and actions", () => {

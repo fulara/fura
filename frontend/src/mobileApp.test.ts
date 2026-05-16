@@ -317,7 +317,7 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Live");
   });
 
-  it("keeps mobile copy controls stable across unchanged active snapshots", () => {
+  it("keeps mobile copy controls stable across changing active snapshots", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
@@ -345,7 +345,7 @@ describe("mountMobileApp", () => {
         }],
       }),
     });
-    expect(document.querySelector<HTMLButtonElement>('#mobileTranscript [data-message-id="message-live"] .message-actions button')).not.toBe(copyButton);
+    expect(document.querySelector<HTMLButtonElement>('#mobileTranscript [data-message-id="message-live"] .message-actions button')).toBe(copyButton);
     expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Updated transcript");
   });
 
