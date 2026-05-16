@@ -26,6 +26,40 @@ export function transcriptMessageRenderCacheKey(
   return `message:${sessionId.length}:${sessionId}:${message.id.length}:${message.id}:${index}:${message.role}:${timestamp}:${variantKey.length}:${variantKey}`;
 }
 
+function transcriptMessagesRenderEqual(left: TranscriptMessage, right: TranscriptMessage): boolean {
+  if (left === right) return true;
+  if (
+    left.role !== right.role ||
+    (left.timestamp ?? null) !== (right.timestamp ?? null) ||
+    left.isNew !== right.isNew ||
+    left.blocks.length !== right.blocks.length
+  ) {
+    return false;
+  }
+  for (let i = 0; i < left.blocks.length; i++) {
+    if (!transcriptBlocksRenderEqual(left.blocks[i], right.blocks[i])) return false;
+  }
+  return true;
+}
+
+function transcriptBlocksRenderEqual(left: ContentBlock, right: ContentBlock): boolean {
+  if (left.kind !== right.kind) return false;
+  switch (left.kind) {
+    case "text":
+      return right.kind === "text" && left.text === right.text;
+    case "image":
+      return right.kind === "image" &&
+        left.mimeType === right.mimeType &&
+        left.data === right.data &&
+        (left.alt ?? null) === (right.alt ?? null);
+    case "thinking":
+      return right.kind === "thinking" && left.thinking === right.thinking;
+    case "redactedthinking":
+      return true;
+  }
+}
+
+
 export function messageText(message: TranscriptMessage): string {
   return message.blocks
     .map(block => {
@@ -104,6 +138,8 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
 export function updateRenderedMessage(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const header = article.firstElementChild;
   if (!header || header.tagName !== "HEADER") return renderMessage(message, options);
+  const previous = renderedMessageState.get(article);
+  if (previous && transcriptMessagesRenderEqual(previous, message)) return article;
   renderedMessageState.set(article, message);
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
