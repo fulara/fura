@@ -137,6 +137,42 @@ describe("renderMessage", () => {
     expect(writeText).toHaveBeenCalledWith("First chunk plus more");
   });
 
+  it("defers body replacement while selected text intersects the message", () => {
+    const node = renderMessage({
+      id: "m-selected",
+      role: "assistant",
+      isNew: true,
+      blocks: [{ kind: "text", text: "Selectable chunk" }],
+    }, { thinkingVisibilityMode: "auto" });
+    document.body.append(node);
+    const textBlock = node.querySelector<HTMLElement>(".text-block");
+    if (!textBlock) throw new Error("text block missing");
+    const originalBlock = textBlock;
+    const range = document.createRange();
+    range.selectNodeContents(textBlock);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+
+    updateRenderedMessage(node, {
+      id: "m-selected",
+      role: "assistant",
+      isNew: true,
+      blocks: [{ kind: "text", text: "Selectable chunk plus final text" }],
+    }, { thinkingVisibilityMode: "auto" });
+
+    expect(node.querySelector<HTMLElement>(".text-block")).toBe(originalBlock);
+    expect(node.textContent).toContain("Selectable chunk");
+    expect(node.textContent).not.toContain("final text");
+
+    selection?.removeAllRanges();
+    document.dispatchEvent(new Event("selectionchange"));
+
+    expect(node.querySelector<HTMLElement>(".text-block")).not.toBe(originalBlock);
+    expect(node.textContent).toContain("Selectable chunk plus final text");
+    node.remove();
+  });
+
   it("renders transcript review mode with line comments and actions", () => {
     const onStart = vi.fn();
     const onAddComment = vi.fn();
