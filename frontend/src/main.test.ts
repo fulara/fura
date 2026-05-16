@@ -568,7 +568,7 @@ describe("desktop cog options", () => {
     expect(diffMain.scrollTop).toBe(42);
   });
 
-  it("keeps final transcript message controls stable across unchanged snapshots", async () => {
+  it("keeps final transcript message controls stable across changing snapshots", async () => {
     const { connection } = await createHarness();
     const transcript = [{
       kind: "message" as const,
@@ -605,7 +605,7 @@ describe("desktop cog options", () => {
       }),
     });
     const updatedButton = document.querySelector<HTMLButtonElement>('#testTranscriptPanel [data-message-id="assistant-1"] .message-actions button');
-    expect(updatedButton).not.toBe(copyButton);
+    expect(updatedButton).toBe(copyButton);
     expect(document.querySelector<HTMLElement>('#testTranscriptPanel [data-message-id="assistant-1"]')?.textContent).toContain("copyable answer updated");
   });
 

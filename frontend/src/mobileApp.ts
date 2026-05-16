@@ -58,7 +58,7 @@ import { catalogContainsProposedModel, filterCatalogModels, formatCatalogModelLa
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import { goalModeBadgeLabel, renderGoalModeCard } from "./goalMode";
 import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
-import { canReuseTranscriptMessageRender, renderMessage, transcriptMessageRenderCacheKey } from "./transcriptView";
+import { renderMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import {
   buildTranscriptReviewPrompt,
   type TranscriptReviewComment,
@@ -93,7 +93,7 @@ type ControlChatMessage = {
 };
 
 type MobileTranscriptRenderCache = {
-  nodes: Map<string, { node: HTMLElement; message: TranscriptMessage }>;
+  nodes: Map<string, HTMLElement>;
 };
 
 export type MobileConnectionOptions = {
@@ -2292,26 +2292,26 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     const fragment = transcript.ownerDocument.createDocumentFragment();
-    const nextMessageNodes = new Map<string, { node: HTMLElement; message: TranscriptMessage }>();
+    const nextMessageNodes = new Map<string, HTMLElement>();
     for (let i = 0; i < projection.transcript.length; i++) {
       const entry = projection.transcript[i];
       if (entry.kind === "message") {
         const reviewKey = activeSessionId ? mobileTranscriptReviewRenderKey(activeSessionId, entry.id) : "";
+        const renderOptions = {
+          thinkingVisibilityMode,
+          review: activeSessionId ? transcriptReviewOptions(activeSessionId, entry) : undefined,
+        };
         const key = transcriptMessageRenderCacheKey(
           projection.summary.sessionId,
-          entry.id,
+          entry,
           i,
           `${thinkingVisibilityMode}:${reviewKey}`,
         );
-        const cachedEntry = transcriptRenderCache.nodes.get(key);
-        const node = cachedEntry?.node.ownerDocument === transcript.ownerDocument &&
-          canReuseTranscriptMessageRender(cachedEntry.message, entry)
-          ? cachedEntry.node
-          : renderMessage(entry, {
-            thinkingVisibilityMode,
-            review: activeSessionId ? transcriptReviewOptions(activeSessionId, entry) : undefined,
-          });
-        nextMessageNodes.set(key, { node, message: entry });
+        const cachedNode = transcriptRenderCache.nodes.get(key);
+        const node = cachedNode?.ownerDocument === transcript.ownerDocument
+          ? updateRenderedMessage(cachedNode, entry, renderOptions)
+          : renderMessage(entry, renderOptions);
+        nextMessageNodes.set(key, node);
         fragment.append(node);
       } else if (showToolBubbles) {
         fragment.append(renderToolCard(entry));

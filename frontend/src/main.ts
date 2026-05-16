@@ -121,7 +121,7 @@ import {
 } from "./extensionDialog";
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { captureDiffFilterFocus, restoreDiffFilterFocus } from "./diffViewDom";
-import { canReuseTranscriptMessageRender, messageText, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey } from "./transcriptView";
+import { messageText, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import {
   buildTranscriptReviewPrompt,
   type TranscriptReviewComment,
@@ -203,19 +203,13 @@ type PanelRenderItem = {
   key: string;
   render: () => HTMLElement;
   cacheable?: boolean;
-  reuseToken?: unknown;
-  canReuse?(previousReuseToken: unknown): boolean;
-};
-
-type CachedPanelNode = {
-  node: HTMLElement;
-  reuseToken?: unknown;
+  update?(cachedNode: HTMLElement): HTMLElement;
 };
 
 
 type CachedPanelRenderState = {
   keys: string[];
-  nodes: Map<string, CachedPanelNode>;
+  nodes: Map<string, HTMLElement>;
   revision: number;
 };
 
@@ -4535,7 +4529,7 @@ function getCachedPanelRenderState(
 ): CachedPanelRenderState {
   let cache = caches.get(container);
   if (!cache) {
-    cache = { keys: [], nodes: new Map<string, CachedPanelNode>(), revision };
+    cache = { keys: [], nodes: new Map<string, HTMLElement>(), revision };
     caches.set(container, cache);
   }
   return cache;
@@ -4557,17 +4551,15 @@ function renderCachedPanelItems(
   const canReuseCache = cache.revision === revision;
 
   const fragment = mkFrag();
-  const nextNodes = new Map<string, CachedPanelNode>();
+  const nextNodes = new Map<string, HTMLElement>();
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    const cachedEntry = canReuseCache && (item.cacheable ?? i < items.length - 1) ? cache.nodes.get(item.key) : undefined;
-    const canReuseEntry = Boolean(
-      cachedEntry?.node.ownerDocument === container.ownerDocument &&
-      (!item.canReuse || item.canReuse(cachedEntry.reuseToken)),
-    );
-    const node = canReuseEntry && cachedEntry ? cachedEntry.node : item.render();
-    nextNodes.set(item.key, { node, reuseToken: item.reuseToken });
+    const cachedNode = canReuseCache && (item.cacheable ?? i < items.length - 1) ? cache.nodes.get(item.key) : undefined;
+    const node = cachedNode?.ownerDocument === container.ownerDocument
+      ? item.update?.(cachedNode) ?? cachedNode
+      : item.render();
+    nextNodes.set(item.key, node);
     fragment.append(node);
   }
 
@@ -4695,13 +4687,15 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
       items.push({
         key: transcriptMessageRenderCacheKey(
           projection.summary.sessionId,
-          entry.id,
+          entry,
           startIndex,
           transcriptReviewRenderKey(projection.summary.sessionId, entry.id),
         ),
         cacheable: true,
-        reuseToken: entry,
-        canReuse: previous => canReuseTranscriptMessageRender(previous, entry),
+        update: node => updateRenderedMessage(node, entry, {
+          thinkingVisibilityMode,
+          review: transcriptReviewOptions(projection.summary.sessionId, entry),
+        }),
         render: () => renderMessage(entry, projection.summary.sessionId),
       });
       continue;

@@ -13,53 +13,17 @@ import {
 } from "./transcriptReview";
 import type { ThinkingVisibilityMode } from "./uiPreferences";
 
-export function transcriptMessagesRenderEqual(left: TranscriptMessage, right: TranscriptMessage): boolean {
-  if (left === right) return true;
-  if (
-    left.role !== right.role ||
-    (left.timestamp ?? null) !== (right.timestamp ?? null) ||
-    left.isNew !== right.isNew ||
-    left.blocks.length !== right.blocks.length
-  ) {
-    return false;
-  }
-  for (let i = 0; i < left.blocks.length; i++) {
-    if (!transcriptBlocksRenderEqual(left.blocks[i], right.blocks[i])) return false;
-  }
-  return true;
-}
+const renderedMessageState = new WeakMap<HTMLElement, TranscriptMessage>();
 
-export function canReuseTranscriptMessageRender(previous: unknown, next: TranscriptMessage): boolean {
-  return typeof previous === "object" &&
-    previous !== null &&
-    transcriptMessagesRenderEqual(previous as TranscriptMessage, next);
-}
 
 export function transcriptMessageRenderCacheKey(
   sessionId: string,
-  messageId: string,
+  message: TranscriptMessage,
   index: number,
   variantKey = "",
 ): string {
-  return `message:${sessionId.length}:${sessionId}:${messageId.length}:${messageId}:${index}:${variantKey.length}:${variantKey}`;
-}
-
-
-function transcriptBlocksRenderEqual(left: ContentBlock, right: ContentBlock): boolean {
-  if (left.kind !== right.kind) return false;
-  switch (left.kind) {
-    case "text":
-      return right.kind === "text" && left.text === right.text;
-    case "image":
-      return right.kind === "image" &&
-        left.mimeType === right.mimeType &&
-        left.data === right.data &&
-        (left.alt ?? null) === (right.alt ?? null);
-    case "thinking":
-      return right.kind === "thinking" && left.thinking === right.thinking;
-    case "redactedthinking":
-      return true;
-  }
+  const timestamp = message.timestamp ?? "";
+  return `message:${sessionId.length}:${sessionId}:${message.id.length}:${message.id}:${index}:${message.role}:${timestamp}:${variantKey.length}:${variantKey}`;
 }
 
 export function messageText(message: TranscriptMessage): string {
@@ -94,15 +58,9 @@ type RenderMessageReviewOptions = {
 
 export function renderMessage(message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const article = mkEl("article");
+  renderedMessageState.set(article, message);
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
-  const visibleBlocks = message.blocks
-    .map((block, index) => ({ block, index }))
-    .filter(({ block }) => options.thinkingVisibilityMode !== "hidden" || block.kind === "text" || block.kind === "image");
-  if (visibleBlocks.length === 0) {
-    article.hidden = true;
-    return article;
-  }
 
   const header = mkEl("header");
   const heading = mkEl("div");
@@ -117,7 +75,7 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
   copy.type = "button";
   copy.textContent = "Copy";
   copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(messageText(message));
+    await navigator.clipboard.writeText(messageText(renderedMessageState.get(article) ?? message));
     copy.textContent = "Copied";
     window.setTimeout(() => {
       copy.textContent = "Copy";
@@ -131,11 +89,38 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
     review.textContent = options.review.active ? "Reviewing" : "Review";
     review.setAttribute("aria-pressed", options.review.active ? "true" : "false");
     review.disabled = options.review.active;
-    review.addEventListener("click", () => options.review?.onStart?.(message));
+    review.addEventListener("click", () => {
+      options.review?.onStart?.(renderedMessageState.get(article) ?? message);
+    });
     actions.append(review);
   }
   header.append(heading, actions);
   article.append(header);
+  appendMessageContent(article, message, options);
+
+  return article;
+}
+
+export function updateRenderedMessage(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
+  const header = article.firstElementChild;
+  if (!header || header.tagName !== "HEADER") return renderMessage(message, options);
+  renderedMessageState.set(article, message);
+  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
+  article.dataset.messageId = message.id;
+  while (header.nextSibling) header.nextSibling.remove();
+  appendMessageContent(article, message, options);
+  return article;
+}
+
+function appendMessageContent(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions): void {
+  const visibleBlocks = message.blocks
+    .map((block, index) => ({ block, index }))
+    .filter(({ block }) => options.thinkingVisibilityMode !== "hidden" || block.kind === "text" || block.kind === "image");
+  if (visibleBlocks.length === 0) {
+    article.hidden = true;
+    return;
+  }
+  article.hidden = false;
 
   if (options.review?.active) {
     article.append(renderTranscriptReviewBody(message, options.review));
@@ -146,8 +131,6 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
       }));
     }
   }
-
-  return article;
 }
 
 function renderTranscriptReviewBody(message: TranscriptMessage, review: RenderMessageReviewOptions): HTMLElement {
