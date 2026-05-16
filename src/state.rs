@@ -156,23 +156,34 @@ impl SessionRuntimeState {
     }
 
     pub(crate) async fn transport_session_id_for(&self, session_id: &str) -> Option<String> {
-        if self.rpc_sessions.read().await.contains_key(session_id) {
-            return Some(session_id.to_string());
+        let (direct_target, target_transport) = {
+            let targets = self.rpc_session_targets.read().await;
+            (
+                targets.get(session_id).cloned(),
+                targets
+                    .iter()
+                    .find(|(_, target_id)| target_id.as_str() == session_id)
+                    .map(|(transport_id, _)| transport_id.clone()),
+            )
+        };
+
+        if let Some(transport_id) = target_transport {
+            return Some(transport_id);
         }
 
-        let targets = self.rpc_session_targets.read().await;
-        if let Some((transport_id, _)) = targets
-            .iter()
-            .find(|(_, target_id)| target_id == &session_id)
-        {
-            return Some(transport_id.clone());
+        if direct_target.is_some() {
+            if self.sessions.read().await.contains_key(session_id) {
+                return None;
+            }
+            return self
+                .rpc_sessions
+                .read()
+                .await
+                .contains_key(session_id)
+                .then(|| session_id.to_string());
         }
 
-        if !targets.contains_key(session_id) {
-            return Some(session_id.to_string());
-        }
-
-        None
+        Some(session_id.to_string())
     }
 
     pub(crate) async fn contains_transport(&self, transport_session_id: &str) -> bool {

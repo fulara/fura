@@ -1906,6 +1906,17 @@ pub(crate) async fn send_prompt(
         }
     }
 
+    if !state.sessions.read().await.contains_key(&session_id) {
+        return vec![unknown_session_error(session_id)];
+    }
+
+    if !has_live_rpc_child(state, &session_id).await {
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: format!("session {session_id} has no live RPC child"),
+        }];
+    }
+
     let snapshot = {
         let mut sessions = state.sessions.write().await;
         match sessions.get_mut(&session_id) {

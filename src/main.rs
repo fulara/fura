@@ -1512,6 +1512,50 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_to_source_session_after_fork_is_not_sent_to_fork_transport() {
+        let state = test_state(8, None);
+        let mut source = test_record();
+        source.id = "source-session".to_string();
+        source.kind = SessionKind::Available;
+        source.status = SessionStatus::Available;
+        let mut fork = test_record();
+        fork.id = "fork-session".to_string();
+        state.sessions.write().await.extend([
+            ("source-session".to_string(), source),
+            ("fork-session".to_string(), fork),
+        ]);
+        let mut commands =
+            register_test_transport(&state, "source-session", "fork-session", 4).await;
+
+        let responses = send_prompt(
+            &state,
+            "source-session".to_string(),
+            "stay on the original branch".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            responses.iter().any(|message| matches!(
+                message,
+                ServerMessage::Error { message, .. }
+                    if message == "session source-session has no live RPC child"
+            )),
+            "sending to the source session should fail instead of reaching the fork transport"
+        );
+        assert!(
+            commands.try_recv().is_err(),
+            "prompt for the source session must not be written to the forked session transport"
+        );
+        let sessions = state.sessions.read().await;
+        assert!(matches!(
+            sessions.get("source-session").map(|record| record.status),
+            Some(SessionStatus::Available)
+        ));
+    }
+
+    #[tokio::test]
     async fn slash_plan_enters_plan_mode_and_sends_initial_prompt() {
         let state = test_state(8, None);
         state
@@ -4153,21 +4197,38 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn rpc_transport_session_id_accepts_live_transport_id() {
+    async fn rpc_transport_session_id_resolves_visible_source_session_after_remap_safely() {
         let state = test_state(8, None);
-        let _commands = register_test_transport(&state, "transport-live", "real-session", 1).await;
+        let _commands = register_test_transport(&state, "source-session", "fork-session", 1).await;
 
         assert_eq!(
-            rpc_transport_session_id(&state, "transport-live")
+            rpc_transport_session_id(&state, "source-session")
                 .await
                 .as_deref(),
-            Some("transport-live")
+            Some("source-session"),
+            "internal callers may still address an unexposed transport id directly"
+        );
+        let mut source = test_record();
+        source.id = "source-session".to_string();
+        source.kind = SessionKind::Available;
+        source.status = SessionStatus::Available;
+        state
+            .sessions
+            .write()
+            .await
+            .insert("source-session".to_string(), source);
+
+        assert!(
+            rpc_transport_session_id(&state, "source-session")
+                .await
+                .is_none(),
+            "a visible source session must not alias the transport after it remaps to a fork"
         );
         assert_eq!(
-            rpc_transport_session_id(&state, "real-session")
+            rpc_transport_session_id(&state, "fork-session")
                 .await
                 .as_deref(),
-            Some("transport-live")
+            Some("source-session")
         );
     }
 

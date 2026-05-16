@@ -169,6 +169,17 @@ pub(crate) async fn rpc_transport_session_id(state: &AppState, session_id: &str)
         .await
 }
 
+pub(crate) async fn has_live_rpc_child(state: &AppState, session_id: &str) -> bool {
+    let Some(transport_session_id) = rpc_transport_session_id(state, session_id).await else {
+        return false;
+    };
+    state
+        .session_runtime
+        .stdin_for_transport(&transport_session_id)
+        .await
+        .is_some()
+}
+
 pub(crate) async fn send_rpc_command(
     state: &AppState,
     session_id: &str,
