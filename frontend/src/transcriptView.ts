@@ -20,18 +20,6 @@ type RenderedMessageState = {
 
 const renderedMessageState = new WeakMap<HTMLElement, RenderedMessageState>();
 
-type PendingRenderedMessageUpdate = {
-  message: TranscriptMessage;
-  signature: string;
-  options: RenderMessageOptions;
-};
-
-const pendingRenderedMessageUpdates = new WeakMap<HTMLElement, PendingRenderedMessageUpdate>();
-const pendingRenderedMessageArticles = new Set<HTMLElement>();
-const pointerSelectingArticles = new WeakSet<HTMLElement>();
-const documentsWithPendingFlushListeners = new WeakSet<Document>();
-
-
 
 export function transcriptMessageRenderCacheKey(
   sessionId: string,
@@ -95,91 +83,11 @@ type RenderMessageReviewOptions = {
   onFlush?(message: TranscriptMessage): void;
 };
 
-function currentRenderedMessage(article: HTMLElement, fallback: TranscriptMessage): TranscriptMessage {
-  return pendingRenderedMessageUpdates.get(article)?.message ?? renderedMessageState.get(article)?.message ?? fallback;
-}
-
-function trackMessagePointerSelection(article: HTMLElement): void {
-  article.addEventListener("pointerdown", event => {
-    if (isInteractiveSelectionTarget(event.target)) return;
-    pointerSelectingArticles.add(article);
-    ensurePendingFlushListeners(article.ownerDocument);
-    article.ownerDocument.addEventListener("pointerup", () => {
-      pointerSelectingArticles.delete(article);
-      flushPendingRenderedMessageUpdates(article.ownerDocument);
-    }, { once: true });
-  });
-}
-
-function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
-  return target instanceof Element && Boolean(target.closest("button,a,input,textarea,select,summary"));
-}
-
-function shouldDeferMessageUpdate(article: HTMLElement): boolean {
-  return pointerSelectingArticles.has(article) || selectionIntersectsArticle(article);
-}
-
-function selectionIntersectsArticle(article: HTMLElement): boolean {
-  const selection = article.ownerDocument.getSelection();
-  if (!selection || selection.isCollapsed) return false;
-  for (let i = 0; i < selection.rangeCount; i++) {
-    const range = selection.getRangeAt(i);
-    try {
-      if (range.intersectsNode(article)) return true;
-    } catch {
-      // Ignore ranges from another document.
-    }
-  }
-  return false;
-}
-
-function queueRenderedMessageUpdate(
-  article: HTMLElement,
-  message: TranscriptMessage,
-  signature: string,
-  options: RenderMessageOptions,
-): void {
-  pendingRenderedMessageUpdates.set(article, { message, signature, options });
-  pendingRenderedMessageArticles.add(article);
-  ensurePendingFlushListeners(article.ownerDocument);
-}
-
-function ensurePendingFlushListeners(document: Document): void {
-  if (documentsWithPendingFlushListeners.has(document)) return;
-  documentsWithPendingFlushListeners.add(document);
-  const flush = () => flushPendingRenderedMessageUpdates(document);
-  document.addEventListener("selectionchange", flush);
-  document.addEventListener("pointerup", flush);
-  document.addEventListener("keyup", flush);
-}
-
-function flushPendingRenderedMessageUpdates(document: Document): void {
-  for (const article of Array.from(pendingRenderedMessageArticles)) {
-    if (article.ownerDocument !== document) continue;
-    if (!article.isConnected) {
-      pendingRenderedMessageArticles.delete(article);
-      pendingRenderedMessageUpdates.delete(article);
-      continue;
-    }
-    if (shouldDeferMessageUpdate(article)) continue;
-    const pending = pendingRenderedMessageUpdates.get(article);
-    if (!pending) {
-      pendingRenderedMessageArticles.delete(article);
-      continue;
-    }
-    pendingRenderedMessageArticles.delete(article);
-    pendingRenderedMessageUpdates.delete(article);
-    applyRenderedMessageUpdate(article, pending.message, pending.signature, pending.options);
-  }
-}
-
-
 export function renderMessage(message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const article = mkEl("article");
   renderedMessageState.set(article, { message, signature: transcriptMessageRenderSignature(message) });
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
-  trackMessagePointerSelection(article);
 
   const header = mkEl("header");
   const heading = mkEl("div");
@@ -194,7 +102,7 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
   copy.type = "button";
   copy.textContent = "Copy";
   copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(messageText(currentRenderedMessage(article, message)));
+    await navigator.clipboard.writeText(messageText(renderedMessageState.get(article)?.message ?? message));
     copy.textContent = "Copied";
     window.setTimeout(() => {
       copy.textContent = "Copy";
@@ -209,7 +117,7 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
     review.setAttribute("aria-pressed", options.review.active ? "true" : "false");
     review.disabled = options.review.active;
     review.addEventListener("click", () => {
-      options.review?.onStart?.(currentRenderedMessage(article, message));
+      options.review?.onStart?.(renderedMessageState.get(article)?.message ?? message);
     });
     actions.append(review);
   }
@@ -226,21 +134,7 @@ export function updateRenderedMessage(article: HTMLElement, message: TranscriptM
   const signature = transcriptMessageRenderSignature(message);
   const previous = renderedMessageState.get(article);
   if (previous?.signature === signature) return article;
-  if (shouldDeferMessageUpdate(article)) {
-    queueRenderedMessageUpdate(article, message, signature, options);
-    return article;
-  }
-  return applyRenderedMessageUpdate(article, message, signature, options);
-}
-
-function applyRenderedMessageUpdate(
-  article: HTMLElement,
-  message: TranscriptMessage,
-  signature: string,
-  options: RenderMessageOptions,
-): HTMLElement {
-  const header = article.firstElementChild;
-  if (!header || header.tagName !== "HEADER") return renderMessage(message, options);
+  if (tryUpdateRenderedMessageContent(article, header, message, options, signature)) return article;
   renderedMessageState.set(article, { message, signature });
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
@@ -249,10 +143,40 @@ function applyRenderedMessageUpdate(
   return article;
 }
 
-function appendMessageContent(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions): void {
-  const visibleBlocks = message.blocks
+function tryUpdateRenderedMessageContent(
+  article: HTMLElement,
+  header: Element,
+  message: TranscriptMessage,
+  options: RenderMessageOptions,
+  signature: string,
+): boolean {
+  if (options.review?.active) return false;
+  const visibleBlocks = visibleMessageBlocks(message, options);
+  if (visibleBlocks.length !== 1) return false;
+  const [{ block, index }] = visibleBlocks;
+  if (block.kind !== "text" || !message.isNew) return false;
+  const body = header.nextElementSibling;
+  if (!(body instanceof HTMLElement) || body.nextElementSibling) return false;
+  if (body.dataset.blockKind !== "text" || body.dataset.blockIndex !== String(index)) return false;
+  const textNode = body.querySelector(".streaming-text-content")?.firstChild;
+  if (!(textNode instanceof Text)) return false;
+
+  renderedMessageState.set(article, { message, signature });
+  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
+  article.dataset.messageId = message.id;
+  textNode.data = block.text;
+  return true;
+}
+
+
+function visibleMessageBlocks(message: TranscriptMessage, options: RenderMessageOptions): Array<{ block: ContentBlock; index: number }> {
+  return message.blocks
     .map((block, index) => ({ block, index }))
     .filter(({ block }) => options.thinkingVisibilityMode !== "hidden" || block.kind === "text" || block.kind === "image");
+}
+
+function appendMessageContent(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions): void {
+  const visibleBlocks = visibleMessageBlocks(message, options);
   if (visibleBlocks.length === 0) {
     article.hidden = true;
     return;
@@ -590,6 +514,16 @@ function renderPlainParagraph(text: string): HTMLParagraphElement {
   return p;
 }
 
+function renderStreamingText(text: string): HTMLElement {
+  const body = mkEl("div");
+  body.className = "markdown-body streaming-text";
+  const p = mkEl("p");
+  p.className = "streaming-text-content";
+  p.append(mkText(text));
+  body.append(p);
+  return body;
+}
+
 function renderList(token: Tokens.List): HTMLOListElement | HTMLUListElement {
   if (token.ordered) {
     const list = mkEl("ol");
@@ -813,7 +747,7 @@ export function renderBlock(
     wrapper.dataset.messageId = messageId;
     wrapper.dataset.blockIndex = String(blockIndex);
     wrapper.dataset.blockKind = "text";
-    wrapper.append(renderMarkdown(block.text));
+    wrapper.append(isNew ? renderStreamingText(block.text) : renderMarkdown(block.text));
     return wrapper;
   }
 

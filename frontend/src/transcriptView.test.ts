@@ -113,6 +113,8 @@ describe("renderMessage", () => {
     if (!button) throw new Error("copy button missing");
     const initialBlock = node.querySelector<HTMLElement>(".text-block");
     if (!initialBlock) throw new Error("text block missing");
+    const initialTextNode = initialBlock.querySelector(".streaming-text-content")?.firstChild;
+    if (!initialTextNode) throw new Error("streaming text node missing");
 
     updateRenderedMessage(node, {
       id: "m-streaming",
@@ -132,45 +134,31 @@ describe("renderMessage", () => {
 
     expect(node.querySelector<HTMLButtonElement>("header button")).toBe(button);
     expect(node.textContent).toContain("First chunk plus more");
+    expect(node.querySelector<HTMLElement>(".text-block")).toBe(initialBlock);
+    expect(initialBlock.querySelector(".streaming-text-content")?.firstChild).toBe(initialTextNode);
     button.click();
     await Promise.resolve();
     expect(writeText).toHaveBeenCalledWith("First chunk plus more");
   });
 
-  it("defers body replacement while selected text intersects the message", () => {
-    const node = renderMessage({
-      id: "m-selected",
+  it("renders live text as plain streaming text until finalized", () => {
+    const live = renderMessage({
+      id: "m-live-markdown",
       role: "assistant",
       isNew: true,
-      blocks: [{ kind: "text", text: "Selectable chunk" }],
+      blocks: [{ kind: "text", text: "```ts\nconst value = 1;" }],
     }, { thinkingVisibilityMode: "auto" });
-    document.body.append(node);
-    const textBlock = node.querySelector<HTMLElement>(".text-block");
-    if (!textBlock) throw new Error("text block missing");
-    const originalBlock = textBlock;
-    const range = document.createRange();
-    range.selectNodeContents(textBlock);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
+    expect(live.querySelector(".streaming-text-content")?.textContent).toBe("```ts\nconst value = 1;");
+    expect(live.querySelector(".code-block")).toBeNull();
 
-    updateRenderedMessage(node, {
-      id: "m-selected",
+    updateRenderedMessage(live, {
+      id: "m-live-markdown",
       role: "assistant",
-      isNew: true,
-      blocks: [{ kind: "text", text: "Selectable chunk plus final text" }],
+      isNew: false,
+      blocks: [{ kind: "text", text: "```ts\nconst value = 1;\n```" }],
     }, { thinkingVisibilityMode: "auto" });
-
-    expect(node.querySelector<HTMLElement>(".text-block")).toBe(originalBlock);
-    expect(node.textContent).toContain("Selectable chunk");
-    expect(node.textContent).not.toContain("final text");
-
-    selection?.removeAllRanges();
-    document.dispatchEvent(new Event("selectionchange"));
-
-    expect(node.querySelector<HTMLElement>(".text-block")).not.toBe(originalBlock);
-    expect(node.textContent).toContain("Selectable chunk plus final text");
-    node.remove();
+    expect(live.querySelector(".streaming-text-content")).toBeNull();
+    expect(live.querySelector(".code-block")).toBeTruthy();
   });
 
   it("renders transcript review mode with line comments and actions", () => {
