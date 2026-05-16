@@ -323,6 +323,9 @@ describe("mountMobileApp", () => {
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
     const copyButton = document.querySelector<HTMLButtonElement>('#mobileTranscript [data-message-id="message-live"] .message-actions button');
     if (!copyButton) throw new Error("copy button missing");
+    const transcript = document.querySelector<HTMLElement>("#mobileTranscript");
+    if (!transcript) throw new Error("mobile transcript missing");
+    const replaceChildren = vi.spyOn(transcript, "replaceChildren");
 
     connection.emit({
       type: "session.snapshot",
@@ -330,6 +333,7 @@ describe("mountMobileApp", () => {
       state: projection("live", { tokensTotal: 15 }),
     });
     expect(document.querySelector<HTMLButtonElement>('#mobileTranscript [data-message-id="message-live"] .message-actions button')).toBe(copyButton);
+    expect(replaceChildren).not.toHaveBeenCalled();
 
     connection.emit({
       type: "session.snapshot",

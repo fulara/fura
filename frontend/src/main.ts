@@ -5,7 +5,7 @@ import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./s
 import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
-import { mkEl, mkFrag, requireElement, setRenderDocument } from "./dom";
+import { mkEl, reconcileChildren, requireElement, setRenderDocument } from "./dom";
 import {
   isCompactReadCard,
   renderCurrentTodoCard,
@@ -4550,8 +4550,8 @@ function renderCachedPanelItems(
 ): void {
   const canReuseCache = cache.revision === revision;
 
-  const fragment = mkFrag();
   const nextNodes = new Map<string, HTMLElement>();
+  const desiredNodes: Node[] = [];
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -4560,12 +4560,11 @@ function renderCachedPanelItems(
       ? item.update?.(cachedNode) ?? cachedNode
       : item.render();
     nextNodes.set(item.key, node);
-    fragment.append(node);
+    desiredNodes.push(node);
   }
 
-  for (const node of trailingNodes) fragment.append(node);
-
-  container.replaceChildren(fragment);
+  desiredNodes.push(...trailingNodes);
+  reconcileChildren(container, desiredNodes);
   cache.keys = items.map(item => item.key);
   cache.nodes = nextNodes;
   cache.revision = revision;

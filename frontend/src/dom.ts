@@ -16,6 +16,22 @@ export function mkFrag(): DocumentFragment {
   return renderDocument.createDocumentFragment();
 }
 
+export function reconcileChildren(container: HTMLElement, desiredNodes: readonly Node[]): void {
+  let cursor = container.firstChild;
+  for (const node of desiredNodes) {
+    if (node === cursor) {
+      cursor = cursor.nextSibling;
+      continue;
+    }
+    container.insertBefore(node, cursor);
+  }
+  while (cursor) {
+    const next = cursor.nextSibling;
+    cursor.remove();
+    cursor = next;
+  }
+}
+
 export function requireElement<T extends HTMLElement>(id: string, owner: Document = document): T {
   const element = owner.getElementById(id);
   if (!element) {
