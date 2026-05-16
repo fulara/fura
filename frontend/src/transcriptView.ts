@@ -134,7 +134,7 @@ export function updateRenderedMessage(article: HTMLElement, message: TranscriptM
   const signature = transcriptMessageRenderSignature(message);
   const previous = renderedMessageState.get(article);
   if (previous?.signature === signature) return article;
-  if (tryUpdateRenderedMessageContent(article, header, message, options, signature)) return article;
+
   renderedMessageState.set(article, { message, signature });
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
@@ -143,30 +143,6 @@ export function updateRenderedMessage(article: HTMLElement, message: TranscriptM
   return article;
 }
 
-function tryUpdateRenderedMessageContent(
-  article: HTMLElement,
-  header: Element,
-  message: TranscriptMessage,
-  options: RenderMessageOptions,
-  signature: string,
-): boolean {
-  if (options.review?.active) return false;
-  const visibleBlocks = visibleMessageBlocks(message, options);
-  if (visibleBlocks.length !== 1) return false;
-  const [{ block, index }] = visibleBlocks;
-  if (block.kind !== "text" || !message.isNew) return false;
-  const body = header.nextElementSibling;
-  if (!(body instanceof HTMLElement) || body.nextElementSibling) return false;
-  if (body.dataset.blockKind !== "text" || body.dataset.blockIndex !== String(index)) return false;
-  const textNode = body.querySelector(".streaming-text-content")?.firstChild;
-  if (!(textNode instanceof Text)) return false;
-
-  renderedMessageState.set(article, { message, signature });
-  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
-  article.dataset.messageId = message.id;
-  textNode.data = block.text;
-  return true;
-}
 
 
 function visibleMessageBlocks(message: TranscriptMessage, options: RenderMessageOptions): Array<{ block: ContentBlock; index: number }> {
@@ -514,15 +490,6 @@ function renderPlainParagraph(text: string): HTMLParagraphElement {
   return p;
 }
 
-function renderStreamingText(text: string): HTMLElement {
-  const body = mkEl("div");
-  body.className = "markdown-body streaming-text";
-  const p = mkEl("p");
-  p.className = "streaming-text-content";
-  p.append(mkText(text));
-  body.append(p);
-  return body;
-}
 
 function renderList(token: Tokens.List): HTMLOListElement | HTMLUListElement {
   if (token.ordered) {
@@ -747,7 +714,7 @@ export function renderBlock(
     wrapper.dataset.messageId = messageId;
     wrapper.dataset.blockIndex = String(blockIndex);
     wrapper.dataset.blockKind = "text";
-    wrapper.append(isNew ? renderStreamingText(block.text) : renderMarkdown(block.text));
+    wrapper.append(renderMarkdown(block.text));
     return wrapper;
   }
 
