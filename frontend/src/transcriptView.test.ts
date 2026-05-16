@@ -113,8 +113,6 @@ describe("renderMessage", () => {
     if (!button) throw new Error("copy button missing");
     const initialBlock = node.querySelector<HTMLElement>(".text-block");
     if (!initialBlock) throw new Error("text block missing");
-    const initialTextNode = initialBlock.querySelector(".streaming-text-content")?.firstChild;
-    if (!initialTextNode) throw new Error("streaming text node missing");
 
     updateRenderedMessage(node, {
       id: "m-streaming",
@@ -134,31 +132,35 @@ describe("renderMessage", () => {
 
     expect(node.querySelector<HTMLButtonElement>("header button")).toBe(button);
     expect(node.textContent).toContain("First chunk plus more");
-    expect(node.querySelector<HTMLElement>(".text-block")).toBe(initialBlock);
-    expect(initialBlock.querySelector(".streaming-text-content")?.firstChild).toBe(initialTextNode);
     button.click();
     await Promise.resolve();
     expect(writeText).toHaveBeenCalledWith("First chunk plus more");
   });
 
-  it("renders live text as plain streaming text until finalized", () => {
+  it("renders live text as markdown while streaming", () => {
     const live = renderMessage({
       id: "m-live-markdown",
       role: "assistant",
       isNew: true,
-      blocks: [{ kind: "text", text: "```ts\nconst value = 1;" }],
-    }, { thinkingVisibilityMode: "auto" });
-    expect(live.querySelector(".streaming-text-content")?.textContent).toBe("```ts\nconst value = 1;");
-    expect(live.querySelector(".code-block")).toBeNull();
-
-    updateRenderedMessage(live, {
-      id: "m-live-markdown",
-      role: "assistant",
-      isNew: false,
       blocks: [{ kind: "text", text: "```ts\nconst value = 1;\n```" }],
     }, { thinkingVisibilityMode: "auto" });
+
     expect(live.querySelector(".streaming-text-content")).toBeNull();
     expect(live.querySelector(".code-block")).toBeTruthy();
+  });
+
+  it("renders an unclosed streaming code fence as a code block", () => {
+    const live = renderMessage({
+      id: "m-live-open-fence",
+      role: "assistant",
+      isNew: true,
+      blocks: [{ kind: "text", text: "```ts\nconst value = 1;" }],
+    }, { thinkingVisibilityMode: "auto" });
+
+    expect(live.querySelector(".streaming-text-content")).toBeNull();
+    expect(live.querySelector(".code-block")).toBeTruthy();
+    expect(live.querySelector(".code-lang")?.textContent).toBe("ts");
+    expect(live.querySelector("code")?.textContent).toContain("const value = 1;");
   });
 
   it("renders transcript review mode with line comments and actions", () => {
