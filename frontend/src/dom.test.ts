@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mkEl, mkFrag, mkText, requireElement, setRenderDocument } from "./dom";
+import { mkEl, mkFrag, mkText, reconcileChildren, requireElement, setRenderDocument } from "./dom";
 
 describe("render document helpers", () => {
   it("creates nodes in the configured render document", () => {
@@ -19,6 +19,33 @@ describe("render document helpers", () => {
     setRenderDocument(document);
 
     expect(mkEl("div").ownerDocument).toBe(document);
+  });
+});
+
+describe("reconcileChildren", () => {
+  it("keeps nodes already in the desired position attached", () => {
+    const container = document.createElement("div");
+    const first = document.createElement("span");
+    const second = document.createElement("span");
+    container.append(first, second);
+
+    reconcileChildren(container, [first, second]);
+
+    expect([...container.childNodes]).toEqual([first, second]);
+  });
+
+  it("moves, inserts, and removes only where needed", () => {
+    const container = document.createElement("div");
+    const first = document.createElement("span");
+    const second = document.createElement("span");
+    const stale = document.createElement("span");
+    const inserted = document.createElement("span");
+    container.append(first, second, stale);
+
+    reconcileChildren(container, [second, inserted, first]);
+
+    expect([...container.childNodes]).toEqual([second, inserted, first]);
+    expect(stale.parentNode).toBeNull();
   });
 });
 

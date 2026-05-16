@@ -9,7 +9,7 @@ import { createPromptSendMessage, type PromptBehavior } from "./composer";
 import { findSlashCommand } from "./slashCommands";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
-import { setRenderDocument } from "./dom";
+import { reconcileChildren, setRenderDocument } from "./dom";
 import {
   extensionDialogBodyText,
   extensionDialogHttpUrl,
@@ -2291,7 +2291,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
 
-    const fragment = transcript.ownerDocument.createDocumentFragment();
+    const desiredNodes: Node[] = [];
     const nextMessageNodes = new Map<string, HTMLElement>();
     for (let i = 0; i < projection.transcript.length; i++) {
       const entry = projection.transcript[i];
@@ -2312,19 +2312,19 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           ? updateRenderedMessage(cachedNode, entry, renderOptions)
           : renderMessage(entry, renderOptions);
         nextMessageNodes.set(key, node);
-        fragment.append(node);
+        desiredNodes.push(node);
       } else if (showToolBubbles) {
-        fragment.append(renderToolCard(entry));
+        desiredNodes.push(renderToolCard(entry));
       }
     }
 
     for (const phaseCard of renderTodoCards(projection.todoPhases ?? [])) {
-      fragment.append(phaseCard);
+      desiredNodes.push(phaseCard);
     }
 
     const visiblePlanReview = visiblePlanReviews.get(projection.summary.sessionId);
     if (visiblePlanReview) {
-      fragment.append(renderPlanReviewCard(
+      desiredNodes.push(renderPlanReviewCard(
         visiblePlanReview.review,
         {
           onApprove: approvePendingPlanReview,
@@ -2335,14 +2335,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,
       ));
     }
-    if (!fragment.hasChildNodes()) {
+    if (desiredNodes.length === 0) {
       const empty = transcript.ownerDocument.createElement("p");
       empty.className = "mobile-empty-state";
       empty.textContent = "Transcript is empty.";
-      fragment.append(empty);
+      desiredNodes.push(empty);
     }
 
-    transcript.replaceChildren(fragment);
+    reconcileChildren(transcript, desiredNodes);
     transcriptRenderCache = { nodes: nextMessageNodes };
     if (wasNearBottom) {
       transcript.scrollTop = transcript.scrollHeight;
@@ -2350,7 +2350,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       transcript.scrollTop = previousScrollTop;
     }
   }
-
 
   return { connect, send };
 }

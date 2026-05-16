@@ -583,6 +583,9 @@ describe("desktop cog options", () => {
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { transcript }) });
     const copyButton = document.querySelector<HTMLButtonElement>('#testTranscriptPanel [data-message-id="assistant-1"] .message-actions button');
     if (!copyButton) throw new Error("copy button missing");
+    const transcriptPanel = document.querySelector<HTMLElement>("#testTranscriptPanel");
+    if (!transcriptPanel) throw new Error("transcript panel missing");
+    const replaceChildren = vi.spyOn(transcriptPanel, "replaceChildren");
 
     connection.emit({
       type: "session.snapshot",
@@ -593,6 +596,7 @@ describe("desktop cog options", () => {
       }),
     });
     expect(document.querySelector<HTMLButtonElement>('#testTranscriptPanel [data-message-id="assistant-1"] .message-actions button')).toBe(copyButton);
+    expect(replaceChildren).not.toHaveBeenCalled();
 
     connection.emit({
       type: "session.snapshot",
