@@ -13,7 +13,12 @@ import {
 } from "./transcriptReview";
 import type { ThinkingVisibilityMode } from "./uiPreferences";
 
-const renderedMessageState = new WeakMap<HTMLElement, TranscriptMessage>();
+type RenderedMessageState = {
+  message: TranscriptMessage;
+  signature: string;
+};
+
+const renderedMessageState = new WeakMap<HTMLElement, RenderedMessageState>();
 
 
 export function transcriptMessageRenderCacheKey(
@@ -26,37 +31,25 @@ export function transcriptMessageRenderCacheKey(
   return `message:${sessionId.length}:${sessionId}:${message.id.length}:${message.id}:${index}:${message.role}:${timestamp}:${variantKey.length}:${variantKey}`;
 }
 
-function transcriptMessagesRenderEqual(left: TranscriptMessage, right: TranscriptMessage): boolean {
-  if (left === right) return true;
-  if (
-    left.role !== right.role ||
-    (left.timestamp ?? null) !== (right.timestamp ?? null) ||
-    left.isNew !== right.isNew ||
-    left.blocks.length !== right.blocks.length
-  ) {
-    return false;
+function transcriptMessageRenderSignature(message: TranscriptMessage): string {
+  let signature = `role:${message.role};ts:${message.timestamp ?? ""};new:${message.isNew ? 1 : 0};blocks:${message.blocks.length};`;
+  for (const block of message.blocks) {
+    switch (block.kind) {
+      case "text":
+        signature += `text:${block.text.length}:${block.text};`;
+        break;
+      case "image":
+        signature += `image:${block.mimeType.length}:${block.mimeType}:${block.data.length}:${block.data}:${block.alt?.length ?? -1}:${block.alt ?? ""};`;
+        break;
+      case "thinking":
+        signature += `thinking:${block.thinking.length}:${block.thinking};`;
+        break;
+      case "redactedthinking":
+        signature += "redactedthinking;";
+        break;
+    }
   }
-  for (let i = 0; i < left.blocks.length; i++) {
-    if (!transcriptBlocksRenderEqual(left.blocks[i], right.blocks[i])) return false;
-  }
-  return true;
-}
-
-function transcriptBlocksRenderEqual(left: ContentBlock, right: ContentBlock): boolean {
-  if (left.kind !== right.kind) return false;
-  switch (left.kind) {
-    case "text":
-      return right.kind === "text" && left.text === right.text;
-    case "image":
-      return right.kind === "image" &&
-        left.mimeType === right.mimeType &&
-        left.data === right.data &&
-        (left.alt ?? null) === (right.alt ?? null);
-    case "thinking":
-      return right.kind === "thinking" && left.thinking === right.thinking;
-    case "redactedthinking":
-      return true;
-  }
+  return signature;
 }
 
 
@@ -92,7 +85,7 @@ type RenderMessageReviewOptions = {
 
 export function renderMessage(message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const article = mkEl("article");
-  renderedMessageState.set(article, message);
+  renderedMessageState.set(article, { message, signature: transcriptMessageRenderSignature(message) });
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
 
@@ -109,7 +102,7 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
   copy.type = "button";
   copy.textContent = "Copy";
   copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(messageText(renderedMessageState.get(article) ?? message));
+    await navigator.clipboard.writeText(messageText(renderedMessageState.get(article)?.message ?? message));
     copy.textContent = "Copied";
     window.setTimeout(() => {
       copy.textContent = "Copy";
@@ -124,7 +117,7 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
     review.setAttribute("aria-pressed", options.review.active ? "true" : "false");
     review.disabled = options.review.active;
     review.addEventListener("click", () => {
-      options.review?.onStart?.(renderedMessageState.get(article) ?? message);
+      options.review?.onStart?.(renderedMessageState.get(article)?.message ?? message);
     });
     actions.append(review);
   }
@@ -138,9 +131,10 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
 export function updateRenderedMessage(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const header = article.firstElementChild;
   if (!header || header.tagName !== "HEADER") return renderMessage(message, options);
+  const signature = transcriptMessageRenderSignature(message);
   const previous = renderedMessageState.get(article);
-  if (previous && transcriptMessagesRenderEqual(previous, message)) return article;
-  renderedMessageState.set(article, message);
+  if (previous?.signature === signature) return article;
+  renderedMessageState.set(article, { message, signature });
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
   while (header.nextSibling) header.nextSibling.remove();
