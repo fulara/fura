@@ -111,6 +111,17 @@ describe("renderMessage", () => {
     }, { thinkingVisibilityMode: "auto" });
     const button = node.querySelector<HTMLButtonElement>("header button");
     if (!button) throw new Error("copy button missing");
+    const initialBlock = node.querySelector<HTMLElement>(".text-block");
+    if (!initialBlock) throw new Error("text block missing");
+
+    updateRenderedMessage(node, {
+      id: "m-streaming",
+      role: "assistant",
+      isNew: true,
+      blocks: [{ kind: "text", text: "First chunk" }],
+    }, { thinkingVisibilityMode: "auto" });
+    expect(node.querySelector<HTMLElement>(".text-block")).toBe(initialBlock);
+
 
     updateRenderedMessage(node, {
       id: "m-streaming",
