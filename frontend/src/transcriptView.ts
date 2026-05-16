@@ -20,6 +20,18 @@ type RenderedMessageState = {
 
 const renderedMessageState = new WeakMap<HTMLElement, RenderedMessageState>();
 
+type PendingRenderedMessageUpdate = {
+  message: TranscriptMessage;
+  signature: string;
+  options: RenderMessageOptions;
+};
+
+const pendingRenderedMessageUpdates = new WeakMap<HTMLElement, PendingRenderedMessageUpdate>();
+const pendingRenderedMessageArticles = new Set<HTMLElement>();
+const pointerSelectingArticles = new WeakSet<HTMLElement>();
+const documentsWithPendingFlushListeners = new WeakSet<Document>();
+
+
 
 export function transcriptMessageRenderCacheKey(
   sessionId: string,
@@ -83,11 +95,91 @@ type RenderMessageReviewOptions = {
   onFlush?(message: TranscriptMessage): void;
 };
 
+function currentRenderedMessage(article: HTMLElement, fallback: TranscriptMessage): TranscriptMessage {
+  return pendingRenderedMessageUpdates.get(article)?.message ?? renderedMessageState.get(article)?.message ?? fallback;
+}
+
+function trackMessagePointerSelection(article: HTMLElement): void {
+  article.addEventListener("pointerdown", event => {
+    if (isInteractiveSelectionTarget(event.target)) return;
+    pointerSelectingArticles.add(article);
+    ensurePendingFlushListeners(article.ownerDocument);
+    article.ownerDocument.addEventListener("pointerup", () => {
+      pointerSelectingArticles.delete(article);
+      flushPendingRenderedMessageUpdates(article.ownerDocument);
+    }, { once: true });
+  });
+}
+
+function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && Boolean(target.closest("button,a,input,textarea,select,summary"));
+}
+
+function shouldDeferMessageUpdate(article: HTMLElement): boolean {
+  return pointerSelectingArticles.has(article) || selectionIntersectsArticle(article);
+}
+
+function selectionIntersectsArticle(article: HTMLElement): boolean {
+  const selection = article.ownerDocument.getSelection();
+  if (!selection || selection.isCollapsed) return false;
+  for (let i = 0; i < selection.rangeCount; i++) {
+    const range = selection.getRangeAt(i);
+    try {
+      if (range.intersectsNode(article)) return true;
+    } catch {
+      // Ignore ranges from another document.
+    }
+  }
+  return false;
+}
+
+function queueRenderedMessageUpdate(
+  article: HTMLElement,
+  message: TranscriptMessage,
+  signature: string,
+  options: RenderMessageOptions,
+): void {
+  pendingRenderedMessageUpdates.set(article, { message, signature, options });
+  pendingRenderedMessageArticles.add(article);
+  ensurePendingFlushListeners(article.ownerDocument);
+}
+
+function ensurePendingFlushListeners(document: Document): void {
+  if (documentsWithPendingFlushListeners.has(document)) return;
+  documentsWithPendingFlushListeners.add(document);
+  const flush = () => flushPendingRenderedMessageUpdates(document);
+  document.addEventListener("selectionchange", flush);
+  document.addEventListener("pointerup", flush);
+  document.addEventListener("keyup", flush);
+}
+
+function flushPendingRenderedMessageUpdates(document: Document): void {
+  for (const article of Array.from(pendingRenderedMessageArticles)) {
+    if (article.ownerDocument !== document) continue;
+    if (!article.isConnected) {
+      pendingRenderedMessageArticles.delete(article);
+      pendingRenderedMessageUpdates.delete(article);
+      continue;
+    }
+    if (shouldDeferMessageUpdate(article)) continue;
+    const pending = pendingRenderedMessageUpdates.get(article);
+    if (!pending) {
+      pendingRenderedMessageArticles.delete(article);
+      continue;
+    }
+    pendingRenderedMessageArticles.delete(article);
+    pendingRenderedMessageUpdates.delete(article);
+    applyRenderedMessageUpdate(article, pending.message, pending.signature, pending.options);
+  }
+}
+
+
 export function renderMessage(message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const article = mkEl("article");
   renderedMessageState.set(article, { message, signature: transcriptMessageRenderSignature(message) });
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
+  trackMessagePointerSelection(article);
 
   const header = mkEl("header");
   const heading = mkEl("div");
@@ -102,7 +194,7 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
   copy.type = "button";
   copy.textContent = "Copy";
   copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(messageText(renderedMessageState.get(article)?.message ?? message));
+    await navigator.clipboard.writeText(messageText(currentRenderedMessage(article, message)));
     copy.textContent = "Copied";
     window.setTimeout(() => {
       copy.textContent = "Copy";
@@ -117,7 +209,7 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
     review.setAttribute("aria-pressed", options.review.active ? "true" : "false");
     review.disabled = options.review.active;
     review.addEventListener("click", () => {
-      options.review?.onStart?.(renderedMessageState.get(article)?.message ?? message);
+      options.review?.onStart?.(currentRenderedMessage(article, message));
     });
     actions.append(review);
   }
@@ -134,6 +226,21 @@ export function updateRenderedMessage(article: HTMLElement, message: TranscriptM
   const signature = transcriptMessageRenderSignature(message);
   const previous = renderedMessageState.get(article);
   if (previous?.signature === signature) return article;
+  if (shouldDeferMessageUpdate(article)) {
+    queueRenderedMessageUpdate(article, message, signature, options);
+    return article;
+  }
+  return applyRenderedMessageUpdate(article, message, signature, options);
+}
+
+function applyRenderedMessageUpdate(
+  article: HTMLElement,
+  message: TranscriptMessage,
+  signature: string,
+  options: RenderMessageOptions,
+): HTMLElement {
+  const header = article.firstElementChild;
+  if (!header || header.tagName !== "HEADER") return renderMessage(message, options);
   renderedMessageState.set(article, { message, signature });
   article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
   article.dataset.messageId = message.id;
