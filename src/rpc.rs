@@ -666,7 +666,21 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     sessions.get_mut(&target_session_id).map(|record| {
                         record.streaming_message = None;
                         record.live_message_ids.insert(message.id.clone());
-                        record.messages.push(message);
+                        if let Some(existing) = record
+                            .messages
+                            .iter_mut()
+                            .find(|existing| existing.id == message.id)
+                        {
+                            *existing = message;
+                        } else if matches!(message.role, MessageRole::User)
+                            && record.messages.last().is_some_and(|existing| {
+                                existing.id.starts_with("__pending_prompt:")
+                            })
+                        {
+                            *record.messages.last_mut().expect("last message exists") = message;
+                        } else {
+                            record.messages.push(message);
+                        }
                         record.updated_at = Timestamp::now();
                         let projection = record.projection();
                         let replace_from = projection.transcript.len().saturating_sub(1);
@@ -1543,6 +1557,12 @@ pub(crate) async fn take_pending_prompt_busy_message(
         .write()
         .await
         .remove(command_id)?;
+    if let Some(snapshot) =
+        remove_optimistic_prompt_message(state, &draft.session_id, &draft.optimistic_message_id)
+            .await
+    {
+        let _ = state.events.send(snapshot);
+    }
     Some(ServerMessage::PromptBusy {
         session_id: draft.session_id,
         text: draft.text,

@@ -752,6 +752,7 @@ pub(crate) struct PendingPromptDraft {
     pub(crate) session_id: String,
     pub(crate) text: String,
     pub(crate) images: Option<Vec<Value>>,
+    pub(crate) optimistic_message_id: String,
 }
 
 #[derive(Debug, Clone)]

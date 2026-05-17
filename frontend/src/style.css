@@ -1813,6 +1813,11 @@ h2 {
   border-color: rgba(127, 140, 255, 0.44);
 }
 
+.message.message-pending-prompt {
+  border-color: rgba(155, 164, 181, 0.38);
+  background: rgba(23, 27, 36, 0.78);
+}
+
 .message.system {
   border-color: rgba(255, 196, 87, 0.34);
 }
@@ -1831,6 +1836,18 @@ h2 {
   align-items: baseline;
   gap: 0.5rem;
   min-width: 0;
+}
+
+.message-pending-badge {
+  border: 1px solid #3a404d;
+  border-radius: 999px;
+  padding: 0.08rem 0.45rem;
+  background: rgba(155, 164, 181, 0.12);
+  color: #aeb7c8;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: none;
 }
 
 .event-timestamp {
