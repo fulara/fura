@@ -4,6 +4,7 @@ import { mountMobileApp, type MobileConnectionOptions } from "./mobileApp";
 import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ClientMessage, ServerConfig, ServerMessage, SessionProjection, SessionSummary } from "./protocol";
 
+let fakeConnectionAutoOpen = true;
 class FakeConnection implements FuraConnection {
   sent: ClientMessage[] = [];
   connected = false;
@@ -14,6 +15,7 @@ class FakeConnection implements FuraConnection {
   connect(): void {
     this.connected = true;
     this.closed = false;
+    if (!fakeConnectionAutoOpen) return;
     this.options.onStatus("connected", "connected");
     this.options.onOpen?.();
   }
@@ -45,12 +47,13 @@ class FakeConnection implements FuraConnection {
 
 const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en", showTools: true, thinkingVisibility: "auto", proposedModels: [] };
 
-function createHarness(path = "/mobile.html", storedToken = "dev") {
+function createHarness(path = "/mobile.html", storedToken = "dev", autoOpen = true) {
   document.body.innerHTML = `<div id="app"></div>`;
   window.localStorage.clear();
   window.sessionStorage.clear();
   if (storedToken) window.sessionStorage.setItem(FURA_TOKEN_STORAGE_KEY, storedToken);
   window.history.replaceState(null, "", path);
+  fakeConnectionAutoOpen = autoOpen;
   const connections: FakeConnection[] = [];
   const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
   const app = mountMobileApp({
@@ -258,6 +261,15 @@ describe("mountMobileApp", () => {
     expect(log?.textContent).toBe("");
     expect(status?.textContent).toBe("connected");
     expect(document.querySelector<HTMLElement>("#mobileAuthGate")?.hidden).toBe(true);
+    debug.mockRestore();
+  });
+
+  it("keeps the auth gate visible while a stored-token connection is pending", () => {
+    const { debug } = createHarness("/mobile.html", "dev", false);
+
+    const gate = document.querySelector<HTMLElement>("#mobileAuthGate");
+    expect(gate?.hidden).toBe(false);
+    expect(document.querySelector("#mobileAuthStatus")?.textContent).toBe("Connecting…");
     debug.mockRestore();
   });
 

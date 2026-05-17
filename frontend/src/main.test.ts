@@ -20,6 +20,7 @@ class FakeConnection implements FuraConnection {
   connect(): void {
     this.connected = true;
     this.closed = false;
+    if (!fakeConnectionAutoOpen) return;
     this.options.onStatus("connected", "connected");
     this.options.onOpen?.();
   }
@@ -155,6 +156,7 @@ function simpleDiffRows(patch: string): DiffRow[] {
 }
 
 let connections: FakeConnection[] = [];
+let fakeConnectionAutoOpen = true;
 let desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
 
 function installMocks(): void {
@@ -207,6 +209,7 @@ async function createHarness(options: { preserveLocalStorage?: boolean } = {}) {
   vi.restoreAllMocks();
   connections = [];
   desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
+  fakeConnectionAutoOpen = true;
   document.body.innerHTML = `<div id="app"></div>`;
   if (!options.preserveLocalStorage) window.localStorage.clear();
   window.sessionStorage.clear();
@@ -221,6 +224,50 @@ async function createHarness(options: { preserveLocalStorage?: boolean } = {}) {
   return { connection };
 }
 
+async function createPendingHarness() {
+  vi.resetModules();
+  vi.restoreAllMocks();
+  connections = [];
+  desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
+  fakeConnectionAutoOpen = false;
+  document.body.innerHTML = `<div id="app"></div>`;
+  window.localStorage.clear();
+  window.sessionStorage.clear();
+  window.sessionStorage.setItem(FURA_TOKEN_STORAGE_KEY, "dev");
+  window.history.replaceState(null, "", "/");
+  vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  installMocks();
+  await import("./main");
+  return { connection: connections[0] };
+}
+
+
+describe("auth gate", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    fakeConnectionAutoOpen = true;
+    connections = [];
+    vi.useRealTimers();
+  });
+
+  it("stays visible while a stored-token connection is pending", async () => {
+    await createPendingHarness();
+
+    expect(document.querySelector<HTMLElement>("#authGate")?.hidden).toBe(false);
+    expect(document.querySelector("#authStatus")?.textContent).toBe("Connecting…");
+  });
+
+  it("does not crash on LAN HTTP where crypto.randomUUID is unavailable", async () => {
+    vi.stubGlobal("crypto", { ...globalThis.crypto, randomUUID: undefined });
+
+    await createPendingHarness();
+
+    expect(document.querySelector<HTMLElement>("#authGate")?.hidden).toBe(false);
+    expect(window.sessionStorage.getItem("fura.diff.clientId")).toBeTruthy();
+    vi.unstubAllGlobals();
+  });
+});
 describe("conflict resolver entry", () => {
   beforeEach(() => {
     vi.resetModules();

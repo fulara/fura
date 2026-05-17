@@ -171,6 +171,37 @@ describe("createFuraConnection", () => {
     expect(authFailures).toEqual(["Authentication failed. Check the token and bridge server."]);
   });
 
+
+  it("surfaces the auth gate when WebSocket closes before opening", async () => {
+    resetFakeWebSockets();
+    const statuses: string[] = [];
+    const logs: string[] = [];
+    const authFailures: string[] = [];
+    const connection = createFuraConnection({
+      auth: { type: "sessionCookie", token: "dev" },
+      locationHref: "http://192.168.9.102:3737/",
+      WebSocketCtor: FakeWebSocket,
+      fetchImpl: okFetch(),
+      onStatus: status => statuses.push(status),
+      onClose: () => logs.push("closed"),
+      onMessage: () => {},
+      onLog: message => logs.push(message),
+      onAuthFailure: message => authFailures.push(message),
+    });
+
+    connection.connect();
+    await flushPromises();
+    FakeWebSocket.instances[0].emit("close");
+
+    expect(statuses).toEqual(["connecting", "disconnected"]);
+    expect(logs).toEqual([
+      "closed",
+      "WebSocket connection failed. Re-enter the bridge token or check the bridge server.",
+    ]);
+    expect(authFailures).toEqual([
+      "WebSocket connection failed. Re-enter the bridge token or check the bridge server.",
+    ]);
+  });
   it("routes text messages and ignores non-text frames", async () => {
     resetFakeWebSockets();
     const logs: string[] = [];

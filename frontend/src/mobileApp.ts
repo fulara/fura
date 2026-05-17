@@ -665,6 +665,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       showAuthGate("Enter the bridge token to connect.");
       return;
     }
+    authGate.hidden = false;
     authSubmit.disabled = true;
     authStatus.textContent = "Connecting…";
     connection?.disconnect();

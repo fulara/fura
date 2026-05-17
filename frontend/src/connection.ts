@@ -89,6 +89,7 @@ export function createFuraConnection(options: FuraConnectionOptions): FuraConnec
   let reconnectAttempts = 0;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
+  let socketOpened = false;
   async function connectWithAuth(generation: number): Promise<void> {
     try {
       const authenticated = await establishAuthSession(locationHref, options.auth, fetchImpl);
@@ -105,8 +106,10 @@ export function createFuraConnection(options: FuraConnectionOptions): FuraConnec
 
       const nextSocket = new WebSocketCtor(buildWebSocketUrl(locationHref, options.clientKind));
       socket = nextSocket;
+      socketOpened = false;
       nextSocket.addEventListener("open", () => {
         if (generation !== connectionGeneration || socket !== nextSocket) return;
+        socketOpened = true;
         reconnectAttempts = 0;
         options.onStatus("connected", "connected");
         options.onOpen?.();
@@ -115,6 +118,15 @@ export function createFuraConnection(options: FuraConnectionOptions): FuraConnec
         if (generation !== connectionGeneration || socket !== nextSocket) return;
         socket = null;
         options.onClose?.();
+        if (!socketOpened) {
+          manuallyDisconnected = true;
+          clearReconnectTimer();
+          const message = "WebSocket connection failed. Re-enter the bridge token or check the bridge server.";
+          options.onStatus("disconnected", "disconnected");
+          options.onLog(message);
+          options.onAuthFailure?.(message);
+          return;
+        }
         scheduleReconnect(generation);
       });
       nextSocket.addEventListener("error", () => {

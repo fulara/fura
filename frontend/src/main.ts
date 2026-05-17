@@ -892,17 +892,25 @@ const pendingDiffFilePatches = new Map<string, PendingDiffFilePatchRequest>();
 const diffFilePatchErrors = new Map<string, DiffFilePatchError>();
 type DiffFileMenuState = { annotationKey: string; filePath: string };
 let openDiffFileMenu: DiffFileMenuState | null = null;
+
+function randomClientId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 const diffClientId = (() => {
   const key = "fura.diff.clientId";
   const existing = sessionStorage.getItem(key);
   if (existing) return existing;
-  const next = crypto.randomUUID();
+  const next = randomClientId();
   sessionStorage.setItem(key, next);
   return next;
 })();
 
 function newDiffId(): string {
-  return crypto.randomUUID();
+  return randomClientId();
 }
 
 function diffPatchCacheKey(comparisonKey: string, filePath: string | null): string {
@@ -1549,6 +1557,7 @@ function connect(token: string): void {
     return;
   }
 
+  authGate.hidden = false;
   authSubmit.disabled = true;
   authStatus.textContent = "Connecting…";
   connection?.disconnect();
@@ -2252,7 +2261,7 @@ function handleServerMessage(message: ServerMessage): void {
 function submitControlPromptText(text: string): boolean {
   const prompt = text.trim();
   if (!prompt) return false;
-  const conversationId = controlConversationId ?? crypto.randomUUID();
+  const conversationId = controlConversationId ?? randomClientId();
   const sent = send({
     type: "control.prompt",
     clientId: controlClientId,
@@ -2379,7 +2388,7 @@ function renderControlCandidate(candidate: ControlCandidate): HTMLElement {
 function getOrCreateControlClientId(): string {
   const existing = window.sessionStorage.getItem(CONTROL_CLIENT_ID_STORAGE_KEY);
   if (existing) return existing;
-  const next = crypto.randomUUID();
+  const next = randomClientId();
   window.sessionStorage.setItem(CONTROL_CLIENT_ID_STORAGE_KEY, next);
   return next;
 }
@@ -7117,10 +7126,7 @@ function setCwdPickerCreatePending(pending: boolean, requestId: string | null = 
 }
 
 function nextClientRequestId(prefix: string): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return `${prefix}-${crypto.randomUUID()}`;
-  }
-  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  return `${prefix}-${randomClientId()}`;
 }
 
 function handleCwdPickerCreateError(requestId: string | null, message: string): boolean {
