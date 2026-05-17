@@ -893,24 +893,35 @@ const diffFilePatchErrors = new Map<string, DiffFilePatchError>();
 type DiffFileMenuState = { annotationKey: string; filePath: string };
 let openDiffFileMenu: DiffFileMenuState | null = null;
 
-function randomClientId(): string {
+function randomUuid(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
 }
 
 const diffClientId = (() => {
   const key = "fura.diff.clientId";
   const existing = sessionStorage.getItem(key);
   if (existing) return existing;
-  const next = randomClientId();
+  const next = randomUuid();
   sessionStorage.setItem(key, next);
   return next;
 })();
 
 function newDiffId(): string {
-  return randomClientId();
+  return randomUuid();
 }
 
 function diffPatchCacheKey(comparisonKey: string, filePath: string | null): string {
@@ -2261,7 +2272,7 @@ function handleServerMessage(message: ServerMessage): void {
 function submitControlPromptText(text: string): boolean {
   const prompt = text.trim();
   if (!prompt) return false;
-  const conversationId = controlConversationId ?? randomClientId();
+  const conversationId = controlConversationId ?? randomUuid();
   const sent = send({
     type: "control.prompt",
     clientId: controlClientId,
@@ -2388,7 +2399,7 @@ function renderControlCandidate(candidate: ControlCandidate): HTMLElement {
 function getOrCreateControlClientId(): string {
   const existing = window.sessionStorage.getItem(CONTROL_CLIENT_ID_STORAGE_KEY);
   if (existing) return existing;
-  const next = randomClientId();
+  const next = randomUuid();
   window.sessionStorage.setItem(CONTROL_CLIENT_ID_STORAGE_KEY, next);
   return next;
 }
@@ -7126,7 +7137,7 @@ function setCwdPickerCreatePending(pending: boolean, requestId: string | null = 
 }
 
 function nextClientRequestId(prefix: string): string {
-  return `${prefix}-${randomClientId()}`;
+  return `${prefix}-${randomUuid()}`;
 }
 
 function handleCwdPickerCreateError(requestId: string | null, message: string): boolean {

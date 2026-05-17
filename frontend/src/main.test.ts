@@ -264,7 +264,7 @@ describe("auth gate", () => {
     await createPendingHarness();
 
     expect(document.querySelector<HTMLElement>("#authGate")?.hidden).toBe(false);
-    expect(window.sessionStorage.getItem("fura.diff.clientId")).toBeTruthy();
+    expect(window.sessionStorage.getItem("fura.diff.clientId")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
     vi.unstubAllGlobals();
   });
 });
