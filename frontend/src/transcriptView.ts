@@ -32,7 +32,7 @@ export function transcriptMessageRenderCacheKey(
 }
 
 function transcriptMessageRenderSignature(message: TranscriptMessage): string {
-  let signature = `role:${message.role};ts:${message.timestamp ?? ""};new:${message.isNew ? 1 : 0};blocks:${message.blocks.length};`;
+  let signature = `id:${message.id};role:${message.role};ts:${message.timestamp ?? ""};new:${message.isNew ? 1 : 0};blocks:${message.blocks.length};`;
   for (const block of message.blocks) {
     switch (block.kind) {
       case "text":
@@ -83,19 +83,20 @@ type RenderMessageReviewOptions = {
   onFlush?(message: TranscriptMessage): void;
 };
 
+
+function isPendingPromptMessage(message: TranscriptMessage): boolean {
+  return message.id.startsWith("__pending_prompt:");
+}
 export function renderMessage(message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const article = mkEl("article");
   renderedMessageState.set(article, { message, signature: transcriptMessageRenderSignature(message) });
-  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
+  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}${isPendingPromptMessage(message) ? " message-pending-prompt" : ""}`;
   article.dataset.messageId = message.id;
 
   const header = mkEl("header");
   const heading = mkEl("div");
   heading.className = "message-heading";
-  const roleLabel = mkEl("strong");
-  roleLabel.textContent = message.role === "user" ? "You" : message.role;
-  heading.append(roleLabel);
-  appendEventTimestamp(heading, message.timestamp);
+  syncMessageHeading(heading, message);
   const actions = mkEl("div");
   actions.className = "message-actions";
   const copy = mkEl("button");
@@ -136,11 +137,27 @@ export function updateRenderedMessage(article: HTMLElement, message: TranscriptM
   if (previous?.signature === signature) return article;
 
   renderedMessageState.set(article, { message, signature });
-  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}`;
+  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}${isPendingPromptMessage(message) ? " message-pending-prompt" : ""}`;
   article.dataset.messageId = message.id;
+  const heading = header.firstElementChild;
+  if (heading) syncMessageHeading(heading as HTMLElement, message);
   while (header.nextSibling) header.nextSibling.remove();
   appendMessageContent(article, message, options);
   return article;
+}
+
+function syncMessageHeading(heading: HTMLElement, message: TranscriptMessage): void {
+  heading.replaceChildren();
+  const roleLabel = mkEl("strong");
+  roleLabel.textContent = message.role === "user" ? "You" : message.role;
+  heading.append(roleLabel);
+  appendEventTimestamp(heading, message.timestamp);
+  if (isPendingPromptMessage(message)) {
+    const pending = mkEl("span");
+    pending.className = "message-pending-badge";
+    pending.textContent = "sending";
+    heading.append(pending);
+  }
 }
 
 

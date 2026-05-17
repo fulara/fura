@@ -2079,6 +2079,29 @@ pub(crate) mod tests {
             ServerMessage::SessionSnapshot { session_id, state } => {
                 assert_eq!(session_id, "s1");
                 assert!(state.is_busy);
+                assert_eq!(state.transcript.len(), 1);
+                match &state.transcript[0] {
+                    TranscriptEntry::Message(message) => {
+                        assert_eq!(message.role, MessageRole::User);
+                        assert!(message.id.starts_with("__pending_prompt:"));
+                        assert_eq!(message.blocks.len(), 2);
+                        assert_eq!(
+                            message.blocks[0],
+                            ContentBlock::Text {
+                                text: "queue this safely".to_string(),
+                            }
+                        );
+                        assert_eq!(
+                            message.blocks[1],
+                            ContentBlock::Image {
+                                data: "abc123".to_string(),
+                                mime_type: "image/png".to_string(),
+                                alt: None,
+                            }
+                        );
+                    }
+                    other => panic!("unexpected transcript entry: {other:?}"),
+                }
             }
             other => panic!("unexpected response: {other:?}"),
         }
@@ -2115,6 +2138,14 @@ pub(crate) mod tests {
         )
         .await;
 
+        match events.recv().await.expect("prompt rollback event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert!(state.transcript.is_empty());
+            }
+            other => panic!("unexpected rollback event: {other:?}"),
+        }
+
         match events.recv().await.expect("prompt busy event") {
             ServerMessage::PromptBusy {
                 session_id,
@@ -2130,7 +2161,7 @@ pub(crate) mod tests {
                     Some("image/png")
                 );
             }
-            other => panic!("unexpected event: {other:?}"),
+            other => panic!("unexpected prompt busy event: {other:?}"),
         }
         assert!(
             events.try_recv().is_err(),
@@ -3611,6 +3642,46 @@ pub(crate) mod tests {
         let record = sessions.get("s1").expect("record remains");
         assert!(matches!(record.status, SessionStatus::Idle));
         assert!(!record.projection().is_busy);
+    }
+
+    #[tokio::test]
+    async fn user_message_end_replaces_optimistic_pending_prompt() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.messages.push(TranscriptMessage {
+            id: "__pending_prompt:test".to_string(),
+            role: MessageRole::User,
+            blocks: vec![ContentBlock::Text {
+                text: "hello there".to_string(),
+            }],
+            timestamp: Some(Timestamp::now()),
+            is_new: true,
+        });
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "id": "user-1",
+                    "role": "user",
+                    "content": [{ "type": "text", "text": "hello there" }]
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert_eq!(record.messages.len(), 1);
+        assert_eq!(record.messages[0].id, "user-1");
+        assert_eq!(record.messages[0].role, MessageRole::User);
     }
 
     #[test]

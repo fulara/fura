@@ -1917,11 +1917,21 @@ pub(crate) async fn send_prompt(
         }];
     }
 
+    let command_id = next_rpc_id();
+    let optimistic_message_id = format!("__pending_prompt:{command_id}");
+    let command_images = images.filter(|images| !images.is_empty());
+
     let snapshot = {
         let mut sessions = state.sessions.write().await;
         match sessions.get_mut(&session_id) {
             Some(record) => {
                 record.status = SessionStatus::Busy;
+                record.messages.push(optimistic_prompt_message(
+                    optimistic_message_id.clone(),
+                    text.clone(),
+                    command_images.as_ref(),
+                ));
+                record.updated_at = Timestamp::now();
                 Some(ServerMessage::SessionSnapshot {
                     session_id: session_id.clone(),
                     state: record.projection(),
@@ -1935,8 +1945,6 @@ pub(crate) async fn send_prompt(
         return vec![unknown_session_error(session_id)];
     };
 
-    let command_id = next_rpc_id();
-    let command_images = images.filter(|images| !images.is_empty());
     if behavior.is_none() {
         state.pending_prompt_drafts.write().await.insert(
             command_id.clone(),
@@ -1944,6 +1952,7 @@ pub(crate) async fn send_prompt(
                 session_id: session_id.clone(),
                 text: text.clone(),
                 images: command_images.clone(),
+                optimistic_message_id: optimistic_message_id.clone(),
             },
         );
     }
@@ -1958,15 +1967,83 @@ pub(crate) async fn send_prompt(
                 .write()
                 .await
                 .remove(&command_id);
-            vec![
-                snapshot,
-                ServerMessage::Error {
-                    request_id: None,
-                    message,
-                },
-            ]
+            let rollback =
+                remove_optimistic_prompt_message(state, &session_id, &optimistic_message_id).await;
+            let mut responses = vec![snapshot];
+            if let Some(rollback) = rollback {
+                responses.push(rollback);
+            }
+            responses.push(ServerMessage::Error {
+                request_id: None,
+                message,
+            });
+            responses
         }
     }
+}
+
+fn optimistic_prompt_message(
+    id: String,
+    text: String,
+    images: Option<&Vec<Value>>,
+) -> TranscriptMessage {
+    let mut blocks = Vec::new();
+    if !text.is_empty() {
+        blocks.push(ContentBlock::Text { text });
+    }
+    if let Some(images) = images {
+        for image in images {
+            let data = image
+                .get("data")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let mime_type = image
+                .get("mimeType")
+                .or_else(|| image.get("mime_type"))
+                .and_then(Value::as_str)
+                .unwrap_or("image/png")
+                .to_string();
+            if !data.is_empty() {
+                blocks.push(ContentBlock::Image {
+                    data,
+                    mime_type,
+                    alt: None,
+                });
+            }
+        }
+    }
+    TranscriptMessage {
+        id,
+        role: MessageRole::User,
+        blocks,
+        timestamp: Some(Timestamp::now()),
+        is_new: true,
+    }
+}
+
+pub(crate) async fn remove_optimistic_prompt_message(
+    state: &AppState,
+    session_id: &str,
+    optimistic_message_id: &str,
+) -> Option<ServerMessage> {
+    let snapshot = {
+        let mut sessions = state.sessions.write().await;
+        sessions.get_mut(session_id).and_then(|record| {
+            let before = record.messages.len();
+            record
+                .messages
+                .retain(|message| message.id != optimistic_message_id);
+            if record.messages.len() == before {
+                return None;
+            }
+            Some(ServerMessage::SessionSnapshot {
+                session_id: session_id.to_string(),
+                state: record.projection(),
+            })
+        })
+    };
+    snapshot
 }
 
 pub(crate) async fn handle_review_comments_list(

@@ -163,6 +163,26 @@ describe("renderMessage", () => {
     expect(live.querySelector("code")?.textContent).toContain("const value = 1;");
   });
 
+  it("styles optimistic pending prompts distinctly", () => {
+    const pending = renderMessage({
+      id: "__pending_prompt:1",
+      role: "user",
+      isNew: true,
+      blocks: [{ kind: "text", text: "pending prompt" }],
+    }, { thinkingVisibilityMode: "auto" });
+    expect(pending.classList.contains("message-pending-prompt")).toBe(true);
+    expect(pending.querySelector(".message-pending-badge")?.textContent).toBe("sending");
+
+    updateRenderedMessage(pending, {
+      id: "user-1",
+      role: "user",
+      isNew: true,
+      blocks: [{ kind: "text", text: "pending prompt" }],
+    }, { thinkingVisibilityMode: "auto" });
+    expect(pending.classList.contains("message-pending-prompt")).toBe(false);
+    expect(pending.querySelector(".message-pending-badge")).toBeNull();
+  });
+
   it("renders transcript review mode with line comments and actions", () => {
     const onStart = vi.fn();
     const onAddComment = vi.fn();
