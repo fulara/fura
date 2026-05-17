@@ -188,39 +188,6 @@ body {
   font-size: 0.82rem;
 }
 
-
-.mobile-goal-mode-card-host {
-  border-bottom: 1px solid #252a35;
-  background: rgba(16, 19, 26, 0.9);
-  padding: 0.55rem 0.75rem;
-}
-
-.mobile-goal-mode-card-host[hidden] {
-  display: none;
-}
-
-.goal-mode-card-mobile {
-  padding: 0.65rem;
-}
-
-.goal-mode-card-mobile .goal-mode-card-header,
-.goal-mode-card-mobile .goal-mode-meta {
-  align-items: flex-start;
-  flex-direction: column;
-  gap: 0.35rem;
-}
-
-.goal-mode-card-mobile .goal-mode-controls {
-  align-items: stretch;
-  flex-direction: column;
-}
-
-.goal-mode-card-mobile .goal-mode-field,
-.goal-mode-card-mobile .goal-mode-objective-input,
-.goal-mode-card-mobile .goal-mode-budget-input,
-.goal-mode-card-mobile .goal-mode-controls button {
-  width: 100%;
-}
 .mobile-create-drawer {
   border: 1px solid #252a35;
   border-radius: 0.9rem;
