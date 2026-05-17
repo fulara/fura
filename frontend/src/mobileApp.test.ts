@@ -1309,25 +1309,10 @@ describe("mountMobileApp", () => {
     expect(connection.sent.some(message => message.type === "sessionChanges.request")).toBe(false);
   });
 
-  it("sends Goal Mode controls from the mobile goal card", () => {
+  it("does not render mobile Goal Mode controls", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     clickSession();
-    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { goalMode: null }) });
-
-    const objective = document.querySelector<HTMLTextAreaElement>(".goal-mode-objective-input");
-    const budget = document.querySelector<HTMLInputElement>(".goal-mode-budget-input");
-    objective!.value = "Ship mobile Goal Mode controls";
-    budget!.value = "1234";
-    document.querySelector<HTMLFormElement>(".goal-mode-start-controls")?.dispatchEvent(new SubmitEvent("submit", { bubbles: true, cancelable: true }));
-
-    expect(connection.sent).toContainEqual({
-      type: "goal.start",
-      sessionId: "live",
-      objective: "Ship mobile Goal Mode controls",
-      tokenBudget: 1234,
-    });
-
     connection.emit({
       type: "session.snapshot",
       sessionId: "live",
@@ -1348,8 +1333,10 @@ describe("mountMobileApp", () => {
         },
       }),
     });
-    document.querySelector<HTMLButtonElement>(".goal-mode-action-controls button")?.click();
 
-    expect(connection.sent).toContainEqual({ type: "goal.control", sessionId: "live", action: "pause" });
+    expect(document.querySelector("#mobileGoalModeCardHost")).toBeNull();
+    expect(document.querySelector(".goal-mode-card-mobile")).toBeNull();
+    expect(document.querySelector(".goal-mode-objective-input")).toBeNull();
+    expect(connection.sent.some(message => message.type.startsWith("goal."))).toBe(false);
   });
 });
