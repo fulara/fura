@@ -3317,6 +3317,7 @@ mod review_comment_tests {
                 context_lines: 3,
                 generated_at: "2026-05-06T00:00:00Z".to_string(),
                 comparison_key: "cmp".to_string(),
+                displayed_patch_range: None,
             },
             summary: DiffSummaryPayload {
                 files: vec![DiffFileSummary {

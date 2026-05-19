@@ -6266,7 +6266,8 @@ function renderReviewableDiffMainContent(
   const summary = mkEl("section");
   summary.className = "diffs-summary";
   const comparison = mkEl("p");
-  comparison.textContent = `${resolvedRefLabel(state.comparison.base)} → ${resolvedRefLabel(state.comparison.head)}`;
+  const displayedRange = state.comparison.displayedPatchRange;
+  comparison.textContent = `${resolvedRefLabel(displayedRange?.base ?? state.comparison.base)} → ${resolvedRefLabel(displayedRange?.head ?? state.comparison.head)}`;
   const commits = mkEl("p");
   commits.textContent = state.review.currentCommitOid ? `Commit ${(state.review.currentCommitIndex ?? 0) + 1}/${state.review.commits.length}` : `Range · ${state.review.commits.length} commit${state.review.commits.length === 1 ? "" : "s"}`;
   summary.append(comparison, commits);

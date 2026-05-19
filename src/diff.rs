@@ -1354,20 +1354,32 @@ async fn prepare_diff_range(
     let current_commit_oid =
         current_commit_oid.filter(|oid| commits.iter().any(|commit| commit.oid == *oid));
     let commit_patch = match current_commit_oid.as_deref() {
-        Some(oid) => Some(selected_commit_patch_refs(
-            oid,
-            &commits,
-            &base_resolved,
-            range_base_oid.as_deref(),
-        )?),
+        Some(oid) => Some(selected_commit_patch_refs(oid, &commits)?),
         None => None,
     };
-    let (display_left, display_right, current_commit_index, previous_commit_oid) =
-        if let Some((left, right, index, previous_oid, _displayed_range)) = commit_patch {
-            (left, right, Some(index), Some(previous_oid))
-        } else {
-            (base_resolved.clone(), head_resolved.clone(), None, None)
-        };
+    let (
+        display_left,
+        display_right,
+        current_commit_index,
+        previous_commit_oid,
+        displayed_patch_range,
+    ) = if let Some((left, right, index, previous_oid, displayed_range)) = commit_patch {
+        (
+            left,
+            right,
+            Some(index),
+            Some(previous_oid),
+            Some(displayed_range),
+        )
+    } else {
+        (
+            base_resolved.clone(),
+            head_resolved.clone(),
+            None,
+            None,
+            None,
+        )
+    };
     let left_tree_or_commit = oid_for_diff(&display_left)?.to_string();
     let right_tree_or_commit = match &display_right {
         ResolvedDiffRef::WorkingTree => current_worktree_tree(&repo_root).await?,
@@ -1394,6 +1406,7 @@ async fn prepare_diff_range(
         context_lines,
         generated_at,
         comparison_key,
+        displayed_patch_range,
     };
     let review = CommitStepState {
         commits,
@@ -1468,8 +1481,6 @@ async fn commits_for_range(
 fn selected_commit_patch_refs(
     commit_oid: &str,
     commits: &[DiffCommitSummary],
-    base_resolved: &ResolvedDiffRef,
-    range_base_oid: Option<&str>,
 ) -> anyhow::Result<(
     ResolvedDiffRef,
     ResolvedDiffRef,
@@ -1482,21 +1493,11 @@ fn selected_commit_patch_refs(
         .position(|commit| commit.oid == commit_oid)
         .ok_or_else(|| anyhow!("commit is not in the selected range: {commit_oid}"))?;
     let selected = &commits[index];
-    let previous = if selected.is_merge {
-        selected.parent_oids.first().cloned()
-    } else if index == 0 {
-        match base_resolved {
-            ResolvedDiffRef::GitRef { oid, .. } => Some(
-                range_base_oid
-                    .map(str::to_string)
-                    .unwrap_or_else(|| oid.clone()),
-            ),
-            ResolvedDiffRef::WorkingTree => None,
-        }
-    } else {
-        Some(commits[index - 1].oid.clone())
-    }
-    .ok_or_else(|| anyhow!("selected commit has no comparable parent/base"))?;
+    let previous = selected
+        .parent_oids
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow!("selected commit has no comparable parent"))?;
     let left_ref = ResolvedDiffRef::GitRef {
         input: previous.clone(),
         ref_kind: DiffRefKind::Commit,
@@ -3001,6 +3002,107 @@ mod tests {
                 .files
                 .iter()
                 .any(|file| file.new_path == "untracked.txt")
+        );
+    }
+
+    #[tokio::test]
+    async fn selected_session_commit_diff_uses_git_parent_not_snapshot_commit() {
+        let (_temp, repo, base, head) = test_repo();
+        let snapshot_ref = "refs/omp/diff-snapshots/diverged-session-start";
+        git(&repo, &["checkout", "-b", "snapshot-state", &base]);
+        write_file(&repo, "scratch.txt", "session start only\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "session snapshot"]);
+        let snapshot_commit = git_output(&repo, &["rev-parse", "HEAD"]);
+        let snapshot_tree = git_output(
+            &repo,
+            &["rev-parse", &format!("{snapshot_commit}^{{tree}}")],
+        );
+        git(&repo, &["update-ref", snapshot_ref, &snapshot_commit]);
+        git(&repo, &["checkout", "main"]);
+
+        let session_file = repo.join("diverged-session.jsonl");
+        let snapshot = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": snapshot_commit,
+                "createdAt": "2026-05-04T00:00:00.000Z",
+                "headCommit": base,
+                "kind": "session-start",
+                "label": "session-start",
+                "ref": snapshot_ref,
+                "repoRoot": repo,
+                "tree": snapshot_tree
+            },
+            "id": "snapshot-entry",
+            "timestamp": "2026-05-04T00:00:00.000Z"
+        });
+        fs::write(&session_file, format!("{snapshot}\n")).expect("session file");
+
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
+        let request = DiffRequestIdentity::SessionChanges {
+            client_id: "client-1".into(),
+            diff_id: test_diff_id(),
+            session_id: "s1".into(),
+            repo_id: None,
+            detail_mode: DiffDetailMode::FilePatch,
+            current_commit_oid: Some(head.clone()),
+            selected_file: None,
+            context_lines: Some(3),
+        };
+
+        let (_repos, _selected_repo_id, prepared) = prepare_session_changes_diff(
+            &state,
+            "client-1".into(),
+            test_diff_id(),
+            "s1".into(),
+            None,
+            DiffDetailMode::FilePatch,
+            Some(head.clone()),
+            None,
+            request,
+            Some(3),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            prepared.review.current_commit_oid.as_deref(),
+            Some(head.as_str())
+        );
+        assert_eq!(
+            prepared.review.previous_commit_oid.as_deref(),
+            Some(base.as_str())
+        );
+        assert_eq!(prepared.left_tree_or_commit, base);
+        assert_eq!(prepared.right_tree_or_commit, head);
+        assert!(matches!(
+            prepared.comparison.displayed_patch_range,
+            Some(DisplayedPatchRange {
+                base: DiffEndpoint::Commit { .. },
+                head: DiffEndpoint::Commit { .. }
+            })
+        ));
+        let (patch, truncated) = generate_aggregate_patch(
+            &prepared.repo_root,
+            &prepared.left_tree_or_commit,
+            &prepared.right_tree_or_commit,
+            prepared.comparison.context_lines,
+        )
+        .await
+        .unwrap();
+        assert!(!truncated);
+        assert!(patch.contains("+pub fn value() -> i32 { 2 }"), "{patch}");
+        assert!(
+            !patch.contains("scratch.txt"),
+            "selected commit patch must not diff against the session snapshot:\n{patch}"
         );
     }
 

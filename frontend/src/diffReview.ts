@@ -207,10 +207,11 @@ function reviewModeLine(state: DiffReviewableState): string {
 }
 
 function comparisonLines(state: DiffReviewableState): string[] {
+  const displayedRange = state.comparison.displayedPatchRange;
   return [
     `Repository: ${state.comparison.repoRoot}`,
-    `Base: ${resolvedRefLabel(state.comparison.base)}`,
-    `Head: ${resolvedRefLabel(state.comparison.head)}`,
+    `Base: ${resolvedRefLabel(displayedRange?.base ?? state.comparison.base)}`,
+    `Head: ${resolvedRefLabel(displayedRange?.head ?? state.comparison.head)}`,
     reviewModeLine(state),
     `Comparison key: ${comparisonKey(state)}`,
   ];

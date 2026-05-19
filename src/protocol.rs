@@ -436,6 +436,7 @@ pub(crate) struct DiffComparisonIdentity {
     pub(crate) context_lines: u32,
     pub(crate) generated_at: String,
     pub(crate) comparison_key: String,
+    pub(crate) displayed_patch_range: Option<DisplayedPatchRange>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
