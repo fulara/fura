@@ -811,7 +811,14 @@ describe("desktop cog options", () => {
       state: {
         ...commonState,
         request: { ...commonState.request, currentCommitOid: commitOid },
-        comparison: { ...commonState.comparison, currentCommitOid: commitOid },
+        comparison: {
+          ...commonState.comparison,
+          currentCommitOid: commitOid,
+          displayedPatchRange: {
+            base: { kind: "commit", oid: "a".repeat(40), shortOid: "aaaaaaaaaaaa", subject: null },
+            head: { kind: "commit", oid: commitOid, shortOid: "bbbbbbbbbbbb", subject: "Add logging" },
+          },
+        },
         review: { ...commonState.review, currentCommitOid: commitOid, currentCommitIndex: 0, previousCommitOid: "a".repeat(40) },
       },
     });
@@ -819,6 +826,7 @@ describe("desktop cog options", () => {
     expect(commitMessage?.textContent).toContain("Detailed body.");
     expect(commitMessage?.parentElement?.classList.contains("diffs-main-body")).toBe(true);
     expect(document.querySelector("#testDiffPanel .diff-step-actions")?.contains(commitMessage as Node)).toBe(false);
+    expect(document.querySelector("#testDiffPanel .diffs-summary p")?.textContent).toBe("aaaaaaaaaaaa → bbbbbbbbbbbb — Add logging");
 
     document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
     expect(document.querySelector("#testDiffPanel .diff-commit-message")).toBeNull();

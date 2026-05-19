@@ -323,6 +323,7 @@ export type DiffComparisonIdentity = {
   contextLines: number;
   generatedAt: string;
   comparisonKey: string;
+  displayedPatchRange?: DisplayedPatchRange | null;
 };
 
 export type DiffSummaryPayload = {
