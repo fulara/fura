@@ -1,7 +1,7 @@
 {
-  "id": "rpc-plan-set-1",
+  "id": "rpc-plan-discuss-1",
   "type": "response",
-  "command": "set_plan_mode",
+  "command": "discuss_plan_mode",
   "success": true,
   "data": {
     "planMode": {

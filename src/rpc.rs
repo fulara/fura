@@ -78,11 +78,7 @@ async fn initialize_pending_created_session(state: &AppState, transport_session_
     };
 
     if let Some(name) = pending.title.as_ref() {
-        let command = serde_json::json!({
-            "id": next_rpc_id(),
-            "type": "set_session_name",
-            "name": name,
-        });
+        let command = set_session_name_command(next_rpc_id(), name.clone());
         if let Err(message) = send_rpc_command(state, transport_session_id, command).await {
             fail_pending_create_initialization(
                 state,
@@ -536,6 +532,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             | OmpRpcFrame::ToolExecutionEnd { .. }
             | OmpRpcFrame::PlanReview { .. }
             | OmpRpcFrame::GoalUpdated { .. }
+            | OmpRpcFrame::HostToolResult { .. }
+            | OmpRpcFrame::HostToolUpdate { .. }
+            | OmpRpcFrame::HostUriRequest { .. }
+            | OmpRpcFrame::HostUriCancel { .. }
+            | OmpRpcFrame::HostUriResult { .. }
             | OmpRpcFrame::Unknown => {}
         }
         return;
@@ -919,29 +920,33 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         OmpRpcFrame::HostToolCancel { id, target_id } => {
             handle_session_host_tool_cancel(state, session_id, id, target_id).await
         }
+        OmpRpcFrame::HostToolResult { .. } | OmpRpcFrame::HostToolUpdate { .. } => {
+            debug!(transport_session_id = %session_id, "ignored outbound host-tool OMP RPC frame");
+        }
+        OmpRpcFrame::HostUriRequest { .. }
+        | OmpRpcFrame::HostUriCancel { .. }
+        | OmpRpcFrame::HostUriResult { .. } => {
+            debug!(transport_session_id = %session_id, "ignored host URI OMP RPC frame; Fura does not register host URI schemes");
+        }
         OmpRpcFrame::Unknown => {
             debug!(transport_session_id = %session_id, "ignored unknown OMP RPC frame");
         }
     }
 }
 
-pub(crate) fn map_plan_mode_projection(value: &Value) -> Option<PlanModeProjection> {
-    if value.is_null() {
-        return None;
-    }
-    if value.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+fn map_plan_mode_state_projection(value: Option<&OmpPlanModeState>) -> Option<PlanModeProjection> {
+    let value = value?;
+    if !value.enabled {
         return None;
     }
     Some(PlanModeProjection {
         enabled: true,
-        plan_file_path: value_str(value, "planFilePath")
-            .unwrap_or("local://PLAN.md")
-            .to_string(),
-        workflow: value_str(value, "workflow").map(str::to_string),
-        discussion: value
-            .get("discussion")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        plan_file_path: value
+            .plan_file_path
+            .clone()
+            .unwrap_or_else(|| "local://PLAN.md".to_string()),
+        workflow: value.workflow.clone(),
+        discussion: value.discussion.unwrap_or(false),
     })
 }
 
@@ -969,6 +974,26 @@ fn map_goal_status(value: &str) -> Option<GoalStatusProjection> {
         "dropped" => Some(GoalStatusProjection::Dropped),
         _ => None,
     }
+}
+
+fn map_goal_mode_state_projection(value: Option<&OmpGoalModeState>) -> Option<GoalModeProjection> {
+    let value = value?;
+    let goal = value.goal.as_ref()?;
+    Some(GoalModeProjection {
+        enabled: value.enabled,
+        mode: map_goal_runtime_mode(&value.mode).unwrap_or(GoalModeRuntimeMode::Active),
+        reason: value.reason.as_deref().and_then(map_goal_reason),
+        goal: GoalProjection {
+            id: goal.id.clone(),
+            objective: goal.objective.clone(),
+            status: map_goal_status(&goal.status)?,
+            token_budget: goal.token_budget,
+            tokens_used: goal.tokens_used,
+            time_used_seconds: goal.time_used_seconds,
+            created_at: goal.created_at,
+            updated_at: goal.updated_at,
+        },
+    })
 }
 
 pub(crate) fn map_goal_mode_projection(value: &Value) -> Option<GoalModeProjection> {
@@ -1188,7 +1213,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             if let Some(mut pending) = pending {
                 if pending.select_created_snapshot {
                     if let Some(entry_id) = selected_repo_diff_snapshot_entry_id(frame) {
-                        pending.repo_id = Some(crate::diff::snapshot_candidate_id(entry_id));
+                        pending.repo_id = Some(crate::diff::snapshot_candidate_id(&entry_id));
                     }
                 }
                 let request = DiffRequestIdentity::SessionChanges {
@@ -1252,11 +1277,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 .pending_session_name(&current_session_id)
                 .await;
             if let Some(ref name) = pending_name {
-                let cmd = serde_json::json!({
-                    "id": next_rpc_id(),
-                    "type": "set_session_name",
-                    "name": name,
-                });
+                let cmd = set_session_name_command(next_rpc_id(), name.clone());
                 if let Err(e) = send_rpc_command(state, session_id, cmd).await {
                     warn!(session_id = %session_id, error = %e, "failed to queue set_session_name after plan approval");
                 }
@@ -1266,12 +1287,8 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             }
         }
         Some("discuss_plan_mode") => {
-            let plan_mode = frame
-                .get("data")
-                .or_else(|| frame.get("result"))
-                .and_then(|data| data.get("planMode"))
-                .map(map_plan_mode_projection)
-                .unwrap_or(None);
+            let plan_mode = rpc_response_data_as::<OmpPlanModeResponse>(frame)
+                .and_then(|data| map_plan_mode_state_projection(data.plan_mode.as_ref()));
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&current_session_id).map(|record| {
@@ -1288,12 +1305,8 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         }
 
         Some("set_plan_mode") => {
-            let plan_mode = frame
-                .get("data")
-                .or_else(|| frame.get("result"))
-                .and_then(|data| data.get("planMode"))
-                .map(map_plan_mode_projection)
-                .unwrap_or(None);
+            let plan_mode = rpc_response_data_as::<OmpPlanModeResponse>(frame)
+                .and_then(|data| map_plan_mode_state_projection(data.plan_mode.as_ref()));
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&current_session_id).map(|record| {
@@ -1309,11 +1322,8 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             }
         }
         Some("goal_mode") => {
-            let goal_mode = frame
-                .get("data")
-                .or_else(|| frame.get("result"))
-                .and_then(|data| data.get("goalMode"))
-                .and_then(map_goal_mode_projection);
+            let goal_mode = rpc_response_data_as::<OmpGoalModeResponse>(frame)
+                .and_then(|data| map_goal_mode_state_projection(data.goal_mode.as_ref()));
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&current_session_id).map(|record| {
@@ -1366,48 +1376,24 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 apply_controller_get_state(state, session_id, frame).await;
                 return;
             }
-            let data = frame.get("data").or_else(|| frame.get("result"));
-            let rpc_session_id = data
-                .and_then(|d| d.get("sessionId"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let target_session_id = rpc_session_id.unwrap_or_else(|| current_session_id.clone());
-            let session_name = data
-                .and_then(|d| d.get("sessionName"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let model = data
-                .and_then(|d| d.get("model"))
-                .and_then(model_display_name);
-            let thinking_level = data
-                .and_then(|d| d.get("thinkingLevel"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let session_file = data
-                .and_then(|d| d.get("sessionFile"))
-                .and_then(|v| v.as_str())
-                .map(str::to_string);
-            let context_usage = data.and_then(|d| d.get("contextUsage"));
-            // tokens/percent can be JSON null when unknown (e.g. right after compaction).
-            let context_tokens = context_usage
-                .and_then(|cu| cu.get("tokens"))
-                .and_then(|v| v.as_u64());
-            let context_window = context_usage
-                .and_then(|cu| cu.get("contextWindow"))
-                .and_then(|v| v.as_u64());
-            let context_percent = context_usage
-                .and_then(|cu| cu.get("percent"))
-                .and_then(|v| v.as_f64());
-            let plan_mode = data
-                .and_then(|d| d.get("planMode"))
-                .map(map_plan_mode_projection);
-            let goal_mode = data.map(|d| d.get("goalMode").and_then(map_goal_mode_projection));
-            let todo_phases = data.and_then(|d| d.get("todoPhases")).map(|value| {
-                parse_todo_phases_value(value).unwrap_or_else(|error| {
-                    warn!(session_id = %current_session_id, %error, "invalid todoPhases in get_state response");
-                    Vec::new()
-                })
-            });
+            let Some(data) = rpc_response_data_as::<OmpSessionState>(frame) else {
+                warn!(session_id = %current_session_id, "get_state response did not match the typed OMP RPC contract");
+                return;
+            };
+            let target_session_id = data.session_id.clone();
+            let session_name = data.session_name.clone();
+            let model = data.model.as_ref().and_then(model_display_name);
+            let thinking_level = data.thinking_level.clone();
+            let session_file = data.session_file.clone();
+            let context_tokens = data.context_usage.as_ref().and_then(|usage| usage.tokens);
+            let context_window = data
+                .context_usage
+                .as_ref()
+                .and_then(|usage| usage.context_window);
+            let context_percent = data.context_usage.as_ref().and_then(|usage| usage.percent);
+            let plan_mode = Some(map_plan_mode_state_projection(data.plan_mode.as_ref()));
+            let goal_mode = Some(map_goal_mode_state_projection(data.goal_mode.as_ref()));
+            let todo_phases = Some(data.todo_phases);
             let outcome = apply_get_state_update(
                 state,
                 session_id,
@@ -1459,11 +1445,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             // Keep the pending name until get_state reports the new OMP session id, then apply it to that target.
             let pending_name = state.session_runtime.pending_session_name(session_id).await;
             if let Some(ref name) = pending_name {
-                let cmd = serde_json::json!({
-                    "id": next_rpc_id(),
-                    "type": "set_session_name",
-                    "name": name,
-                });
+                let cmd = set_session_name_command(next_rpc_id(), name.clone());
                 if let Err(e) = send_rpc_command(state, session_id, cmd).await {
                     warn!(session_id = %session_id, error = %e, "failed to queue set_session_name after handoff");
                 }
@@ -1498,11 +1480,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 // Keep the pending name until get_state reports the new OMP session id, then apply it to that target.
                 let pending_name = state.session_runtime.pending_session_name(session_id).await;
                 if let Some(ref name) = pending_name {
-                    let cmd = serde_json::json!({
-                        "id": next_rpc_id(),
-                        "type": "set_session_name",
-                        "name": name,
-                    });
+                    let cmd = set_session_name_command(next_rpc_id(), name.clone());
                     if let Err(e) = send_rpc_command(state, session_id, cmd).await {
                         warn!(session_id = %session_id, error = %e, "failed to queue set_session_name after fork");
                     }
@@ -1775,12 +1753,21 @@ pub(crate) fn value_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(|value| value.as_str())
 }
 
-fn selected_repo_diff_snapshot_entry_id(frame: &Value) -> Option<&str> {
-    frame
-        .get("data")?
-        .get("selectedSnapshot")?
-        .get("entryId")?
-        .as_str()
+fn rpc_response_data_as<T>(frame: &Value) -> Option<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_value::<OmpRpcResponseFrame>(frame.clone())
+        .ok()
+        .and_then(|response| response.data_as())
+}
+
+fn selected_repo_diff_snapshot_entry_id(frame: &Value) -> Option<String> {
+    Some(
+        rpc_response_data_as::<OmpRepoDiffResult>(frame)?
+            .selected_snapshot?
+            .entry_id,
+    )
 }
 
 pub(crate) fn tool_async_state(result: &Value) -> Option<&str> {

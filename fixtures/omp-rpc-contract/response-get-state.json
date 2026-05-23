@@ -1,5 +1,5 @@
 {
-  "id": "rpc-1",
+  "id": "rpc-state-1",
   "type": "response",
   "command": "get_state",
   "success": true,
@@ -41,24 +41,7 @@
     "autoCompactionEnabled": true,
     "messageCount": 4,
     "queuedMessageCount": 0,
-    "todoPhases": [
-      {
-        "name": "Compatibility",
-        "tasks": [
-          {
-            "content": "Decode get_state todos",
-            "status": "completed"
-          },
-          {
-            "content": "Render current todos",
-            "status": "in_progress",
-            "notes": [
-              "Covers notes as string arrays"
-            ]
-          }
-        ]
-      }
-    ],
+    "todoPhases": [],
     "planMode": {
       "enabled": true,
       "planFilePath": "local://PLAN.md",
@@ -79,6 +62,18 @@
         "updatedAt": 1770000009000
       }
     },
+    "systemPrompt": [
+      "You are a reliable coding agent."
+    ],
+    "dumpTools": [
+      {
+        "name": "read",
+        "description": "Read files",
+        "parameters": {
+          "type": "object"
+        }
+      }
+    ],
     "contextUsage": {
       "tokens": 1234,
       "contextWindow": 200000,

@@ -916,14 +916,13 @@ async fn handle_plan_approve(
             .set_pending_session_name(session_id.clone(), execution_title)
             .await;
     }
-    let command = serde_json::json!({
-        "id": next_rpc_id(),
-        "type": "approve_plan_mode",
-        "planFilePath": plan_file_path,
-        "finalPlanFilePath": final_plan_file_path,
-        "preserveContext": preserve_context,
-        "compactBeforeExecute": compact_before_execute,
-    });
+    let command = approve_plan_mode_command(
+        next_rpc_id(),
+        plan_file_path,
+        final_plan_file_path,
+        preserve_context,
+        compact_before_execute,
+    );
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => {
             let snapshot = {
@@ -954,10 +953,7 @@ fn short_session_id(session_id: &str) -> String {
 
 async fn handle_plan_discuss(state: &AppState, session_id: String) -> Vec<ServerMessage> {
     info!(action = "plan.discuss", session_id = %session_id);
-    let command = serde_json::json!({
-        "id": next_rpc_id(),
-        "type": "discuss_plan_mode",
-    });
+    let command = discuss_plan_mode_command(next_rpc_id());
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => Vec::new(),
         Err(message) => vec![ServerMessage::Error {
@@ -1474,7 +1470,7 @@ pub(crate) async fn handle_slash_command(
                 match send_rpc_command(
                     state,
                     &session_id,
-                    serde_json::json!({ "id": next_rpc_id(), "type": "set_session_name", "name": new_title }),
+                    set_session_name_command(next_rpc_id(), new_title.clone()),
                 )
                 .await
                 {
@@ -1513,7 +1509,7 @@ pub(crate) async fn handle_slash_command(
             send_slash_rpc_command(
                 state,
                 session_id,
-                serde_json::json!({ "id": next_rpc_id(), "type": "get_session_stats" }),
+                get_session_stats_command(next_rpc_id()),
                 "Requested session stats.",
             )
             .await
@@ -1550,13 +1546,7 @@ pub(crate) async fn handle_session_fork(
         .session_runtime
         .set_pending_session_name(session_id.clone(), name)
         .await;
-    match send_rpc_command(
-        state,
-        &session_id,
-        serde_json::json!({ "id": next_rpc_id(), "type": "fork" }),
-    )
-    .await
-    {
+    match send_rpc_command(state, &session_id, fork_command(next_rpc_id())).await {
         Ok(()) => Vec::new(),
         Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
     }
@@ -1596,22 +1586,17 @@ pub(crate) async fn handle_plan_slash_command(
     };
 
     if enabled {
-        let command = serde_json::json!({
-            "id": next_rpc_id(),
-            "type": "set_plan_mode",
-            "enabled": false,
-        });
+        let command = set_plan_mode_command(next_rpc_id(), false, None, None);
         return send_slash_rpc_command(state, session_id, command, "Requested plan mode exit.")
             .await;
     }
 
-    let command = serde_json::json!({
-        "id": next_rpc_id(),
-        "type": "set_plan_mode",
-        "enabled": true,
-        "planFilePath": "local://PLAN.md",
-        "workflow": "parallel",
-    });
+    let command = set_plan_mode_command(
+        next_rpc_id(),
+        true,
+        Some("local://PLAN.md".to_string()),
+        Some("parallel".to_string()),
+    );
     if let Err(message) = send_rpc_command(state, &session_id, command).await {
         return vec![notice(session_id, NoticeLevel::Error, message)];
     }
@@ -1624,12 +1609,12 @@ pub(crate) async fn handle_plan_slash_command(
         )];
     }
 
-    let prompt_command = serde_json::json!({
-        "id": next_rpc_id(),
-        "type": "prompt",
-        "message": args,
-        "streamingBehavior": "followUp",
-    });
+    let prompt_command = prompt_command(
+        next_rpc_id(),
+        args.to_string(),
+        None,
+        Some(PromptBehavior::FollowUp),
+    );
     match send_rpc_command(state, &session_id, prompt_command).await {
         Ok(()) => vec![notice(
             session_id,
@@ -1644,13 +1629,7 @@ pub(crate) async fn handle_fork_slash_command(
     state: &AppState,
     session_id: String,
 ) -> Vec<ServerMessage> {
-    match send_rpc_command(
-        state,
-        &session_id,
-        serde_json::json!({ "id": next_rpc_id(), "type": "fork" }),
-    )
-    .await
-    {
+    match send_rpc_command(state, &session_id, fork_command(next_rpc_id())).await {
         Ok(()) => Vec::new(),
         Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
     }
@@ -1836,7 +1815,7 @@ pub(crate) async fn handle_thinking_slash_command(
     send_slash_rpc_command(
         state,
         session_id,
-        serde_json::json!({ "id": next_rpc_id(), "type": "set_thinking_level", "level": level }),
+        set_thinking_level_command(next_rpc_id(), level),
         "Requested thinking level change.",
     )
     .await
@@ -3054,11 +3033,7 @@ fn parse_hunk_start(part: &str) -> Option<u32> {
 }
 
 fn review_set_host_tools_command(id: String, tools: Vec<Value>) -> Value {
-    json!({
-        "id": id,
-        "type": "set_host_tools",
-        "tools": tools,
-    })
+    set_host_tools_command(id, tools)
 }
 
 pub(crate) async fn remember_session_host_tools(
@@ -3371,7 +3346,7 @@ mod review_comment_tests {
         run_git(root, &["checkout", "-b", "ours"]);
         fs::write(root.join("demo.txt"), "one\nours\nthree\n").expect("ours file written");
         run_git(root, &["commit", "-am", "ours"]);
-        run_git(root, &["checkout", "-b", "theirs", "master"]);
+        run_git(root, &["checkout", "-b", "theirs", "HEAD~1"]);
         fs::write(root.join("demo.txt"), "one\ntheirs\nthree\n").expect("theirs file written");
         run_git(root, &["commit", "-am", "theirs"]);
         run_git(root, &["checkout", "ours"]);

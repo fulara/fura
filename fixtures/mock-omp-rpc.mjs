@@ -79,7 +79,6 @@ const mockImageData =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 const mockSnapshotCommit = "1111111111111111111111111111111111111111";
 const mockSnapshotHeadCommit = "2222222222222222222222222222222222222222";
-const mockSnapshotTree = "3333333333333333333333333333333333333333";
 
 
 const diffSnapshots = [
@@ -93,7 +92,6 @@ const diffSnapshots = [
     sourceRef: "HEAD",
     commit: mockSnapshotCommit,
     headCommit: mockSnapshotHeadCommit,
-    tree: mockSnapshotTree,
   },
 ];
 function write(frame) {
@@ -479,7 +477,6 @@ for await (const line of rl) {
         sourceRef: command.sourceRef ?? command.ref ?? "HEAD",
         commit: mockSnapshotHeadCommit,
         headCommit: mockSnapshotHeadCommit,
-        tree: mockSnapshotTree,
       };
       diffSnapshots.push(snapshot);
       success(command, {

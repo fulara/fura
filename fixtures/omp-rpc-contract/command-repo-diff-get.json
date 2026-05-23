@@ -1,0 +1,7 @@
+{
+  "id": "cmd-diff-get-1",
+  "type": "repo_diff_get",
+  "selector": "snap-session-start",
+  "headSelector": "HEAD",
+  "stat": true
+}

@@ -1,5 +1,5 @@
 {
-  "id": "rpc-2",
+  "id": "rpc-messages-1",
   "type": "response",
   "command": "get_messages",
   "success": true,

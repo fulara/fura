@@ -1,5 +1,5 @@
 {
-  "id": "rpc-4",
+  "id": "rpc-models-1",
   "type": "response",
   "command": "get_available_models",
   "success": true,

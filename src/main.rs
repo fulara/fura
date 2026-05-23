@@ -1089,6 +1089,63 @@ pub(crate) mod tests {
             .unwrap_or_else(|error| panic!("failed to parse contract fixture {file}: {error}"))
     }
 
+    fn canonical_command_fixture(name: &str) -> Option<Value> {
+        Some(match name {
+            "command-get-state" => get_state_command("cmd-state-1".to_string()),
+            "command-fork" => fork_command("cmd-fork-1".to_string()),
+            "command-set-active-tools" => set_active_tools_command(
+                "cmd-tools-1".to_string(),
+                vec![
+                    "read".to_string(),
+                    "todo_write".to_string(),
+                    "task".to_string(),
+                ],
+            ),
+            "command-set-plan-mode" => set_plan_mode_command(
+                "cmd-plan-1".to_string(),
+                true,
+                Some("local://PLAN.md".to_string()),
+                Some("parallel".to_string()),
+            ),
+            "command-approve-plan-mode" => approve_plan_mode_command(
+                "cmd-plan-approve-1".to_string(),
+                "local://PLAN.md".to_string(),
+                "local://Fura_RPC_Protocol_Plan.md".to_string(),
+                true,
+                false,
+            ),
+            "command-discuss-plan-mode" => {
+                discuss_plan_mode_command("cmd-plan-discuss-1".to_string())
+            }
+            "command-goal-mode-create" => goal_mode_command(
+                "cmd-goal-create-1".to_string(),
+                "create",
+                Some("Ship goal-mode projection".to_string()),
+                Some(50000),
+            ),
+            "command-goal-mode-set-budget" => goal_mode_command(
+                "cmd-goal-budget-1".to_string(),
+                "set_budget",
+                None,
+                Some(75000),
+            ),
+            "command-repo-diff-get" => repo_diff_get_command(
+                "cmd-diff-get-1".to_string(),
+                Some("snap-session-start".to_string()),
+                Some("HEAD".to_string()),
+                Some(true),
+            ),
+            "command-repo-diff-snapshot" => repo_diff_snapshot_command(
+                "cmd-diff-snapshot-1".to_string(),
+                "manual".to_string(),
+                Some("/tmp/repo".to_string()),
+                Some("refs/omp/diff-snapshots/manual".to_string()),
+            ),
+            "command-set-host-uri-schemes" => return None,
+            _ => panic!("unexpected command fixture {name}"),
+        })
+    }
+
     #[test]
     fn omp_contract_fixtures_decode_as_typed_frames() {
         let manifest: Vec<ContractManifestEntry> =
@@ -1101,6 +1158,20 @@ pub(crate) mod tests {
         );
         for entry in manifest {
             let value = read_contract_fixture(&entry.file);
+            if entry.category == "command" {
+                let command = OmpRpcCommand::decode(value.clone()).unwrap_or_else(|error| {
+                    panic!(
+                        "{} ({}) failed to decode as command: {error}",
+                        entry.name, entry.category
+                    )
+                });
+                let _ = command;
+                if let Some(expected) = canonical_command_fixture(&entry.name) {
+                    assert_eq!(expected, value, "{} command helper drifted", entry.name);
+                }
+                continue;
+            }
+
             let frame = OmpRpcFrame::decode(value).unwrap_or_else(|error| {
                 panic!(
                     "{} ({}) failed to decode: {error}",
@@ -1116,9 +1187,17 @@ pub(crate) mod tests {
                         )
                         .expect("get_state data should decode");
                         assert!(!data.session_id.is_empty());
+                        assert!(data.context_usage.is_some());
                         assert!(
-                            !data.todo_phases.is_empty(),
-                            "get_state fixture must cover todoPhases compatibility"
+                            data.plan_mode.as_ref().is_some_and(|state| state.enabled),
+                            "get_state fixture must cover planMode compatibility"
+                        );
+                        assert!(
+                            data.goal_mode
+                                .as_ref()
+                                .and_then(|state| state.goal.as_ref())
+                                .is_some(),
+                            "get_state fixture must cover goalMode compatibility"
                         );
                     }
                     "get_messages" => {
@@ -1147,6 +1226,46 @@ pub(crate) mod tests {
                         )
                         .expect("get_available_models data should decode");
                         assert!(!data.models.is_empty());
+                    }
+                    "set_plan_mode" | "discuss_plan_mode" => {
+                        let data: OmpPlanModeResponse = response
+                            .data_as()
+                            .expect("plan mode response data should decode");
+                        assert!(
+                            data.plan_mode.as_ref().is_some_and(|state| state.enabled),
+                            "plan mode response fixture must carry enabled planMode"
+                        );
+                    }
+                    "approve_plan_mode" => {
+                        let data: OmpApprovePlanModeResponse = response
+                            .data_as()
+                            .expect("approve_plan_mode data should decode");
+                        assert_eq!(data.execution_dispatched, Some(true));
+                    }
+                    "goal_mode" => {
+                        let data: OmpGoalModeResponse =
+                            response.data_as().expect("goal_mode data should decode");
+                        assert!(
+                            data.goal_mode
+                                .as_ref()
+                                .and_then(|state| state.goal.as_ref())
+                                .is_some(),
+                            "goal mode response fixture must carry a goal"
+                        );
+                    }
+                    "set_active_tools" => {
+                        let data: OmpSetActiveToolsResponse = response
+                            .data_as()
+                            .expect("set_active_tools data should decode");
+                        assert!(data.tool_names.iter().any(|tool| tool == "read"));
+                    }
+                    "repo_diff_get" | "repo_diff_snapshot" => {
+                        let data: OmpRepoDiffResult =
+                            response.data_as().expect("repo diff data should decode");
+                        assert!(
+                            data.selected_snapshot.is_some(),
+                            "repo diff fixture must carry selectedSnapshot"
+                        );
                     }
                     _ if response.is_error() => {
                         assert!(
@@ -3601,6 +3720,32 @@ pub(crate) mod tests {
             record.messages[0].timestamp.map(Timestamp::millis),
             Some(1770000005000)
         );
+    }
+
+    #[tokio::test]
+    async fn host_uri_frames_are_ignored_without_provider_behavior() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        for fixture in [
+            "host-uri-request-read.json",
+            "host-uri-request-write.json",
+            "host-uri-cancel.json",
+            "host-uri-result-success.json",
+            "host-uri-result-error.json",
+        ] {
+            let frame = read_contract_fixture(fixture);
+            apply_rpc_frame(&state, "s1", &frame).await;
+        }
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert!(record.messages.is_empty());
+        assert!(record.pending_plan_review.is_none());
     }
 
     #[tokio::test]

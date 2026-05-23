@@ -1,0 +1,7 @@
+{
+  "id": "cmd-diff-snapshot-1",
+  "type": "repo_diff_snapshot",
+  "label": "manual",
+  "repoRoot": "/tmp/repo",
+  "ref": "refs/omp/diff-snapshots/manual"
+}

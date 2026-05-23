@@ -1,7 +1,7 @@
 {
-  "id": "rpc-diff-get-1",
+  "id": "rpc-diff-snapshot-1",
   "type": "response",
-  "command": "repo_diff_get",
+  "command": "repo_diff_snapshot",
   "success": true,
   "data": {
     "snapshots": [
@@ -28,15 +28,14 @@
       }
     ],
     "selectedSnapshot": {
-      "entryId": "snap-session-start",
-      "label": "session-start",
-      "commit": "abc1230000000000000000000000000000000000",
-      "kind": "session-start",
-      "createdAt": "2026-04-30T00:00:00.000Z",
+      "entryId": "snap-manual",
+      "label": "manual",
+      "commit": "def4560000000000000000000000000000000000",
+      "kind": "manual",
+      "createdAt": "2026-04-30T00:01:00.000Z",
       "headCommit": "abc1230000000000000000000000000000000000",
       "repoRoot": "/tmp/repo",
-      "ref": "refs/omp/diff-snapshots/session-start",
-      "sourceRef": "HEAD"
+      "ref": "refs/omp/diff-snapshots/manual"
     },
     "headSnapshot": {
       "entryId": "snap-session-start",
@@ -49,7 +48,7 @@
       "ref": "refs/omp/diff-snapshots/session-start",
       "sourceRef": "HEAD"
     },
-    "diff": "",
-    "stat": true
+    "diff": "diff --git a/file.txt b/file.txt\n+changed\n",
+    "stat": false
   }
 }

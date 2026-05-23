@@ -1,5 +1,5 @@
 {
-  "id": "rpc-3",
+  "id": "rpc-stats-1",
   "type": "response",
   "command": "get_session_stats",
   "success": true,

@@ -105,6 +105,6 @@ function expectSnapshotShape(snapshot: any): void {
     ref: expect.any(String),
     commit: expect.stringMatching(/^[0-9a-f]{40}$/),
     headCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
-    tree: expect.stringMatching(/^[0-9a-f]{40}$/),
   });
+  expect(snapshot).not.toHaveProperty("tree");
 }

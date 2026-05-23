@@ -391,11 +391,27 @@ async fn ensure_controller_session(state: &AppState) -> Result<String, String> {
     send_rpc_command(
         state,
         &transport_session_id,
-        json!({ "id": next_rpc_id(), "type": "set_session_name", "name": CONTROLLER_SESSION_TITLE }),
+        set_session_name_command(next_rpc_id(), CONTROLLER_SESSION_TITLE.to_string()),
     )
     .await?;
-    send_rpc_command(state, &transport_session_id, set_host_tools_command()).await?;
-    send_rpc_command(state, &transport_session_id, set_active_tools_command()).await?;
+    send_rpc_command(
+        state,
+        &transport_session_id,
+        set_host_tools_command(next_rpc_id(), controller_tool_definitions()),
+    )
+    .await?;
+    send_rpc_command(
+        state,
+        &transport_session_id,
+        set_active_tools_command(
+            next_rpc_id(),
+            FURA_TOOL_NAMES
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+        ),
+    )
+    .await?;
 
     {
         let mut controller = state.bridge_controller.write().await;
@@ -404,22 +420,6 @@ async fn ensure_controller_session(state: &AppState) -> Result<String, String> {
     }
 
     Ok(transport_session_id)
-}
-
-fn set_host_tools_command() -> Value {
-    json!({
-        "id": next_rpc_id(),
-        "type": "set_host_tools",
-        "tools": controller_tool_definitions(),
-    })
-}
-
-fn set_active_tools_command() -> Value {
-    json!({
-        "id": next_rpc_id(),
-        "type": "set_active_tools",
-        "toolNames": FURA_TOOL_NAMES,
-    })
 }
 
 fn controller_tool_definitions() -> Vec<Value> {

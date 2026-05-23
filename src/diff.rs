@@ -125,17 +125,9 @@ pub(crate) async fn handle_session_changes_snapshot(
             context_lines,
         },
     );
-    let mut command = serde_json::json!({
-        "id": command_id.clone(),
-        "type": "repo_diff_snapshot",
-        "label": label,
-    });
-    if let Some(value) = repo_root.and_then(|value| non_empty_trimmed(&value).map(str::to_string)) {
-        command["repoRoot"] = Value::String(value);
-    }
-    if let Some(value) = ref_name.and_then(|value| non_empty_trimmed(&value).map(str::to_string)) {
-        command["ref"] = Value::String(value);
-    }
+    let repo_root = repo_root.and_then(|value| non_empty_trimmed(&value).map(str::to_string));
+    let ref_name = ref_name.and_then(|value| non_empty_trimmed(&value).map(str::to_string));
+    let command = repo_diff_snapshot_command(command_id.clone(), label, repo_root, ref_name);
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => Vec::new(),
         Err(message) => {
