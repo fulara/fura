@@ -2761,9 +2761,33 @@ pub(crate) mod tests {
         })
         .expect("worktree should be created");
 
-        assert_eq!(created.source_repo_root, repo_dir);
-        assert_eq!(created.worktree_root, worktree_dir);
-        assert_eq!(created.session_cwd, worktree_dir);
+        assert_eq!(
+            created
+                .source_repo_root
+                .canonicalize()
+                .expect("created source repo path should canonicalize"),
+            repo_dir
+                .canonicalize()
+                .expect("source repo path should canonicalize")
+        );
+        assert_eq!(
+            created
+                .worktree_root
+                .canonicalize()
+                .expect("created worktree path should canonicalize"),
+            worktree_dir
+                .canonicalize()
+                .expect("worktree path should canonicalize")
+        );
+        assert_eq!(
+            created
+                .session_cwd
+                .canonicalize()
+                .expect("created session cwd should canonicalize"),
+            worktree_dir
+                .canonicalize()
+                .expect("session cwd should canonicalize")
+        );
         assert_eq!(
             fs::read_to_string(created.session_cwd.join("README.md"))
                 .expect("worktree file should exist"),

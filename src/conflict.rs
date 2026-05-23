@@ -1702,7 +1702,7 @@ mod tests {
         run_git(root, &["checkout", "-b", "ours"]);
         fs::write(root.join("demo.txt"), "one\nours\nthree\n").expect("ours file written");
         run_git(root, &["commit", "-am", "ours"]);
-        run_git(root, &["checkout", "-b", "theirs", "master"]);
+        run_git(root, &["checkout", "-b", "theirs", "HEAD~1"]);
         fs::write(root.join("demo.txt"), "one\ntheirs\nthree\n").expect("theirs file written");
         run_git(root, &["commit", "-am", "theirs"]);
         run_git(root, &["checkout", "ours"]);
@@ -1740,7 +1740,7 @@ mod tests {
         run_git(root, &["checkout", "-b", "ours"]);
         write_repo_file(root, path, ours);
         run_git(root, &["commit", "-am", "ours"]);
-        run_git(root, &["checkout", "-b", "theirs", "master"]);
+        run_git(root, &["checkout", "-b", "theirs", "HEAD~1"]);
         write_repo_file(root, path, theirs);
         run_git(root, &["commit", "-am", "theirs"]);
         run_git(root, &["checkout", "ours"]);
@@ -1764,7 +1764,7 @@ mod tests {
         write_repo_file(root, path, ours);
         run_git(root, &["add", path]);
         run_git(root, &["commit", "-m", "ours"]);
-        run_git(root, &["checkout", "-b", "theirs", "master"]);
+        run_git(root, &["checkout", "-b", "theirs", "HEAD~1"]);
         write_repo_file(root, path, theirs);
         run_git(root, &["add", path]);
         run_git(root, &["commit", "-m", "theirs"]);
