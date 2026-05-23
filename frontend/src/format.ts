@@ -24,6 +24,20 @@ export function formatContext(percent: number, windowSize: number): string {
   return `${pct}%/${win}`;
 }
 
+export function formatContextUsage(
+  tokens: number | null | undefined,
+  percent: number | null | undefined,
+  windowSize: number | null | undefined,
+): string | null {
+  if (windowSize == null || !Number.isFinite(windowSize) || windowSize <= 0) return null;
+  const effectivePercent = percent != null && Number.isFinite(percent)
+    ? percent
+    : tokens != null && Number.isFinite(tokens) && tokens >= 0
+      ? (tokens / windowSize) * 100
+      : null;
+  return effectivePercent == null ? null : formatContext(effectivePercent, windowSize);
+}
+
 
 export function shortId(id: string): string {
   return id.slice(0, 8);

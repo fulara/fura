@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
+import { formatContext, formatContextUsage, formatCost, formatTokens, shortId, shortPath } from "./format";
 
 describe("shortPath", () => {
   it("keeps short and relative paths intact", () => {
@@ -44,6 +44,21 @@ describe("formatContext", () => {
     expect(formatContext(0.236, 900)).toBe("0.24%/900");
     expect(formatContext(2.84, 12_300)).toBe("2.8%/12K");
     expect(formatContext(19.99, 1_000_000)).toBe("20.0%/1.0M");
+  });
+});
+
+describe("formatContextUsage", () => {
+  it("uses explicit context percentage when present", () => {
+    expect(formatContextUsage(100, 12.34, 200_000)).toBe("12.3%/200K");
+  });
+
+  it("derives context percentage from tokens and window when percentage is missing", () => {
+    expect(formatContextUsage(25_000, null, 200_000)).toBe("12.5%/200K");
+  });
+
+  it("returns null when context window is unavailable", () => {
+    expect(formatContextUsage(25_000, null, null)).toBeNull();
+    expect(formatContextUsage(null, null, 200_000)).toBeNull();
   });
 });
 

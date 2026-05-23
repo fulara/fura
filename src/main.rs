@@ -2092,12 +2092,17 @@ pub(crate) mod tests {
 
         let first = commands.recv().await.expect("first refresh command");
         let second = commands.recv().await.expect("second refresh command");
+        let third = commands.recv().await.expect("third refresh command");
         assert_eq!(
             first.get("type").and_then(|value| value.as_str()),
-            Some("get_messages")
+            Some("get_state")
         );
         assert_eq!(
             second.get("type").and_then(|value| value.as_str()),
+            Some("get_messages")
+        );
+        assert_eq!(
+            third.get("type").and_then(|value| value.as_str()),
             Some("get_session_stats")
         );
         assert_eq!(
@@ -2430,6 +2435,45 @@ pub(crate) mod tests {
                 assert_eq!(model.provider, "mock");
                 assert_eq!(model.id, "mock-reasoner");
                 assert!(model.thinking);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_cycle_thinking_level_response_updates_projection() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.thinking_level = Some("low".to_string());
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "cycle_thinking_level",
+                "success": true,
+                "data": { "level": "high" }
+            }),
+        )
+        .await;
+
+        {
+            let sessions = state.sessions.read().await;
+            let record = sessions.get("s1").expect("record remains");
+            assert_eq!(record.thinking_level.as_deref(), Some("high"));
+        }
+
+        match events.recv().await.expect("snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state.thinking_level.as_deref(), Some("high"));
             }
             other => panic!("unexpected event: {other:?}"),
         }

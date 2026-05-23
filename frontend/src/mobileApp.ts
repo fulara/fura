@@ -25,7 +25,7 @@ import {
   restoreBusyPromptEditorText,
   type BusyPromptDraft,
 } from "./promptBusy";
-import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
+import { formatContextUsage, formatCost, formatTokens, shortId, shortPath } from "./format";
 import type {
   ClientMessage,
   ControlCandidate,
@@ -1458,8 +1458,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (projection) {
       parts.push(mobileStatusPart(formatTokens(projection.tokensTotal), "tokens"));
       parts.push(mobileStatusPart(formatCost(projection.costUsd), "cost"));
-      if (projection.contextPercent != null && projection.contextWindow != null) {
-        parts.push(mobileStatusPart(formatContext(projection.contextPercent, projection.contextWindow), "context"));
+      const contextUsage = formatContextUsage(projection.contextTokens, projection.contextPercent, projection.contextWindow);
+      if (contextUsage != null) {
+        parts.push(mobileStatusPart(contextUsage, "context"));
       }
     }
 

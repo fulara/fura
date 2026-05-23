@@ -2,7 +2,7 @@ import "./style.css";
 import "highlight.js/styles/github-dark.css";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
-import { formatContext, formatCost, formatTokens, shortId, shortPath } from "./format";
+import { formatContextUsage, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
 import { mkEl, reconcileChildren, requireElement, setRenderDocument } from "./dom";
@@ -6982,8 +6982,9 @@ function renderStatusBar(projection?: SessionProjection): void {
   parts.push(statusPart(`📁 ${shortPath(cwd)}`, "cwd"));
   parts.push(statusPart(formatTokens(projection.tokensTotal), "tokens"));
   parts.push(statusPart(formatCost(projection.costUsd), "cost"));
-  if (projection.contextPercent != null && projection.contextWindow != null) {
-    parts.push(statusPart(formatContext(projection.contextPercent, projection.contextWindow), "context"));
+  const contextUsage = formatContextUsage(projection.contextTokens, projection.contextPercent, projection.contextWindow);
+  if (contextUsage != null) {
+    parts.push(statusPart(contextUsage, "context"));
   }
   if (projection.isBusy) {
     parts.push(statusInterruptButton());

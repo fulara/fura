@@ -580,23 +580,8 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             )
             .await;
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
-            if let Err(message) = send_rpc_command(
-                state,
-                &target_session_id,
-                get_messages_command(next_rpc_id()),
-            )
-            .await
-            {
-                warn!(session_id = %target_session_id, %message, "post-agent transcript refresh failed");
-            }
-            if let Err(message) = send_rpc_command(
-                state,
-                &target_session_id,
-                get_session_stats_command(next_rpc_id()),
-            )
-            .await
-            {
-                warn!(session_id = %target_session_id, %message, "post-agent stats refresh failed");
+            if let Err(message) = refresh_rpc_state(state, &target_session_id).await {
+                warn!(session_id = %target_session_id, %message, "post-agent state refresh failed");
             }
         }
         OmpRpcFrame::PlanReview {
@@ -1104,6 +1089,30 @@ pub(crate) async fn apply_model_change_response(
     });
 }
 
+pub(crate) async fn apply_thinking_level_response(
+    state: &AppState,
+    session_id: &str,
+    thinking_level: Option<String>,
+) {
+    let Some(thinking_level) = thinking_level else {
+        return;
+    };
+    let snapshot = {
+        let mut sessions = state.sessions.write().await;
+        sessions.get_mut(session_id).map(|record| {
+            record.thinking_level = Some(thinking_level);
+            ServerMessage::SessionSnapshot {
+                session_id: session_id.to_string(),
+                state: record.projection(),
+            }
+        })
+    };
+
+    if let Some(snapshot) = snapshot {
+        let _ = state.events.send(snapshot);
+    }
+}
+
 pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
     let command = value_str(frame, "command").or_else(|| value_str(frame, "requestType"));
     let status = value_str(frame, "status");
@@ -1352,6 +1361,28 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let model_value = data.and_then(|data| data.get("model"));
             apply_model_change_response(state, &current_session_id, model_value, thinking_level)
                 .await;
+        }
+        Some("set_thinking_level") => {
+            if state
+                .session_runtime
+                .pending_create(session_id)
+                .await
+                .is_none()
+            {
+                if let Err(message) =
+                    send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await
+                {
+                    warn!(session_id = %current_session_id, %message, "post-thinking-change state refresh failed");
+                }
+            }
+        }
+        Some("cycle_thinking_level") => {
+            let data = frame.get("data").or_else(|| frame.get("result"));
+            let thinking_level = data
+                .and_then(|data| data.get("level"))
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+            apply_thinking_level_response(state, &current_session_id, thinking_level).await;
         }
         Some("get_messages") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
