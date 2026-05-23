@@ -70,12 +70,25 @@ export function buildPlanReviewPrompt(review: PendingPlanReview, comments: Trans
   });
 }
 
+export function buildMoveBackToPlanPrompt(review: PendingPlanReview): string {
+  const planPath = review.planFilePath || "the current plan file";
+  return [
+    "We are done discussing the current plan.",
+    "Review only the conversation that happened after you presented the current plan for approval.",
+    "Decide whether that discussion requires changes to the plan.",
+    `If changes are needed, update ${planPath}; otherwise leave it unchanged.`,
+    "Then present the final plan for approval again using the normal plan-mode approval flow.",
+    "Do not begin implementation.",
+  ].join(" ");
+}
+
 export function renderPlanReviewCard(
   review: PendingPlanReview,
   actions: {
     onApprove: (review: PendingPlanReview, approvalMode: PlanApprovalMode) => void;
     onRefine: (review: PendingPlanReview) => void;
     onDiscuss: (review: PendingPlanReview) => void;
+    onBackToPlan: (review: PendingPlanReview) => void;
   },
   mode: PlanReviewMode = "pending",
   lineReview?: PlanReviewLineReviewOptions,
@@ -169,7 +182,15 @@ export function renderPlanReviewCard(
     status.textContent = mode === "refining"
       ? "Refinement mode: write the changes you want in the prompt composer."
       : "Discussion mode: ask questions about the plan in the prompt composer.";
-    footer.append(status);
+
+    const back = mkEl("button");
+    back.type = "button";
+    back.className = "plan-review-back-to-plan";
+    back.textContent = "Move back to plan";
+    back.title = "Return to the plan decision state with approve, refine, and discuss actions.";
+    back.addEventListener("click", () => actions.onBackToPlan(review));
+
+    footer.append(status, back);
   }
 
   card.append(header, body, footer);

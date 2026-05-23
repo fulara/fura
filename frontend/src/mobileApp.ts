@@ -64,6 +64,7 @@ import {
 } from "./transcriptReview";
 import {
   buildPlanReviewPrompt,
+  buildMoveBackToPlanPrompt,
   createApprovePlanReviewMessage,
   createDiscussPlanReviewMessage,
   pendingPlanReviewFromMessage,
@@ -970,8 +971,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const existing = visiblePlanReviews.get(sessionId);
     const mode: VisiblePlanReview["mode"] = projection.planMode?.discussion
       ? "discussing"
-      : existing && existing.mode === "refining" && samePendingPlanReview(existing.review, pending)
-        ? "refining"
+      : existing && existing.mode !== "pending" && samePendingPlanReview(existing.review, pending)
+        ? existing.mode
         : "pending";
     visiblePlanReviews.set(sessionId, { review: pending, mode });
   }
@@ -1012,6 +1013,17 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (!accepted) return;
     visiblePlanReviews.set(review.sessionId, { review, mode: "discussing" });
     renderActiveSession();
+    if (activeSessionId === review.sessionId) promptInput.focus();
+  }
+
+  function moveBackToPlanReview(review: PendingPlanReview): void {
+    const accepted = send(createPromptSendMessage(
+      review.sessionId,
+      buildMoveBackToPlanPrompt(review),
+      [],
+      "followUp",
+    ));
+    if (!accepted) return;
     if (activeSessionId === review.sessionId) promptInput.focus();
   }
   function renderBusyPromptChoice(): void {
@@ -2283,6 +2295,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           onApprove: approvePendingPlanReview,
           onRefine: refinePendingPlanReview,
           onDiscuss: discussPendingPlanReview,
+          onBackToPlan: moveBackToPlanReview,
         },
         visiblePlanReview.mode,
         visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,

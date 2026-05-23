@@ -129,6 +129,7 @@ import {
 } from "./transcriptReview";
 import {
   buildPlanReviewPrompt,
+  buildMoveBackToPlanPrompt,
   createApprovePlanReviewMessage,
   createDiscussPlanReviewMessage,
   pendingPlanReviewFromMessage,
@@ -2449,8 +2450,8 @@ function syncVisiblePlanReviewFromProjection(sessionId: string, projection: Sess
   const existing = visiblePlanReviews.get(sessionId);
   const mode: VisiblePlanReview["mode"] = projection.planMode?.discussion
     ? "discussing"
-    : existing && existing.mode === "refining" && samePendingPlanReview(existing.review, pending)
-      ? "refining"
+    : existing && existing.mode !== "pending" && samePendingPlanReview(existing.review, pending)
+      ? existing.mode
       : "pending";
   visiblePlanReviews.set(sessionId, { review: pending, mode });
 }
@@ -2497,6 +2498,13 @@ function discussPendingPlanReview(review: PendingPlanReview): void {
   visiblePlanReviews.set(review.sessionId, { review, mode: "discussing" });
   markTranscriptViewDirty();
   render();
+  if (workspaceMode === "session" && activeSessionId === review.sessionId) {
+    promptInput.focus();
+  }
+}
+
+function moveBackToPlanReview(review: PendingPlanReview): void {
+  sendPromptMessage(review.sessionId, buildMoveBackToPlanPrompt(review), [], "followUp");
   if (workspaceMode === "session" && activeSessionId === review.sessionId) {
     promptInput.focus();
   }
@@ -4757,6 +4765,7 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
           onApprove: approvePendingPlanReview,
           onRefine: refinePendingPlanReview,
           onDiscuss: discussPendingPlanReview,
+          onBackToPlan: moveBackToPlanReview,
         },
         visiblePlanReview.mode,
         visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,
