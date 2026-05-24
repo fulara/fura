@@ -1057,20 +1057,12 @@ pub(crate) async fn apply_thinking_level_response(
     let Some(thinking_level) = thinking_level else {
         return;
     };
-    let snapshot = {
-        let mut sessions = state.sessions.write().await;
-        sessions.get_mut(session_id).map(|record| {
+    state
+        .session_events
+        .mutate_session_snapshot(state, session_id, |record| {
             record.thinking_level = Some(thinking_level);
-            ServerMessage::SessionSnapshot {
-                session_id: session_id.to_string(),
-                state: record.projection(),
-            }
         })
-    };
-
-    if let Some(snapshot) = snapshot {
-        let _ = state.events.send(snapshot);
-    }
+        .await;
 }
 
 pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
