@@ -44,7 +44,7 @@ import {
   sessionStatusLabel,
   visibleSessions as filterVisibleSessions,
 } from "./sessionList";
-import { applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
+import { applySessionDelta, applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   comparisonKey,
   DEFAULT_SESSION_CHANGES_DETAIL_MODE,
@@ -1761,6 +1761,30 @@ function handleServerMessage(message: ServerMessage): void {
         } else {
           syncSessionModePanels();
         }
+      } else {
+        unreadSessions.add(message.sessionId);
+        renderSessions();
+      }
+      break;
+    }
+    case "session.delta": {
+      const result = applySessionDelta(sessions, projections, message.sessionId, message.state);
+      if (!result) {
+        send({ type: "state.refresh", sessionId: message.sessionId });
+        break;
+      }
+      ({ sessions, projections } = result);
+      const projection = projections.get(message.sessionId);
+      if (projection) {
+        syncVisiblePlanReviewFromProjection(message.sessionId, projection);
+        syncPromptHistoryFromProjection(message.sessionId, projection);
+      }
+      if (workspaceMode === "session" && (!activeSessionId || activeSessionId === message.sessionId)) {
+        activateSession(message.sessionId);
+        markTranscriptViewDirty();
+        markToolsViewDirty();
+        syncSessionModePanels();
+        render();
       } else {
         unreadSessions.add(message.sessionId);
         renderSessions();

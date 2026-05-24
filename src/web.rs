@@ -52,10 +52,6 @@ impl WebSocketUpdateMode {
     fn uses_conflation(self) -> bool {
         matches!(self, Self::ConflateAndDelta)
     }
-
-    fn uses_session_deltas(self) -> bool {
-        matches!(self, Self::ConflateAndDelta)
-    }
 }
 #[derive(Debug, Deserialize)]
 pub(crate) struct AuthSessionRequest {
@@ -723,7 +719,7 @@ async fn send_client_message(
     outbound_seq: &mut u64,
     source: &'static str,
 ) -> Result<(), axum::Error> {
-    let message = prepare_client_message(state, message, update_mode).await;
+    let message = prepare_client_message(message, update_mode);
     *outbound_seq += 1;
     send_json_with_context(
         state,
@@ -739,37 +735,11 @@ async fn send_client_message(
     .await
 }
 
-async fn prepare_client_message(
-    state: &AppState,
+fn prepare_client_message(
     message: ServerMessage,
-    update_mode: WebSocketUpdateMode,
+    _update_mode: WebSocketUpdateMode,
 ) -> ServerMessage {
-    match message {
-        ServerMessage::SessionDelta {
-            session_id,
-            state: delta,
-        } => {
-            if update_mode.uses_session_deltas() {
-                ServerMessage::SessionDelta {
-                    session_id,
-                    state: delta,
-                }
-            } else {
-                let sessions = state.sessions.read().await;
-                sessions
-                    .get(&session_id)
-                    .map(|record| ServerMessage::SessionSnapshot {
-                        session_id: session_id.clone(),
-                        state: record.projection(),
-                    })
-                    .unwrap_or(ServerMessage::SessionDelta {
-                        session_id,
-                        state: delta,
-                    })
-            }
-        }
-        message => message,
-    }
+    message
 }
 async fn send_json_with_context(
     state: &AppState,
@@ -1554,6 +1524,18 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn immediate_prepare_client_message_preserves_session_delta() {
+        let projection = test_projection("s1", vec![test_message("m1", "first")]);
+        let message = ServerMessage::SessionDelta {
+            session_id: "s1".to_string(),
+            state: SessionProjectionDelta::from_projection_replace_tail(0, &projection),
+        };
+
+        let prepared = prepare_client_message(message, WebSocketUpdateMode::Immediate);
+
+        assert!(matches!(prepared, ServerMessage::SessionDelta { .. }));
+    }
     #[test]
     fn conflate_server_messages_keeps_only_latest_snapshots() {
         let first = test_projection("s1", vec![test_message("m1", "first")]);

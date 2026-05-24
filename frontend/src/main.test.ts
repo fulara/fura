@@ -660,6 +660,80 @@ describe("desktop cog options", () => {
     expect(document.querySelector<HTMLElement>('#testTranscriptPanel [data-message-id="assistant-1"]')?.textContent).toContain("copyable answer updated");
   });
 
+  it("applies desktop session deltas to an existing projection", async () => {
+    const { connection } = await createHarness();
+    const baseTranscript = [{
+      kind: "message" as const,
+      id: "assistant-1",
+      role: "assistant" as const,
+      blocks: [{ kind: "text" as const, text: "first answer" }],
+      timestamp: null,
+      isNew: false,
+    }];
+    const appended = {
+      kind: "message" as const,
+      id: "assistant-2",
+      role: "assistant" as const,
+      blocks: [{ kind: "text" as const, text: "delta answer" }],
+      timestamp: null,
+      isNew: true,
+    };
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { transcript: baseTranscript }),
+    });
+    connection.sent.length = 0;
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "live",
+      state: {
+        summary: summary("live", { messageCount: 2 }),
+        transcriptReplaceFrom: 1,
+        transcriptAppend: [appended],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    });
+
+    expect(document.querySelector<HTMLElement>('#testTranscriptPanel [data-message-id="assistant-1"]')?.textContent).toContain("first answer");
+    expect(document.querySelector<HTMLElement>('#testTranscriptPanel [data-message-id="assistant-2"]')?.textContent).toContain("delta answer");
+    expect(connection.sent).not.toContainEqual({ type: "state.refresh", sessionId: "live" });
+  });
+
+  it("requests state refresh for desktop session deltas without a base projection", async () => {
+    const { connection } = await createHarness();
+    connection.sent.length = 0;
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "missing",
+      state: {
+        summary: summary("missing", { messageCount: 1 }),
+        transcriptReplaceFrom: 0,
+        transcriptAppend: [{
+          kind: "message",
+          id: "assistant-1",
+          role: "assistant",
+          blocks: [{ kind: "text", text: "orphan delta" }],
+          timestamp: null,
+          isNew: true,
+        }],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    });
+
+    expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "missing" });
+  });
+
   it("renders aggregate patch by default and drills down without refetching all files", async () => {
     const { connection } = await createHarness();
     const aggregatePatch = [
