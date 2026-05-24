@@ -5,9 +5,9 @@ use std::{
     time::Instant,
 };
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::{
-    sync::{RwLock, broadcast, mpsc, oneshot},
+    sync::{Mutex, RwLock, broadcast, mpsc, oneshot},
     task::JoinHandle,
 };
 use tracing::warn;
@@ -16,8 +16,9 @@ use crate::{
     ActiveConflictContext, CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode,
     DiffFileSelector, DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot,
     GoalModeProjection, PlanModeProjection, PreparedDiff, ProposedModelConfig, ServerMessage,
-    SessionKind, SessionMode, SessionRecord, SessionStatus, ThinkingVisibilityPreference,
-    Timestamp, TodoPhaseProjection, VoiceCommand, save_fura_config,
+    SessionKind, SessionMode, SessionProjectionDelta, SessionRecord, SessionStatus,
+    ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand,
+    append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -41,6 +42,7 @@ pub(crate) struct AppState {
     pub(crate) active_review_contexts: Arc<RwLock<HashMap<String, ActiveReviewContext>>>,
     pub(crate) active_conflict_contexts: Arc<RwLock<HashMap<String, ActiveConflictContext>>>,
     pub(crate) events: broadcast::Sender<ServerMessage>,
+    pub(crate) session_events: SessionEventCoordinator,
     pub(crate) session_host_tools: Arc<RwLock<HashMap<String, Vec<Value>>>>,
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
@@ -55,6 +57,242 @@ pub(crate) struct AppState {
     pub(crate) thinking_visibility: Arc<RwLock<ThinkingVisibilityPreference>>,
     pub(crate) allowed_origins: Option<Arc<Vec<String>>>,
     pub(crate) secure_auth_cookie: bool,
+}
+#[derive(Clone, Default)]
+pub(crate) struct SessionEventCoordinator {
+    gate: Arc<Mutex<()>>,
+}
+
+impl SessionEventCoordinator {
+    pub(crate) async fn mutate_session_snapshot<F>(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        mutate: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut SessionRecord),
+    {
+        self.mutate_session_and_emit(state, session_id, |record| {
+            mutate(record);
+            Some(ServerMessage::SessionSnapshot {
+                session_id: session_id.to_string(),
+                state: record.projection(),
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn mutate_session_delta<F>(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        build_delta: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut SessionRecord) -> Option<SessionProjectionDelta>,
+    {
+        self.mutate_session_and_emit(state, session_id, |record| {
+            build_delta(record).map(|delta| ServerMessage::SessionDelta {
+                session_id: session_id.to_string(),
+                state: delta,
+            })
+        })
+        .await
+    }
+
+    pub(crate) async fn mutate_session_and_emit<F>(
+        &self,
+        state: &AppState,
+        session_id: &str,
+        build: F,
+    ) -> bool
+    where
+        F: FnOnce(&mut SessionRecord) -> Option<ServerMessage>,
+    {
+        let started_at = Instant::now();
+        let _event_guard = self.gate.lock().await;
+        let message = {
+            let mut sessions = state.sessions.write().await;
+            let Some(record) = sessions.get_mut(session_id) else {
+                return false;
+            };
+            build(record)
+        };
+        if let Some(message) = message {
+            let fields = session_event_timing_fields(started_at, std::slice::from_ref(&message));
+            let _ = state.events.send(message);
+            drop(_event_guard);
+            append_bridge_debug_event(state, "session_event.emit", fields).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) async fn mutate_sessions_and_emit<F>(&self, state: &AppState, build: F) -> usize
+    where
+        F: FnOnce(&mut HashMap<String, SessionRecord>) -> Vec<ServerMessage>,
+    {
+        let started_at = Instant::now();
+        let _event_guard = self.gate.lock().await;
+        let messages = {
+            let mut sessions = state.sessions.write().await;
+            build(&mut sessions)
+        };
+        let sent = messages.len();
+        let fields = session_event_timing_fields(started_at, &messages);
+        for message in messages {
+            let _ = state.events.send(message);
+        }
+        drop(_event_guard);
+        append_bridge_debug_event(state, "session_event.emit", fields).await;
+        sent
+    }
+    pub(crate) async fn coordinate_sessions_and_emit<R, F>(&self, state: &AppState, build: F) -> R
+    where
+        F: FnOnce(&mut HashMap<String, SessionRecord>) -> (R, Vec<ServerMessage>),
+    {
+        let started_at = Instant::now();
+        let _event_guard = self.gate.lock().await;
+        let (result, messages) = {
+            let mut sessions = state.sessions.write().await;
+            build(&mut sessions)
+        };
+        let fields = session_event_timing_fields(started_at, &messages);
+        for message in messages {
+            let _ = state.events.send(message);
+        }
+        drop(_event_guard);
+        append_bridge_debug_event(state, "session_event.emit", fields).await;
+        result
+    }
+
+    pub(crate) async fn emit_current_session_snapshot(
+        &self,
+        state: &AppState,
+        session_id: &str,
+    ) -> bool {
+        let started_at = Instant::now();
+        let _event_guard = self.gate.lock().await;
+        let snapshot = {
+            let sessions = state.sessions.read().await;
+            sessions
+                .get(session_id)
+                .map(|record| ServerMessage::SessionSnapshot {
+                    session_id: session_id.to_string(),
+                    state: record.projection(),
+                })
+        };
+        if let Some(snapshot) = snapshot {
+            let fields = session_event_timing_fields(started_at, std::slice::from_ref(&snapshot));
+            let _ = state.events.send(snapshot);
+            drop(_event_guard);
+            append_bridge_debug_event(state, "session_event.emit", fields).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) async fn emit_sessions_snapshot(&self, state: &AppState) {
+        let started_at = Instant::now();
+        let _event_guard = self.gate.lock().await;
+        let snapshot = {
+            let sessions = state.sessions.read().await;
+            sessions_snapshot_from_map(&sessions)
+        };
+        let fields = session_event_timing_fields(started_at, std::slice::from_ref(&snapshot));
+        let _ = state.events.send(snapshot);
+        drop(_event_guard);
+        append_bridge_debug_event(state, "session_event.emit", fields).await;
+    }
+}
+
+fn session_event_timing_fields(
+    started_at: Instant,
+    messages: &[ServerMessage],
+) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert(
+        "durationMs".to_string(),
+        Value::Number((started_at.elapsed().as_millis() as u64).into()),
+    );
+    fields.insert(
+        "messageCount".to_string(),
+        Value::Number((messages.len() as u64).into()),
+    );
+
+    let mut message_types = Vec::new();
+    let mut session_id = None;
+    let mut transcript_len = None;
+    let mut session_count = None;
+    for message in messages {
+        message_types.push(Value::String(
+            session_event_message_type(message).to_string(),
+        ));
+        match message {
+            ServerMessage::SessionSnapshot {
+                session_id: id,
+                state,
+            } => {
+                if session_id.is_none() {
+                    session_id = Some(id.clone());
+                }
+                if transcript_len.is_none() {
+                    transcript_len = Some(state.transcript.len() as u64);
+                }
+            }
+            ServerMessage::SessionDelta {
+                session_id: id,
+                state,
+            } => {
+                if session_id.is_none() {
+                    session_id = Some(id.clone());
+                }
+                if transcript_len.is_none() {
+                    transcript_len = Some(
+                        state.transcript_replace_from as u64 + state.transcript_append.len() as u64,
+                    );
+                }
+            }
+            ServerMessage::SessionsSnapshot { sessions } => {
+                if session_count.is_none() {
+                    session_count = Some(sessions.len() as u64);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fields.insert("messageTypes".to_string(), Value::Array(message_types));
+    if let Some(session_id) = session_id {
+        fields.insert("sessionId".to_string(), Value::String(session_id));
+    }
+    if let Some(transcript_len) = transcript_len {
+        fields.insert(
+            "transcriptLen".to_string(),
+            Value::Number(transcript_len.into()),
+        );
+    }
+    if let Some(session_count) = session_count {
+        fields.insert(
+            "sessionCount".to_string(),
+            Value::Number(session_count.into()),
+        );
+    }
+    fields
+}
+
+fn session_event_message_type(message: &ServerMessage) -> &'static str {
+    match message {
+        ServerMessage::SessionsSnapshot { .. } => "sessions.snapshot",
+        ServerMessage::SessionSnapshot { .. } => "session.snapshot",
+        ServerMessage::SessionDelta { .. } => "session.delta",
+        ServerMessage::PlanReview { .. } => "plan.review",
+        ServerMessage::SessionExited { .. } => "session.exited",
+        _ => "other",
+    }
 }
 
 #[derive(Clone)]
@@ -530,159 +768,174 @@ pub(crate) async fn apply_get_state_update(
     };
     let effective_session_name = pending_switch_name.clone().or(update.session_name);
 
-    let (previous_snapshot, target_snapshot) = {
-        let mut sessions = state.sessions.write().await;
+    let (previous_snapshot, target_snapshot) = state
+        .session_events
+        .coordinate_sessions_and_emit(state, |sessions| {
+            let (previous_snapshot, target_snapshot) = if target_changed {
+                let source = sessions.get(&update.current_session_id).cloned();
+                let previous_snapshot =
+                    sessions.get_mut(&update.current_session_id).map(|record| {
+                        record.status = SessionStatus::Available;
+                        record.kind = SessionKind::Available;
+                        record.streaming_message = None;
+                        record.live_message_ids.clear();
+                        ServerMessage::SessionSnapshot {
+                            session_id: update.current_session_id.clone(),
+                            state: record.projection(),
+                        }
+                    });
 
-        if target_changed {
-            let source = sessions.get(&update.current_session_id).cloned();
-            let previous_snapshot = sessions.get_mut(&update.current_session_id).map(|record| {
-                record.status = SessionStatus::Available;
-                record.kind = SessionKind::Available;
-                record.streaming_message = None;
-                record.live_message_ids.clear();
-                ServerMessage::SessionSnapshot {
-                    session_id: update.current_session_id.clone(),
-                    state: record.projection(),
+                sessions
+                    .entry(update.target_session_id.clone())
+                    .and_modify(|record| {
+                        record.status = SessionStatus::Idle;
+                        record.kind = SessionKind::Managed;
+                        record.streaming_message = None;
+                        record.live_message_ids.clear();
+                        if record.worktree.is_none() {
+                            record.worktree = pending_create
+                                .as_ref()
+                                .and_then(|pending| pending.worktree.clone());
+                        }
+                        if let Some(pending) = pending_create.as_ref() {
+                            record.session_mode = pending.session_mode;
+                        }
+                    })
+                    .or_insert_with(|| {
+                        let now = Timestamp::now();
+                        let created_at = source
+                            .as_ref()
+                            .map(|record| record.created_at)
+                            .or_else(|| pending_create.as_ref().map(|pending| pending.created_at))
+                            .unwrap_or(now);
+                        SessionRecord {
+                            id: update.target_session_id.clone(),
+                            cwd: source
+                                .as_ref()
+                                .and_then(|record| record.cwd.clone())
+                                .or_else(|| {
+                                    pending_create
+                                        .as_ref()
+                                        .and_then(|pending| pending.cwd.clone())
+                                }),
+                            args: source
+                                .as_ref()
+                                .map(|record| record.args.clone())
+                                .or_else(|| {
+                                    pending_create.as_ref().map(|pending| pending.args.clone())
+                                })
+                                .unwrap_or_default(),
+                            status: SessionStatus::Idle,
+                            created_at,
+                            updated_at: now,
+                            messages: Vec::new(),
+                            live_message_ids: HashSet::new(),
+                            streaming_message: None,
+                            tool_cards: Vec::new(),
+                            active_tool_calls: Vec::new(),
+                            todo_phases: None,
+                            kind: SessionKind::Managed,
+                            session_mode: source
+                                .as_ref()
+                                .map(|record| record.session_mode)
+                                .or_else(|| {
+                                    pending_create.as_ref().map(|pending| pending.session_mode)
+                                })
+                                .unwrap_or_default(),
+                            session_file: None,
+                            title: pending_create
+                                .as_ref()
+                                .and_then(|pending| pending.title.clone())
+                                .or_else(|| pending_switch_name.clone()),
+                            timestamp: None,
+                            category: source
+                                .as_ref()
+                                .and_then(|record| record.category.clone())
+                                .or_else(|| {
+                                    pending_create
+                                        .as_ref()
+                                        .and_then(|pending| pending.category.clone())
+                                }),
+                            worktree: source
+                                .as_ref()
+                                .and_then(|record| record.worktree.clone())
+                                .or_else(|| {
+                                    pending_create
+                                        .as_ref()
+                                        .and_then(|pending| pending.worktree.clone())
+                                }),
+                            model: None,
+                            thinking_level: None,
+                            tokens_total: 0,
+                            cost_usd: 0.0,
+                            context_tokens: None,
+                            context_window: None,
+                            context_percent: None,
+                            plan_mode: None,
+                            goal_mode: None,
+                            pending_plan_review: None,
+                        }
+                    });
+
+                if let Some(record) = sessions.get_mut(&update.target_session_id) {
+                    record.updated_at = Timestamp::now();
+                    apply_rpc_state_to_record(
+                        record,
+                        effective_session_name,
+                        update.model,
+                        update.thinking_level,
+                        update.session_file,
+                        update.context_tokens,
+                        update.context_window,
+                        update.context_percent,
+                        update.plan_mode.clone(),
+                        update.goal_mode.clone(),
+                        update.todo_phases.clone(),
+                    );
                 }
-            });
 
-            sessions
-                .entry(update.target_session_id.clone())
-                .and_modify(|record| {
-                    record.status = SessionStatus::Idle;
-                    record.kind = SessionKind::Managed;
-                    record.streaming_message = None;
-                    record.live_message_ids.clear();
-                    if record.worktree.is_none() {
-                        record.worktree = pending_create
-                            .as_ref()
-                            .and_then(|pending| pending.worktree.clone());
-                    }
-                    if let Some(pending) = pending_create.as_ref() {
-                        record.session_mode = pending.session_mode;
-                    }
-                })
-                .or_insert_with(|| {
-                    let now = Timestamp::now();
-                    let created_at = source
-                        .as_ref()
-                        .map(|record| record.created_at)
-                        .or_else(|| pending_create.as_ref().map(|pending| pending.created_at))
-                        .unwrap_or(now);
-                    SessionRecord {
-                        id: update.target_session_id.clone(),
-                        cwd: source
-                            .as_ref()
-                            .and_then(|record| record.cwd.clone())
-                            .or_else(|| {
-                                pending_create
-                                    .as_ref()
-                                    .and_then(|pending| pending.cwd.clone())
-                            }),
-                        args: source
-                            .as_ref()
-                            .map(|record| record.args.clone())
-                            .or_else(|| pending_create.as_ref().map(|pending| pending.args.clone()))
-                            .unwrap_or_default(),
-                        status: SessionStatus::Idle,
-                        created_at,
-                        updated_at: now,
-                        messages: Vec::new(),
-                        live_message_ids: HashSet::new(),
-                        streaming_message: None,
-                        tool_cards: Vec::new(),
-                        active_tool_calls: Vec::new(),
-                        todo_phases: None,
-                        kind: SessionKind::Managed,
-                        session_mode: source
-                            .as_ref()
-                            .map(|record| record.session_mode)
-                            .or_else(|| pending_create.as_ref().map(|pending| pending.session_mode))
-                            .unwrap_or_default(),
-                        session_file: None,
-                        title: pending_create
-                            .as_ref()
-                            .and_then(|pending| pending.title.clone())
-                            .or_else(|| pending_switch_name.clone()),
-                        timestamp: None,
-                        category: source
-                            .as_ref()
-                            .and_then(|record| record.category.clone())
-                            .or_else(|| {
-                                pending_create
-                                    .as_ref()
-                                    .and_then(|pending| pending.category.clone())
-                            }),
-                        worktree: source
-                            .as_ref()
-                            .and_then(|record| record.worktree.clone())
-                            .or_else(|| {
-                                pending_create
-                                    .as_ref()
-                                    .and_then(|pending| pending.worktree.clone())
-                            }),
-                        model: None,
-                        thinking_level: None,
-                        tokens_total: 0,
-                        cost_usd: 0.0,
-                        context_tokens: None,
-                        context_window: None,
-                        context_percent: None,
-                        plan_mode: None,
-                        goal_mode: None,
-                        pending_plan_review: None,
+                let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
+                    ServerMessage::SessionSnapshot {
+                        session_id: update.target_session_id.clone(),
+                        state: record.projection(),
                     }
                 });
-
-            if let Some(record) = sessions.get_mut(&update.target_session_id) {
-                record.updated_at = Timestamp::now();
-                apply_rpc_state_to_record(
-                    record,
-                    effective_session_name,
-                    update.model,
-                    update.thinking_level,
-                    update.session_file,
-                    update.context_tokens,
-                    update.context_window,
-                    update.context_percent,
-                    update.plan_mode.clone(),
-                    update.goal_mode.clone(),
-                    update.todo_phases.clone(),
-                );
-            }
-
-            let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
-                ServerMessage::SessionSnapshot {
-                    session_id: update.target_session_id.clone(),
-                    state: record.projection(),
+                (previous_snapshot, target_snapshot)
+            } else {
+                if let Some(record) = sessions.get_mut(&update.target_session_id) {
+                    apply_rpc_state_to_record(
+                        record,
+                        effective_session_name,
+                        update.model,
+                        update.thinking_level,
+                        update.session_file,
+                        update.context_tokens,
+                        update.context_window,
+                        update.context_percent,
+                        update.plan_mode,
+                        update.goal_mode,
+                        update.todo_phases,
+                    );
                 }
-            });
-            (previous_snapshot, target_snapshot)
-        } else {
-            if let Some(record) = sessions.get_mut(&update.target_session_id) {
-                apply_rpc_state_to_record(
-                    record,
-                    effective_session_name,
-                    update.model,
-                    update.thinking_level,
-                    update.session_file,
-                    update.context_tokens,
-                    update.context_window,
-                    update.context_percent,
-                    update.plan_mode,
-                    update.goal_mode,
-                    update.todo_phases,
-                );
+                let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
+                    ServerMessage::SessionSnapshot {
+                        session_id: update.target_session_id.clone(),
+                        state: record.projection(),
+                    }
+                });
+                (None, target_snapshot)
+            };
+
+            let mut messages = Vec::with_capacity(2);
+            if let Some(snapshot) = previous_snapshot.clone() {
+                messages.push(snapshot);
             }
-            let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
-                ServerMessage::SessionSnapshot {
-                    session_id: update.target_session_id.clone(),
-                    state: record.projection(),
-                }
-            });
-            (None, target_snapshot)
-        }
-    };
+            if let Some(snapshot) = target_snapshot.clone() {
+                messages.push(snapshot);
+            }
+            ((previous_snapshot, target_snapshot), messages)
+        })
+        .await;
 
     let (target_category, target_mode) = if target_changed {
         let sessions = state.sessions.read().await;

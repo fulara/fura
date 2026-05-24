@@ -3,16 +3,17 @@ use std::{
     env, fs,
     io::{BufRead, BufReader as StdBufReader},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tracing::warn;
 
 use crate::{
     AppState, GoalModeProjection, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader,
     SessionKind, SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard,
-    TranscriptMessage, is_controller_session_record, map_goal_mode_projection,
-    project_omp_transcript, save_fura_config,
+    TranscriptMessage, append_bridge_debug_event, is_controller_session_record,
+    map_goal_mode_projection, project_omp_transcript, save_fura_config,
 };
 
 #[derive(Debug)]
@@ -32,7 +33,9 @@ pub(crate) struct DiscoveredSession {
 }
 
 pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
+    let started_at = Instant::now();
     let discovered = discover_sessions(&state.session_root);
+    let discover_ms = started_at.elapsed().as_millis() as u64;
     let mut discovered_ids = HashSet::new();
     let categories = state.session_runtime.session_categories_snapshot().await;
     let modes = state.session_runtime.session_modes_snapshot().await;
@@ -142,6 +145,8 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
     });
     let retained_session_ids = sessions.keys().cloned().collect::<HashSet<_>>();
     let sessions_changed = before != session_summaries_from_map(&sessions);
+    let session_count = sessions.len() as u64;
+    let discovered_count = discovered_ids.len() as u64;
     drop(sessions);
 
     let metadata_pruned = state
@@ -153,6 +158,24 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
             warn!(%error, "failed to save pruned session metadata");
         }
     }
+
+    let mut fields = Map::new();
+    fields.insert(
+        "durationMs".to_string(),
+        Value::Number((started_at.elapsed().as_millis() as u64).into()),
+    );
+    fields.insert("discoverMs".to_string(), Value::Number(discover_ms.into()));
+    fields.insert(
+        "discoveredCount".to_string(),
+        Value::Number(discovered_count.into()),
+    );
+    fields.insert(
+        "sessionCount".to_string(),
+        Value::Number(session_count.into()),
+    );
+    fields.insert("changed".to_string(), Value::Bool(sessions_changed));
+    fields.insert("metadataPruned".to_string(), Value::Bool(metadata_pruned));
+    append_bridge_debug_event(state, "session_catalog.refresh", fields).await;
 
     sessions_changed
 }

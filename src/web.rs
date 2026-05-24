@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -14,19 +15,20 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::{
-    AppState, AuthSession, ClientMessage, ServerMessage, append_event_debug_client_message,
-    append_event_debug_server_message, client_config, handle_client_message,
-    refresh_session_catalog, sessions_snapshot_from_map,
+    AppState, AuthSession, ClientMessage, ServerMessage, append_bridge_debug_event,
+    append_event_debug_client_message, append_event_debug_server_message, client_config,
+    handle_client_message, refresh_session_catalog, sessions_snapshot_from_map,
 };
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
 const AUTH_SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const MAX_CLIENT_TEXT_FRAME_BYTES: usize = 32 * 1024 * 1024;
+static NEXT_WEBSOCKET_CONNECTION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct WebSocketQuery {
@@ -210,23 +212,97 @@ pub(crate) async fn ws_handler(
     }
 }
 
+fn next_websocket_connection_id() -> u64 {
+    NEXT_WEBSOCKET_CONNECTION_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SendLogContext {
+    connection_id: u64,
+    outbound_seq: u64,
+    update_mode: WebSocketUpdateMode,
+    source: &'static str,
+}
+
+fn websocket_update_mode_label(update_mode: WebSocketUpdateMode) -> &'static str {
+    match update_mode {
+        WebSocketUpdateMode::Immediate => "immediate",
+        WebSocketUpdateMode::ConflateAndDelta => "conflateAndDelta",
+    }
+}
+
+fn text_preview(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
+async fn append_websocket_debug_event(
+    state: &AppState,
+    event_type: &'static str,
+    connection_id: u64,
+    update_mode: WebSocketUpdateMode,
+    outbound_seq: u64,
+    lifetime_ms: Option<u128>,
+    extras: Map<String, Value>,
+) {
+    let mut fields = extras;
+    fields.insert(
+        "connectionId".to_string(),
+        Value::Number(connection_id.into()),
+    );
+    fields.insert(
+        "updateMode".to_string(),
+        Value::String(websocket_update_mode_label(update_mode).to_string()),
+    );
+    fields.insert(
+        "outboundSeq".to_string(),
+        Value::Number(outbound_seq.into()),
+    );
+    if let Some(lifetime_ms) = lifetime_ms {
+        fields.insert(
+            "lifetimeMs".to_string(),
+            Value::Number((lifetime_ms as u64).into()),
+        );
+    }
+    append_bridge_debug_event(state, event_type, fields).await;
+}
+
 pub(crate) async fn handle_socket(
     mut socket: WebSocket,
     state: AppState,
     update_mode: WebSocketUpdateMode,
 ) {
-    info!(?update_mode, "websocket client connected");
+    let connection_id = next_websocket_connection_id();
+    let mut outbound_seq = 0_u64;
+    let opened_at = Instant::now();
+    info!(?update_mode, connection_id, "websocket client connected");
+    append_websocket_debug_event(
+        &state,
+        "websocket.open",
+        connection_id,
+        update_mode,
+        outbound_seq,
+        Some(0),
+        Map::new(),
+    )
+    .await;
     let mut event_rx = state.events.subscribe();
 
     let config = client_config(&state).await;
-    if send_json(
-        &mut socket,
+    outbound_seq += 1;
+    if send_json_with_context(
         &state,
+        &mut socket,
         &ServerMessage::Hello {
             server_version: env!("CARGO_PKG_VERSION"),
             protocol_version: 1,
             config,
         },
+        Some(SendLogContext {
+            connection_id,
+            outbound_seq,
+            update_mode,
+            source: "initial",
+        }),
     )
     .await
     .is_err()
@@ -234,19 +310,43 @@ pub(crate) async fn handle_socket(
         return;
     }
 
-    if send_sessions_snapshot(&mut socket, &state).await.is_err() {
+    if send_sessions_snapshot(
+        &mut socket,
+        &state,
+        update_mode,
+        connection_id,
+        &mut outbound_seq,
+    )
+    .await
+    .is_err()
+    {
         return;
     }
 
     loop {
         tokio::select! {
             frame = socket.recv() => {
-                let Some(frame) = frame else { return; };
+                let Some(frame) = frame else {
+                    append_websocket_debug_event(
+                        &state,
+                        "websocket.close",
+                        connection_id,
+                        update_mode,
+                        outbound_seq,
+                        Some(opened_at.elapsed().as_millis()),
+                        Map::new(),
+                    )
+                    .await;
+                    return;
+                };
                 match handle_websocket_frame(
                     &mut socket,
                     &state,
                     frame,
                     update_mode,
+                    connection_id,
+                    &mut outbound_seq,
+                    opened_at,
                 ).await {
                     Ok(FrameOutcome::Continue) => {}
                     Ok(FrameOutcome::Resynced) => {
@@ -262,26 +362,79 @@ pub(crate) async fn handle_socket(
                             Ok(messages) => messages,
                             Err(OutboundCollectError::Lagged(skipped)) => {
                                 warn!(skipped, "websocket client lagged behind bridge events");
+                                let mut fields = Map::new();
+                                fields.insert("skipped".to_string(), Value::Number(skipped.into()));
+                                append_websocket_debug_event(
+                                    &state,
+                                    "websocket.lagged",
+                                    connection_id,
+                                    update_mode,
+                                    outbound_seq,
+                                    Some(opened_at.elapsed().as_millis()),
+                                    fields,
+                                )
+                                .await;
                                 return;
                             }
-                            Err(OutboundCollectError::Closed) => return,
+                            Err(OutboundCollectError::Closed) => {
+                                append_websocket_debug_event(
+                                    &state,
+                                    "websocket.event_channel_closed",
+                                    connection_id,
+                                    update_mode,
+                                    outbound_seq,
+                                    Some(opened_at.elapsed().as_millis()),
+                                    Map::new(),
+                                )
+                                .await;
+                                return;
+                            }
                         };
                         for message in messages {
-                            if send_client_message(
+                            let send_result = send_client_message(
                                 &mut socket,
                                 &state,
                                 message,
                                 update_mode,
-                            ).await.is_err() {
+                                connection_id,
+                                &mut outbound_seq,
+                                "broadcast",
+                            )
+                            .await;
+                            if send_result.is_err() {
                                 return;
                             }
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         warn!(skipped, "websocket client lagged behind bridge events");
+                        let mut fields = Map::new();
+                        fields.insert("skipped".to_string(), Value::Number(skipped.into()));
+                        append_websocket_debug_event(
+                            &state,
+                            "websocket.lagged",
+                            connection_id,
+                            update_mode,
+                            outbound_seq,
+                            Some(opened_at.elapsed().as_millis()),
+                            fields,
+                        )
+                        .await;
                         return;
                     }
-                    Err(broadcast::error::RecvError::Closed) => return,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        append_websocket_debug_event(
+                            &state,
+                            "websocket.event_channel_closed",
+                            connection_id,
+                            update_mode,
+                            outbound_seq,
+                            Some(opened_at.elapsed().as_millis()),
+                            Map::new(),
+                        )
+                        .await;
+                        return;
+                    }
                 }
             }
         }
@@ -321,11 +474,26 @@ pub(crate) async fn handle_websocket_frame(
     state: &AppState,
     frame: Result<Message, axum::Error>,
     update_mode: WebSocketUpdateMode,
+    connection_id: u64,
+    outbound_seq: &mut u64,
+    opened_at: Instant,
 ) -> Result<FrameOutcome, axum::Error> {
     let frame = match frame {
         Ok(frame) => frame,
         Err(error) => {
             warn!(%error, "websocket receive failed");
+            let mut fields = Map::new();
+            fields.insert("error".to_string(), Value::String(error.to_string()));
+            append_websocket_debug_event(
+                state,
+                "websocket.receive_error",
+                connection_id,
+                update_mode,
+                *outbound_seq,
+                Some(opened_at.elapsed().as_millis()),
+                fields,
+            )
+            .await;
             return Err(error);
         }
     };
@@ -333,6 +501,21 @@ pub(crate) async fn handle_websocket_frame(
     match frame {
         Message::Text(text) => {
             if client_text_frame_too_large(&text) {
+                let mut fields = Map::new();
+                fields.insert(
+                    "bytes".to_string(),
+                    Value::Number((text.len() as u64).into()),
+                );
+                append_websocket_debug_event(
+                    state,
+                    "websocket.text_too_large",
+                    connection_id,
+                    update_mode,
+                    *outbound_seq,
+                    Some(opened_at.elapsed().as_millis()),
+                    fields,
+                )
+                .await;
                 close_for_text_frame_too_large(socket, text.len()).await?;
                 return Ok(FrameOutcome::Continue);
             }
@@ -355,6 +538,9 @@ pub(crate) async fn handle_websocket_frame(
                             state,
                             response,
                             WebSocketUpdateMode::Immediate,
+                            connection_id,
+                            outbound_seq,
+                            "direct-response",
                         )
                         .await?;
                     }
@@ -366,18 +552,68 @@ pub(crate) async fn handle_websocket_frame(
                         request_id: None,
                         message: format!("invalid client message: {error}"),
                     };
-                    send_json(socket, state, &response).await?;
+                    *outbound_seq += 1;
+                    send_json_with_context(
+                        state,
+                        socket,
+                        &response,
+                        Some(SendLogContext {
+                            connection_id,
+                            outbound_seq: *outbound_seq,
+                            update_mode,
+                            source: "direct-error",
+                        }),
+                    )
+                    .await?;
                 }
             }
         }
-        Message::Close(_) => return Err(axum::Error::new(anyhow!("websocket closed"))),
+        Message::Close(frame) => {
+            let mut fields = Map::new();
+            if let Some(frame) = frame {
+                fields.insert(
+                    "code".to_string(),
+                    Value::Number(u16::from(frame.code).into()),
+                );
+                let reason = frame.reason.to_string();
+                if !reason.is_empty() {
+                    fields.insert(
+                        "reason".to_string(),
+                        Value::String(text_preview(&reason, 120)),
+                    );
+                }
+            }
+            append_websocket_debug_event(
+                state,
+                "websocket.close",
+                connection_id,
+                update_mode,
+                *outbound_seq,
+                Some(opened_at.elapsed().as_millis()),
+                fields,
+            )
+            .await;
+            return Err(axum::Error::new(anyhow!("websocket closed")));
+        }
         Message::Ping(_) | Message::Pong(_) => {}
         Message::Binary(_) => {
             let response = ServerMessage::Error {
                 request_id: None,
                 message: "binary websocket frames are not supported".to_string(),
             };
-            send_json(socket, state, &response).await?;
+            *outbound_seq += 1;
+            send_json_with_context(
+                state,
+                socket,
+                &response,
+                Some(SendLogContext {
+                    connection_id,
+                    outbound_seq: *outbound_seq,
+                    update_mode,
+                    source: "direct-error",
+                }),
+            )
+            .await?;
         }
     }
 
@@ -385,19 +621,34 @@ pub(crate) async fn handle_websocket_frame(
 }
 
 fn client_message_resyncs_stream(
-    message: &ClientMessage,
-    update_mode: WebSocketUpdateMode,
+    _message: &ClientMessage,
+    _update_mode: WebSocketUpdateMode,
 ) -> bool {
-    update_mode.uses_session_deltas() && matches!(message, ClientMessage::StateRefresh { .. })
+    false
 }
 
 pub(crate) async fn send_sessions_snapshot(
     socket: &mut WebSocket,
     state: &AppState,
+    update_mode: WebSocketUpdateMode,
+    connection_id: u64,
+    outbound_seq: &mut u64,
 ) -> Result<(), axum::Error> {
     refresh_session_catalog(state).await;
     let sessions = state.sessions.read().await;
-    send_json(socket, state, &sessions_snapshot_from_map(&sessions)).await
+    *outbound_seq += 1;
+    send_json_with_context(
+        state,
+        socket,
+        &sessions_snapshot_from_map(&sessions),
+        Some(SendLogContext {
+            connection_id,
+            outbound_seq: *outbound_seq,
+            update_mode,
+            source: "initial",
+        }),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -468,9 +719,24 @@ async fn send_client_message(
     state: &AppState,
     message: ServerMessage,
     update_mode: WebSocketUpdateMode,
+    connection_id: u64,
+    outbound_seq: &mut u64,
+    source: &'static str,
 ) -> Result<(), axum::Error> {
     let message = prepare_client_message(state, message, update_mode).await;
-    send_json(socket, state, &message).await
+    *outbound_seq += 1;
+    send_json_with_context(
+        state,
+        socket,
+        &message,
+        Some(SendLogContext {
+            connection_id,
+            outbound_seq: *outbound_seq,
+            update_mode,
+            source,
+        }),
+    )
+    .await
 }
 
 async fn prepare_client_message(
@@ -505,18 +771,97 @@ async fn prepare_client_message(
         message => message,
     }
 }
-
-pub(crate) async fn send_json(
-    socket: &mut WebSocket,
+async fn send_json_with_context(
     state: &AppState,
+    socket: &mut WebSocket,
     message: &ServerMessage,
+    context: Option<SendLogContext>,
 ) -> Result<(), axum::Error> {
+    log_server_message_send_context(message, context);
     log_server_message(message);
     append_event_debug_server_message(state, message).await;
+    let serialize_started_at = Instant::now();
     match serde_json::to_string(message) {
-        Ok(text) => socket.send(Message::Text(text.into())).await,
+        Ok(text) => {
+            let serialize_ms = serialize_started_at.elapsed().as_millis() as u64;
+            let byte_len = text.len() as u64;
+            let send_started_at = Instant::now();
+            match socket.send(Message::Text(text.into())).await {
+                Ok(()) => {
+                    if let Some(context) = context {
+                        if should_log_send_timing(message) {
+                            let mut fields = websocket_send_timing_fields(
+                                message,
+                                context,
+                                byte_len,
+                                serialize_ms,
+                                send_started_at.elapsed().as_millis() as u64,
+                            );
+                            fields.insert("ok".to_string(), Value::Bool(true));
+                            append_websocket_debug_event(
+                                state,
+                                "websocket.send_timing",
+                                context.connection_id,
+                                context.update_mode,
+                                context.outbound_seq,
+                                None,
+                                fields,
+                            )
+                            .await;
+                        }
+                    }
+                    Ok(())
+                }
+                Err(error) => {
+                    if let Some(context) = context {
+                        let mut fields = websocket_send_timing_fields(
+                            message,
+                            context,
+                            byte_len,
+                            serialize_ms,
+                            send_started_at.elapsed().as_millis() as u64,
+                        );
+                        fields.insert("ok".to_string(), Value::Bool(false));
+                        fields.insert("error".to_string(), Value::String(error.to_string()));
+                        append_websocket_debug_event(
+                            state,
+                            "websocket.send_error",
+                            context.connection_id,
+                            context.update_mode,
+                            context.outbound_seq,
+                            None,
+                            fields,
+                        )
+                        .await;
+                    }
+                    Err(error)
+                }
+            }
+        }
         Err(error) => {
             error!(%error, "failed to serialize websocket message");
+            if let Some(context) = context {
+                let mut fields = Map::new();
+                fields.insert(
+                    "messageType".to_string(),
+                    Value::String(server_message_type(message).to_string()),
+                );
+                fields.insert(
+                    "source".to_string(),
+                    Value::String(context.source.to_string()),
+                );
+                fields.insert("error".to_string(), Value::String(error.to_string()));
+                append_websocket_debug_event(
+                    state,
+                    "websocket.serialize_error",
+                    context.connection_id,
+                    context.update_mode,
+                    context.outbound_seq,
+                    None,
+                    fields,
+                )
+                .await;
+            }
             socket
                 .send(Message::Text(
                     r#"{"type":"error","requestId":null,"message":"internal serialization error"}"#
@@ -528,6 +873,128 @@ pub(crate) async fn send_json(
     }
 }
 
+fn should_log_send_timing(message: &ServerMessage) -> bool {
+    matches!(
+        message,
+        ServerMessage::SessionsSnapshot { .. }
+            | ServerMessage::SessionSnapshot { .. }
+            | ServerMessage::SessionDelta { .. }
+    )
+}
+
+fn websocket_send_timing_fields(
+    message: &ServerMessage,
+    context: SendLogContext,
+    byte_len: u64,
+    serialize_ms: u64,
+    send_ms: u64,
+) -> Map<String, Value> {
+    let mut fields = Map::new();
+    fields.insert(
+        "messageType".to_string(),
+        Value::String(server_message_type(message).to_string()),
+    );
+    fields.insert(
+        "source".to_string(),
+        Value::String(context.source.to_string()),
+    );
+    fields.insert("byteLen".to_string(), Value::Number(byte_len.into()));
+    fields.insert(
+        "serializeMs".to_string(),
+        Value::Number(serialize_ms.into()),
+    );
+    fields.insert("sendMs".to_string(), Value::Number(send_ms.into()));
+    match message {
+        ServerMessage::SessionsSnapshot { sessions } => {
+            fields.insert(
+                "sessionCount".to_string(),
+                Value::Number((sessions.len() as u64).into()),
+            );
+        }
+        ServerMessage::SessionSnapshot { session_id, state } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert(
+                "transcriptLen".to_string(),
+                Value::Number((state.transcript.len() as u64).into()),
+            );
+        }
+        ServerMessage::SessionDelta { session_id, state } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert(
+                "transcriptAppendLen".to_string(),
+                Value::Number((state.transcript_append.len() as u64).into()),
+            );
+            fields.insert(
+                "transcriptReplaceFrom".to_string(),
+                Value::Number((state.transcript_replace_from as u64).into()),
+            );
+        }
+        _ => {}
+    }
+    fields
+}
+fn log_server_message_send_context(message: &ServerMessage, context: Option<SendLogContext>) {
+    let Some(context) = context else {
+        return;
+    };
+    info!(
+        direction = "bridge_to_client",
+        message_type = server_message_type(message),
+        connection_id = context.connection_id,
+        outbound_seq = context.outbound_seq,
+        source = context.source,
+        "websocket message send"
+    );
+}
+
+fn server_message_type(message: &ServerMessage) -> &'static str {
+    match message {
+        ServerMessage::Hello { .. } => "hello",
+        ServerMessage::ConfigUpdated { .. } => "config.updated",
+        ServerMessage::SessionsSnapshot { .. } => "sessions.snapshot",
+        ServerMessage::SessionSnapshot { .. } => "session.snapshot",
+        ServerMessage::SessionDelta { .. } => "session.delta",
+        ServerMessage::SessionExited { .. } => "session.exited",
+        ServerMessage::DialogRequest { .. } => "dialog.request",
+        ServerMessage::LogStderr { .. } => "log.stderr",
+        ServerMessage::SessionNotice { .. } => "session.notice",
+        ServerMessage::PromptBusy { .. } => "prompt.busy",
+        ServerMessage::ModelList { .. } => "model.list",
+        ServerMessage::ConfigModelCatalogList { .. } => "config.modelCatalog.list",
+        ServerMessage::ModelChanged { .. } => "model.changed",
+        ServerMessage::PlanReview { .. } => "plan.review",
+        ServerMessage::SessionChangesSummary { .. } => "sessionChanges.summary",
+        ServerMessage::CompareDiffSummary { .. } => "compareDiff.summary",
+        ServerMessage::DiffContent { .. } => "diff.content",
+        ServerMessage::DiffComplete { .. } => "diff.complete",
+        ServerMessage::DiffCancelled { .. } => "diff.cancelled",
+        ServerMessage::DiffError { .. } => "diff.error",
+        ServerMessage::DiffReviewWorktreeState { .. } => "diff.reviewWorktree.state",
+        ServerMessage::ControlReply { .. } => "control.reply",
+        ServerMessage::ControlStatus { .. } => "control.status",
+        ServerMessage::FrontendControl { .. } => "frontend.control",
+        ServerMessage::CodeWorkspaceReady { .. } => "code.workspace.ready",
+        ServerMessage::CodeTree { .. } => "code.tree",
+        ServerMessage::CodeFile { .. } => "code.file",
+        ServerMessage::CodeFileSearchResults { .. } => "code.file.searchResults",
+        ServerMessage::CodeError { .. } => "code.error",
+        ServerMessage::ConflictSnapshot { .. } => "conflict.snapshot",
+        ServerMessage::ConflictFile { .. } => "conflict.file",
+        ServerMessage::ConflictMagicWandPreview { .. } => "conflict.magicWandPreview",
+        ServerMessage::ConflictAgentResult { .. } => "conflict.agentResult",
+        ServerMessage::ConflictStatus { .. } => "conflict.status",
+        ServerMessage::ConflictError { .. } => "conflict.error",
+        ServerMessage::RawOmp { .. } => "raw.omp",
+        ServerMessage::VoiceStatus { .. } => "voice.status",
+        ServerMessage::VoiceDelta { .. } => "voice.delta",
+        ServerMessage::VoiceFinal { .. } => "voice.final",
+        ServerMessage::VoiceError { .. } => "voice.error",
+        ServerMessage::ReviewCommentsSnapshot { .. } => "review.comments.snapshot",
+        ServerMessage::ReviewCommentUpserted { .. } => "review.comment.upserted",
+        ServerMessage::ReviewCommentDeleted { .. } => "review.comment.deleted",
+        ServerMessage::Error { .. } => "error",
+    }
+}
 pub(crate) fn log_server_message(message: &ServerMessage) {
     match message {
         ServerMessage::Hello { .. } => {
@@ -1058,8 +1525,8 @@ mod tests {
     }
 
     #[test]
-    fn mobile_state_refresh_resets_event_cursor_after_snapshot_resync() {
-        assert!(client_message_resyncs_stream(
+    fn mobile_state_refresh_uses_existing_event_cursor() {
+        assert!(!client_message_resyncs_stream(
             &ClientMessage::StateRefresh {
                 session_id: "s1".to_string(),
             },

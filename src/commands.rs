@@ -2,11 +2,12 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use anyhow::{Context, anyhow};
 use git2::{Branch, BranchType, Repository, Worktree, WorktreeAddOptions, WorktreePruneOptions};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use tracing::{debug, error, info, warn};
 
 use crate::*;
@@ -55,8 +56,8 @@ pub(crate) async fn handle_client_message(
         ClientMessage::SessionList => {
             info!(action = "session.list");
             refresh_session_catalog(state).await;
-            let sessions = state.sessions.read().await;
-            vec![sessions_snapshot_from_map(&sessions)]
+            state.session_events.emit_sessions_snapshot(state).await;
+            Vec::new()
         }
         ClientMessage::SessionAttach { session_id }
         | ClientMessage::StateRefresh { session_id } => {
@@ -64,13 +65,14 @@ pub(crate) async fn handle_client_message(
             if let Err(message) = refresh_rpc_state(state, &session_id).await {
                 warn!(session_id = %session_id, %message, "state refresh could not reach RPC child");
             }
-            let sessions = state.sessions.read().await;
-            match sessions.get(&session_id) {
-                Some(record) => vec![ServerMessage::SessionSnapshot {
-                    session_id,
-                    state: record.projection(),
-                }],
-                None => vec![unknown_session_error(session_id)],
+            if state
+                .session_events
+                .emit_current_session_snapshot(state, &session_id)
+                .await
+            {
+                Vec::new()
+            } else {
+                vec![unknown_session_error(session_id)]
             }
         }
         ClientMessage::SessionDetach { session_id } => {
@@ -763,6 +765,7 @@ pub(crate) async fn create_session(
     worktree: Option<WorktreeCreateRequest>,
     proposed_model_id: Option<String>,
 ) -> Vec<ServerMessage> {
+    let started_at = Instant::now();
     let category = match normalize_session_category(category) {
         Ok(category) => category,
         Err(message) => {
@@ -774,6 +777,7 @@ pub(crate) async fn create_session(
     };
     let transport_id = Uuid::new_v4().to_string();
     let args = args.unwrap_or_default();
+    let arg_count = args.len();
     let created_at = Timestamp::now();
     let requested_cwd = match normalize_optional_field(cwd) {
         Some(cwd) => cwd,
@@ -794,8 +798,11 @@ pub(crate) async fn create_session(
     };
 
     if let Some(worktree) = worktree {
+        let worktree_started_at = Instant::now();
         default_cwd_to_save = worktree.source_repo.trim().to_string();
-        match create_git_worktree(worktree).await {
+        let worktree_result = create_git_worktree(worktree).await;
+        let worktree_ms = worktree_started_at.elapsed().as_millis() as u64;
+        match worktree_result {
             Ok(created) => {
                 info!(
                     action = "worktree.created",
@@ -811,6 +818,16 @@ pub(crate) async fn create_session(
             }
             Err(error) => {
                 warn!(transport_session_id = %transport_id, %error, "worktree creation failed");
+                append_session_create_timing(
+                    state,
+                    "worktree_error",
+                    &transport_id,
+                    started_at,
+                    Some(worktree_ms),
+                    false,
+                    arg_count,
+                )
+                .await;
                 return vec![ServerMessage::Error {
                     request_id,
                     message: format!("worktree creation failed: {error}"),
@@ -826,7 +843,7 @@ pub(crate) async fn create_session(
         cwd = %session_cwd,
         has_name = name.is_some(),
         has_worktree,
-        arg_count = args.len(),
+        arg_count,
     );
 
     state
@@ -847,6 +864,7 @@ pub(crate) async fn create_session(
         )
         .await;
 
+    let spawn_started_at = Instant::now();
     if let Err(error) = spawn_rpc_child(
         state.clone(),
         transport_id.clone(),
@@ -856,6 +874,16 @@ pub(crate) async fn create_session(
     )
     .await
     {
+        append_session_create_timing(
+            state,
+            "spawn_error",
+            &transport_id,
+            started_at,
+            None,
+            has_worktree,
+            arg_count,
+        )
+        .await;
         state
             .session_runtime
             .remove_pending_create(&transport_id)
@@ -866,10 +894,51 @@ pub(crate) async fn create_session(
             message: format!("failed to start RPC child: {error}"),
         }];
     }
+    let spawn_ms = spawn_started_at.elapsed().as_millis() as u64;
 
     save_default_cwd(state, &default_cwd_to_save).await;
+    append_session_create_timing(
+        state,
+        "spawned",
+        &transport_id,
+        started_at,
+        Some(spawn_ms),
+        has_worktree,
+        arg_count,
+    )
+    .await;
 
     Vec::new()
+}
+
+async fn append_session_create_timing(
+    state: &AppState,
+    stage: &'static str,
+    transport_id: &str,
+    started_at: Instant,
+    stage_ms: Option<u64>,
+    has_worktree: bool,
+    arg_count: usize,
+) {
+    let mut fields = Map::new();
+    fields.insert("stage".to_string(), Value::String(stage.to_string()));
+    fields.insert(
+        "transportSessionId".to_string(),
+        Value::String(transport_id.to_string()),
+    );
+    fields.insert(
+        "durationMs".to_string(),
+        Value::Number((started_at.elapsed().as_millis() as u64).into()),
+    );
+    if let Some(stage_ms) = stage_ms {
+        fields.insert("stageMs".to_string(), Value::Number(stage_ms.into()));
+    }
+    fields.insert("hasWorktree".to_string(), Value::Bool(has_worktree));
+    fields.insert(
+        "argCount".to_string(),
+        Value::Number((arg_count as u64).into()),
+    );
+    append_bridge_debug_event(state, "session.create_timing", fields).await;
 }
 
 async fn handle_plan_approve(
@@ -925,19 +994,12 @@ async fn handle_plan_approve(
     );
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => {
-            let snapshot = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&session_id).map(|record| {
+            state
+                .session_events
+                .mutate_session_snapshot(state, &session_id, |record| {
                     record.pending_plan_review = None;
-                    ServerMessage::SessionSnapshot {
-                        session_id: session_id.clone(),
-                        state: record.projection(),
-                    }
                 })
-            };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
-            }
+                .await;
             Vec::new()
         }
         Err(message) => vec![ServerMessage::Error {
@@ -980,20 +1042,26 @@ pub(crate) async fn set_session_category(
 
     info!(action = "session.set_category", session_id = %session_id, has_category = category.is_some());
 
-    let (snapshot, sessions_snapshot) = {
-        let mut sessions = state.sessions.write().await;
-        let Some(record) = sessions.get_mut(&session_id) else {
-            return vec![unknown_session_error(session_id)];
-        };
-        record.category = category.clone();
-        (
-            ServerMessage::SessionSnapshot {
-                session_id: session_id.clone(),
-                state: record.projection(),
-            },
-            sessions_snapshot_from_map(&sessions),
-        )
-    };
+    let category_for_record = category.clone();
+    let sent = state
+        .session_events
+        .mutate_sessions_and_emit(state, |sessions| {
+            let Some(record) = sessions.get_mut(&session_id) else {
+                return Vec::new();
+            };
+            record.category = category_for_record;
+            vec![
+                ServerMessage::SessionSnapshot {
+                    session_id: session_id.clone(),
+                    state: record.projection(),
+                },
+                sessions_snapshot_from_map(sessions),
+            ]
+        })
+        .await;
+    if sent == 0 {
+        return vec![unknown_session_error(session_id)];
+    }
 
     state
         .session_runtime
@@ -1003,7 +1071,7 @@ pub(crate) async fn set_session_category(
         warn!(%error, "failed to save session category");
     }
 
-    vec![snapshot, sessions_snapshot]
+    Vec::new()
 }
 
 pub(crate) async fn set_client_config(
@@ -1203,24 +1271,22 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
             .contains_transport(&transport_session_id)
             .await
         {
-            let sessions = state.sessions.read().await;
-            return match sessions.get(&session_id) {
-                Some(record) => vec![ServerMessage::SessionSnapshot {
-                    session_id,
-                    state: record.projection(),
-                }],
-                None => vec![ServerMessage::Error {
-                    request_id: None,
-                    message: format!(
-                        "session {session_id} is marked live but has no catalog entry"
-                    ),
-                }],
-            };
+            if state
+                .session_events
+                .emit_current_session_snapshot(state, &session_id)
+                .await
+            {
+                return Vec::new();
+            }
+            return vec![ServerMessage::Error {
+                request_id: None,
+                message: format!("session {session_id} is marked live but has no catalog entry"),
+            }];
         }
     }
 
     let category = state.session_runtime.session_category(&session_id).await;
-    let (projection, sessions_snapshot) = {
+    {
         let mut sessions = state.sessions.write().await;
         let record = opened_session_record(
             &discovered,
@@ -1228,10 +1294,8 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
             category,
             sessions.get(&session_id),
         );
-        let projection = record.projection();
         sessions.insert(session_id.clone(), record);
-        (projection, sessions_snapshot_from_map(&sessions))
-    };
+    }
 
     let transport_session_id = {
         if state.session_runtime.contains_transport(&session_id).await {
@@ -1259,26 +1323,35 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
 
     if let Err(error) = spawn_result {
         error!(session_id = %session_id, %error, "failed to open RPC session");
-        let mut sessions = state.sessions.write().await;
-        if let Some(record) = sessions.get_mut(&session_id) {
-            record.status = SessionStatus::Error;
-        }
-        return vec![
-            sessions_snapshot_from_map(&sessions),
-            ServerMessage::Error {
-                request_id: None,
-                message: format!("failed to open session {session_file}: {error}"),
-            },
-        ];
+        state
+            .session_events
+            .mutate_sessions_and_emit(state, |sessions| {
+                if let Some(record) = sessions.get_mut(&session_id) {
+                    record.status = SessionStatus::Error;
+                }
+                vec![sessions_snapshot_from_map(sessions)]
+            })
+            .await;
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: format!("failed to open session {session_file}: {error}"),
+        }];
     }
 
-    vec![
-        sessions_snapshot,
-        ServerMessage::SessionSnapshot {
-            session_id,
-            state: projection,
-        },
-    ]
+    state
+        .session_events
+        .mutate_sessions_and_emit(state, |sessions| {
+            let mut messages = vec![sessions_snapshot_from_map(sessions)];
+            if let Some(record) = sessions.get(&session_id) {
+                messages.push(ServerMessage::SessionSnapshot {
+                    session_id: session_id.clone(),
+                    state: record.projection(),
+                });
+            }
+            messages
+        })
+        .await;
+    Vec::new()
 }
 
 pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<ServerMessage> {
@@ -1295,9 +1368,12 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
         }
     }
 
-    let mut sessions = state.sessions.write().await;
-    match sessions.get_mut(&session_id) {
-        Some(record) => {
+    let sent = state
+        .session_events
+        .mutate_sessions_and_emit(state, |sessions| {
+            let Some(record) = sessions.get_mut(&session_id) else {
+                return Vec::new();
+            };
             record.status = SessionStatus::Exited;
             vec![
                 ServerMessage::SessionSnapshot {
@@ -1305,14 +1381,18 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
                     state: record.projection(),
                 },
                 ServerMessage::SessionExited {
-                    session_id,
+                    session_id: session_id.clone(),
                     code: None,
                     signal: Some("stopped".to_string()),
                 },
-                sessions_snapshot_from_map(&sessions),
+                sessions_snapshot_from_map(sessions),
             ]
-        }
-        None => vec![unknown_session_error(session_id)],
+        })
+        .await;
+    if sent == 0 {
+        vec![unknown_session_error(session_id)]
+    } else {
+        Vec::new()
     }
 }
 
@@ -1478,18 +1558,12 @@ pub(crate) async fn handle_slash_command(
                     Ok(()) => {
                         // OMP returns only a success ack — it does not echo the name back.
                         // Update our projection directly since we already know the new title.
-                        {
-                            let mut sessions = state.sessions.write().await;
-                            if let Some(record) = sessions.get_mut(&session_id) {
+                        state
+                            .session_events
+                            .mutate_session_snapshot(state, &session_id, |record| {
                                 record.title = Some(new_title);
-                            }
-                            if let Some(record) = sessions.get(&session_id) {
-                                let _ = state.events.send(ServerMessage::SessionSnapshot {
-                                    session_id: session_id.clone(),
-                                    state: record.projection(),
-                                });
-                            }
-                        }
+                            })
+                            .await;
                         broadcast_sessions_snapshot(state).await;
                         vec![notice(session_id, NoticeLevel::Info, "Session renamed.")]
                     }
@@ -1900,29 +1974,22 @@ pub(crate) async fn send_prompt(
     let optimistic_message_id = format!("__pending_prompt:{command_id}");
     let command_images = images.filter(|images| !images.is_empty());
 
-    let snapshot = {
-        let mut sessions = state.sessions.write().await;
-        match sessions.get_mut(&session_id) {
-            Some(record) => {
-                record.status = SessionStatus::Busy;
-                record.messages.push(optimistic_prompt_message(
-                    optimistic_message_id.clone(),
-                    text.clone(),
-                    command_images.as_ref(),
-                ));
-                record.updated_at = Timestamp::now();
-                Some(ServerMessage::SessionSnapshot {
-                    session_id: session_id.clone(),
-                    state: record.projection(),
-                })
-            }
-            None => None,
-        }
-    };
+    let snapshot_sent = state
+        .session_events
+        .mutate_session_snapshot(state, &session_id, |record| {
+            record.status = SessionStatus::Busy;
+            record.messages.push(optimistic_prompt_message(
+                optimistic_message_id.clone(),
+                text.clone(),
+                command_images.as_ref(),
+            ));
+            record.updated_at = Timestamp::now();
+        })
+        .await;
 
-    let Some(snapshot) = snapshot else {
+    if !snapshot_sent {
         return vec![unknown_session_error(session_id)];
-    };
+    }
 
     if behavior.is_none() {
         state.pending_prompt_drafts.write().await.insert(
@@ -1939,24 +2006,18 @@ pub(crate) async fn send_prompt(
     let command = prompt_command(command_id.clone(), text, command_images, behavior);
 
     match send_rpc_command(state, &session_id, command).await {
-        Ok(()) => vec![snapshot],
+        Ok(()) => Vec::new(),
         Err(message) => {
             state
                 .pending_prompt_drafts
                 .write()
                 .await
                 .remove(&command_id);
-            let rollback =
-                remove_optimistic_prompt_message(state, &session_id, &optimistic_message_id).await;
-            let mut responses = vec![snapshot];
-            if let Some(rollback) = rollback {
-                responses.push(rollback);
-            }
-            responses.push(ServerMessage::Error {
+            remove_optimistic_prompt_message(state, &session_id, &optimistic_message_id).await;
+            vec![ServerMessage::Error {
                 request_id: None,
                 message,
-            });
-            responses
+            }]
         }
     }
 }
@@ -2005,10 +2066,10 @@ pub(crate) async fn remove_optimistic_prompt_message(
     state: &AppState,
     session_id: &str,
     optimistic_message_id: &str,
-) -> Option<ServerMessage> {
-    let snapshot = {
-        let mut sessions = state.sessions.write().await;
-        sessions.get_mut(session_id).and_then(|record| {
+) -> bool {
+    state
+        .session_events
+        .mutate_session_and_emit(state, session_id, |record| {
             let before = record.messages.len();
             record
                 .messages
@@ -2021,8 +2082,7 @@ pub(crate) async fn remove_optimistic_prompt_message(
                 state: record.projection(),
             })
         })
-    };
-    snapshot
+        .await
 }
 
 pub(crate) async fn handle_review_comments_list(
@@ -3203,24 +3263,23 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
     )
     .await;
 
-    let mut sessions = state.sessions.write().await;
-    match sessions.get_mut(&session_id) {
-        Some(record) => {
+    let snapshot_sent = state
+        .session_events
+        .mutate_session_snapshot(&state, &session_id, |record| {
             record.status = SessionStatus::Idle;
-            let mut responses = vec![ServerMessage::SessionSnapshot {
-                session_id,
-                state: record.projection(),
-            }];
-            if let Err(message) = send_result {
-                responses.push(ServerMessage::Error {
-                    request_id: None,
-                    message,
-                });
-            }
-            responses
-        }
-        None => vec![unknown_session_error(session_id)],
+        })
+        .await;
+    if !snapshot_sent {
+        return vec![unknown_session_error(session_id)];
     }
+    let mut responses = Vec::new();
+    if let Err(message) = send_result {
+        responses.push(ServerMessage::Error {
+            request_id: None,
+            message,
+        });
+    }
+    responses
 }
 
 #[cfg(test)]
@@ -3337,7 +3396,7 @@ mod review_comment_tests {
     fn create_conflict_agent_test_repo() -> TempDir {
         let temp = TempDir::new().expect("temp repo created");
         let root = temp.path();
-        run_git(root, &["init"]);
+        run_git(root, &["init", "-b", "master"]);
         run_git(root, &["config", "user.email", "fura@example.invalid"]);
         run_git(root, &["config", "user.name", "Fura Test"]);
         fs::write(root.join("demo.txt"), "one\nbase\nthree\n").expect("base file written");

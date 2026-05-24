@@ -1693,7 +1693,7 @@ mod tests {
     fn create_conflicted_repo() -> TempDir {
         let temp = TempDir::new().expect("temp repo created");
         let root = temp.path();
-        run_git(root, &["init"]);
+        run_git(root, &["init", "-b", "master"]);
         run_git(root, &["config", "user.email", "fura@example.invalid"]);
         run_git(root, &["config", "user.name", "Fura Test"]);
         fs::write(root.join("demo.txt"), "one\nbase\nthree\n").expect("base file written");
@@ -1731,7 +1731,7 @@ mod tests {
     ) -> TempDir {
         let temp = TempDir::new().expect("temp repo created");
         let root = temp.path();
-        run_git(root, &["init"]);
+        run_git(root, &["init", "-b", "master"]);
         run_git(root, &["config", "user.email", "fura@example.invalid"]);
         run_git(root, &["config", "user.name", "Fura Test"]);
         write_repo_file(root, path, base);
@@ -1756,7 +1756,7 @@ mod tests {
     fn create_add_add_conflicted_repo(path: &str, ours: &str, theirs: &str) -> TempDir {
         let temp = TempDir::new().expect("temp repo created");
         let root = temp.path();
-        run_git(root, &["init"]);
+        run_git(root, &["init", "-b", "master"]);
         run_git(root, &["config", "user.email", "fura@example.invalid"]);
         run_git(root, &["config", "user.name", "Fura Test"]);
         run_git(root, &["commit", "--allow-empty", "-m", "base"]);

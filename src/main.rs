@@ -162,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
         active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
         active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
         events,
+        session_events: SessionEventCoordinator::default(),
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
             args: rpc_args,
@@ -374,8 +375,7 @@ fn log_server_ready(
 }
 
 async fn broadcast_sessions_snapshot(state: &AppState) {
-    let sessions = state.session_runtime.sessions.read().await;
-    let _ = state.events.send(sessions_snapshot_from_map(&sessions));
+    state.session_events.emit_sessions_snapshot(state).await;
 }
 
 fn next_rpc_id() -> String {
@@ -854,6 +854,7 @@ pub(crate) mod tests {
             active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
             active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
             events,
+            session_events: SessionEventCoordinator::default(),
             session_host_tools: Arc::new(RwLock::new(HashMap::new())),
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),
@@ -1650,10 +1651,24 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
 
         let responses =
             set_session_category(&state, "s1".to_string(), Some(" infra ".to_string())).await;
-        assert_eq!(responses.len(), 2);
+        assert!(responses.is_empty());
+        match events.recv().await.expect("category snapshot") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state.summary.category.as_deref(), Some("infra"));
+            }
+            other => panic!("unexpected category event: {other:?}"),
+        }
+        match events.recv().await.expect("sessions snapshot") {
+            ServerMessage::SessionsSnapshot { sessions } => {
+                assert_eq!(sessions[0].category.as_deref(), Some("infra"));
+            }
+            other => panic!("unexpected sessions event: {other:?}"),
+        }
         let sessions = state.sessions.read().await;
         assert_eq!(
             sessions
@@ -1673,7 +1688,20 @@ pub(crate) mod tests {
 
         let responses =
             set_session_category(&state, "s1".to_string(), Some("   ".to_string())).await;
-        assert_eq!(responses.len(), 2);
+        assert!(responses.is_empty());
+        match events.recv().await.expect("category clear snapshot") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert!(state.summary.category.is_none());
+            }
+            other => panic!("unexpected category clear event: {other:?}"),
+        }
+        match events.recv().await.expect("sessions clear snapshot") {
+            ServerMessage::SessionsSnapshot { sessions } => {
+                assert!(sessions[0].category.is_none());
+            }
+            other => panic!("unexpected sessions clear event: {other:?}"),
+        }
         let sessions = state.sessions.read().await;
         assert_eq!(
             sessions
@@ -1685,6 +1713,111 @@ pub(crate) mod tests {
         assert!(!state.session_runtime.has_session_category("s1").await);
     }
 
+    #[tokio::test]
+    async fn session_list_enqueues_sessions_snapshot_without_direct_response() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        let responses = handle_client_message(&state, ClientMessage::SessionList).await;
+
+        assert!(responses.is_empty());
+        match events.recv().await.expect("sessions snapshot event") {
+            ServerMessage::SessionsSnapshot { sessions } => {
+                assert!(sessions.iter().any(|session| session.session_id == "s1"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn state_refresh_enqueues_session_snapshot_without_direct_response() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::StateRefresh {
+                session_id: "s1".to_string(),
+            },
+        )
+        .await;
+
+        assert!(responses.is_empty());
+        match events.recv().await.expect("session snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state.summary.status, SessionStatus::Idle);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_event_coordinator_preserves_projection_event_order() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        assert!(
+            state
+                .session_events
+                .emit_current_session_snapshot(&state, "s1")
+                .await
+        );
+        assert!(
+            state
+                .session_events
+                .mutate_session_snapshot(&state, "s1", |record| {
+                    record.messages.push(TranscriptMessage {
+                        id: "m1".to_string(),
+                        role: MessageRole::Assistant,
+                        blocks: vec![ContentBlock::Text {
+                            text: "newer".to_string(),
+                        }],
+                        timestamp: None,
+                        is_new: true,
+                    });
+                })
+                .await
+        );
+        assert!(
+            state
+                .session_events
+                .emit_current_session_snapshot(&state, "s1")
+                .await
+        );
+
+        let first = events.recv().await.expect("first snapshot");
+        let second = events.recv().await.expect("second snapshot");
+        let third = events.recv().await.expect("third snapshot");
+
+        match first {
+            ServerMessage::SessionSnapshot { state, .. } => assert!(state.transcript.is_empty()),
+            other => panic!("unexpected first event: {other:?}"),
+        }
+        match second {
+            ServerMessage::SessionSnapshot { state, .. } => assert_eq!(state.transcript.len(), 1),
+            other => panic!("unexpected second event: {other:?}"),
+        }
+        match third {
+            ServerMessage::SessionSnapshot { state, .. } => assert_eq!(state.transcript.len(), 1),
+            other => panic!("unexpected third event: {other:?}"),
+        }
+    }
     #[tokio::test]
     async fn slash_fork_sends_rpc_fork_command() {
         let state = test_state(8, None);
@@ -2316,6 +2449,7 @@ pub(crate) mod tests {
             .await
             .insert("s1".to_string(), test_record());
         let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
+        let mut events = state.events.subscribe();
 
         let responses = send_prompt(
             &state,
@@ -2330,8 +2464,8 @@ pub(crate) mod tests {
         )
         .await;
 
-        assert_eq!(responses.len(), 1);
-        match &responses[0] {
+        assert!(responses.is_empty());
+        match events.recv().await.expect("optimistic prompt snapshot") {
             ServerMessage::SessionSnapshot { session_id, state } => {
                 assert_eq!(session_id, "s1");
                 assert!(state.is_busy);
@@ -2359,7 +2493,7 @@ pub(crate) mod tests {
                     other => panic!("unexpected transcript entry: {other:?}"),
                 }
             }
-            other => panic!("unexpected response: {other:?}"),
+            other => panic!("unexpected event: {other:?}"),
         }
         let command = commands.recv().await.expect("prompt command sent");
         let command_id = command
@@ -2380,7 +2514,6 @@ pub(crate) mod tests {
             "regular prompt draft should be retained until OMP accepts or rejects it"
         );
 
-        let mut events = state.events.subscribe();
         apply_rpc_response(
             &state,
             "s1",
@@ -2716,6 +2849,37 @@ pub(crate) mod tests {
         let _ = async_fs::remove_file(path).await;
     }
 
+    #[tokio::test]
+    async fn append_bridge_debug_event_writes_compact_websocket_record() {
+        let path = env::temp_dir().join(format!(
+            "fura-bridge-debug-event-{}.jsonl",
+            Uuid::new_v4().simple()
+        ));
+        let state = test_state(1, Some(path.clone()));
+        let mut fields = serde_json::Map::new();
+        fields.insert("connectionId".to_string(), Value::Number(7_u64.into()));
+        fields.insert("outboundSeq".to_string(), Value::Number(3_u64.into()));
+        fields.insert(
+            "reason".to_string(),
+            Value::String("normal close".to_string()),
+        );
+
+        append_bridge_debug_event(&state, "websocket.close", fields).await;
+
+        let written = async_fs::read_to_string(&path)
+            .await
+            .expect("debug event file should be written");
+        let record: Value = serde_json::from_str(written.trim_end()).expect("debug event is JSONL");
+
+        assert_eq!(record["type"], "websocket.close");
+        assert_eq!(record["connectionId"], 7);
+        assert_eq!(record["outboundSeq"], 3);
+        assert_eq!(record["reason"], "normal close");
+        assert!(record["timestampMs"].is_number());
+
+        let _ = async_fs::remove_file(path).await;
+    }
+
     #[test]
     fn parses_session_create_message() {
         // Without name
@@ -2964,33 +3128,33 @@ pub(crate) mod tests {
             branch_name: Some("feature/worktree-test".to_string()),
         })
         .expect("worktree should be created");
+        let expected_repo_dir = repo_dir
+            .canonicalize()
+            .expect("repo dir should canonicalize");
+        let expected_worktree_dir = worktree_dir
+            .canonicalize()
+            .expect("worktree dir should canonicalize");
 
         assert_eq!(
             created
                 .source_repo_root
                 .canonicalize()
-                .expect("created source repo path should canonicalize"),
-            repo_dir
-                .canonicalize()
-                .expect("source repo path should canonicalize")
+                .expect("created repo root should canonicalize"),
+            expected_repo_dir
         );
         assert_eq!(
             created
                 .worktree_root
                 .canonicalize()
-                .expect("created worktree path should canonicalize"),
-            worktree_dir
-                .canonicalize()
-                .expect("worktree path should canonicalize")
+                .expect("created worktree root should canonicalize"),
+            expected_worktree_dir
         );
         assert_eq!(
             created
                 .session_cwd
                 .canonicalize()
                 .expect("created session cwd should canonicalize"),
-            worktree_dir
-                .canonicalize()
-                .expect("session cwd should canonicalize")
+            expected_worktree_dir
         );
         assert_eq!(
             fs::read_to_string(created.session_cwd.join("README.md"))

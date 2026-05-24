@@ -597,26 +597,28 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 title: title.clone(),
                 content: content.clone(),
             };
-            let snapshot = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&target_session_id).map(|record| {
-                    record.pending_plan_review = Some(persisted);
-                    ServerMessage::SessionSnapshot {
-                        session_id: target_session_id.clone(),
-                        state: record.projection(),
-                    }
+            state
+                .session_events
+                .mutate_sessions_and_emit(state, |sessions| {
+                    let Some(record) = sessions.get_mut(&target_session_id) else {
+                        return Vec::new();
+                    };
+                    record.pending_plan_review = Some(persisted.clone());
+                    vec![
+                        ServerMessage::SessionSnapshot {
+                            session_id: target_session_id.clone(),
+                            state: record.projection(),
+                        },
+                        ServerMessage::PlanReview {
+                            session_id: target_session_id.clone(),
+                            plan_file_path,
+                            final_plan_file_path,
+                            title,
+                            content,
+                        },
+                    ]
                 })
-            };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
-            }
-            let _ = state.events.send(ServerMessage::PlanReview {
-                session_id: target_session_id.clone(),
-                plan_file_path,
-                final_plan_file_path,
-                title,
-                content,
-            });
+                .await;
         }
         OmpRpcFrame::MessageUpdate { message, .. } => {
             let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
@@ -630,24 +632,18 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 if message.id.is_empty() {
                     message.id = "__streaming__".to_string();
                 }
-                let delta = {
-                    let mut sessions = state.sessions.write().await;
-                    sessions.get_mut(&target_session_id).map(|record| {
+                state
+                    .session_events
+                    .mutate_session_delta(state, &target_session_id, |record| {
                         record.streaming_message = Some(message);
                         let projection = record.projection();
                         let replace_from = projection.transcript.len().saturating_sub(1);
-                        ServerMessage::SessionDelta {
-                            session_id: target_session_id.clone(),
-                            state: SessionProjectionDelta::from_projection_replace_tail(
-                                replace_from,
-                                &projection,
-                            ),
-                        }
+                        Some(SessionProjectionDelta::from_projection_replace_tail(
+                            replace_from,
+                            &projection,
+                        ))
                     })
-                };
-                if let Some(msg) = delta {
-                    let _ = state.events.send(msg);
-                }
+                    .await;
             }
         }
         OmpRpcFrame::MessageEnd { message } => {
@@ -659,9 +655,9 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 message.is_new = true;
                 // Clear streaming_message and push the final message atomically in a single
                 // lock so no snapshot can fire showing a gap between the two.
-                let delta = {
-                    let mut sessions = state.sessions.write().await;
-                    sessions.get_mut(&target_session_id).map(|record| {
+                let delta_sent = state
+                    .session_events
+                    .mutate_session_delta(state, &target_session_id, |record| {
                         record.streaming_message = None;
                         record.live_message_ids.insert(message.id.clone());
                         if let Some(existing) = record
@@ -682,17 +678,13 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         record.updated_at = Timestamp::now();
                         let projection = record.projection();
                         let replace_from = projection.transcript.len().saturating_sub(1);
-                        ServerMessage::SessionDelta {
-                            session_id: target_session_id.clone(),
-                            state: SessionProjectionDelta::from_projection_replace_tail(
-                                replace_from,
-                                &projection,
-                            ),
-                        }
+                        Some(SessionProjectionDelta::from_projection_replace_tail(
+                            replace_from,
+                            &projection,
+                        ))
                     })
-                };
-                if let Some(delta) = delta {
-                    let _ = state.events.send(delta);
+                    .await;
+                if delta_sent {
                     broadcast_sessions_snapshot(state).await;
                 }
             }
@@ -704,9 +696,9 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             intent,
         } => {
             let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
-            let delta = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&target_session_id).map(|record| {
+            state
+                .session_events
+                .mutate_session_delta(state, &target_session_id, |record| {
                     let insert_after_count = record.messages.len();
                     record.active_tool_calls.push(ToolCard {
                         tool_call_id,
@@ -722,18 +714,12 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     });
                     let projection = record.projection();
                     let replace_from = projection.transcript.len().saturating_sub(1);
-                    ServerMessage::SessionDelta {
-                        session_id: target_session_id.clone(),
-                        state: SessionProjectionDelta::from_projection_replace_tail(
-                            replace_from,
-                            &projection,
-                        ),
-                    }
+                    Some(SessionProjectionDelta::from_projection_replace_tail(
+                        replace_from,
+                        &projection,
+                    ))
                 })
-            };
-            if let Some(delta) = delta {
-                let _ = state.events.send(delta);
-            }
+                .await;
         }
         OmpRpcFrame::ToolExecutionUpdate {
             tool_call_id,
@@ -743,9 +729,9 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             let async_state = partial_result.as_ref().and_then(tool_async_state);
             let is_final_async = matches!(async_state, Some("completed" | "failed"));
             let is_async_error = matches!(async_state, Some("failed"));
-            let delta = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&target_session_id).and_then(|record| {
+            state
+                .session_events
+                .mutate_session_delta(state, &target_session_id, |record| {
                     let pos = record
                         .active_tool_calls
                         .iter()
@@ -776,18 +762,12 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             matches!(entry, TranscriptEntry::Tool(card) if card.tool_call_id == tool_call_id)
                         })
                         .unwrap_or_else(|| projection.transcript.len().saturating_sub(1));
-                    Some(ServerMessage::SessionDelta {
-                        session_id: target_session_id.clone(),
-                        state: SessionProjectionDelta::from_projection_replace_tail(
-                            replace_from,
-                            &projection,
-                        ),
-                    })
+                    Some(SessionProjectionDelta::from_projection_replace_tail(
+                        replace_from,
+                        &projection,
+                    ))
                 })
-            };
-            if let Some(delta) = delta {
-                let _ = state.events.send(delta);
-            }
+                .await;
         }
         OmpRpcFrame::ToolExecutionEnd {
             tool_call_id,
@@ -798,9 +778,9 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             let is_error = is_error.unwrap_or(false);
             let is_background_running =
                 matches!(result.as_ref().and_then(tool_async_state), Some("running"));
-            let delta = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&target_session_id).map(|record| {
+            state
+                .session_events
+                .mutate_session_delta(state, &target_session_id, |record| {
                     if let Some(pos) = record
                         .active_tool_calls
                         .iter()
@@ -845,36 +825,23 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             matches!(entry, TranscriptEntry::Tool(card) if card.tool_call_id == tool_call_id)
                         })
                         .unwrap_or_else(|| projection.transcript.len().saturating_sub(1));
-                    ServerMessage::SessionDelta {
-                        session_id: target_session_id.clone(),
-                        state: SessionProjectionDelta::from_projection_replace_tail(
-                            replace_from,
-                            &projection,
-                        ),
-                    }
+                    Some(SessionProjectionDelta::from_projection_replace_tail(
+                        replace_from,
+                        &projection,
+                    ))
                 })
-            };
-            if let Some(delta) = delta {
-                let _ = state.events.send(delta);
-            }
+                .await;
         }
         OmpRpcFrame::GoalUpdated {
             state: goal_state, ..
         } => {
             let goal_mode = goal_state.as_ref().and_then(map_goal_mode_projection);
-            let snapshot = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&target_session_id).map(|record| {
+            state
+                .session_events
+                .mutate_session_snapshot(state, &target_session_id, |record| {
                     record.goal_mode = goal_mode;
-                    ServerMessage::SessionSnapshot {
-                        session_id: target_session_id.clone(),
-                        state: record.projection(),
-                    }
                 })
-            };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
-            }
+                .await;
         }
         OmpRpcFrame::Response(response) => {
             let _ = response.is_error();
@@ -1067,23 +1034,15 @@ pub(crate) async fn apply_model_change_response(
     let display_name = model_display_name(model_value)
         .unwrap_or_else(|| format!("{}/{}", model.provider, model.id));
 
-    let snapshot = {
-        let mut sessions = state.sessions.write().await;
-        sessions.get_mut(session_id).map(|record| {
+    state
+        .session_events
+        .mutate_session_snapshot(state, session_id, |record| {
             record.model = Some(display_name);
             if let Some(thinking_level) = thinking_level {
                 record.thinking_level = Some(thinking_level);
             }
-            ServerMessage::SessionSnapshot {
-                session_id: session_id.to_string(),
-                state: record.projection(),
-            }
         })
-    };
-
-    if let Some(snapshot) = snapshot {
-        let _ = state.events.send(snapshot);
-    }
+        .await;
     let _ = state.events.send(ServerMessage::ModelChanged {
         session_id: session_id.to_string(),
         model,
@@ -1302,53 +1261,34 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             if let Some(plan_mode) = plan_mode.as_mut() {
                 plan_mode.discussion = true;
             }
-            let snapshot = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&current_session_id).map(|record| {
+            state
+                .session_events
+                .mutate_session_snapshot(state, &current_session_id, |record| {
                     record.plan_mode = plan_mode;
-                    ServerMessage::SessionSnapshot {
-                        session_id: current_session_id.clone(),
-                        state: record.projection(),
-                    }
                 })
-            };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
-            }
+                .await;
         }
 
         Some("set_plan_mode") => {
             let plan_mode = rpc_response_data_as::<OmpPlanModeResponse>(frame)
                 .and_then(|data| map_plan_mode_state_projection(data.plan_mode.as_ref()));
-            let snapshot = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&current_session_id).map(|record| {
+            state
+                .session_events
+                .mutate_session_snapshot(state, &current_session_id, |record| {
                     record.plan_mode = plan_mode;
-                    ServerMessage::SessionSnapshot {
-                        session_id: current_session_id.clone(),
-                        state: record.projection(),
-                    }
                 })
-            };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
-            }
+                .await;
         }
         Some("goal_mode") => {
             let goal_mode = rpc_response_data_as::<OmpGoalModeResponse>(frame)
                 .and_then(|data| map_goal_mode_state_projection(data.goal_mode.as_ref()));
-            let snapshot = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&current_session_id).map(|record| {
+            let snapshot_sent = state
+                .session_events
+                .mutate_session_snapshot(state, &current_session_id, |record| {
                     record.goal_mode = goal_mode;
-                    ServerMessage::SessionSnapshot {
-                        session_id: current_session_id.clone(),
-                        state: record.projection(),
-                    }
                 })
-            };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
+                .await;
+            if snapshot_sent {
                 broadcast_sessions_snapshot(state).await;
             }
         }
@@ -1449,31 +1389,18 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             )
             .await;
 
-            let previous_snapshot = outcome.previous_snapshot;
-            let target_snapshot = outcome.target_snapshot;
-
-            if let Some(snapshot) = previous_snapshot {
-                let _ = state.events.send(snapshot);
-            }
-            if let Some(snapshot) = target_snapshot {
-                let _ = state.events.send(snapshot);
-            }
+            let _ = outcome;
             broadcast_sessions_snapshot(state).await;
         }
         Some("handoff") => {
-            let snapshot = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&current_session_id).map(|record| {
+            let snapshot_sent = state
+                .session_events
+                .mutate_session_snapshot(state, &current_session_id, |record| {
                     record.status = SessionStatus::Idle;
                     record.live_message_ids.clear();
-                    ServerMessage::SessionSnapshot {
-                        session_id: current_session_id.clone(),
-                        state: record.projection(),
-                    }
                 })
-            };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
+                .await;
+            if snapshot_sent {
                 broadcast_sessions_snapshot(state).await;
             }
             // Queue the requested name before refresh so set_session_name reaches OMP before get_state.
@@ -1543,24 +1470,17 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 .and_then(|tokens| tokens.get("total"))
                 .and_then(|v| v.as_u64());
             let cost_usd = data.and_then(|d| d.get("cost")).and_then(|v| v.as_f64());
-            let snapshot = {
-                let mut sessions = state.sessions.write().await;
-                sessions.get_mut(&current_session_id).map(|record| {
+            state
+                .session_events
+                .mutate_session_snapshot(state, &current_session_id, |record| {
                     if let Some(total) = tokens_total {
                         record.tokens_total = total;
                     }
                     if let Some(cost) = cost_usd {
                         record.cost_usd = cost;
                     }
-                    ServerMessage::SessionSnapshot {
-                        session_id: current_session_id.clone(),
-                        state: record.projection(),
-                    }
                 })
-            };
-            if let Some(snapshot) = snapshot {
-                let _ = state.events.send(snapshot);
-            }
+                .await;
         }
         Some("prompt") | Some("abort") => {}
         _ => {}
@@ -1581,12 +1501,7 @@ pub(crate) async fn take_pending_prompt_busy_message(
         .write()
         .await
         .remove(command_id)?;
-    if let Some(snapshot) =
-        remove_optimistic_prompt_message(state, &draft.session_id, &draft.optimistic_message_id)
-            .await
-    {
-        let _ = state.events.send(snapshot);
-    }
+    remove_optimistic_prompt_message(state, &draft.session_id, &draft.optimistic_message_id).await;
     Some(ServerMessage::PromptBusy {
         session_id: draft.session_id,
         text: draft.text,
@@ -1610,19 +1525,14 @@ pub(crate) fn rpc_prompt_error_settles_turn(command: Option<&str>, message: &str
 }
 
 pub(crate) async fn settle_prompt_error_and_broadcast(state: &AppState, session_id: &str) {
-    let snapshot = {
-        let mut sessions = state.sessions.write().await;
-        sessions.get_mut(session_id).map(|record| {
+    let snapshot_sent = state
+        .session_events
+        .mutate_session_snapshot(state, session_id, |record| {
             record.status = SessionStatus::Idle;
             record.streaming_message = None;
-            ServerMessage::SessionSnapshot {
-                session_id: session_id.to_string(),
-                state: record.projection(),
-            }
         })
-    };
-    if let Some(snapshot) = snapshot {
-        let _ = state.events.send(snapshot);
+        .await;
+    if snapshot_sent {
         broadcast_sessions_snapshot(state).await;
     }
 }
@@ -1632,18 +1542,13 @@ pub(crate) async fn mark_status_and_broadcast(
     session_id: &str,
     status: SessionStatus,
 ) {
-    let snapshot = {
-        let mut sessions = state.sessions.write().await;
-        sessions.get_mut(session_id).map(|record| {
+    let snapshot_sent = state
+        .session_events
+        .mutate_session_snapshot(state, session_id, |record| {
             record.status = status;
-            ServerMessage::SessionSnapshot {
-                session_id: session_id.to_string(),
-                state: record.projection(),
-            }
         })
-    };
-    if let Some(snapshot) = snapshot {
-        let _ = state.events.send(snapshot);
+        .await;
+    if snapshot_sent {
         broadcast_sessions_snapshot(state).await;
     }
 }
@@ -1686,9 +1591,9 @@ pub(crate) async fn replace_messages_and_broadcast(
     tool_cards: Vec<ToolCard>,
     status: Option<SessionStatus>,
 ) {
-    let snapshot = {
-        let mut sessions = state.sessions.write().await;
-        sessions.get_mut(session_id).map(|record| {
+    let snapshot_sent = state
+        .session_events
+        .mutate_session_snapshot(state, session_id, |record| {
             if let Some(status) = status {
                 record.status = status;
             }
@@ -1701,14 +1606,9 @@ pub(crate) async fn replace_messages_and_broadcast(
                     "ignored older get_messages projection"
                 );
             }
-            ServerMessage::SessionSnapshot {
-                session_id: session_id.to_string(),
-                state: record.projection(),
-            }
         })
-    };
-    if let Some(snapshot) = snapshot {
-        let _ = state.events.send(snapshot);
+        .await;
+    if snapshot_sent {
         broadcast_sessions_snapshot(state).await;
     }
 }
@@ -1819,6 +1719,29 @@ pub(crate) fn ensure_rpc_id(command: &mut Value) {
 }
 
 pub(crate) async fn append_bridge_debug_rpc_line(state: &AppState, session_id: &str, line: &str) {
+    let record = serde_json::json!({
+        "timestampMs": Timestamp::now().millis(),
+        "sessionId": session_id,
+        "direction": "rpc_to_bridge",
+        "rawLine": line,
+    });
+    append_bridge_debug_record(state, record, "RPC frame").await;
+}
+
+pub(crate) async fn append_bridge_debug_event(
+    state: &AppState,
+    event_type: &'static str,
+    mut fields: serde_json::Map<String, Value>,
+) {
+    fields.insert(
+        "timestampMs".to_string(),
+        Value::Number(Timestamp::now().millis().into()),
+    );
+    fields.insert("type".to_string(), Value::String(event_type.to_string()));
+    append_bridge_debug_record(state, Value::Object(fields), event_type).await;
+}
+
+async fn append_bridge_debug_record(state: &AppState, record: Value, label: &str) {
     let Some(path) = state.bridge_debug_file.as_ref() else {
         return;
     };
@@ -1833,15 +1756,8 @@ pub(crate) async fn append_bridge_debug_rpc_line(state: &AppState, session_id: &
         }
     }
 
-    let record = serde_json::json!({
-        "timestampMs": Timestamp::now().millis(),
-        "sessionId": session_id,
-        "direction": "rpc_to_bridge",
-        "rawLine": line,
-    });
-
     let Ok(mut encoded) = serde_json::to_string(&record) else {
-        warn!(session_id = %session_id, "failed to serialize bridge debug RPC frame");
+        warn!(event = label, "failed to serialize bridge debug event");
         return;
     };
     encoded.push('\n');
@@ -1854,7 +1770,7 @@ pub(crate) async fn append_bridge_debug_rpc_line(state: &AppState, session_id: &
     {
         Ok(mut file) => {
             if let Err(error) = file.write_all(encoded.as_bytes()).await {
-                warn!(path = %path.display(), %error, "failed to write bridge debug RPC frame");
+                warn!(path = %path.display(), %error, event = label, "failed to write bridge debug event");
             }
         }
         Err(error) => {
