@@ -55,6 +55,10 @@ pub(crate) struct Args {
     #[arg(long, env = "FURA_BRIDGE_DEBUG_FILE")]
     pub(crate) bridge_debug_file: Option<PathBuf>,
 
+    /// Compact JSONL event log with large text fields truncated for diagnosis.
+    #[arg(long, env = "FURA_EVENT_DEBUG_FILE")]
+    pub(crate) event_debug_file: Option<PathBuf>,
+
     /// Forward raw OMP RPC frames to WebSocket clients. Disabled by default because clients do not render them.
     #[arg(long, env = "FURA_FORWARD_RAW_FRAMES", default_value_t = false)]
     pub(crate) forward_raw_frames: bool,

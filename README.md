@@ -97,6 +97,7 @@ Environment overrides for `run-local-omp.sh`:
 | `BUN_BIN` | `~/.bun/bin/bun` | Path to the `bun` executable |
 | `FURA_TOKEN` | `dev` | Bridge token entered in the browser auth screen |
 | `FURA_BRIDGE_DEBUG_FILE` | `./bridge-debug.jsonl` | Raw RPC frame log (contains prompts — do not commit) |
+| `FURA_EVENT_DEBUG_FILE` | `./fura-events.jsonl` | Compact bridge event log with large text fields truncated |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
 ### Against a local OMP checkout over Tailscale + HTTPS
@@ -157,6 +158,7 @@ All flags can also be set via environment variables:
 | `--session-root` | `FURA_SESSION_ROOT` | `~/.omp/agent/sessions` | OMP session directory |
 | `--log-frames` | `FURA_LOG_FRAMES` | false | Log raw RPC frames to stdout |
 | `--bridge-debug-file` | `FURA_BRIDGE_DEBUG_FILE` | — | Dump raw RPC frames to JSONL file |
+| `--event-debug-file` | `FURA_EVENT_DEBUG_FILE` | — | Dump compact bridge events to JSONL with large text fields truncated |
 
 ## Development
 

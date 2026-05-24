@@ -19,7 +19,8 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::{
-    AppState, AuthSession, ClientMessage, ServerMessage, client_config, handle_client_message,
+    AppState, AuthSession, ClientMessage, ServerMessage, append_event_debug_client_message,
+    append_event_debug_server_message, client_config, handle_client_message,
     refresh_session_catalog, sessions_snapshot_from_map,
 };
 
@@ -220,6 +221,7 @@ pub(crate) async fn handle_socket(
     let config = client_config(&state).await;
     if send_json(
         &mut socket,
+        &state,
         &ServerMessage::Hello {
             server_version: env!("CARGO_PKG_VERSION"),
             protocol_version: 1,
@@ -341,6 +343,7 @@ pub(crate) async fn handle_websocket_frame(
 
             match serde_json::from_str::<ClientMessage>(&text) {
                 Ok(message) => {
+                    append_event_debug_client_message(state, &message).await;
                     let outcome = if client_message_resyncs_stream(&message, update_mode) {
                         FrameOutcome::Resynced
                     } else {
@@ -363,7 +366,7 @@ pub(crate) async fn handle_websocket_frame(
                         request_id: None,
                         message: format!("invalid client message: {error}"),
                     };
-                    send_json(socket, &response).await?;
+                    send_json(socket, state, &response).await?;
                 }
             }
         }
@@ -374,7 +377,7 @@ pub(crate) async fn handle_websocket_frame(
                 request_id: None,
                 message: "binary websocket frames are not supported".to_string(),
             };
-            send_json(socket, &response).await?;
+            send_json(socket, state, &response).await?;
         }
     }
 
@@ -394,7 +397,7 @@ pub(crate) async fn send_sessions_snapshot(
 ) -> Result<(), axum::Error> {
     refresh_session_catalog(state).await;
     let sessions = state.sessions.read().await;
-    send_json(socket, &sessions_snapshot_from_map(&sessions)).await
+    send_json(socket, state, &sessions_snapshot_from_map(&sessions)).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -467,7 +470,7 @@ async fn send_client_message(
     update_mode: WebSocketUpdateMode,
 ) -> Result<(), axum::Error> {
     let message = prepare_client_message(state, message, update_mode).await;
-    send_json(socket, &message).await
+    send_json(socket, state, &message).await
 }
 
 async fn prepare_client_message(
@@ -505,9 +508,11 @@ async fn prepare_client_message(
 
 pub(crate) async fn send_json(
     socket: &mut WebSocket,
+    state: &AppState,
     message: &ServerMessage,
 ) -> Result<(), axum::Error> {
     log_server_message(message);
+    append_event_debug_server_message(state, message).await;
     match serde_json::to_string(message) {
         Ok(text) => socket.send(Message::Text(text.into())).await,
         Err(error) => {

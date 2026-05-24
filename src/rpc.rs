@@ -404,6 +404,7 @@ where
             continue;
         }
         append_bridge_debug_rpc_line(&state, &session_id, &line).await;
+        append_event_debug_rpc_line(&state, &session_id, &line).await;
         if state.log_frames {
             info!(direction = "rpc_to_bridge", session_id = %session_id, frame = %line, "rpc frame");
         }
@@ -1296,8 +1297,11 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             }
         }
         Some("discuss_plan_mode") => {
-            let plan_mode = rpc_response_data_as::<OmpPlanModeResponse>(frame)
+            let mut plan_mode = rpc_response_data_as::<OmpPlanModeResponse>(frame)
                 .and_then(|data| map_plan_mode_state_projection(data.plan_mode.as_ref()));
+            if let Some(plan_mode) = plan_mode.as_mut() {
+                plan_mode.discussion = true;
+            }
             let snapshot = {
                 let mut sessions = state.sessions.write().await;
                 sessions.get_mut(&current_session_id).map(|record| {

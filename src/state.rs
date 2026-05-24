@@ -45,6 +45,7 @@ pub(crate) struct AppState {
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
     pub(crate) bridge_debug_file: Option<PathBuf>,
+    pub(crate) event_debug_file: Option<PathBuf>,
     pub(crate) forward_raw_frames: bool,
     pub(crate) session_root: PathBuf,
     pub(crate) default_cwd: Arc<RwLock<String>>,
@@ -463,9 +464,7 @@ pub(crate) fn apply_rpc_state_to_record(
     record.context_window = context_window;
     record.context_percent = context_percent;
     if let Some(plan_mode) = plan_mode {
-        let keep_pending_plan = plan_mode
-            .as_ref()
-            .is_some_and(|mode| mode.enabled && !mode.discussion);
+        let keep_pending_plan = plan_mode.as_ref().is_some_and(|mode| mode.enabled);
         record.plan_mode = plan_mode;
         if !keep_pending_plan {
             record.pending_plan_review = None;

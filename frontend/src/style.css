@@ -42,6 +42,12 @@ button:hover:not(:disabled) {
   background: #262b36;
 }
 
+button:focus-visible {
+  border-color: #7f8cff;
+  box-shadow: 0 0 0 3px rgba(127, 140, 255, 0.16);
+  outline: none;
+}
+
 button.danger-action {
   border-color: rgba(255, 107, 107, 0.35);
   color: #ffaaa6;

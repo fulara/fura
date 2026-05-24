@@ -24,6 +24,7 @@ mod config;
 mod conflict;
 mod control;
 mod diff;
+mod event_debug;
 mod omp_rpc;
 mod projection;
 mod protocol;
@@ -42,6 +43,7 @@ use config::*;
 use conflict::*;
 use control::*;
 use diff::*;
+use event_debug::*;
 use omp_rpc::*;
 use projection::*;
 use protocol::*;
@@ -166,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
         }),
         log_frames: args.log_frames,
         bridge_debug_file: args.bridge_debug_file,
+        event_debug_file: args.event_debug_file,
         forward_raw_frames: args.forward_raw_frames,
         session_root,
         default_cwd: Arc::new(RwLock::new(default_cwd)),
@@ -360,6 +363,12 @@ fn log_server_ready(
         warn!(
             path = %path.display(),
             "bridge debug file is enabled; raw RPC frames may include prompts, file contents, command output, and secrets"
+        );
+    }
+    if let Some(path) = state.event_debug_file.as_ref() {
+        warn!(
+            path = %path.display(),
+            "event debug file is enabled; large text fields are truncated but prompts and previews may still include sensitive data"
         );
     }
 }
@@ -558,6 +567,75 @@ pub(crate) mod tests {
         );
 
         assert!(record.goal_mode.is_none());
+    }
+    #[test]
+    fn rpc_state_update_keeps_pending_plan_while_discussing() {
+        let mut record = test_record();
+        record.pending_plan_review = Some(PendingPlanReviewProjection {
+            plan_file_path: "local://PLAN.md".to_string(),
+            final_plan_file_path: "local://FINAL.md".to_string(),
+            title: Some("Discuss me".to_string()),
+            content: "# Plan".to_string(),
+        });
+
+        apply_rpc_state_to_record(
+            &mut record,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(PlanModeProjection {
+                enabled: true,
+                plan_file_path: "local://PLAN.md".to_string(),
+                workflow: Some("parallel".to_string()),
+                discussion: true,
+            })),
+            None,
+            None,
+        );
+
+        assert!(
+            record.pending_plan_review.is_some(),
+            "discussion mode still needs pending plan content to render the plan card"
+        );
+    }
+
+    #[test]
+    fn rpc_state_update_clears_pending_plan_when_plan_mode_exits() {
+        let mut record = test_record();
+        record.pending_plan_review = Some(PendingPlanReviewProjection {
+            plan_file_path: "local://PLAN.md".to_string(),
+            final_plan_file_path: "local://FINAL.md".to_string(),
+            title: Some("Done".to_string()),
+            content: "# Plan".to_string(),
+        });
+
+        apply_rpc_state_to_record(
+            &mut record,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(Some(PlanModeProjection {
+                enabled: false,
+                plan_file_path: "local://PLAN.md".to_string(),
+                workflow: Some("parallel".to_string()),
+                discussion: false,
+            })),
+            None,
+            None,
+        );
+
+        assert!(
+            record.pending_plan_review.is_none(),
+            "leaving plan mode should still remove stale plan review UI state"
+        );
     }
     fn discovered_session(id: &str, title: Option<&str>, session_file: &Path) -> DiscoveredSession {
         DiscoveredSession {
@@ -783,6 +861,7 @@ pub(crate) mod tests {
             }),
             log_frames: false,
             bridge_debug_file,
+            event_debug_file: None,
             forward_raw_frames: false,
             session_root: env::temp_dir(),
             default_cwd: Arc::new(RwLock::new(env::temp_dir().to_string_lossy().into_owned())),
@@ -1958,6 +2037,59 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn discuss_plan_mode_response_marks_projection_as_discussing() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.plan_mode = Some(PlanModeProjection {
+            enabled: true,
+            plan_file_path: "local://PLAN.md".to_string(),
+            workflow: Some("parallel".to_string()),
+            discussion: false,
+        });
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        map_test_transport(&state, "transport-1", "s1").await;
+        let mut events = state.events.subscribe();
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "discuss_plan_mode",
+                "success": true,
+                "data": {
+                    "planMode": {
+                        "enabled": true,
+                        "planFilePath": "local://PLAN.md",
+                        "workflow": "parallel",
+                        "discussion": false
+                    }
+                }
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("discussion snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                let plan_mode = state.plan_mode.expect("plan mode should remain active");
+                assert!(plan_mode.enabled);
+                assert_eq!(plan_mode.plan_file_path, "local://PLAN.md");
+                assert_eq!(plan_mode.workflow.as_deref(), Some("parallel"));
+                assert!(
+                    plan_mode.discussion,
+                    "Fura must own discussion state even when OMP returns discussion=false"
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn extension_ui_request_event_emits_dialog_request() {
         let state = test_state(8, None);
         state
@@ -2552,6 +2684,34 @@ pub(crate) mod tests {
         assert_eq!(record["sessionId"], "session-a");
         assert_eq!(record["direction"], "rpc_to_bridge");
         assert_eq!(record["rawLine"], raw_line);
+
+        let _ = async_fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn append_event_debug_rpc_line_writes_compact_summary() {
+        let path = env::temp_dir().join(format!(
+            "fura-event-debug-{}.jsonl",
+            Uuid::new_v4().simple()
+        ));
+        let mut state = test_state(1, None);
+        state.event_debug_file = Some(path.clone());
+        let raw_line = r#"{"type":"plan_review","planFilePath":"local://PLAN.md","finalPlanFilePath":"local://APPROVED.md","title":"Plan","content":"abcdefghijklmnopqrstuvwxyz"}"#;
+
+        append_event_debug_rpc_line(&state, "session-a", raw_line).await;
+
+        let written = async_fs::read_to_string(&path)
+            .await
+            .expect("event debug file should be written");
+        let record: Value = serde_json::from_str(written.trim_end()).expect("debug file is JSONL");
+
+        assert_eq!(record["sessionId"], "session-a");
+        assert_eq!(record["direction"], "rpc_to_bridge");
+        assert_eq!(record["type"], "plan_review");
+        assert_eq!(record["planFilePath"], "local://PLAN.md");
+        assert_eq!(record["contentBytes"], 26);
+        assert_eq!(record["contentPreview"], "abcdefghijklmnopqrstuvwxyz");
+        assert!(record.get("rawLine").is_none());
 
         let _ = async_fs::remove_file(path).await;
     }

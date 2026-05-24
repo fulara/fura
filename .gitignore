@@ -7,6 +7,9 @@
 .DS_Store
 
 /bridge-debug*.jsonl
+/fura-events*.jsonl
+/fura-restart.log
 
 /.cert
 
+/restart-run-local-with-tailscale.sh
