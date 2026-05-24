@@ -110,7 +110,22 @@ function createSessionListItem(
 
   const button = ownerDocument.createElement("button");
   button.type = "button";
-  button.addEventListener("click", () => callbacks.onSelectSession(sessionId));
+  let suppressMouseClick = false;
+  button.addEventListener("mousedown", event => {
+    if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    suppressMouseClick = true;
+    callbacks.onSelectSession(sessionId);
+    (ownerDocument.defaultView ?? window).setTimeout(() => {
+      suppressMouseClick = false;
+    }, 0);
+  });
+  button.addEventListener("click", () => {
+    if (suppressMouseClick) {
+      suppressMouseClick = false;
+      return;
+    }
+    callbacks.onSelectSession(sessionId);
+  });
 
   const titleRow = ownerDocument.createElement("span");
   titleRow.className = "session-title-row";

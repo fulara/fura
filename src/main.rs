@@ -1762,6 +1762,202 @@ pub(crate) mod tests {
         }
     }
 
+    fn push_message_delta(
+        record: &mut SessionRecord,
+        id: &str,
+        text: &str,
+        replace_from: usize,
+    ) -> Option<SessionProjectionDelta> {
+        record.messages.push(text_message(id, text));
+        Some(SessionProjectionDelta::from_projection_replace_tail(
+            replace_from,
+            &record.projection(),
+        ))
+    }
+
+    #[tokio::test]
+    async fn session_event_coordinator_coalesces_session_deltas_until_boundary() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        assert!(
+            state
+                .session_events
+                .mutate_session_delta(&state, "s1", |record| {
+                    push_message_delta(record, "m1", "first", 0)
+                })
+                .await
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        assert!(
+            state
+                .session_events
+                .mutate_session_delta(&state, "s1", |record| {
+                    push_message_delta(record, "m2", "second", 1)
+                })
+                .await
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        assert!(
+            state
+                .session_events
+                .emit_current_session_snapshot(&state, "s1")
+                .await
+        );
+
+        match events.recv().await.expect("coalesced delta") {
+            ServerMessage::SessionDelta { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state.transcript_replace_from, 0);
+                assert_eq!(state.transcript_append.len(), 2);
+                match &state.transcript_append[0] {
+                    TranscriptEntry::Message(message) => assert_eq!(message.id, "m1"),
+                    other => panic!("unexpected first transcript entry: {other:?}"),
+                }
+                match &state.transcript_append[1] {
+                    TranscriptEntry::Message(message) => assert_eq!(message.id, "m2"),
+                    other => panic!("unexpected second transcript entry: {other:?}"),
+                }
+            }
+            other => panic!("unexpected first event: {other:?}"),
+        }
+
+        match events.recv().await.expect("boundary snapshot") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state.transcript.len(), 2);
+            }
+            other => panic!("unexpected second event: {other:?}"),
+        }
+
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_event_coordinator_flushes_pending_delta_before_sessions_snapshot() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        assert!(
+            state
+                .session_events
+                .mutate_session_delta(&state, "s1", |record| {
+                    push_message_delta(record, "m1", "first", 0)
+                })
+                .await
+        );
+        state.session_events.emit_sessions_snapshot(&state).await;
+
+        match events.recv().await.expect("flushed delta") {
+            ServerMessage::SessionDelta { session_id, .. } => assert_eq!(session_id, "s1"),
+            other => panic!("unexpected first event: {other:?}"),
+        }
+        match events.recv().await.expect("sessions snapshot") {
+            ServerMessage::SessionsSnapshot { sessions } => assert_eq!(sessions.len(), 1),
+            other => panic!("unexpected second event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_event_coordinator_flushes_pending_deltas_in_first_seen_order() {
+        let state = test_state(8, None);
+        let mut second = test_record();
+        second.id = "s2".to_string();
+        let mut sessions = state.sessions.write().await;
+        sessions.insert("s1".to_string(), test_record());
+        sessions.insert("s2".to_string(), second);
+        drop(sessions);
+        let mut events = state.events.subscribe();
+
+        assert!(
+            state
+                .session_events
+                .mutate_session_delta(&state, "s2", |record| {
+                    push_message_delta(record, "m2", "second session", 0)
+                })
+                .await
+        );
+        assert!(
+            state
+                .session_events
+                .mutate_session_delta(&state, "s1", |record| {
+                    push_message_delta(record, "m1", "first session", 0)
+                })
+                .await
+        );
+        state.session_events.emit_sessions_snapshot(&state).await;
+
+        match events.recv().await.expect("first delta") {
+            ServerMessage::SessionDelta { session_id, .. } => assert_eq!(session_id, "s2"),
+            other => panic!("unexpected first event: {other:?}"),
+        }
+        match events.recv().await.expect("second delta") {
+            ServerMessage::SessionDelta { session_id, .. } => assert_eq!(session_id, "s1"),
+            other => panic!("unexpected second event: {other:?}"),
+        }
+        match events.recv().await.expect("boundary snapshot") {
+            ServerMessage::SessionsSnapshot { sessions } => assert_eq!(sessions.len(), 2),
+            other => panic!("unexpected third event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_event_coordinator_timer_flushes_pending_delta_without_boundary() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        assert!(
+            state
+                .session_events
+                .mutate_session_delta(&state, "s1", |record| {
+                    push_message_delta(record, "m1", "first", 0)
+                })
+                .await
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        let message = tokio::time::timeout(Duration::from_millis(750), events.recv())
+            .await
+            .expect("timer should flush pending delta")
+            .expect("delta event");
+        match message {
+            ServerMessage::SessionDelta { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state.transcript_replace_from, 0);
+                assert_eq!(state.transcript_append.len(), 1);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
     #[tokio::test]
     async fn session_event_coordinator_preserves_projection_event_order() {
         let state = test_state(8, None);

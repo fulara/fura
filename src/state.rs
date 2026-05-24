@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use serde_json::{Map, Value};
@@ -58,9 +58,33 @@ pub(crate) struct AppState {
     pub(crate) allowed_origins: Option<Arc<Vec<String>>>,
     pub(crate) secure_auth_cookie: bool,
 }
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct SessionEventCoordinator {
     gate: Arc<Mutex<()>>,
+    pending_deltas: Arc<Mutex<PendingSessionDeltas>>,
+}
+
+impl Default for SessionEventCoordinator {
+    fn default() -> Self {
+        Self {
+            gate: Arc::new(Mutex::new(())),
+            pending_deltas: Arc::new(Mutex::new(PendingSessionDeltas::default())),
+        }
+    }
+}
+
+const SESSION_DELTA_THROTTLE_WINDOW: Duration = Duration::from_millis(250);
+
+#[derive(Default)]
+struct PendingSessionDeltas {
+    sessions: HashMap<String, PendingSessionDelta>,
+    order: Vec<String>,
+    flush_scheduled: bool,
+    flush_generation: u64,
+}
+
+struct PendingSessionDelta {
+    min_replace_from: usize,
 }
 
 impl SessionEventCoordinator {
@@ -92,13 +116,36 @@ impl SessionEventCoordinator {
     where
         F: FnOnce(&mut SessionRecord) -> Option<SessionProjectionDelta>,
     {
-        self.mutate_session_and_emit(state, session_id, |record| {
-            build_delta(record).map(|delta| ServerMessage::SessionDelta {
-                session_id: session_id.to_string(),
-                state: delta,
-            })
-        })
-        .await
+        let _event_guard = self.gate.lock().await;
+        let replace_from = {
+            let mut sessions = state.sessions.write().await;
+            let Some(record) = sessions.get_mut(session_id) else {
+                return false;
+            };
+            let Some(delta) = build_delta(record) else {
+                return false;
+            };
+            delta.transcript_replace_from
+        };
+
+        let schedule_generation = {
+            let mut pending = self.pending_deltas.lock().await;
+            pending.record_delta(session_id, replace_from);
+            pending.schedule_flush()
+        };
+
+        if let Some(generation) = schedule_generation {
+            let coordinator = self.clone();
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(SESSION_DELTA_THROTTLE_WINDOW).await;
+                coordinator
+                    .flush_pending_deltas_for_timer(&state, generation)
+                    .await;
+            });
+        }
+
+        true
     }
 
     pub(crate) async fn mutate_session_and_emit<F>(
@@ -112,22 +159,27 @@ impl SessionEventCoordinator {
     {
         let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
-        let message = {
+        let mut messages = {
             let mut sessions = state.sessions.write().await;
             let Some(record) = sessions.get_mut(session_id) else {
                 return false;
             };
-            build(record)
+            let Some(message) = build(record) else {
+                return false;
+            };
+            let mut pending = self.pending_deltas.lock().await;
+            let mut messages = drain_pending_delta_messages_locked(&mut pending, &sessions);
+            messages.push(message);
+            messages
         };
-        if let Some(message) = message {
-            let fields = session_event_timing_fields(started_at, std::slice::from_ref(&message));
+
+        let fields = session_event_timing_fields(started_at, &messages);
+        for message in messages.drain(..) {
             let _ = state.events.send(message);
-            drop(_event_guard);
-            append_bridge_debug_event(state, "session_event.emit", fields).await;
-            true
-        } else {
-            false
         }
+        drop(_event_guard);
+        append_bridge_debug_event(state, "session_event.emit", fields).await;
+        true
     }
 
     pub(crate) async fn mutate_sessions_and_emit<F>(&self, state: &AppState, build: F) -> usize
@@ -136,11 +188,18 @@ impl SessionEventCoordinator {
     {
         let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
-        let messages = {
+        let (sent, messages) = {
             let mut sessions = state.sessions.write().await;
-            build(&mut sessions)
+            let mut messages = build(&mut sessions);
+            let sent = messages.len();
+            if !messages.is_empty() {
+                let mut pending = self.pending_deltas.lock().await;
+                let mut flushed = drain_pending_delta_messages_locked(&mut pending, &sessions);
+                flushed.append(&mut messages);
+                messages = flushed;
+            }
+            (sent, messages)
         };
-        let sent = messages.len();
         let fields = session_event_timing_fields(started_at, &messages);
         for message in messages {
             let _ = state.events.send(message);
@@ -149,6 +208,7 @@ impl SessionEventCoordinator {
         append_bridge_debug_event(state, "session_event.emit", fields).await;
         sent
     }
+
     pub(crate) async fn coordinate_sessions_and_emit<R, F>(&self, state: &AppState, build: F) -> R
     where
         F: FnOnce(&mut HashMap<String, SessionRecord>) -> (R, Vec<ServerMessage>),
@@ -157,7 +217,14 @@ impl SessionEventCoordinator {
         let _event_guard = self.gate.lock().await;
         let (result, messages) = {
             let mut sessions = state.sessions.write().await;
-            build(&mut sessions)
+            let (result, mut messages) = build(&mut sessions);
+            if !messages.is_empty() {
+                let mut pending = self.pending_deltas.lock().await;
+                let mut flushed = drain_pending_delta_messages_locked(&mut pending, &sessions);
+                flushed.append(&mut messages);
+                messages = flushed;
+            }
+            (result, messages)
         };
         let fields = session_event_timing_fields(started_at, &messages);
         for message in messages {
@@ -175,38 +242,125 @@ impl SessionEventCoordinator {
     ) -> bool {
         let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
-        let snapshot = {
+        let mut messages = {
             let sessions = state.sessions.read().await;
-            sessions
-                .get(session_id)
-                .map(|record| ServerMessage::SessionSnapshot {
-                    session_id: session_id.to_string(),
-                    state: record.projection(),
-                })
+            let Some(record) = sessions.get(session_id) else {
+                return false;
+            };
+            let mut pending = self.pending_deltas.lock().await;
+            let mut messages = drain_pending_delta_messages_locked(&mut pending, &sessions);
+            messages.push(ServerMessage::SessionSnapshot {
+                session_id: session_id.to_string(),
+                state: record.projection(),
+            });
+            messages
         };
-        if let Some(snapshot) = snapshot {
-            let fields = session_event_timing_fields(started_at, std::slice::from_ref(&snapshot));
-            let _ = state.events.send(snapshot);
-            drop(_event_guard);
-            append_bridge_debug_event(state, "session_event.emit", fields).await;
-            true
-        } else {
-            false
+        let fields = session_event_timing_fields(started_at, &messages);
+        for message in messages.drain(..) {
+            let _ = state.events.send(message);
         }
+        drop(_event_guard);
+        append_bridge_debug_event(state, "session_event.emit", fields).await;
+        true
     }
 
     pub(crate) async fn emit_sessions_snapshot(&self, state: &AppState) {
         let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
-        let snapshot = {
+        let mut messages = {
             let sessions = state.sessions.read().await;
-            sessions_snapshot_from_map(&sessions)
+            let mut pending = self.pending_deltas.lock().await;
+            let mut messages = drain_pending_delta_messages_locked(&mut pending, &sessions);
+            messages.push(sessions_snapshot_from_map(&sessions));
+            messages
         };
-        let fields = session_event_timing_fields(started_at, std::slice::from_ref(&snapshot));
-        let _ = state.events.send(snapshot);
+        let fields = session_event_timing_fields(started_at, &messages);
+        for message in messages.drain(..) {
+            let _ = state.events.send(message);
+        }
         drop(_event_guard);
         append_bridge_debug_event(state, "session_event.emit", fields).await;
     }
+
+    async fn flush_pending_deltas_for_timer(&self, state: &AppState, generation: u64) {
+        let started_at = Instant::now();
+        let _event_guard = self.gate.lock().await;
+        let messages = {
+            let sessions = state.sessions.read().await;
+            let mut pending = self.pending_deltas.lock().await;
+            if !pending.flush_scheduled || pending.flush_generation != generation {
+                return;
+            }
+            drain_pending_delta_messages_locked(&mut pending, &sessions)
+        };
+
+        if messages.is_empty() {
+            return;
+        }
+
+        let fields = session_event_timing_fields(started_at, &messages);
+        for message in messages {
+            let _ = state.events.send(message);
+        }
+        drop(_event_guard);
+        append_bridge_debug_event(state, "session_event.emit", fields).await;
+    }
+}
+
+impl PendingSessionDeltas {
+    fn record_delta(&mut self, session_id: &str, replace_from: usize) {
+        if let Some(pending) = self.sessions.get_mut(session_id) {
+            pending.min_replace_from = pending.min_replace_from.min(replace_from);
+            return;
+        }
+
+        self.order.push(session_id.to_string());
+        self.sessions.insert(
+            session_id.to_string(),
+            PendingSessionDelta {
+                min_replace_from: replace_from,
+            },
+        );
+    }
+
+    fn schedule_flush(&mut self) -> Option<u64> {
+        if self.flush_scheduled {
+            return None;
+        }
+
+        self.flush_scheduled = true;
+        self.flush_generation = self.flush_generation.wrapping_add(1);
+        Some(self.flush_generation)
+    }
+}
+
+fn drain_pending_delta_messages_locked(
+    pending: &mut PendingSessionDeltas,
+    sessions: &HashMap<String, SessionRecord>,
+) -> Vec<ServerMessage> {
+    pending.flush_scheduled = false;
+    let pending_by_session = std::mem::take(&mut pending.sessions);
+    let pending_order = std::mem::take(&mut pending.order);
+    let mut messages = Vec::with_capacity(pending_by_session.len());
+
+    for session_id in pending_order {
+        let Some(pending_delta) = pending_by_session.get(&session_id) else {
+            continue;
+        };
+        let Some(record) = sessions.get(&session_id) else {
+            continue;
+        };
+        let projection = record.projection();
+        let replace_from = pending_delta
+            .min_replace_from
+            .min(projection.transcript.len());
+        messages.push(ServerMessage::SessionDelta {
+            session_id,
+            state: SessionProjectionDelta::from_projection_replace_tail(replace_from, &projection),
+        });
+    }
+
+    messages
 }
 
 fn session_event_timing_fields(

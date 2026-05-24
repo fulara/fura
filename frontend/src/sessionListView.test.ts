@@ -94,6 +94,26 @@ describe("createSessionListView", () => {
     expect(container.querySelector(".session-delete")?.getAttribute("aria-label")).toBe("Delete session Named");
   });
 
+  it("selects on mouse down before a busy rerender can cancel the click", () => {
+    const first = session({ sessionId: "session-abc", title: "Named", status: "busy" });
+    const updated = session({ sessionId: "session-abc", title: "Named", status: "busy", messageCount: 1 });
+    const { container, view, selected } = renderList({ sessions: [first] });
+    const button = container.querySelector<HTMLButtonElement>("button.session");
+    if (!button) throw new Error("session button missing");
+
+    button.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    view.render({
+      sessions: [updated],
+      visibleSessions: [updated],
+      selectedCategoryFilter: "",
+      activeSessionId: null,
+      unreadSessionIds: new Set(),
+    });
+    button.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(selected).toEqual(["session-abc"]);
+  });
+
   it("reorders existing nodes and removes hidden sessions without recreating retained items", () => {
     const first = session({ sessionId: "first-session", title: "First" });
     const second = session({ sessionId: "second-session", title: "Second" });
