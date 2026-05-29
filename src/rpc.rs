@@ -41,10 +41,16 @@ async fn reset_model_catalog_if_transport_exited(state: &AppState, session_id: &
     catalog.transport_session_id = None;
     drop(catalog);
     if had_in_flight {
-        let _ = state.events.send(ServerMessage::Error {
-            request_id,
-            message: "Model catalog RPC child exited before returning models.".to_string(),
-        });
+        let _ = state
+            .events
+            .emit(
+                state,
+                ServerMessage::Error {
+                    request_id,
+                    message: "Model catalog RPC child exited before returning models.".to_string(),
+                },
+            )
+            .await;
     }
     true
 }
@@ -144,10 +150,16 @@ async fn fail_pending_create_initialization(
         .session_runtime
         .remove_pending_create(transport_session_id)
         .await;
-    let _ = state.events.send(ServerMessage::Error {
-        request_id,
-        message,
-    });
+    let _ = state
+        .events
+        .emit(
+            state,
+            ServerMessage::Error {
+                request_id,
+                message,
+            },
+        )
+        .await;
     stop_transport(state, transport_session_id).await;
 }
 
@@ -340,11 +352,18 @@ pub(crate) async fn spawn_rpc_child(
             .await;
         }
         for context in removed_conflict_contexts {
-            let _ = state.events.send(ServerMessage::ConflictError {
-                repo_id: Some(context.repo_id),
-                path: Some(context.path),
-                message: "Conflict Resolver session exited before returning a result.".to_string(),
-            });
+            let _ = state
+                .events
+                .emit(
+                    &state,
+                    ServerMessage::ConflictError {
+                        repo_id: Some(context.repo_id),
+                        path: Some(context.path),
+                        message: "Conflict Resolver session exited before returning a result."
+                            .to_string(),
+                    },
+                )
+                .await;
         }
         if reset_controller_if_transport_exited(&state, &session_id).await {
             return;
@@ -362,27 +381,45 @@ pub(crate) async fn spawn_rpc_child(
                 let code = status.code();
                 info!(action = "rpc.exit", session_id = %session_id, target_session_id = %target_session_id, code = ?code);
                 if let Some(pending_create) = pending_create {
-                    let _ = state.events.send(ServerMessage::Error {
-                        request_id: pending_create.request_id,
-                        message: pending_create_exit_message(code, &recent_stderr),
-                    });
+                    let _ = state
+                        .events
+                        .emit(
+                            &state,
+                            ServerMessage::Error {
+                                request_id: pending_create.request_id,
+                                message: pending_create_exit_message(code, &recent_stderr),
+                            },
+                        )
+                        .await;
                 } else {
                     mark_status_and_broadcast(&state, &target_session_id, SessionStatus::Exited)
                         .await;
-                    let _ = state.events.send(ServerMessage::SessionExited {
-                        session_id: target_session_id,
-                        code,
-                        signal: None,
-                    });
+                    let _ = state
+                        .events
+                        .emit(
+                            &state,
+                            ServerMessage::SessionExited {
+                                session_id: target_session_id,
+                                code,
+                                signal: None,
+                            },
+                        )
+                        .await;
                 }
             }
             Err(error) => {
                 warn!(action = "rpc.exit_error", session_id = %session_id, target_session_id = %target_session_id, %error);
                 if let Some(pending_create) = pending_create {
-                    let _ = state.events.send(ServerMessage::Error {
-                        request_id: pending_create.request_id,
-                        message: pending_create_wait_error_message(&error, &recent_stderr),
-                    });
+                    let _ = state
+                        .events
+                        .emit(
+                            &state,
+                            ServerMessage::Error {
+                                request_id: pending_create.request_id,
+                                message: pending_create_wait_error_message(&error, &recent_stderr),
+                            },
+                        )
+                        .await;
                 } else {
                     mark_status_and_broadcast(&state, &target_session_id, SessionStatus::Error)
                         .await;
@@ -415,10 +452,16 @@ where
                 apply_rpc_frame(&state, &session_id, &frame).await;
                 if state.forward_raw_frames {
                     let raw_session_id = rpc_session_target_id(&state, &session_id).await;
-                    let _ = state.events.send(ServerMessage::RawOmp {
-                        session_id: raw_session_id,
-                        frame,
-                    });
+                    let _ = state
+                        .events
+                        .emit(
+                            &state,
+                            ServerMessage::RawOmp {
+                                session_id: raw_session_id,
+                                frame,
+                            },
+                        )
+                        .await;
                 }
             }
             Err(error) => {
@@ -442,10 +485,16 @@ where
             .await;
         warn!(session_id = %session_id, bytes = line.len(), "RPC stderr line");
         let target_session_id = rpc_session_target_id(&state, &session_id).await;
-        let _ = state.events.send(ServerMessage::LogStderr {
-            session_id: target_session_id,
-            text: line,
-        });
+        let _ = state
+            .events
+            .emit(
+                &state,
+                ServerMessage::LogStderr {
+                    session_id: target_session_id,
+                    text: line,
+                },
+            )
+            .await;
     }
 }
 
@@ -498,13 +547,19 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             OmpRpcFrame::AgentStart => {
                 let run = state.bridge_controller.read().await.active_run.clone();
                 if let Some(run) = run {
-                    let _ = state.events.send(ServerMessage::ControlStatus {
-                        target_client_id: Some(run.target_client_id),
-                        status: ControlStatusProjection {
-                            status: "working".to_string(),
-                            message: Some("Ask Fura is working.".to_string()),
-                        },
-                    });
+                    let _ = state
+                        .events
+                        .emit(
+                            state,
+                            ServerMessage::ControlStatus {
+                                target_client_id: Some(run.target_client_id),
+                                status: ControlStatusProjection {
+                                    status: "working".to_string(),
+                                    message: Some("Ask Fura is working.".to_string()),
+                                },
+                            },
+                        )
+                        .await;
                 }
             }
             OmpRpcFrame::AgentEnd { .. } => handle_controller_agent_end(state).await,
@@ -554,10 +609,16 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 .await
                 {
                     let request_id = complete_model_catalog_request(state, session_id).await;
-                    let _ = state.events.send(ServerMessage::Error {
-                        request_id,
-                        message,
-                    });
+                    let _ = state
+                        .events
+                        .emit(
+                            state,
+                            ServerMessage::Error {
+                                request_id,
+                                message,
+                            },
+                        )
+                        .await;
                 }
                 return;
             }
@@ -598,7 +659,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 content: content.clone(),
             };
             state
-                .session_events
+                .events
                 .mutate_sessions_and_emit(state, |sessions| {
                     let Some(record) = sessions.get_mut(&target_session_id) else {
                         return Vec::new();
@@ -633,7 +694,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     message.id = "__streaming__".to_string();
                 }
                 state
-                    .session_events
+                    .events
                     .mutate_session_delta(state, &target_session_id, |record| {
                         record.streaming_message = Some(message);
                         let projection = record.projection();
@@ -656,7 +717,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 // Clear streaming_message and push the final message atomically in a single
                 // lock so no snapshot can fire showing a gap between the two.
                 let delta_sent = state
-                    .session_events
+                    .events
                     .mutate_session_delta(state, &target_session_id, |record| {
                         record.streaming_message = None;
                         record.live_message_ids.insert(message.id.clone());
@@ -697,7 +758,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         } => {
             let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
             state
-                .session_events
+                .events
                 .mutate_session_delta(state, &target_session_id, |record| {
                     let insert_after_count = record.messages.len();
                     record.active_tool_calls.push(ToolCard {
@@ -729,8 +790,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             let async_state = partial_result.as_ref().and_then(tool_async_state);
             let is_final_async = matches!(async_state, Some("completed" | "failed"));
             let is_async_error = matches!(async_state, Some("failed"));
-            state
-                .session_events
+            state.events
                 .mutate_session_delta(state, &target_session_id, |record| {
                     let pos = record
                         .active_tool_calls
@@ -778,8 +838,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             let is_error = is_error.unwrap_or(false);
             let is_background_running =
                 matches!(result.as_ref().and_then(tool_async_state), Some("running"));
-            state
-                .session_events
+            state.events
                 .mutate_session_delta(state, &target_session_id, |record| {
                     if let Some(pos) = record
                         .active_tool_calls
@@ -837,7 +896,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         } => {
             let goal_mode = goal_state.as_ref().and_then(map_goal_mode_projection);
             state
-                .session_events
+                .events
                 .mutate_session_snapshot(state, &target_session_id, |record| {
                     record.goal_mode = goal_mode;
                 })
@@ -856,10 +915,16 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             let mut dialog = serde_json::Map::from_iter(payload);
             dialog.insert("id".to_string(), Value::String(id));
             dialog.insert("method".to_string(), Value::String(method));
-            let _ = state.events.send(ServerMessage::DialogRequest {
-                session_id: target_session_id,
-                dialog: Value::Object(dialog),
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::DialogRequest {
+                        session_id: target_session_id,
+                        dialog: Value::Object(dialog),
+                    },
+                )
+                .await;
         }
         OmpRpcFrame::HostToolCall {
             id,
@@ -1035,7 +1100,7 @@ pub(crate) async fn apply_model_change_response(
         .unwrap_or_else(|| format!("{}/{}", model.provider, model.id));
 
     state
-        .session_events
+        .events
         .mutate_session_snapshot(state, session_id, |record| {
             record.model = Some(display_name);
             if let Some(thinking_level) = thinking_level {
@@ -1043,10 +1108,16 @@ pub(crate) async fn apply_model_change_response(
             }
         })
         .await;
-    let _ = state.events.send(ServerMessage::ModelChanged {
-        session_id: session_id.to_string(),
-        model,
-    });
+    let _ = state
+        .events
+        .emit(
+            state,
+            ServerMessage::ModelChanged {
+                session_id: session_id.to_string(),
+                model,
+            },
+        )
+        .await;
 }
 
 pub(crate) async fn apply_thinking_level_response(
@@ -1058,7 +1129,7 @@ pub(crate) async fn apply_thinking_level_response(
         return;
     };
     state
-        .session_events
+        .events
         .mutate_session_snapshot(state, session_id, |record| {
             record.thinking_level = Some(thinking_level);
         })
@@ -1080,10 +1151,16 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         }
         if is_model_catalog_transport(state, session_id).await {
             let request_id = complete_model_catalog_request(state, session_id).await;
-            let _ = state.events.send(ServerMessage::Error {
-                request_id,
-                message,
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::Error {
+                        request_id,
+                        message,
+                    },
+                )
+                .await;
             return;
         }
         let pending_create = state.session_runtime.pending_create(session_id).await;
@@ -1113,7 +1190,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         }
         if rpc_prompt_busy_needs_client_choice(command, &message) {
             if let Some(prompt_busy) = take_pending_prompt_busy_message(state, frame).await {
-                let _ = state.events.send(prompt_busy);
+                let _ = state.events.emit(state, prompt_busy).await;
                 return;
             }
             if command == Some("prompt") {
@@ -1156,7 +1233,11 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         }
         let _ = state
             .events
-            .send(notice(current_session_id, NoticeLevel::Error, message));
+            .emit(
+                state,
+                notice(current_session_id, NoticeLevel::Error, message),
+            )
+            .await;
         return;
     }
 
@@ -1200,17 +1281,29 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     pending.context_lines,
                 )
                 .await;
-                let _ = state.events.send(notice(
-                    pending.session_id,
-                    NoticeLevel::Info,
-                    "Diff snapshot created.",
-                ));
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        notice(
+                            pending.session_id,
+                            NoticeLevel::Info,
+                            "Diff snapshot created.",
+                        ),
+                    )
+                    .await;
             } else {
-                let _ = state.events.send(notice(
-                    current_session_id.clone(),
-                    NoticeLevel::Info,
-                    "Diff snapshot created.",
-                ));
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        notice(
+                            current_session_id.clone(),
+                            NoticeLevel::Info,
+                            "Diff snapshot created.",
+                        ),
+                    )
+                    .await;
             }
         }
         Some("get_available_models") => {
@@ -1224,12 +1317,22 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 let request_id = complete_model_catalog_request(state, session_id).await;
                 let _ = state
                     .events
-                    .send(ServerMessage::ConfigModelCatalogList { request_id, models });
+                    .emit(
+                        state,
+                        ServerMessage::ConfigModelCatalogList { request_id, models },
+                    )
+                    .await;
             } else {
-                let _ = state.events.send(ServerMessage::ModelList {
-                    session_id: current_session_id.clone(),
-                    models,
-                });
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        ServerMessage::ModelList {
+                            session_id: current_session_id.clone(),
+                            models,
+                        },
+                    )
+                    .await;
             }
         }
         Some("approve_plan_mode") => {
@@ -1254,7 +1357,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 plan_mode.discussion = true;
             }
             state
-                .session_events
+                .events
                 .mutate_session_snapshot(state, &current_session_id, |record| {
                     record.plan_mode = plan_mode;
                 })
@@ -1265,7 +1368,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let plan_mode = rpc_response_data_as::<OmpPlanModeResponse>(frame)
                 .and_then(|data| map_plan_mode_state_projection(data.plan_mode.as_ref()));
             state
-                .session_events
+                .events
                 .mutate_session_snapshot(state, &current_session_id, |record| {
                     record.plan_mode = plan_mode;
                 })
@@ -1275,7 +1378,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let goal_mode = rpc_response_data_as::<OmpGoalModeResponse>(frame)
                 .and_then(|data| map_goal_mode_state_projection(data.goal_mode.as_ref()));
             let snapshot_sent = state
-                .session_events
+                .events
                 .mutate_session_snapshot(state, &current_session_id, |record| {
                     record.goal_mode = goal_mode;
                 })
@@ -1386,7 +1489,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         }
         Some("handoff") => {
             let snapshot_sent = state
-                .session_events
+                .events
                 .mutate_session_snapshot(state, &current_session_id, |record| {
                     record.status = SessionStatus::Idle;
                     record.live_message_ids.clear();
@@ -1407,11 +1510,17 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             if let Err(message) = refresh_rpc_state(state, session_id).await {
                 warn!(session_id = %session_id, %message, "post-handoff state refresh failed");
             }
-            let _ = state.events.send(notice(
-                current_session_id,
-                NoticeLevel::Info,
-                "Handoff complete. New session context loaded.",
-            ));
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    notice(
+                        current_session_id,
+                        NoticeLevel::Info,
+                        "Handoff complete. New session context loaded.",
+                    ),
+                )
+                .await;
         }
         Some("fork") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
@@ -1424,11 +1533,17 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     .session_runtime
                     .remove_pending_session_name(session_id)
                     .await;
-                let _ = state.events.send(notice(
-                    current_session_id,
-                    NoticeLevel::Warning,
-                    "Fork cancelled or unavailable for this session.",
-                ));
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        notice(
+                            current_session_id,
+                            NoticeLevel::Warning,
+                            "Fork cancelled or unavailable for this session.",
+                        ),
+                    )
+                    .await;
             } else {
                 // Queue the requested name before refresh so set_session_name reaches OMP before get_state.
                 // Keep the pending name until get_state reports the new OMP session id, then apply it to that target.
@@ -1441,17 +1556,29 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 }
                 if let Err(message) = refresh_rpc_state(state, session_id).await {
                     warn!(session_id = %session_id, %message, "post-fork state refresh failed");
-                    let _ = state.events.send(notice(
-                        current_session_id,
-                        NoticeLevel::Error,
-                        format!("Fork completed, but state refresh failed: {message}"),
-                    ));
+                    let _ = state
+                        .events
+                        .emit(
+                            state,
+                            notice(
+                                current_session_id,
+                                NoticeLevel::Error,
+                                format!("Fork completed, but state refresh failed: {message}"),
+                            ),
+                        )
+                        .await;
                 } else {
-                    let _ = state.events.send(notice(
-                        current_session_id,
-                        NoticeLevel::Info,
-                        "Fork complete. New session is active.",
-                    ));
+                    let _ = state
+                        .events
+                        .emit(
+                            state,
+                            notice(
+                                current_session_id,
+                                NoticeLevel::Info,
+                                "Fork complete. New session is active.",
+                            ),
+                        )
+                        .await;
                 }
             }
         }
@@ -1463,7 +1590,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 .and_then(|v| v.as_u64());
             let cost_usd = data.and_then(|d| d.get("cost")).and_then(|v| v.as_f64());
             state
-                .session_events
+                .events
                 .mutate_session_snapshot(state, &current_session_id, |record| {
                     if let Some(total) = tokens_total {
                         record.tokens_total = total;
@@ -1518,7 +1645,7 @@ pub(crate) fn rpc_prompt_error_settles_turn(command: Option<&str>, message: &str
 
 pub(crate) async fn settle_prompt_error_and_broadcast(state: &AppState, session_id: &str) {
     let snapshot_sent = state
-        .session_events
+        .events
         .mutate_session_snapshot(state, session_id, |record| {
             record.status = SessionStatus::Idle;
             record.streaming_message = None;
@@ -1535,7 +1662,7 @@ pub(crate) async fn mark_status_and_broadcast(
     status: SessionStatus,
 ) {
     let snapshot_sent = state
-        .session_events
+        .events
         .mutate_session_snapshot(state, session_id, |record| {
             record.status = status;
         })
@@ -1584,7 +1711,7 @@ pub(crate) async fn replace_messages_and_broadcast(
     status: Option<SessionStatus>,
 ) {
     let snapshot_sent = state
-        .session_events
+        .events
         .mutate_session_snapshot(state, session_id, |record| {
             if let Some(status) = status {
                 record.status = status;

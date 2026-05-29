@@ -237,25 +237,37 @@ pub(crate) async fn handle_controller_agent_end(state: &AppState) {
             active_session_id = ?run.active_session_id,
             elapsed_ms,
         );
-        let _ = state.events.send(ServerMessage::ControlStatus {
-            target_client_id: Some(run.target_client_id),
-            status: ControlStatusProjection {
-                status: "idle".to_string(),
-                message: None,
-            },
-        });
+        let _ = state
+            .events
+            .emit(
+                state,
+                ServerMessage::ControlStatus {
+                    target_client_id: Some(run.target_client_id),
+                    status: ControlStatusProjection {
+                        status: "idle".to_string(),
+                        message: None,
+                    },
+                },
+            )
+            .await;
     }
 }
 
 pub(crate) async fn handle_controller_rpc_error(state: &AppState, message: String) {
     if let Some(run) = clear_active_run(state).await {
-        let _ = state.events.send(ServerMessage::ControlStatus {
-            target_client_id: Some(run.target_client_id),
-            status: ControlStatusProjection {
-                status: "error".to_string(),
-                message: Some(message),
-            },
-        });
+        let _ = state
+            .events
+            .emit(
+                state,
+                ServerMessage::ControlStatus {
+                    target_client_id: Some(run.target_client_id),
+                    status: ControlStatusProjection {
+                        status: "error".to_string(),
+                        message: Some(message),
+                    },
+                },
+            )
+            .await;
     }
 }
 
@@ -344,13 +356,19 @@ pub(crate) async fn reset_controller_if_transport_exited(
     drop(controller);
 
     if let Some(run) = active_run {
-        let _ = state.events.send(ServerMessage::ControlStatus {
-            target_client_id: Some(run.target_client_id),
-            status: ControlStatusProjection {
-                status: "error".to_string(),
-                message: Some("Fura controller session exited.".to_string()),
-            },
-        });
+        let _ = state
+            .events
+            .emit(
+                state,
+                ServerMessage::ControlStatus {
+                    target_client_id: Some(run.target_client_id),
+                    status: ControlStatusProjection {
+                        status: "error".to_string(),
+                        message: Some("Fura controller session exited.".to_string()),
+                    },
+                },
+            )
+            .await;
     }
     true
 }
@@ -534,13 +552,19 @@ async fn dispatch_controller_tool(
                     },
                 );
             }
-            let _ = state.events.send(ServerMessage::ControlReply {
-                target_client_id: run.target_client_id,
-                conversation_id: run.conversation_id,
-                message: args.message,
-                candidates,
-                suggested_actions: args.suggested_actions,
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::ControlReply {
+                        target_client_id: run.target_client_id,
+                        conversation_id: run.conversation_id,
+                        message: args.message,
+                        candidates,
+                        suggested_actions: args.suggested_actions,
+                    },
+                )
+                .await;
             Ok("Dispatched Ask Fura reply to the requesting frontend client.".to_string())
         }
         "fura_select_session" => {
@@ -555,12 +579,18 @@ async fn dispatch_controller_tool(
                 return Err(format!("session {} is not available", args.session_id));
             }
             let run = current_run(state).await?;
-            let _ = state.events.send(ServerMessage::FrontendControl {
-                target_client_id: run.target_client_id,
-                action: FrontendControlAction::SelectSession {
-                    session_id: args.session_id,
-                },
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::FrontendControl {
+                        target_client_id: run.target_client_id,
+                        action: FrontendControlAction::SelectSession {
+                            session_id: args.session_id,
+                        },
+                    },
+                )
+                .await;
             Ok("Dispatched select-session action to the requesting frontend client.".to_string())
         }
         "fura_set_prompt_draft" => {
@@ -571,26 +601,38 @@ async fn dispatch_controller_tool(
                 }
             }
             let run = current_run(state).await?;
-            let _ = state.events.send(ServerMessage::FrontendControl {
-                target_client_id: run.target_client_id,
-                action: FrontendControlAction::SetPromptDraft {
-                    session_id: args.session_id,
-                    text: args.text,
-                    focus: Some(true),
-                },
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::FrontendControl {
+                        target_client_id: run.target_client_id,
+                        action: FrontendControlAction::SetPromptDraft {
+                            session_id: args.session_id,
+                            text: args.text,
+                            focus: Some(true),
+                        },
+                    },
+                )
+                .await;
             Ok("Dispatched prompt-draft action to the requesting frontend client.".to_string())
         }
         "fura_show_notice" => {
             let args: ShowNoticeArgs = parse_tool_args(arguments)?;
             let run = current_run(state).await?;
-            let _ = state.events.send(ServerMessage::FrontendControl {
-                target_client_id: run.target_client_id,
-                action: FrontendControlAction::ShowNotice {
-                    level: args.level,
-                    text: args.text,
-                },
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::FrontendControl {
+                        target_client_id: run.target_client_id,
+                        action: FrontendControlAction::ShowNotice {
+                            level: args.level,
+                            text: args.text,
+                        },
+                    },
+                )
+                .await;
             Ok("Dispatched notice action to the requesting frontend client.".to_string())
         }
         _ => Err(format!("unknown Fura controller tool: {tool_name}")),

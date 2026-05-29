@@ -143,10 +143,16 @@ async fn run_openai_realtime_transcription(
     )
     .await
     {
-        let _ = state.events.send(ServerMessage::VoiceError {
-            target_client_id: target_client_id.clone(),
-            message: error.to_string(),
-        });
+        let _ = state
+            .events
+            .emit(
+                &state,
+                ServerMessage::VoiceError {
+                    target_client_id: target_client_id.clone(),
+                    message: error.to_string(),
+                },
+            )
+            .await;
     }
 
     remove_voice_session_if_current(&state, &target_client_id, &run_id).await;
@@ -204,11 +210,17 @@ async fn run_openai_realtime_transcription_inner(
         .context("failed to configure OpenAI transcription session")?;
     wait_for_transcription_session_update(&mut ws).await?;
 
-    let _ = state.events.send(ServerMessage::VoiceStatus {
-        target_client_id: target_client_id.to_string(),
-        status: "listening".to_string(),
-        message: Some("Hold to dictate. Release to finish.".to_string()),
-    });
+    let _ = state
+        .events
+        .emit(
+            state,
+            ServerMessage::VoiceStatus {
+                target_client_id: target_client_id.to_string(),
+                status: "listening".to_string(),
+                message: Some("Hold to dictate. Release to finish.".to_string()),
+            },
+        )
+        .await;
 
     let mut sent_audio = false;
     let mut stopping = false;
@@ -238,11 +250,17 @@ async fn run_openai_realtime_transcription_inner(
                                 .await
                                 .context("failed to commit OpenAI audio buffer")?;
                         } else {
-                            let _ = state.events.send(ServerMessage::VoiceStatus {
-                                target_client_id: target_client_id.to_string(),
-                                status: "idle".to_string(),
-                                message: Some("No voice audio captured.".to_string()),
-                            });
+                            let _ = state
+                                .events
+                                .emit(
+                                    state,
+                                    ServerMessage::VoiceStatus {
+                                        target_client_id: target_client_id.to_string(),
+                                        status: "idle".to_string(),
+                                        message: Some("No voice audio captured.".to_string()),
+                                    },
+                                )
+                                .await;
                             break;
                         }
                     }
@@ -317,11 +335,17 @@ async fn handle_openai_message(
                 .and_then(Value::as_str)
                 .filter(|text| !text.is_empty())
             {
-                let _ = state.events.send(ServerMessage::VoiceDelta {
-                    target_client_id: target_client_id.to_string(),
-                    item_id: openai_item_id(&event),
-                    text: delta.to_string(),
-                });
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        ServerMessage::VoiceDelta {
+                            target_client_id: target_client_id.to_string(),
+                            item_id: openai_item_id(&event),
+                            text: delta.to_string(),
+                        },
+                    )
+                    .await;
             }
         }
         "conversation.item.input_audio_transcription.completed" => {
@@ -329,41 +353,71 @@ async fn handle_openai_message(
                 .get("transcript")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let _ = state.events.send(ServerMessage::VoiceFinal {
-                target_client_id: target_client_id.to_string(),
-                item_id: openai_item_id(&event),
-                text: transcript.to_string(),
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::VoiceFinal {
+                        target_client_id: target_client_id.to_string(),
+                        item_id: openai_item_id(&event),
+                        text: transcript.to_string(),
+                    },
+                )
+                .await;
             if stopping {
-                let _ = state.events.send(ServerMessage::VoiceStatus {
-                    target_client_id: target_client_id.to_string(),
-                    status: "idle".to_string(),
-                    message: Some("Voice transcription finished.".to_string()),
-                });
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        ServerMessage::VoiceStatus {
+                            target_client_id: target_client_id.to_string(),
+                            status: "idle".to_string(),
+                            message: Some("Voice transcription finished.".to_string()),
+                        },
+                    )
+                    .await;
                 return Ok(true);
             }
         }
         "conversation.item.input_audio_transcription.failed" => {
             let message = openai_error_message(&event);
-            let _ = state.events.send(ServerMessage::VoiceError {
-                target_client_id: target_client_id.to_string(),
-                message: message.to_string(),
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::VoiceError {
+                        target_client_id: target_client_id.to_string(),
+                        message: message.to_string(),
+                    },
+                )
+                .await;
             return Ok(true);
         }
         "input_audio_buffer.speech_started" => {
-            let _ = state.events.send(ServerMessage::VoiceStatus {
-                target_client_id: target_client_id.to_string(),
-                status: "listening".to_string(),
-                message: Some("Listening.".to_string()),
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::VoiceStatus {
+                        target_client_id: target_client_id.to_string(),
+                        status: "listening".to_string(),
+                        message: Some("Listening.".to_string()),
+                    },
+                )
+                .await;
         }
         "input_audio_buffer.speech_stopped" | "input_audio_buffer.committed" => {
-            let _ = state.events.send(ServerMessage::VoiceStatus {
-                target_client_id: target_client_id.to_string(),
-                status: "transcribing".to_string(),
-                message: Some("Transcribing.".to_string()),
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::VoiceStatus {
+                        target_client_id: target_client_id.to_string(),
+                        status: "transcribing".to_string(),
+                        message: Some("Transcribing.".to_string()),
+                    },
+                )
+                .await;
         }
         "error" => {
             let message = openai_error_message(&event);
@@ -372,11 +426,17 @@ async fn handle_openai_message(
                 && lower_message.contains("buffer")
                 && (lower_message.contains("empty") || lower_message.contains("too small"))
             {
-                let _ = state.events.send(ServerMessage::VoiceStatus {
-                    target_client_id: target_client_id.to_string(),
-                    status: "idle".to_string(),
-                    message: Some("Voice transcription finished.".to_string()),
-                });
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        ServerMessage::VoiceStatus {
+                            target_client_id: target_client_id.to_string(),
+                            status: "idle".to_string(),
+                            message: Some("Voice transcription finished.".to_string()),
+                        },
+                    )
+                    .await;
                 return Ok(true);
             }
             return Err(anyhow!(message.to_string()));

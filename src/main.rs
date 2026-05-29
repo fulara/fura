@@ -161,8 +161,7 @@ async fn main() -> anyhow::Result<()> {
         review_comment_db_path,
         active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
         active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
-        events,
-        session_events: SessionEventCoordinator::default(),
+        events: WsEventCoordinator::new(events),
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
             args: rpc_args,
@@ -375,7 +374,7 @@ fn log_server_ready(
 }
 
 async fn broadcast_sessions_snapshot(state: &AppState) {
-    state.session_events.emit_sessions_snapshot(state).await;
+    state.events.emit_sessions_snapshot(state).await;
 }
 
 fn next_rpc_id() -> String {
@@ -853,8 +852,7 @@ pub(crate) mod tests {
             review_comment_db_path: database_path_from_config(None),
             active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
             active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
-            events,
-            session_events: SessionEventCoordinator::default(),
+            events: WsEventCoordinator::new(events),
             session_host_tools: Arc::new(RwLock::new(HashMap::new())),
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),
@@ -1787,7 +1785,7 @@ pub(crate) mod tests {
 
         assert!(
             state
-                .session_events
+                .events
                 .mutate_session_delta(&state, "s1", |record| {
                     push_message_delta(record, "m1", "first", 0)
                 })
@@ -1800,7 +1798,7 @@ pub(crate) mod tests {
 
         assert!(
             state
-                .session_events
+                .events
                 .mutate_session_delta(&state, "s1", |record| {
                     push_message_delta(record, "m2", "second", 1)
                 })
@@ -1813,7 +1811,7 @@ pub(crate) mod tests {
 
         assert!(
             state
-                .session_events
+                .events
                 .emit_current_session_snapshot(&state, "s1")
                 .await
         );
@@ -1861,13 +1859,13 @@ pub(crate) mod tests {
 
         assert!(
             state
-                .session_events
+                .events
                 .mutate_session_delta(&state, "s1", |record| {
                     push_message_delta(record, "m1", "first", 0)
                 })
                 .await
         );
-        state.session_events.emit_sessions_snapshot(&state).await;
+        state.events.emit_sessions_snapshot(&state).await;
 
         match events.recv().await.expect("flushed delta") {
             ServerMessage::SessionDelta { session_id, .. } => assert_eq!(session_id, "s1"),
@@ -1875,6 +1873,51 @@ pub(crate) mod tests {
         }
         match events.recv().await.expect("sessions snapshot") {
             ServerMessage::SessionsSnapshot { sessions } => assert_eq!(sessions.len(), 1),
+            other => panic!("unexpected second event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn event_coordinator_flushes_pending_delta_before_non_session_event() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        assert!(
+            state
+                .events
+                .mutate_session_delta(&state, "s1", |record| {
+                    push_message_delta(record, "m1", "first", 0)
+                })
+                .await
+        );
+        state
+            .events
+            .emit(
+                &state,
+                ServerMessage::Error {
+                    request_id: Some("req-1".to_string()),
+                    message: "boundary".to_string(),
+                },
+            )
+            .await;
+
+        match events.recv().await.expect("flushed delta") {
+            ServerMessage::SessionDelta { session_id, .. } => assert_eq!(session_id, "s1"),
+            other => panic!("unexpected first event: {other:?}"),
+        }
+        match events.recv().await.expect("error event") {
+            ServerMessage::Error {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id.as_deref(), Some("req-1"));
+                assert_eq!(message, "boundary");
+            }
             other => panic!("unexpected second event: {other:?}"),
         }
     }
@@ -1892,7 +1935,7 @@ pub(crate) mod tests {
 
         assert!(
             state
-                .session_events
+                .events
                 .mutate_session_delta(&state, "s2", |record| {
                     push_message_delta(record, "m2", "second session", 0)
                 })
@@ -1900,13 +1943,13 @@ pub(crate) mod tests {
         );
         assert!(
             state
-                .session_events
+                .events
                 .mutate_session_delta(&state, "s1", |record| {
                     push_message_delta(record, "m1", "first session", 0)
                 })
                 .await
         );
-        state.session_events.emit_sessions_snapshot(&state).await;
+        state.events.emit_sessions_snapshot(&state).await;
 
         match events.recv().await.expect("first delta") {
             ServerMessage::SessionDelta { session_id, .. } => assert_eq!(session_id, "s2"),
@@ -1934,7 +1977,7 @@ pub(crate) mod tests {
 
         assert!(
             state
-                .session_events
+                .events
                 .mutate_session_delta(&state, "s1", |record| {
                     push_message_delta(record, "m1", "first", 0)
                 })
@@ -1970,13 +2013,13 @@ pub(crate) mod tests {
 
         assert!(
             state
-                .session_events
+                .events
                 .emit_current_session_snapshot(&state, "s1")
                 .await
         );
         assert!(
             state
-                .session_events
+                .events
                 .mutate_session_snapshot(&state, "s1", |record| {
                     record.messages.push(TranscriptMessage {
                         id: "m1".to_string(),
@@ -1992,7 +2035,7 @@ pub(crate) mod tests {
         );
         assert!(
             state
-                .session_events
+                .events
                 .emit_current_session_snapshot(&state, "s1")
                 .await
         );

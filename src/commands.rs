@@ -56,7 +56,7 @@ pub(crate) async fn handle_client_message(
         ClientMessage::SessionList => {
             info!(action = "session.list");
             refresh_session_catalog(state).await;
-            state.session_events.emit_sessions_snapshot(state).await;
+            state.events.emit_sessions_snapshot(state).await;
             Vec::new()
         }
         ClientMessage::SessionAttach { session_id }
@@ -66,7 +66,7 @@ pub(crate) async fn handle_client_message(
                 warn!(session_id = %session_id, %message, "state refresh could not reach RPC child");
             }
             if state
-                .session_events
+                .events
                 .emit_current_session_snapshot(state, &session_id)
                 .await
             {
@@ -995,7 +995,7 @@ async fn handle_plan_approve(
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => {
             state
-                .session_events
+                .events
                 .mutate_session_snapshot(state, &session_id, |record| {
                     record.pending_plan_review = None;
                 })
@@ -1044,7 +1044,7 @@ pub(crate) async fn set_session_category(
 
     let category_for_record = category.clone();
     let sent = state
-        .session_events
+        .events
         .mutate_sessions_and_emit(state, |sessions| {
             let Some(record) = sessions.get_mut(&session_id) else {
                 return Vec::new();
@@ -1272,7 +1272,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
             .await
         {
             if state
-                .session_events
+                .events
                 .emit_current_session_snapshot(state, &session_id)
                 .await
             {
@@ -1324,7 +1324,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
     if let Err(error) = spawn_result {
         error!(session_id = %session_id, %error, "failed to open RPC session");
         state
-            .session_events
+            .events
             .mutate_sessions_and_emit(state, |sessions| {
                 if let Some(record) = sessions.get_mut(&session_id) {
                     record.status = SessionStatus::Error;
@@ -1339,7 +1339,7 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
     }
 
     state
-        .session_events
+        .events
         .mutate_sessions_and_emit(state, |sessions| {
             let mut messages = vec![sessions_snapshot_from_map(sessions)];
             if let Some(record) = sessions.get(&session_id) {
@@ -1369,7 +1369,7 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
     }
 
     let sent = state
-        .session_events
+        .events
         .mutate_sessions_and_emit(state, |sessions| {
             let Some(record) = sessions.get_mut(&session_id) else {
                 return Vec::new();
@@ -1559,7 +1559,7 @@ pub(crate) async fn handle_slash_command(
                         // OMP returns only a success ack — it does not echo the name back.
                         // Update our projection directly since we already know the new title.
                         state
-                            .session_events
+                            .events
                             .mutate_session_snapshot(state, &session_id, |record| {
                                 record.title = Some(new_title);
                             })
@@ -1975,7 +1975,7 @@ pub(crate) async fn send_prompt(
     let command_images = images.filter(|images| !images.is_empty());
 
     let snapshot_sent = state
-        .session_events
+        .events
         .mutate_session_snapshot(state, &session_id, |record| {
             record.status = SessionStatus::Busy;
             record.messages.push(optimistic_prompt_message(
@@ -2068,7 +2068,7 @@ pub(crate) async fn remove_optimistic_prompt_message(
     optimistic_message_id: &str,
 ) -> bool {
     state
-        .session_events
+        .events
         .mutate_session_and_emit(state, session_id, |record| {
             let before = record.messages.len();
             record
@@ -2175,9 +2175,15 @@ async fn create_review_comment_with_author(
                 comparison_key = %comment.comparison_key,
                 author = %comment.author.as_str()
             );
-            let _ = state.events.send(ServerMessage::ReviewCommentUpserted {
-                comment: comment.clone(),
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::ReviewCommentUpserted {
+                        comment: comment.clone(),
+                    },
+                )
+                .await;
             Ok(comment)
         }
         Err(message) => {
@@ -2240,7 +2246,8 @@ pub(crate) async fn handle_review_comment_update(
             );
             let _ = state
                 .events
-                .send(ServerMessage::ReviewCommentUpserted { comment });
+                .emit(state, ServerMessage::ReviewCommentUpserted { comment })
+                .await;
             Vec::new()
         }
         Err(message) => {
@@ -2267,7 +2274,8 @@ pub(crate) async fn handle_review_comment_mark_flushed(
             for comment in comments {
                 let _ = state
                     .events
-                    .send(ServerMessage::ReviewCommentUpserted { comment });
+                    .emit(state, ServerMessage::ReviewCommentUpserted { comment })
+                    .await;
             }
             Vec::new()
         }
@@ -2298,11 +2306,17 @@ pub(crate) async fn handle_review_comment_delete(
                 comment_id = %id,
                 comparison_key = %comparison_key
             );
-            let _ = state.events.send(ServerMessage::ReviewCommentDeleted {
-                session_id,
-                comparison_key,
-                id,
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::ReviewCommentDeleted {
+                        session_id,
+                        comparison_key,
+                        id,
+                    },
+                )
+                .await;
             Vec::new()
         }
         Err(message) => {
@@ -2656,11 +2670,17 @@ pub(crate) async fn clear_conflict_contexts_for_session(
     }
     if let Some(message) = message {
         for context in removed {
-            let _ = state.events.send(ServerMessage::ConflictError {
-                repo_id: Some(context.repo_id),
-                path: Some(context.path),
-                message: message.to_string(),
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::ConflictError {
+                        repo_id: Some(context.repo_id),
+                        path: Some(context.path),
+                        message: message.to_string(),
+                    },
+                )
+                .await;
         }
     }
 }
@@ -2918,9 +2938,15 @@ async fn add_conflict_agent_result(
         removed_context.previous_host_tools.clone(),
     )
     .await;
-    let _ = state.events.send(ServerMessage::ConflictAgentResult {
-        result: result.clone(),
-    });
+    let _ = state
+        .events
+        .emit(
+            state,
+            ServerMessage::ConflictAgentResult {
+                result: result.clone(),
+            },
+        )
+        .await;
     Ok(match result.mode {
         ConflictAgentMode::Explain => format!(
             "Stored conflict explanation for {} ({:?}).",
@@ -3264,7 +3290,7 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
     .await;
 
     let snapshot_sent = state
-        .session_events
+        .events
         .mutate_session_snapshot(&state, &session_id, |record| {
             record.status = SessionStatus::Idle;
         })

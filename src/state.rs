@@ -41,8 +41,7 @@ pub(crate) struct AppState {
     pub(crate) review_comment_db_path: PathBuf,
     pub(crate) active_review_contexts: Arc<RwLock<HashMap<String, ActiveReviewContext>>>,
     pub(crate) active_conflict_contexts: Arc<RwLock<HashMap<String, ActiveConflictContext>>>,
-    pub(crate) events: broadcast::Sender<ServerMessage>,
-    pub(crate) session_events: SessionEventCoordinator,
+    pub(crate) events: WsEventCoordinator,
     pub(crate) session_host_tools: Arc<RwLock<HashMap<String, Vec<Value>>>>,
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
@@ -59,18 +58,10 @@ pub(crate) struct AppState {
     pub(crate) secure_auth_cookie: bool,
 }
 #[derive(Clone)]
-pub(crate) struct SessionEventCoordinator {
+pub(crate) struct WsEventCoordinator {
+    sender: broadcast::Sender<ServerMessage>,
     gate: Arc<Mutex<()>>,
     pending_deltas: Arc<Mutex<PendingSessionDeltas>>,
-}
-
-impl Default for SessionEventCoordinator {
-    fn default() -> Self {
-        Self {
-            gate: Arc::new(Mutex::new(())),
-            pending_deltas: Arc::new(Mutex::new(PendingSessionDeltas::default())),
-        }
-    }
 }
 
 const SESSION_DELTA_THROTTLE_WINDOW: Duration = Duration::from_millis(250);
@@ -87,7 +78,81 @@ struct PendingSessionDelta {
     min_replace_from: usize,
 }
 
-impl SessionEventCoordinator {
+impl WsEventCoordinator {
+    pub(crate) fn new(sender: broadcast::Sender<ServerMessage>) -> Self {
+        Self {
+            sender,
+            gate: Arc::new(Mutex::new(())),
+            pending_deltas: Arc::new(Mutex::new(PendingSessionDeltas::default())),
+        }
+    }
+
+    pub(crate) fn subscribe(&self) -> broadcast::Receiver<ServerMessage> {
+        self.sender.subscribe()
+    }
+
+    pub(crate) async fn emit(&self, state: &AppState, message: ServerMessage) {
+        self.emit_many(state, vec![message]).await;
+    }
+
+    pub(crate) async fn emit_many(&self, state: &AppState, messages: Vec<ServerMessage>) {
+        if messages.is_empty() {
+            return;
+        }
+
+        let started_at = Instant::now();
+        let _event_guard = self.gate.lock().await;
+        let (messages, schedule_generation) = self.prepare_external_messages(state, messages).await;
+        let fields = session_event_timing_fields(started_at, &messages);
+        self.send_all(messages);
+        drop(_event_guard);
+        self.schedule_timer_flush_if_needed(state, schedule_generation);
+        append_bridge_debug_event(state, "session_event.emit", fields).await;
+    }
+
+    async fn prepare_external_messages(
+        &self,
+        state: &AppState,
+        messages: Vec<ServerMessage>,
+    ) -> (Vec<ServerMessage>, Option<u64>) {
+        let mut prepared = Vec::with_capacity(messages.len());
+        let mut schedule_generation = None;
+        let sessions = state.sessions.read().await;
+        let mut pending = self.pending_deltas.lock().await;
+
+        for message in messages {
+            if let ServerMessage::SessionDelta { session_id, state } = message {
+                pending.record_delta(&session_id, state.transcript_replace_from);
+                if schedule_generation.is_none() {
+                    schedule_generation = pending.schedule_flush();
+                }
+            } else {
+                prepared.extend(drain_pending_delta_messages_locked(&mut pending, &sessions));
+                prepared.push(message);
+            }
+        }
+
+        (prepared, schedule_generation)
+    }
+
+    fn schedule_timer_flush_if_needed(&self, state: &AppState, generation: Option<u64>) {
+        if let Some(generation) = generation {
+            let coordinator = self.clone();
+            let state = state.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(SESSION_DELTA_THROTTLE_WINDOW).await;
+                coordinator
+                    .flush_pending_deltas_for_timer(&state, generation)
+                    .await;
+            });
+        }
+    }
+
+    fn send_all(&self, messages: impl IntoIterator<Item = ServerMessage>) {
+        for message in messages {
+            let _ = self.sender.send(message);
+        }
+    }
     pub(crate) async fn mutate_session_snapshot<F>(
         &self,
         state: &AppState,
@@ -159,7 +224,7 @@ impl SessionEventCoordinator {
     {
         let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
-        let mut messages = {
+        let messages = {
             let mut sessions = state.sessions.write().await;
             let Some(record) = sessions.get_mut(session_id) else {
                 return false;
@@ -174,9 +239,7 @@ impl SessionEventCoordinator {
         };
 
         let fields = session_event_timing_fields(started_at, &messages);
-        for message in messages.drain(..) {
-            let _ = state.events.send(message);
-        }
+        self.send_all(messages);
         drop(_event_guard);
         append_bridge_debug_event(state, "session_event.emit", fields).await;
         true
@@ -201,9 +264,7 @@ impl SessionEventCoordinator {
             (sent, messages)
         };
         let fields = session_event_timing_fields(started_at, &messages);
-        for message in messages {
-            let _ = state.events.send(message);
-        }
+        self.send_all(messages);
         drop(_event_guard);
         append_bridge_debug_event(state, "session_event.emit", fields).await;
         sent
@@ -227,9 +288,7 @@ impl SessionEventCoordinator {
             (result, messages)
         };
         let fields = session_event_timing_fields(started_at, &messages);
-        for message in messages {
-            let _ = state.events.send(message);
-        }
+        self.send_all(messages);
         drop(_event_guard);
         append_bridge_debug_event(state, "session_event.emit", fields).await;
         result
@@ -242,7 +301,7 @@ impl SessionEventCoordinator {
     ) -> bool {
         let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
-        let mut messages = {
+        let messages = {
             let sessions = state.sessions.read().await;
             let Some(record) = sessions.get(session_id) else {
                 return false;
@@ -256,9 +315,7 @@ impl SessionEventCoordinator {
             messages
         };
         let fields = session_event_timing_fields(started_at, &messages);
-        for message in messages.drain(..) {
-            let _ = state.events.send(message);
-        }
+        self.send_all(messages);
         drop(_event_guard);
         append_bridge_debug_event(state, "session_event.emit", fields).await;
         true
@@ -267,7 +324,7 @@ impl SessionEventCoordinator {
     pub(crate) async fn emit_sessions_snapshot(&self, state: &AppState) {
         let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
-        let mut messages = {
+        let messages = {
             let sessions = state.sessions.read().await;
             let mut pending = self.pending_deltas.lock().await;
             let mut messages = drain_pending_delta_messages_locked(&mut pending, &sessions);
@@ -275,9 +332,7 @@ impl SessionEventCoordinator {
             messages
         };
         let fields = session_event_timing_fields(started_at, &messages);
-        for message in messages.drain(..) {
-            let _ = state.events.send(message);
-        }
+        self.send_all(messages);
         drop(_event_guard);
         append_bridge_debug_event(state, "session_event.emit", fields).await;
     }
@@ -299,9 +354,7 @@ impl SessionEventCoordinator {
         }
 
         let fields = session_event_timing_fields(started_at, &messages);
-        for message in messages {
-            let _ = state.events.send(message);
-        }
+        self.send_all(messages);
         drop(_event_guard);
         append_bridge_debug_event(state, "session_event.emit", fields).await;
     }
@@ -923,7 +976,7 @@ pub(crate) async fn apply_get_state_update(
     let effective_session_name = pending_switch_name.clone().or(update.session_name);
 
     let (previous_snapshot, target_snapshot) = state
-        .session_events
+        .events
         .coordinate_sessions_and_emit(state, |sessions| {
             let (previous_snapshot, target_snapshot) = if target_changed {
                 let source = sessions.get(&update.current_session_id).cloned();

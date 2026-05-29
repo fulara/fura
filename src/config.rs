@@ -548,7 +548,10 @@ pub(crate) async fn client_config(state: &AppState) -> ClientConfig {
 
 pub(crate) async fn broadcast_config(state: &AppState) {
     let config = client_config(state).await;
-    let _ = state.events.send(ServerMessage::ConfigUpdated { config });
+    let _ = state
+        .events
+        .emit(state, ServerMessage::ConfigUpdated { config })
+        .await;
 }
 
 pub(crate) async fn save_fura_config(state: &AppState) -> anyhow::Result<()> {

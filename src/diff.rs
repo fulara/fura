@@ -448,12 +448,18 @@ async fn register_generation_job(
         }
     }
     if let Some(cancelled_diff_id) = cancelled_diff_id {
-        let _ = state.events.send(ServerMessage::DiffCancelled {
-            target_client_id: client_id,
-            diff_id: cancelled_diff_id,
-            scope,
-            reason: Some("replaced".to_string()),
-        });
+        let _ = state
+            .events
+            .emit(
+                state,
+                ServerMessage::DiffCancelled {
+                    target_client_id: client_id,
+                    diff_id: cancelled_diff_id,
+                    scope,
+                    reason: Some("replaced".to_string()),
+                },
+            )
+            .await;
     }
 }
 
@@ -552,12 +558,18 @@ async fn cancel_current_diff(
         true
     };
     if cancelled {
-        let _ = state.events.send(ServerMessage::DiffCancelled {
-            target_client_id: client_id.to_string(),
-            diff_id: diff_id.to_string(),
-            scope,
-            reason,
-        });
+        let _ = state
+            .events
+            .emit(
+                state,
+                ServerMessage::DiffCancelled {
+                    target_client_id: client_id.to_string(),
+                    diff_id: diff_id.to_string(),
+                    scope,
+                    reason,
+                },
+            )
+            .await;
     }
     cancelled
 }
@@ -620,12 +632,20 @@ pub(crate) async fn start_session_changes_generation_job(
                 )
                 .await
                 {
-                    let _ = job_state.events.send(message);
-                    let _ = job_state.events.send(ServerMessage::DiffComplete {
-                        target_client_id: job_client_id,
-                        diff_id: job_diff_id,
-                        scope: DiffScope::SessionChanges,
-                    });
+                    let _ = job_state
+                        .events
+                        .emit_many(
+                            &job_state,
+                            vec![
+                                message,
+                                ServerMessage::DiffComplete {
+                                    target_client_id: job_client_id,
+                                    diff_id: job_diff_id,
+                                    scope: DiffScope::SessionChanges,
+                                },
+                            ],
+                        )
+                        .await;
                 }
             }
             Err(error) if is_expected_missing_session_changes(&error) => {}
@@ -639,14 +659,20 @@ pub(crate) async fn start_session_changes_generation_job(
                 )
                 .await
                 {
-                    let _ = job_state.events.send(diff_error(
-                        Some(job_client_id),
-                        Some(job_diff_id),
-                        DiffErrorScope::SessionChanges,
-                        Some(session_id),
-                        None,
-                        error,
-                    ));
+                    let _ = job_state
+                        .events
+                        .emit(
+                            &job_state,
+                            diff_error(
+                                Some(job_client_id),
+                                Some(job_diff_id),
+                                DiffErrorScope::SessionChanges,
+                                Some(session_id),
+                                None,
+                                error,
+                            ),
+                        )
+                        .await;
                 }
             }
         }
@@ -755,12 +781,20 @@ async fn start_compare_generation_job(
                 )
                 .await
                 {
-                    let _ = job_state.events.send(message);
-                    let _ = job_state.events.send(ServerMessage::DiffComplete {
-                        target_client_id: job_client_id,
-                        diff_id: job_diff_id,
-                        scope: DiffScope::CompareDiff,
-                    });
+                    let _ = job_state
+                        .events
+                        .emit_many(
+                            &job_state,
+                            vec![
+                                message,
+                                ServerMessage::DiffComplete {
+                                    target_client_id: job_client_id,
+                                    diff_id: job_diff_id,
+                                    scope: DiffScope::CompareDiff,
+                                },
+                            ],
+                        )
+                        .await;
                 }
             }
             Err(error) => {
@@ -773,14 +807,20 @@ async fn start_compare_generation_job(
                 )
                 .await
                 {
-                    let _ = job_state.events.send(diff_error(
-                        Some(job_client_id),
-                        Some(job_diff_id),
-                        DiffErrorScope::CompareDiff,
-                        None,
-                        Some(repo_root),
-                        error,
-                    ));
+                    let _ = job_state
+                        .events
+                        .emit(
+                            &job_state,
+                            diff_error(
+                                Some(job_client_id),
+                                Some(job_diff_id),
+                                DiffErrorScope::CompareDiff,
+                                None,
+                                Some(repo_root),
+                                error,
+                            ),
+                        )
+                        .await;
                 }
             }
         }
@@ -1177,24 +1217,31 @@ async fn prepare_session_changes_diff(
 ) -> anyhow::Result<(Vec<SessionRepoCandidate>, String, PreparedDiff)> {
     let candidates = session_repo_candidates(state, &session_id).await?;
     if candidates.is_empty() {
-        let _ = state.events.send(ServerMessage::SessionChangesSummary {
-            state: SessionChangesSummaryState::MissingRepo {
-                target_client_id: client_id,
-                diff_id,
-                request,
-                session_id,
-                repo_root: None,
-                reason: "Fura could not identify a git repository for this session.".to_string(),
-                repos: candidates,
-            },
-        });
+        let _ = state
+            .events
+            .emit(
+                state,
+                ServerMessage::SessionChangesSummary {
+                    state: SessionChangesSummaryState::MissingRepo {
+                        target_client_id: client_id,
+                        diff_id,
+                        request,
+                        session_id,
+                        repo_root: None,
+                        reason: "Fura could not identify a git repository for this session."
+                            .to_string(),
+                        repos: candidates,
+                    },
+                },
+            )
+            .await;
         bail!("missing repository for session changes");
     }
     let selected = select_session_repo(&candidates, selected_repo_id.as_deref())
         .ok_or_else(|| anyhow!("Selected repository is not available for this session."))?;
     let repo_root_text = selected.repo_root.clone();
     let Some(snapshot) = selected.session_start_snapshot.clone() else {
-        let _ = state.events.send(ServerMessage::SessionChangesSummary {
+        let _ = state.events.emit(state, ServerMessage::SessionChangesSummary {
             state: SessionChangesSummaryState::MissingSnapshot {
                 target_client_id: client_id,
                 diff_id,
@@ -1205,7 +1252,7 @@ async fn prepare_session_changes_diff(
                     .to_string(),
                 repos: candidates,
             },
-        });
+        }).await;
         bail!("missing repository diff snapshot");
     };
     let repo_root = discover_repo_root(&repo_root_text)?;
@@ -1630,33 +1677,45 @@ async fn send_diff_content_for_prepared(
     match result {
         Ok((patch, truncated)) => {
             let rows = parse_diff_rows(&patch);
-            let _ = state.events.send(ServerMessage::DiffContent {
-                content: DiffContentState {
-                    target_client_id: client_id,
-                    diff_id,
-                    scope,
-                    comparison_key: prepared.comparison.comparison_key.clone(),
-                    file,
-                    patch,
-                    truncated,
-                    rows,
-                    context_lines,
-                    generated_at: Timestamp::now().millis().to_string(),
-                },
-            });
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::DiffContent {
+                        content: DiffContentState {
+                            target_client_id: client_id,
+                            diff_id,
+                            scope,
+                            comparison_key: prepared.comparison.comparison_key.clone(),
+                            file,
+                            patch,
+                            truncated,
+                            rows,
+                            context_lines,
+                            generated_at: Timestamp::now().millis().to_string(),
+                        },
+                    },
+                )
+                .await;
         }
         Err(error) => {
-            let _ = state.events.send(diff_error(
-                Some(client_id),
-                Some(diff_id),
-                match scope {
-                    DiffScope::SessionChanges => DiffErrorScope::SessionChanges,
-                    DiffScope::CompareDiff => DiffErrorScope::CompareDiff,
-                },
-                session_id,
-                Some(prepared.repo_root.display().to_string()),
-                error,
-            ));
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    diff_error(
+                        Some(client_id),
+                        Some(diff_id),
+                        match scope {
+                            DiffScope::SessionChanges => DiffErrorScope::SessionChanges,
+                            DiffScope::CompareDiff => DiffErrorScope::CompareDiff,
+                        },
+                        session_id,
+                        Some(prepared.repo_root.display().to_string()),
+                        error,
+                    ),
+                )
+                .await;
         }
     }
 }
@@ -3584,14 +3643,20 @@ mod tests {
             !is_current_generation(&state, "client-1", DiffScope::CompareDiff, "diff-old", 1).await
         );
         if is_current_generation(&state, "client-1", DiffScope::CompareDiff, "diff-old", 1).await {
-            let _ = state.events.send(diff_error(
-                Some("client-1".into()),
-                Some("diff-old".into()),
-                DiffErrorScope::CompareDiff,
-                None,
-                Some("repo".into()),
-                anyhow!("stale error"),
-            ));
+            let _ = state
+                .events
+                .emit(
+                    &state,
+                    diff_error(
+                        Some("client-1".into()),
+                        Some("diff-old".into()),
+                        DiffErrorScope::CompareDiff,
+                        None,
+                        Some("repo".into()),
+                        anyhow!("stale error"),
+                    ),
+                )
+                .await;
         }
         loop {
             match tokio::time::timeout(std::time::Duration::from_millis(50), events.recv()).await {
