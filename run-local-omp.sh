@@ -73,6 +73,6 @@ exec cargo run --bin fura -- \
   --no-default-rpc-args \
   --rpc-arg "${OMP_REPO}/packages/coding-agent/src/cli.ts" \
   "--rpc-arg=--mode" \
-  --rpc-arg "rpc" \
+  --rpc-arg "rpc-ui" \
   "--rpc-arg=--no-lsp" \
   "$@"

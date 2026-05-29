@@ -51,7 +51,7 @@ pub(crate) struct Args {
     #[arg(long, env = "FURA_LOG_FRAMES", default_value_t = false)]
     pub(crate) log_frames: bool,
 
-    /// JSONL file that receives every raw RPC stdout frame before Fura maps it.
+    /// JSONL file that receives bridge debug records, including raw RPC stdout frames and WebSocket traffic summaries.
     #[arg(long, env = "FURA_BRIDGE_DEBUG_FILE")]
     pub(crate) bridge_debug_file: Option<PathBuf>,
 
@@ -74,7 +74,7 @@ pub(crate) struct Args {
     #[arg(long = "rpc-arg", env = "FURA_RPC_ARGS")]
     pub(crate) rpc_args: Vec<String>,
 
-    /// Do not add the default Oh My Pi RPC args (`--mode rpc`).
+    /// Do not add the default Oh My Pi RPC UI args (`--mode rpc-ui`).
     #[arg(long, env = "FURA_NO_DEFAULT_RPC_ARGS", default_value_t = false)]
     pub(crate) no_default_rpc_args: bool,
 

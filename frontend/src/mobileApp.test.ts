@@ -870,6 +870,36 @@ describe("mountMobileApp", () => {
     });
   });
 
+  it("renders editor dialog requests and sends edited values", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "dialog-editor",
+        method: "editor",
+        title: "Enter custom review instructions",
+        prefill: "Check edge cases.",
+        promptStyle: true,
+      },
+    });
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("#mobileDialogField textarea");
+    if (!textarea) throw new Error("dialog editor missing");
+    expect(textarea.rows).toBe(6);
+    expect(textarea.value).toBe("Check edge cases.");
+    textarea.value = "Check edge cases and concurrency.";
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLFormElement>("#mobileDialogForm")?.requestSubmit();
+
+    expect(connection.sent).toContainEqual({
+      type: "dialog.respond",
+      sessionId: "live",
+      dialogId: "dialog-editor",
+      response: { value: "Check edge cases and concurrency." },
+    });
+  });
+
   it("renders open_url dialog requests without sending extension responses", () => {
     const { connection } = createHarness();
     connection.emit({

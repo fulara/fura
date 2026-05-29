@@ -392,6 +392,68 @@ describe("desktop extension dialogs", () => {
     expect(overlay?.hidden).toBe(true);
     expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
   });
+
+  it("renders select dialog requests and sends selected values", async () => {
+    const { connection } = await createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "select-1",
+        method: "select",
+        title: "Review Mode",
+        options: ["Review uncommitted changes", "Review a commit"],
+      },
+    });
+
+    const overlay = document.querySelector<HTMLElement>("#extensionDialogOverlay");
+    expect(overlay?.hidden).toBe(false);
+    expect(document.querySelector("#extensionDialogTitle")?.textContent).toBe("Review Mode");
+
+    const select = document.querySelector<HTMLSelectElement>("#extensionDialogField select");
+    if (!select) throw new Error("dialog select missing");
+    select.value = "Review a commit";
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    document.querySelector<HTMLFormElement>("#extensionDialogForm")?.requestSubmit();
+
+    expect(connection.sent).toContainEqual({
+      type: "dialog.respond",
+      sessionId: "live",
+      dialogId: "select-1",
+      response: { value: "Review a commit" },
+    });
+    expect(overlay?.hidden).toBe(true);
+  });
+
+  it("renders editor dialog requests and sends edited values", async () => {
+    const { connection } = await createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "editor-1",
+        method: "editor",
+        title: "Enter custom review instructions",
+        prefill: "Focus on correctness.",
+        promptStyle: true,
+      },
+    });
+
+    const textarea = document.querySelector<HTMLTextAreaElement>("#extensionDialogField textarea");
+    if (!textarea) throw new Error("dialog editor missing");
+    expect(textarea.rows).toBe(6);
+    expect(textarea.value).toBe("Focus on correctness.");
+    textarea.value = "Focus on concurrency and missed errors.";
+    textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    document.querySelector<HTMLFormElement>("#extensionDialogForm")?.requestSubmit();
+
+    expect(connection.sent).toContainEqual({
+      type: "dialog.respond",
+      sessionId: "live",
+      dialogId: "editor-1",
+      response: { value: "Focus on concurrency and missed errors." },
+    });
+  });
 });
 
 

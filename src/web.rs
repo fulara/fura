@@ -20,9 +20,9 @@ use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 use crate::{
-    AppState, AuthSession, ClientMessage, ServerMessage, append_bridge_debug_event,
-    append_event_debug_client_message, append_event_debug_server_message, client_config,
-    handle_client_message, refresh_session_catalog, sessions_snapshot_from_map,
+    AppState, AuthSession, ClientMessage, PlanApprovalMode, ServerMessage,
+    append_bridge_debug_event, append_event_debug_client_message, append_event_debug_server_message,
+    client_config, handle_client_message, refresh_session_catalog, sessions_snapshot_from_map,
 };
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
@@ -229,6 +229,196 @@ fn websocket_update_mode_label(update_mode: WebSocketUpdateMode) -> &'static str
 
 fn text_preview(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
+}
+
+fn client_message_type(message: &ClientMessage) -> &'static str {
+    match message {
+        ClientMessage::SessionCreate { .. } => "session.create",
+        ClientMessage::SessionSetCategory { .. } => "session.setCategory",
+        ClientMessage::ConfigSet { .. } => "config.set",
+        ClientMessage::ConfigModelCatalogList { .. } => "config.modelCatalog.list",
+        ClientMessage::SessionAttach { .. } => "session.attach",
+        ClientMessage::SessionOpen { .. } => "session.open",
+        ClientMessage::SessionDetach { .. } => "session.detach",
+        ClientMessage::SessionStop { .. } => "session.stop",
+        ClientMessage::SessionDelete { .. } => "session.delete",
+        ClientMessage::SessionList => "session.list",
+        ClientMessage::StateRefresh { .. } => "state.refresh",
+        ClientMessage::PromptSend { .. } => "prompt.send",
+        ClientMessage::PromptAbort { .. } => "prompt.abort",
+        ClientMessage::GoalStart { .. } => "goal.start",
+        ClientMessage::GoalControl { .. } => "goal.control",
+        ClientMessage::GoalSetBudget { .. } => "goal.setBudget",
+        ClientMessage::ControlPrompt { .. } => "control.prompt",
+        ClientMessage::ControlAbort { .. } => "control.abort",
+        ClientMessage::VoiceStart { .. } => "voice.start",
+        ClientMessage::VoiceAudio { .. } => "voice.audio",
+        ClientMessage::VoiceStop { .. } => "voice.stop",
+        ClientMessage::DialogRespond { .. } => "dialog.respond",
+        ClientMessage::ModelList { .. } => "model.list",
+        ClientMessage::ModelSet { .. } => "model.set",
+        ClientMessage::SessionChangesRequest { .. } => "sessionChanges.request",
+        ClientMessage::SessionChangesSnapshot { .. } => "sessionChanges.snapshot",
+        ClientMessage::CompareDiffRequest { .. } => "compareDiff.request",
+        ClientMessage::DiffCancel { .. } => "diff.cancel",
+        ClientMessage::DiffContentRequest { .. } => "diff.content.request",
+        ClientMessage::DiffReviewWorktreeEnsure { .. } => "diff.reviewWorktree.ensure",
+        ClientMessage::DiffReviewWorktreeCheckout { .. } => "diff.reviewWorktree.checkout",
+        ClientMessage::SessionFork { .. } => "session.fork",
+        ClientMessage::SessionHandoff { .. } => "session.handoff",
+        ClientMessage::CodeWorkspaceOpen { .. } => "code.workspace.open",
+        ClientMessage::CodeWorkspaceOpenRoot { .. } => "code.workspace.openRoot",
+        ClientMessage::CodeTreeList { .. } => "code.tree.list",
+        ClientMessage::CodeFileOpen { .. } => "code.file.open",
+        ClientMessage::CodeFileClose { .. } => "code.file.close",
+        ClientMessage::CodeFileSearch { .. } => "code.file.search",
+        ClientMessage::ConflictScan { .. } => "conflict.scan",
+        ClientMessage::ConflictFileOpen { .. } => "conflict.file.open",
+        ClientMessage::ConflictFilePreviewMagicWand { .. } => "conflict.file.previewMagicWand",
+        ClientMessage::ConflictFileWriteResult { .. } => "conflict.file.writeResult",
+        ClientMessage::ConflictFileStageResolved { .. } => "conflict.file.stageResolved",
+        ClientMessage::ConflictAgentRun { .. } => "conflict.agent.run",
+        ClientMessage::PlanApprove { .. } => "plan.approve",
+        ClientMessage::PlanDiscuss { .. } => "plan.discuss",
+        ClientMessage::RawRpc { .. } => "raw.rpc",
+        ClientMessage::ReviewCommentsList { .. } => "review.comments.list",
+        ClientMessage::ReviewCommentCreate { .. } => "review.comment.create",
+        ClientMessage::ReviewCommentUpdate { .. } => "review.comment.update",
+        ClientMessage::ReviewCommentMarkFlushed { .. } => "review.comment.markFlushed",
+        ClientMessage::ReviewCommentDelete { .. } => "review.comment.delete",
+        ClientMessage::ReviewAgentReviewStart { .. } => "review.agentReview.start",
+    }
+}
+
+fn client_message_debug_fields(
+    message: &ClientMessage,
+    connection_id: u64,
+    update_mode: WebSocketUpdateMode,
+    raw_text: &str,
+) -> (&'static str, Map<String, Value>) {
+    let mut fields = Map::new();
+    fields.insert(
+        "direction".to_string(),
+        Value::String("client_to_bridge".to_string()),
+    );
+    fields.insert(
+        "connectionId".to_string(),
+        Value::Number(connection_id.into()),
+    );
+    fields.insert(
+        "updateMode".to_string(),
+        Value::String(websocket_update_mode_label(update_mode).to_string()),
+    );
+    fields.insert(
+        "rawBytes".to_string(),
+        Value::Number((raw_text.len() as u64).into()),
+    );
+    let message_type = client_message_type(message);
+    match message {
+        ClientMessage::SessionAttach { session_id }
+        | ClientMessage::SessionDetach { session_id }
+        | ClientMessage::SessionStop { session_id }
+        | ClientMessage::StateRefresh { session_id }
+        | ClientMessage::PromptAbort { session_id }
+        | ClientMessage::ModelList { session_id }
+        | ClientMessage::CodeWorkspaceOpen { session_id }
+        | ClientMessage::PlanDiscuss { session_id } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+        }
+        ClientMessage::SessionDelete {
+            session_id,
+            delete_worktree,
+        } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert("deleteWorktree".to_string(), Value::Bool(*delete_worktree));
+        }
+        ClientMessage::PromptSend {
+            session_id,
+            text,
+            images,
+            behavior,
+        } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert(
+                "textBytes".to_string(),
+                Value::Number((text.len() as u64).into()),
+            );
+            fields.insert(
+                "textPreview".to_string(),
+                Value::String(text_preview(text, 120)),
+            );
+            fields.insert(
+                "imageCount".to_string(),
+                Value::Number((images.as_ref().map_or(0_usize, Vec::len) as u64).into()),
+            );
+            if let Some(behavior) = behavior {
+                fields.insert(
+                    "behavior".to_string(),
+                    Value::String(behavior.as_rpc_streaming_behavior().to_string()),
+                );
+            }
+        }
+        ClientMessage::PlanApprove {
+            session_id,
+            final_plan_file_path,
+            approval_mode,
+            ..
+        } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert(
+                "finalPlanFilePath".to_string(),
+                Value::String(final_plan_file_path.clone()),
+            );
+            if let Some(approval_mode) = approval_mode {
+                fields.insert(
+                    "approvalMode".to_string(),
+                    Value::String(
+                        match approval_mode {
+                            PlanApprovalMode::Execute => "execute",
+                            PlanApprovalMode::Compact => "compact",
+                            PlanApprovalMode::Keep => "keep",
+                        }
+                        .to_string(),
+                    ),
+                );
+            }
+        }
+        ClientMessage::DialogRespond {
+            session_id,
+            dialog_id,
+            response,
+        } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert("dialogId".to_string(), Value::String(dialog_id.clone()));
+            if let Some(keys) = response
+                .as_object()
+                .map(|obj| obj.keys().cloned().map(Value::String).collect::<Vec<_>>())
+            {
+                fields.insert("responseKeys".to_string(), Value::Array(keys));
+            }
+        }
+        ClientMessage::SessionOpen { session_file } => {
+            fields.insert(
+                "sessionFile".to_string(),
+                Value::String(session_file.clone()),
+            );
+        }
+        ClientMessage::SessionList => {}
+        _ => {}
+    }
+    (message_type, fields)
+}
+
+pub(crate) async fn append_client_message_debug_event(
+    state: &AppState,
+    message: &ClientMessage,
+    connection_id: u64,
+    update_mode: WebSocketUpdateMode,
+    raw_text: &str,
+) {
+    let (event_type, fields) =
+        client_message_debug_fields(message, connection_id, update_mode, raw_text);
+    append_bridge_debug_event(state, event_type, fields).await;
 }
 
 async fn append_websocket_debug_event(
@@ -523,6 +713,14 @@ pub(crate) async fn handle_websocket_frame(
             match serde_json::from_str::<ClientMessage>(&text) {
                 Ok(message) => {
                     append_event_debug_client_message(state, &message).await;
+                    append_client_message_debug_event(
+                        state,
+                        &message,
+                        connection_id,
+                        update_mode,
+                        &text,
+                    )
+                    .await;
                     let outcome = if client_message_resyncs_stream(&message, update_mode) {
                         FrameOutcome::Resynced
                     } else {

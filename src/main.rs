@@ -57,6 +57,11 @@ use web::*;
 
 const SESSION_CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const SESSION_CATALOG_PRELOAD_LIMIT: usize = 30;
+const DEFAULT_OMP_RPC_MODE: &str = "rpc-ui";
+
+fn default_omp_rpc_args() -> Vec<String> {
+    vec!["--mode".to_string(), DEFAULT_OMP_RPC_MODE.to_string()]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BridgeTokenSource {
@@ -109,10 +114,11 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut rpc_args = Vec::new();
-    if !args.no_default_rpc_args {
-        rpc_args.extend(["--mode".to_string(), "rpc".to_string()]);
-    }
+    let mut rpc_args = if args.no_default_rpc_args {
+        Vec::new()
+    } else {
+        default_omp_rpc_args()
+    };
     rpc_args.extend(args.rpc_args);
 
     let session_root = args.session_root.unwrap_or_else(default_session_root);
@@ -432,6 +438,14 @@ pub(crate) mod tests {
         io::BufReader,
         sync::{mpsc, oneshot},
     };
+
+    #[test]
+    fn default_omp_rpc_args_enable_rpc_ui_mode() {
+        assert_eq!(
+            default_omp_rpc_args(),
+            vec!["--mode".to_string(), "rpc-ui".to_string()]
+        );
+    }
 
     fn text_message(id: &str, text: &str) -> TranscriptMessage {
         TranscriptMessage {
@@ -3115,6 +3129,86 @@ pub(crate) mod tests {
         assert_eq!(record["outboundSeq"], 3);
         assert_eq!(record["reason"], "normal close");
         assert!(record["timestampMs"].is_number());
+
+        let _ = async_fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn append_client_message_debug_event_writes_connection_aware_session_attach_record() {
+        let path = env::temp_dir().join(format!(
+            "fura-client-debug-{}.jsonl",
+            Uuid::new_v4().simple()
+        ));
+        let state = test_state(1, Some(path.clone()));
+        let message = ClientMessage::SessionAttach {
+            session_id: "session-123".to_string(),
+        };
+
+        let raw = r#"{"type":"session.attach","sessionId":"session-123"}"#;
+
+        append_client_message_debug_event(
+            &state,
+            &message,
+            42,
+            WebSocketUpdateMode::Immediate,
+            raw,
+        )
+        .await;
+
+        let written = async_fs::read_to_string(&path)
+            .await
+            .expect("debug event file should be written");
+        let record: Value = serde_json::from_str(written.trim_end()).expect("debug event is JSONL");
+
+        assert_eq!(record["type"], "session.attach");
+        assert_eq!(record["direction"], "client_to_bridge");
+        assert_eq!(record["connectionId"], 42);
+        assert_eq!(record["updateMode"], "immediate");
+        assert_eq!(record["sessionId"], "session-123");
+        assert_eq!(record["rawBytes"], raw.len() as u64);
+        assert!(record["timestampMs"].is_number());
+
+        let _ = async_fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn append_client_message_debug_event_writes_prompt_preview_fields() {
+        let path = env::temp_dir().join(format!(
+            "fura-client-prompt-debug-{}.jsonl",
+            Uuid::new_v4().simple()
+        ));
+        let state = test_state(1, Some(path.clone()));
+        let message = ClientMessage::PromptSend {
+            session_id: "session-123".to_string(),
+            text: "hello from browser".to_string(),
+            images: Some(vec![serde_json::json!({"type": "image"})]),
+            behavior: Some(PromptBehavior::FollowUp),
+        };
+        let raw = r#"{"type":"prompt.send","sessionId":"session-123","text":"hello from browser","images":[{"type":"image"}],"behavior":"followUp"}"#;
+
+        append_client_message_debug_event(
+            &state,
+            &message,
+            7,
+            WebSocketUpdateMode::ConflateAndDelta,
+            raw,
+        )
+        .await;
+
+        let written = async_fs::read_to_string(&path)
+            .await
+            .expect("debug event file should be written");
+        let record: Value = serde_json::from_str(written.trim_end()).expect("debug event is JSONL");
+
+        assert_eq!(record["type"], "prompt.send");
+        assert_eq!(record["direction"], "client_to_bridge");
+        assert_eq!(record["connectionId"], 7);
+        assert_eq!(record["updateMode"], "conflateAndDelta");
+        assert_eq!(record["sessionId"], "session-123");
+        assert_eq!(record["textBytes"], 18);
+        assert_eq!(record["textPreview"], "hello from browser");
+        assert_eq!(record["imageCount"], 1);
+        assert_eq!(record["behavior"], "followUp");
 
         let _ = async_fs::remove_file(path).await;
     }
