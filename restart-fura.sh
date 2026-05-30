@@ -25,6 +25,7 @@ LOG_FILE=${FURA_RESTART_LOG_FILE:-${SCRIPT_DIR}/.fura-restart.log}
 DRY_RUN=0
 LAUNCHER=${FURA_RESTART_LAUNCHER:-}
 FORWARD_ARGS=()
+FORWARD_ARG_COUNT=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
     --)
       shift
       FORWARD_ARGS=("$@")
+      FORWARD_ARG_COUNT=$#
       break
       ;;
     *)
@@ -42,6 +44,7 @@ while [[ $# -gt 0 ]]; do
         LAUNCHER=$1
       else
         FORWARD_ARGS+=("$1")
+        FORWARD_ARG_COUNT=$((FORWARD_ARG_COUNT + 1))
       fi
       shift
       ;;
@@ -79,11 +82,9 @@ if [[ -r "${PID_FILE}" ]]; then
   fi
 fi
 
-while IFS= read -r line; do
-  [[ -n "${line}" ]] || continue
-  pid=${line%% *}
-  cmd=${line#* }
-  if [[ "${cmd}" == *"${SCRIPT_DIR}/target/debug/fura"* || "${cmd}" == *"${SCRIPT_DIR}/target/release/fura"* ]]; then
+while read -r pid cmd; do
+  [[ -n "${pid:-}" && -n "${cmd:-}" ]] || continue
+  if [[ "${cmd}" == *"${SCRIPT_DIR}/target/debug/fura"* || "${cmd}" == *"${SCRIPT_DIR}/target/release/fura"* || "${cmd}" == target/debug/fura* || "${cmd}" == target/release/fura* ]]; then
     add_pid "${pid}"
   fi
 done < <(ps -axo pid=,command=)
@@ -138,7 +139,11 @@ fi
 mkdir -p -- "$(dirname -- "${PID_FILE}")" "$(dirname -- "${LOG_FILE}")"
 rm -f -- "${PID_FILE}"
 
-nohup "${LAUNCHER}" "${FORWARD_ARGS[@]}" >>"${LOG_FILE}" 2>&1 < /dev/null &
+if (( FORWARD_ARG_COUNT > 0 )); then
+  nohup "${LAUNCHER}" "${FORWARD_ARGS[@]}" >>"${LOG_FILE}" 2>&1 < /dev/null &
+else
+  nohup "${LAUNCHER}" >>"${LOG_FILE}" 2>&1 < /dev/null &
+fi
 launcher_pid=$!
 disown "${launcher_pid}" 2>/dev/null || true
 printf '%s\n' "${launcher_pid}" > "${PID_FILE}"
