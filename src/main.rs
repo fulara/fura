@@ -2765,6 +2765,62 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn slash_passthrough_prompt_creates_command_notice_without_sending_state() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
+        let mut events = state.events.subscribe();
+
+        let responses =
+            send_prompt(&state, "s1".to_string(), "/review".to_string(), None, None).await;
+
+        assert!(responses.is_empty());
+        let command = commands.recv().await.expect("prompt command sent");
+        assert_eq!(
+            command.get("type").and_then(|value| value.as_str()),
+            Some("prompt")
+        );
+        assert_eq!(
+            command.get("message").and_then(|value| value.as_str()),
+            Some("/review")
+        );
+        assert!(
+            state.pending_prompt_drafts.read().await.is_empty(),
+            "slash passthrough prompts should not wait for agent_start/message_end to clear an optimistic bubble"
+        );
+        match events.recv().await.expect("command notice snapshot") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert!(!state.is_busy);
+                assert_eq!(state.transcript.len(), 1);
+                match &state.transcript[0] {
+                    TranscriptEntry::Message(message) => {
+                        assert_eq!(message.role, MessageRole::System);
+                        assert!(message.id.starts_with("__command_notice:"));
+                        assert!(!message.id.starts_with("__pending_prompt:"));
+                        assert_eq!(
+                            message.blocks,
+                            vec![ContentBlock::Text {
+                                text: "Command requested: /review".to_string(),
+                            }]
+                        );
+                    }
+                    other => panic!("unexpected transcript entry: {other:?}"),
+                }
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            events.try_recv().is_err(),
+            "slash passthrough prompt should only emit the command notice snapshot"
+        );
+    }
+
+    #[tokio::test]
     async fn rpc_model_list_response_emits_model_list() {
         let state = test_state(8, None);
         state

@@ -77,10 +77,19 @@ type RenderMessageReviewOptions = {
 function isPendingPromptMessage(message: TranscriptMessage): boolean {
   return message.id.startsWith("__pending_prompt:");
 }
+
+function isCommandNoticeMessage(message: TranscriptMessage): boolean {
+  return message.id.startsWith("__command_notice:");
+}
+
+function messageClassName(message: TranscriptMessage, options: RenderMessageOptions): string {
+  return `message ${message.role}${options.review?.active ? " message-reviewing" : ""}${isPendingPromptMessage(message) ? " message-pending-prompt" : ""}${isCommandNoticeMessage(message) ? " message-command-notice" : ""}`;
+}
+
 export function renderMessage(message: TranscriptMessage, options: RenderMessageOptions): HTMLElement {
   const article = mkEl("article");
   renderedMessageState.set(article, { message, signature: transcriptMessageRenderSignature(message) });
-  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}${isPendingPromptMessage(message) ? " message-pending-prompt" : ""}`;
+  article.className = messageClassName(message, options);
   article.dataset.messageId = message.id;
 
   const header = mkEl("header");
@@ -127,7 +136,7 @@ export function updateRenderedMessage(article: HTMLElement, message: TranscriptM
   if (previous?.signature === signature) return article;
 
   renderedMessageState.set(article, { message, signature });
-  article.className = `message ${message.role}${options.review?.active ? " message-reviewing" : ""}${isPendingPromptMessage(message) ? " message-pending-prompt" : ""}`;
+  article.className = messageClassName(message, options);
   article.dataset.messageId = message.id;
   const heading = header.firstElementChild;
   if (heading) syncMessageHeading(heading as HTMLElement, message);
@@ -139,7 +148,7 @@ export function updateRenderedMessage(article: HTMLElement, message: TranscriptM
 function syncMessageHeading(heading: HTMLElement, message: TranscriptMessage): void {
   heading.replaceChildren();
   const roleLabel = mkEl("strong");
-  roleLabel.textContent = message.role === "user" ? "You" : message.role;
+  roleLabel.textContent = isCommandNoticeMessage(message) ? "Command" : message.role === "user" ? "You" : message.role;
   heading.append(roleLabel);
   appendEventTimestamp(heading, message.timestamp);
   if (isPendingPromptMessage(message)) {

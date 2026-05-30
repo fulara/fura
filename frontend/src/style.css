@@ -1827,6 +1827,11 @@ h2 {
 .message.system {
   border-color: rgba(255, 196, 87, 0.34);
 }
+.message.message-command-notice {
+  border-color: rgba(120, 208, 255, 0.36);
+  background: rgba(18, 30, 43, 0.78);
+}
+
 
 .message header {
   display: flex;
@@ -3759,6 +3764,12 @@ h2 {
   font-size: 0.85rem;
   line-height: 1.4;
   word-break: break-word;
+}
+
+.notice-info {
+  background: rgba(120, 208, 255, 0.10);
+  border: 1px solid rgba(120, 208, 255, 0.30);
+  color: #8dd7ff;
 }
 
 .notice-error {

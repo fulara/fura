@@ -217,6 +217,22 @@ describe("renderMessage", () => {
     expect(pending.querySelector(".message-pending-badge")).toBeNull();
   });
 
+  it("renders command notices without pending sending state", () => {
+    const notice = renderMessage({
+      id: "__command_notice:1",
+      role: "system",
+      isNew: true,
+      blocks: [{ kind: "text", text: "Command requested: /review" }],
+    }, { thinkingVisibilityMode: "auto" });
+
+    expect(notice.classList.contains("message-command-notice")).toBe(true);
+    expect(notice.classList.contains("message-pending-prompt")).toBe(false);
+    expect(notice.querySelector(".message-heading strong")?.textContent).toBe("Command");
+    expect(notice.querySelector(".message-pending-badge")).toBeNull();
+    expect(notice.textContent).toContain("Command requested: /review");
+  });
+
+
   it("renders transcript review mode with line comments and actions", () => {
     const onStart = vi.fn();
     const onAddComment = vi.fn();

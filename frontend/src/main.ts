@@ -1664,6 +1664,11 @@ function appendSessionNotice(sessionId: string, notice: SessionNotice): void {
   if (workspaceMode === "session" && sessionId === activeSessionId) markTranscriptViewDirty();
 }
 
+function extensionNotifyLevel(request: ExtensionDialogRequest): SessionNotice["level"] {
+  const notifyType = request.notifyType?.toLowerCase();
+  return notifyType === "error" || notifyType === "warning" ? notifyType : "info";
+}
+
 function isPendingCreatedSession(sessionId: string): boolean {
   return Boolean(pendingCreatedSessionBaseline && !pendingCreatedSessionBaseline.has(sessionId));
 }
@@ -2531,9 +2536,13 @@ function handleExtensionDialogRequest(message: Extract<ServerMessage, { type: "d
     case "cancel":
       cancelExtensionDialog(request.targetId);
       return;
-    case "notify":
-      appendLog(formatExtensionDialogNotification(request));
+    case "notify": {
+      const text = formatExtensionDialogNotification(request);
+      appendLog(text);
+      appendSessionNotice(request.sessionId, { level: extensionNotifyLevel(request), text });
+      render();
       return;
+    }
     case "set_editor_text":
       promptInput.value = request.text ?? "";
       persistPromptDraftForWorkspace();

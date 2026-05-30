@@ -1946,6 +1946,9 @@ pub(crate) async fn send_prompt(
         }
     }
 
+    let suppress_optimistic_prompt =
+        behavior.is_none() && !has_images && parse_slash_command(text.trim()).is_some();
+
     if !state.sessions.read().await.contains_key(&session_id) {
         return vec![unknown_session_error(session_id)];
     }
@@ -1961,33 +1964,52 @@ pub(crate) async fn send_prompt(
     let optimistic_message_id = format!("__pending_prompt:{command_id}");
     let command_images = images.filter(|images| !images.is_empty());
 
-    let snapshot_sent = state
-        .events
-        .mutate_session_snapshot(state, &session_id, |record| {
-            record.status = SessionStatus::Busy;
-            record.messages.push(optimistic_prompt_message(
-                optimistic_message_id.clone(),
-                text.clone(),
-                command_images.as_ref(),
-            ));
-            record.updated_at = Timestamp::now();
-        })
-        .await;
+    let command_notice_message_id = format!("__command_notice:{command_id}");
 
-    if !snapshot_sent {
-        return vec![unknown_session_error(session_id)];
-    }
+    if suppress_optimistic_prompt {
+        let snapshot_sent = state
+            .events
+            .mutate_session_snapshot(state, &session_id, |record| {
+                record.messages.push(command_notice_message(
+                    command_notice_message_id.clone(),
+                    text.clone(),
+                ));
+                record.updated_at = Timestamp::now();
+            })
+            .await;
 
-    if behavior.is_none() {
-        state.pending_prompt_drafts.write().await.insert(
-            command_id.clone(),
-            PendingPromptDraft {
-                session_id: session_id.clone(),
-                text: text.clone(),
-                images: command_images.clone(),
-                optimistic_message_id: optimistic_message_id.clone(),
-            },
-        );
+        if !snapshot_sent {
+            return vec![unknown_session_error(session_id)];
+        }
+    } else {
+        let snapshot_sent = state
+            .events
+            .mutate_session_snapshot(state, &session_id, |record| {
+                record.status = SessionStatus::Busy;
+                record.messages.push(optimistic_prompt_message(
+                    optimistic_message_id.clone(),
+                    text.clone(),
+                    command_images.as_ref(),
+                ));
+                record.updated_at = Timestamp::now();
+            })
+            .await;
+
+        if !snapshot_sent {
+            return vec![unknown_session_error(session_id)];
+        }
+
+        if behavior.is_none() {
+            state.pending_prompt_drafts.write().await.insert(
+                command_id.clone(),
+                PendingPromptDraft {
+                    session_id: session_id.clone(),
+                    text: text.clone(),
+                    images: command_images.clone(),
+                    optimistic_message_id: optimistic_message_id.clone(),
+                },
+            );
+        }
     }
 
     let command = prompt_command(command_id.clone(), text, command_images, behavior);
@@ -2000,13 +2022,30 @@ pub(crate) async fn send_prompt(
                 .write()
                 .await
                 .remove(&command_id);
-            remove_optimistic_prompt_message(state, &session_id, &optimistic_message_id).await;
+            if suppress_optimistic_prompt {
+                remove_optimistic_prompt_message(state, &session_id, &command_notice_message_id)
+                    .await;
+            } else {
+                remove_optimistic_prompt_message(state, &session_id, &optimistic_message_id).await;
+            }
             vec![ServerMessage::Error {
                 request_id: None,
                 message,
             }]
         }
     }
+}
+
+fn command_notice_message(id: String, text: String) -> TranscriptMessage {
+    TranscriptMessage::new(
+        id,
+        MessageRole::System,
+        vec![ContentBlock::Text {
+            text: format!("Command requested: {}", text.trim()),
+        }],
+        Some(Timestamp::now()),
+        true,
+    )
 }
 
 fn optimistic_prompt_message(

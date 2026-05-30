@@ -83,9 +83,10 @@ describe("plan review helpers", () => {
 
     expect(card.textContent).toContain("Refining plan: Migration");
     expect(card.textContent).toContain("Use the composer below");
-    expect(card.querySelector(".plan-review-approve")).toBeNull();
+    expect(card.querySelector(".plan-review-approve")).not.toBeNull();
     card.querySelector<HTMLButtonElement>(".message-review-toggle")?.click();
     expect(onStart).toHaveBeenCalled();
+    card.querySelector<HTMLButtonElement>(".plan-review-approve-execute")?.click();
   });
 
 });

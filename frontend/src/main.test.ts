@@ -393,6 +393,30 @@ describe("desktop extension dialogs", () => {
     expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
   });
 
+  it("shows notify dialog requests as visible session notices", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "notify-1",
+        method: "notify",
+        message: "No uncommitted changes found",
+        notifyType: "warning",
+      },
+    });
+
+    expect(document.querySelector<HTMLElement>("#extensionDialogOverlay")?.hidden).toBe(true);
+    const notice = document.querySelector<HTMLElement>(".session-notice.notice-warning");
+    expect(notice?.textContent).toContain("warning: No uncommitted changes found");
+    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
+  });
+
+
   it("renders select dialog requests and sends selected values", async () => {
     const { connection } = await createHarness();
     connection.emit({

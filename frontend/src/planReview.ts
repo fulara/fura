@@ -121,27 +121,28 @@ export function renderPlanReviewCard(
 
   const footer = mkEl("footer");
   footer.className = "plan-review-actions";
+  const approve = mkEl("button");
+  approve.type = "button";
+  approve.className = "plan-review-approve plan-review-approve-execute";
+  approve.textContent = "Approve and execute";
+  approve.title = "Start a fresh execution session with this plan as the source of truth.";
+  approve.addEventListener("click", () => actions.onApprove(review, "execute"));
+
+  const compact = mkEl("button");
+  compact.type = "button";
+  compact.className = "plan-review-approve plan-review-approve-compact";
+  compact.textContent = "Approve and compact context";
+  compact.title = "Keep this session, compact the planning discussion first, then execute the approved plan.";
+  compact.addEventListener("click", () => actions.onApprove(review, "compact"));
+
+  const keep = mkEl("button");
+  keep.type = "button";
+  keep.className = "plan-review-approve plan-review-approve-keep";
+  keep.textContent = "Approve and keep context";
+  keep.title = "Keep this session and execute with the full planning discussion still in context.";
+  keep.addEventListener("click", () => actions.onApprove(review, "keep"));
+
   if (mode === "pending") {
-    const approve = mkEl("button");
-    approve.type = "button";
-    approve.className = "plan-review-approve plan-review-approve-execute";
-    approve.textContent = "Approve and execute";
-    approve.title = "Start a fresh execution session with this plan as the source of truth.";
-    approve.addEventListener("click", () => actions.onApprove(review, "execute"));
-
-    const compact = mkEl("button");
-    compact.type = "button";
-    compact.className = "plan-review-approve plan-review-approve-compact";
-    compact.textContent = "Approve and compact context";
-    compact.title = "Keep this session, compact the planning discussion first, then execute the approved plan.";
-    compact.addEventListener("click", () => actions.onApprove(review, "compact"));
-
-    const keep = mkEl("button");
-    keep.type = "button";
-    keep.className = "plan-review-approve plan-review-approve-keep";
-    keep.textContent = "Approve and keep context";
-    keep.title = "Keep this session and execute with the full planning discussion still in context.";
-    keep.addEventListener("click", () => actions.onApprove(review, "keep"));
     const refine = mkEl("button");
     refine.type = "button";
     refine.className = "plan-review-refine";
@@ -153,8 +154,7 @@ export function renderPlanReviewCard(
     const status = mkEl("p");
     status.className = "plan-review-refining-status";
     status.textContent = "Refinement mode: write the changes you want in the prompt composer.";
-
-    footer.append(status);
+    footer.append(status, approve, compact, keep);
   }
 
   card.append(header, body, footer);

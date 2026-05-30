@@ -654,6 +654,7 @@ describe("mountMobileApp", () => {
       type: "session.snapshot",
       sessionId: "live",
       state: projection("live", {
+        planMode: { enabled: true, planFilePath: "local://PLAN.md" },
         pendingPlanReview: {
           planFilePath: "local://PLAN.md",
           finalPlanFilePath: "local://FINAL.md",
@@ -1041,6 +1042,30 @@ describe("mountMobileApp", () => {
     expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
   });
 
+  it("shows notify dialog requests as visible mobile notices", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "notify-1",
+        method: "notify",
+        message: "No uncommitted changes found",
+        notifyType: "warning",
+      },
+    });
+
+    expect(document.querySelector<HTMLElement>("#mobileDialogOverlay")?.hidden).toBe(true);
+    const notice = document.querySelector<HTMLElement>(".session-notice.notice-warning");
+    expect(notice?.textContent).toContain("warning: No uncommitted changes found");
+    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
+  });
+
+
   it("applies extension editor text updates to the mobile prompt draft", () => {
     const { connection } = createHarness();
     connection.emit({
@@ -1102,7 +1127,7 @@ describe("mountMobileApp", () => {
     expect(input.value).toBe("");
   });
 
-  it("renders session-scoped plan review while still allowing plan questions", () => {
+  it("renders session-scoped plan review while allowing questions and approval from refine mode", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     clickSession();
@@ -1129,18 +1154,6 @@ describe("mountMobileApp", () => {
     form.requestSubmit();
     expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "question about plan")).toBe(true);
     connection.sent = [];
-
-
-    connection.emit({
-      type: "plan.review",
-      sessionId: "live",
-      planFilePath: "local://PLAN.md",
-      finalPlanFilePath: "local://FINAL.md",
-      title: "Review me",
-      content: "Plan body",
-    });
-    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Plan ready: Review me");
-    expect(input.disabled).toBe(false);
 
     document.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
     expect(document.querySelector(".plan-review-card")?.textContent).toContain("Refining plan: Review me");

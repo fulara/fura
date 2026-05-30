@@ -92,6 +92,8 @@ type ControlChatMessage = {
 type MobileTranscriptRenderCache = {
   nodes: Map<string, HTMLElement>;
 };
+type SessionNotice = { level: "info" | "warning" | "error"; text: string };
+
 
 function mobileToolCardRenderKey(card: ToolCard): string {
   const renderContentKey = card.renderHash ? `hash:${card.renderHash}` : `legacy:${JSON.stringify([
@@ -492,6 +494,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let busyPromptDraft: BusyPromptDraft | null = null;
   let activeDialog: ExtensionDialogRequest | null = null;
   const dialogQueue: ExtensionDialogRequest[] = [];
+  const sessionNotices = new Map<string, SessionNotice[]>();
+
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
@@ -1018,6 +1022,25 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (activeSessionId === review.sessionId) promptInput.focus();
   }
 
+  function extensionNotifyLevel(request: ExtensionDialogRequest): SessionNotice["level"] {
+    const notifyType = request.notifyType?.toLowerCase();
+    return notifyType === "error" || notifyType === "warning" ? notifyType : "info";
+  }
+
+  function appendSessionNotice(sessionId: string, notice: SessionNotice): void {
+    const notices = sessionNotices.get(sessionId) ?? [];
+    notices.push(notice);
+    sessionNotices.set(sessionId, notices);
+  }
+
+  function renderSessionNoticeNodes(notices: SessionNotice[]): HTMLElement[] {
+    return notices.map(notice => {
+      const bar = transcript.ownerDocument.createElement("div");
+      bar.className = `session-notice notice-${notice.level}`;
+      bar.textContent = notice.text;
+      return bar;
+    });
+  }
   function renderBusyPromptChoice(): void {
     const draft = busyPromptDraft;
     const shouldShow = Boolean(draft && draft.sessionId === activeSessionId);
@@ -1086,9 +1109,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "cancel":
         cancelMobileDialog(request.targetId);
         return;
-      case "notify":
-        appendLog(formatExtensionDialogNotification(request));
+      case "notify": {
+        const text = formatExtensionDialogNotification(request);
+        appendLog(text);
+        appendSessionNotice(request.sessionId, { level: extensionNotifyLevel(request), text });
+        renderActiveSession();
         return;
+      }
       case "set_editor_text":
         promptInput.value = request.text ?? "";
         return;
@@ -1742,6 +1769,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       case "session.notice":
         appendLog(`[${message.sessionId}] ${message.level}: ${message.text}`);
+        if (message.level === "info" || message.level === "warning" || message.level === "error") {
+          appendSessionNotice(message.sessionId, { level: message.level, text: message.text });
+          renderActiveSession();
+        }
         break;
       case "prompt.busy":
         handlePromptBusy(message);
@@ -2295,6 +2326,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     for (const phaseCard of renderTodoCards(projection.todoPhases ?? [])) {
       desiredNodes.push(phaseCard);
     }
+
+    desiredNodes.push(...renderSessionNoticeNodes(sessionNotices.get(projection.summary.sessionId) ?? []));
 
     const visiblePlanReview = visiblePlanReviews.get(projection.summary.sessionId);
     if (visiblePlanReview) {
