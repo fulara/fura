@@ -40,7 +40,7 @@ export function renderToolCard(card: ToolCard): HTMLElement {
 
 export function renderReadToolCard(card: ToolCard): HTMLElement {
   const result = card.partialResult ?? card.result;
-  const images = toolResultImages(result);
+  const images = readToolCardImages(card);
   const isCompact = !card.isError && images.length === 0;
   const wrapper = mkEl("section");
   wrapper.className = `tool-card read-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${isCompact ? "tool-compact" : ""}`;
@@ -100,7 +100,11 @@ export function renderReadToolGroup(cards: Array<{ kind: "tool" } & ToolCard>): 
 }
 
 export function isCompactReadCard(entry: TranscriptEntry | undefined): entry is { kind: "tool" } & ToolCard {
-  return entry?.kind === "tool" && entry.toolName === "read" && !entry.isError;
+  return entry?.kind === "tool" && entry.toolName === "read" && !entry.isError && readToolCardImages(entry).length === 0;
+}
+
+function readToolCardImages(card: ToolCard): RenderableImage[] {
+  return toolResultImages(card.partialResult ?? card.result);
 }
 
 function readArgSummary(card: ToolCard): string {

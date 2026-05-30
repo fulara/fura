@@ -21,6 +21,7 @@ function tool(overrides: Partial<ToolCard> = {}): ToolCard {
     args: {},
     isActive: false,
     isError: false,
+    renderHash: "tool-hash",
     ...overrides,
   };
 }
@@ -108,12 +109,14 @@ describe("read tool cards", () => {
   });
 
   it("renders successful read image results instead of compacting them away", () => {
-    const node = renderReadToolCard(tool({
+    const imageRead = { kind: "tool", ...tool({
       toolName: "read",
       args: { path: "/tmp/omp-image.png" },
       result: { content: [{ type: "image", data: "abc", mimeType: "image/png" }] },
-    }));
+    }) } satisfies TranscriptEntry;
+    const node = renderReadToolCard(imageRead);
 
+    expect(isCompactReadCard(imageRead)).toBe(false);
     expect(node.className).not.toContain("tool-compact");
     expect(node.querySelector(".tool-result-body")).toBeNull();
     expect(node.querySelector(".tool-image-grid img")?.getAttribute("src")).toBe("data:image/png;base64,abc");

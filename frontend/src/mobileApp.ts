@@ -42,6 +42,7 @@ import type {
   SessionSummary,
   ThinkingVisibilityMode,
   TodoPhase,
+  ToolCard,
   TranscriptMessage,
 } from "./protocol";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility } from "./uiPreferences";
@@ -55,7 +56,7 @@ import {
 import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
 import { catalogContainsProposedModel, filterCatalogModels, formatCatalogModelLabel, formatProposedModelDetails, normalizeSelectedProposedModelId, proposedModelIdFromName, removeProposedModel, upsertProposedModel, validateProposedModels } from "./proposedModels";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
-import { renderCurrentTodoCard, renderToolCard } from "./toolCards";
+import { isCompactReadCard, renderCurrentTodoCard, renderReadToolCard, renderReadToolGroup, renderToolCard } from "./toolCards";
 import { renderMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import {
   buildTranscriptReviewPrompt,
@@ -90,10 +91,27 @@ type ControlChatMessage = {
   candidates?: ControlCandidate[];
   suggestedActions?: ControlSuggestedAction[];
 };
-
 type MobileTranscriptRenderCache = {
   nodes: Map<string, HTMLElement>;
 };
+
+function mobileToolCardRenderKey(card: ToolCard): string {
+  const renderContentKey = card.renderHash ? `hash:${card.renderHash}` : `legacy:${JSON.stringify([
+    card.timestamp ?? null,
+    card.toolName,
+    card.intent ?? null,
+    card.args,
+    card.isActive,
+    card.isError,
+    card.partialResult ?? null,
+    card.result ?? null,
+  ])}`;
+  return `${card.toolCallId.length}:${card.toolCallId}:${renderContentKey}`;
+}
+
+function mobileReadToolGroupRenderKey(cards: Array<{ kind: "tool" } & ToolCard>): string {
+  return `read-group:${JSON.stringify(cards.map(card => mobileToolCardRenderKey(card)))}`;
+}
 
 export type MobileConnectionOptions = {
   auth: WebSocketAuth;
@@ -1935,6 +1953,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       blocks: [{ kind: "text", text: message.text }],
       timestamp: null,
       isNew: false,
+      renderHash: `mobile-control:${index}:${message.role}:${message.text}`,
     }, { thinkingVisibilityMode });
     const roleLabel = article.querySelector(".message-heading strong");
     if (roleLabel && message.role === "assistant") roleLabel.textContent = "Ask Fura";
@@ -2257,7 +2276,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     const desiredNodes: Node[] = [];
-    const nextMessageNodes = new Map<string, HTMLElement>();
+    const nextNodes = new Map<string, HTMLElement>();
     for (let i = 0; i < projection.transcript.length; i++) {
       const entry = projection.transcript[i];
       if (entry.kind === "message") {
@@ -2276,10 +2295,30 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         const node = cachedNode?.ownerDocument === transcript.ownerDocument
           ? updateRenderedMessage(cachedNode, entry, renderOptions)
           : renderMessage(entry, renderOptions);
-        nextMessageNodes.set(key, node);
+        nextNodes.set(key, node);
         desiredNodes.push(node);
       } else if (showToolBubbles) {
-        desiredNodes.push(renderToolCard(entry));
+        if (isCompactReadCard(entry)) {
+          const readCards = [entry];
+          while (isCompactReadCard(projection.transcript[i + 1])) {
+            readCards.push(projection.transcript[++i] as { kind: "tool" } & ToolCard);
+          }
+          const key = mobileReadToolGroupRenderKey(readCards);
+          const cachedNode = transcriptRenderCache.nodes.get(key);
+          const node = cachedNode?.ownerDocument === transcript.ownerDocument
+            ? cachedNode
+            : (readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards));
+          nextNodes.set(key, node);
+          desiredNodes.push(node);
+        } else {
+          const key = `tool:${mobileToolCardRenderKey(entry)}`;
+          const cachedNode = transcriptRenderCache.nodes.get(key);
+          const node = cachedNode?.ownerDocument === transcript.ownerDocument
+            ? cachedNode
+            : renderToolCard(entry);
+          nextNodes.set(key, node);
+          desiredNodes.push(node);
+        }
       }
     }
 
@@ -2309,7 +2348,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     reconcileChildren(transcript, desiredNodes);
-    transcriptRenderCache = { nodes: nextMessageNodes };
+    transcriptRenderCache = { nodes: nextNodes };
     if (wasNearBottom) {
       transcript.scrollTop = transcript.scrollHeight;
     } else {

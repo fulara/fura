@@ -87,7 +87,7 @@ describe("applySessionSnapshot", () => {
 describe("applySessionDelta", () => {
   it("appends transcript entries and replaces scalar projection state", () => {
     const existing = projection("a", {
-      transcript: [{ kind: "message", id: "m1", role: "assistant", blocks: [{ kind: "text", text: "old" }], timestamp: null, isNew: false }],
+      transcript: [{ kind: "message", id: "m1", role: "assistant", blocks: [{ kind: "text", text: "old" }], timestamp: null, isNew: false, renderHash: "m1-old" }],
       isBusy: true,
     });
     const projections = new Map([["a", existing]]);
@@ -95,7 +95,7 @@ describe("applySessionDelta", () => {
     const result = applySessionDelta([summary("a")], projections, "a", {
       summary: summary("a", { status: "idle", messageCount: 2 }),
       transcriptReplaceFrom: 1,
-      transcriptAppend: [{ kind: "message", id: "m2", role: "assistant", blocks: [{ kind: "text", text: "new" }], timestamp: null, isNew: true }],
+      transcriptAppend: [{ kind: "message", id: "m2", role: "assistant", blocks: [{ kind: "text", text: "new" }], timestamp: null, isNew: true, renderHash: "m2-new" }],
       isBusy: false,
       tokensTotal: 12,
       costUsd: 0.01,
@@ -111,14 +111,14 @@ describe("applySessionDelta", () => {
   it("replaces the transcript tail from the supplied replace-from index", () => {
     const existing = projection("a", {
       transcript: [
-        { kind: "message", id: "m1", role: "assistant", blocks: [{ kind: "text", text: "stable" }], timestamp: null, isNew: false },
-        { kind: "message", id: "streaming", role: "assistant", blocks: [{ kind: "text", text: "old partial" }], timestamp: null, isNew: true },
+        { kind: "message", id: "m1", role: "assistant", blocks: [{ kind: "text", text: "stable" }], timestamp: null, isNew: false, renderHash: "m1-stable" },
+        { kind: "message", id: "streaming", role: "assistant", blocks: [{ kind: "text", text: "old partial" }], timestamp: null, isNew: true, renderHash: "streaming-old" },
       ],
     });
     const result = applySessionDelta([summary("a")], new Map([["a", existing]]), "a", {
       summary: summary("a", { messageCount: 1 }),
       transcriptReplaceFrom: 1,
-      transcriptAppend: [{ kind: "message", id: "streaming", role: "assistant", blocks: [{ kind: "text", text: "new partial" }], timestamp: null, isNew: true }],
+      transcriptAppend: [{ kind: "message", id: "streaming", role: "assistant", blocks: [{ kind: "text", text: "new partial" }], timestamp: null, isNew: true, renderHash: "streaming-new" }],
       isBusy: true,
       tokensTotal: 0,
       costUsd: 0,

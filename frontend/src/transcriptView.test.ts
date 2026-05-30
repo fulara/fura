@@ -8,6 +8,7 @@ describe("messageText", () => {
       id: "m1",
       role: "assistant",
       isNew: false,
+      renderHash: "test-transcriptView.test-10",
       blocks: [
         { kind: "text", text: "Answer" },
         { kind: "image", data: "abc", mimeType: "image/png", alt: "Chart" },
@@ -26,6 +27,7 @@ describe("renderMessage", () => {
       id: "m1",
       role: "user",
       isNew: false,
+      renderHash: "test-transcriptView.test-28",
       timestamp: Date.UTC(2026, 4, 1, 12, 34),
       blocks: [{ kind: "text", text: "Hello" }],
     }, { thinkingVisibilityMode: "auto" });
@@ -42,6 +44,7 @@ describe("renderMessage", () => {
       id: "m2",
       role: "assistant",
       isNew: false,
+      renderHash: "test-transcriptView.test-44",
       blocks: [{ kind: "thinking", thinking: "not shown" }],
     }, { thinkingVisibilityMode: "hidden" });
 
@@ -53,6 +56,7 @@ describe("renderMessage", () => {
       id: "m-image",
       role: "assistant",
       isNew: false,
+      renderHash: "test-transcriptView.test-55",
       blocks: [{ kind: "image", data: "abc", mimeType: "image/png", alt: "Generated chart" }],
     }, { thinkingVisibilityMode: "hidden" });
 
@@ -66,6 +70,7 @@ describe("renderMessage", () => {
       id: "m-user-image",
       role: "user",
       isNew: false,
+      renderHash: "test-transcriptView.test-68",
       blocks: [
         { kind: "text", text: "See attached" },
         { kind: "image", data: "abc123", mimeType: "image/jpeg" },
@@ -86,6 +91,7 @@ describe("renderMessage", () => {
       id: "m3",
       role: "assistant",
       isNew: false,
+      renderHash: "test-transcriptView.test-88",
       blocks: [{ kind: "text", text: "Copy me" }],
     }, { thinkingVisibilityMode: "auto" });
 
@@ -107,6 +113,7 @@ describe("renderMessage", () => {
       id: "m-streaming",
       role: "assistant",
       isNew: true,
+      renderHash: "test-transcriptView.test-109",
       blocks: [{ kind: "text", text: "First chunk" }],
     }, { thinkingVisibilityMode: "auto" });
     const button = node.querySelector<HTMLButtonElement>("header button");
@@ -118,6 +125,7 @@ describe("renderMessage", () => {
       id: "m-streaming",
       role: "assistant",
       isNew: true,
+      renderHash: "test-transcriptView.test-109",
       blocks: [{ kind: "text", text: "First chunk" }],
     }, { thinkingVisibilityMode: "auto" });
     expect(node.querySelector<HTMLElement>(".text-block")).toBe(initialBlock);
@@ -127,6 +135,7 @@ describe("renderMessage", () => {
       id: "m-streaming",
       role: "assistant",
       isNew: true,
+      renderHash: "test-transcriptView.test-129",
       blocks: [{ kind: "text", text: "First chunk plus more" }],
     }, { thinkingVisibilityMode: "auto" });
 
@@ -137,11 +146,33 @@ describe("renderMessage", () => {
     expect(writeText).toHaveBeenCalledWith("First chunk plus more");
   });
 
+  it("uses structural message signatures when renderHash is absent", () => {
+    const node = renderMessage({
+      id: "m-legacy",
+      role: "assistant",
+      isNew: false,
+      blocks: [{ kind: "text", text: "Old body" }],
+    }, { thinkingVisibilityMode: "auto" });
+    const button = node.querySelector<HTMLButtonElement>("header button");
+
+    updateRenderedMessage(node, {
+      id: "m-legacy",
+      role: "assistant",
+      isNew: false,
+      blocks: [{ kind: "text", text: "New body" }],
+    }, { thinkingVisibilityMode: "auto" });
+
+    expect(node.querySelector<HTMLButtonElement>("header button")).toBe(button);
+    expect(node.textContent).toContain("New body");
+    expect(node.textContent).not.toContain("Old body");
+  });
+
   it("renders live text as markdown while streaming", () => {
     const live = renderMessage({
       id: "m-live-markdown",
       role: "assistant",
       isNew: true,
+      renderHash: "test-transcriptView.test-144",
       blocks: [{ kind: "text", text: "```ts\nconst value = 1;\n```" }],
     }, { thinkingVisibilityMode: "auto" });
 
@@ -154,6 +185,7 @@ describe("renderMessage", () => {
       id: "m-live-open-fence",
       role: "assistant",
       isNew: true,
+      renderHash: "test-transcriptView.test-156",
       blocks: [{ kind: "text", text: "```ts\nconst value = 1;" }],
     }, { thinkingVisibilityMode: "auto" });
 
@@ -168,6 +200,7 @@ describe("renderMessage", () => {
       id: "__pending_prompt:1",
       role: "user",
       isNew: true,
+      renderHash: "test-transcriptView.test-170",
       blocks: [{ kind: "text", text: "pending prompt" }],
     }, { thinkingVisibilityMode: "auto" });
     expect(pending.classList.contains("message-pending-prompt")).toBe(true);
@@ -177,6 +210,7 @@ describe("renderMessage", () => {
       id: "user-1",
       role: "user",
       isNew: true,
+      renderHash: "test-transcriptView.test-179",
       blocks: [{ kind: "text", text: "pending prompt" }],
     }, { thinkingVisibilityMode: "auto" });
     expect(pending.classList.contains("message-pending-prompt")).toBe(false);
@@ -194,6 +228,7 @@ describe("renderMessage", () => {
       id: "m-review",
       role: "assistant",
       isNew: false,
+      renderHash: "test-transcriptView.test-196",
       blocks: [{ kind: "text", text: "line one\nline two" }],
     };
 
@@ -243,6 +278,7 @@ describe("renderMessage", () => {
       id: "m-markdown-review",
       role: "assistant",
       isNew: false,
+      renderHash: "test-transcriptView.test-245",
       blocks: [{ kind: "text", text: "# Heading\n\n- first\n- second" }],
     };
 

@@ -675,6 +675,7 @@ describe("desktop cog options", () => {
           blocks: [{ kind: "text", text: "new transcript output" }],
           timestamp: null,
           isNew: true,
+          renderHash: "test-main.test-653",
         }],
       }),
     });
@@ -693,6 +694,7 @@ describe("desktop cog options", () => {
           blocks: [{ kind: "text", text: "other session output" }],
           timestamp: null,
           isNew: true,
+          renderHash: "test-main.test-671",
         }],
       }),
     });
@@ -710,6 +712,7 @@ describe("desktop cog options", () => {
       blocks: [{ kind: "text" as const, text: "copyable answer" }],
       timestamp: null,
       isNew: false,
+      renderHash: "test-main.test-688",
     }];
 
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
@@ -738,6 +741,7 @@ describe("desktop cog options", () => {
         transcript: [{
           ...transcript[0],
           blocks: [{ kind: "text" as const, text: "copyable answer updated" }],
+          renderHash: "updated-answer",
         }],
       }),
     });
@@ -755,6 +759,7 @@ describe("desktop cog options", () => {
       blocks: [{ kind: "text" as const, text: "first answer" }],
       timestamp: null,
       isNew: false,
+      renderHash: "test-main.test-733",
     }];
     const appended = {
       kind: "message" as const,
@@ -763,6 +768,7 @@ describe("desktop cog options", () => {
       blocks: [{ kind: "text" as const, text: "delta answer" }],
       timestamp: null,
       isNew: true,
+      renderHash: "test-main.test-741",
     };
 
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
@@ -792,6 +798,152 @@ describe("desktop cog options", () => {
     expect(connection.sent).not.toContainEqual({ type: "state.refresh", sessionId: "live" });
   });
 
+  it("reuses unchanged tool-card DOM from session delta tails", async () => {
+    const { connection } = await createHarness();
+    const stableTool = {
+      kind: "tool" as const,
+      toolCallId: "tool-stable",
+      toolName: "bash",
+      args: { command: "echo stable" },
+      isActive: false,
+      isError: false,
+      result: { text: "stable result" },
+      renderHash: "stable-hash",
+    };
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [{
+          kind: "tool",
+          toolCallId: "tool-changing",
+          toolName: "bash",
+          args: { command: "echo old" },
+          isActive: true,
+          isError: false,
+          partialResult: { text: "old partial" },
+          renderHash: "changing-old",
+        }, stableTool],
+      }),
+    });
+    const initialCards = document.querySelectorAll<HTMLElement>("#testTranscriptPanel .tool-card");
+    const changingCard = initialCards[0];
+    const stableCard = initialCards[1];
+    if (!changingCard || !stableCard) throw new Error("tool cards missing");
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "live",
+      state: {
+        summary: summary("live"),
+        transcriptReplaceFrom: 0,
+        transcriptAppend: [{
+          kind: "tool",
+          toolCallId: "tool-changing",
+          toolName: "bash",
+          args: { command: "echo old" },
+          isActive: false,
+          isError: false,
+          result: { text: "new final" },
+          renderHash: "changing-new",
+        }, stableTool],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    });
+
+    const updatedCards = document.querySelectorAll<HTMLElement>("#testTranscriptPanel .tool-card");
+    expect(updatedCards[0]).not.toBe(changingCard);
+    expect(updatedCards[0]?.textContent).toContain("new final");
+    expect(updatedCards[1]).toBe(stableCard);
+  });
+
+  it("updates desktop tool-card DOM structurally when renderHash is absent", async () => {
+    const { connection } = await createHarness();
+    const legacyTool = {
+      kind: "tool" as const,
+      toolCallId: "tool-legacy",
+      toolName: "bash",
+      args: { command: "echo legacy" },
+      isActive: true,
+      isError: false,
+      partialResult: { text: "old partial" },
+    };
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { transcript: [legacyTool] }),
+    });
+    const initialCard = document.querySelector<HTMLElement>("#testTranscriptPanel .tool-card");
+    if (!initialCard) throw new Error("tool card missing");
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "live",
+      state: {
+        summary: summary("live"),
+        transcriptReplaceFrom: 0,
+        transcriptAppend: [{
+          ...legacyTool,
+          isActive: false,
+          partialResult: undefined,
+          result: { text: "new final" },
+        }],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    });
+
+    const updatedCard = document.querySelector<HTMLElement>("#testTranscriptPanel .tool-card");
+    expect(updatedCard).not.toBe(initialCard);
+    expect(updatedCard?.textContent).toContain("new final");
+  });
+
+  it("does not group image-bearing desktop read cards", async () => {
+    const { connection } = await createHarness();
+    const imageRead = {
+      kind: "tool" as const,
+      toolCallId: "read-image",
+      toolName: "read",
+      args: { path: "/tmp/image.png" },
+      isActive: false,
+      isError: false,
+      result: { content: [{ type: "image", data: "abc", mimeType: "image/png" }] },
+      renderHash: "read-image-hash",
+    };
+    const textRead = {
+      kind: "tool" as const,
+      toolCallId: "read-text",
+      toolName: "read",
+      args: { path: "/tmp/file.txt" },
+      isActive: false,
+      isError: false,
+      result: { text: "file contents" },
+      renderHash: "read-text-hash",
+    };
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { transcript: [imageRead, textRead] }),
+    });
+
+    const cards = document.querySelectorAll<HTMLElement>("#testTranscriptPanel .read-tool-card");
+    expect(cards).toHaveLength(2);
+    expect(cards[0]?.classList.contains("read-tool-group")).toBe(false);
+    expect(cards[0]?.querySelector(".tool-image-grid img")?.getAttribute("src")).toBe("data:image/png;base64,abc");
+    expect(cards[1]?.classList.contains("tool-compact")).toBe(true);
+  });
+
   it("requests state refresh for desktop session deltas without a base projection", async () => {
     const { connection } = await createHarness();
     connection.sent.length = 0;
@@ -809,6 +961,7 @@ describe("desktop cog options", () => {
           blocks: [{ kind: "text", text: "orphan delta" }],
           timestamp: null,
           isNew: true,
+          renderHash: "test-main.test-851",
         }],
         isBusy: false,
         tokensTotal: 0,
@@ -1456,6 +1609,7 @@ describe("desktop cog options", () => {
           blocks: [{ kind: "text", text: `line ${index}` }],
           timestamp: null,
           isNew: false,
+          renderHash: "test-main.test-1498",
         })),
       }),
     });

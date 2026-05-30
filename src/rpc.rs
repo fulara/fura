@@ -12,6 +12,28 @@ use tracing::{debug, info, warn};
 use crate::*;
 
 const RECENT_RPC_STDERR_LINE_COUNT: usize = 4;
+
+fn is_synthetic_transcript_message_id(id: &str) -> bool {
+    id.starts_with("approved-plan:") || id.starts_with("__pending_prompt:")
+}
+
+fn projected_message_ordinal_for_append(record: &SessionRecord) -> usize {
+    record
+        .messages
+        .iter()
+        .filter(|message| !is_synthetic_transcript_message_id(&message.id))
+        .count()
+}
+
+fn projected_message_ordinal_for_pending_prompt(record: &SessionRecord) -> usize {
+    record
+        .messages
+        .iter()
+        .rev()
+        .skip(1)
+        .filter(|message| !is_synthetic_transcript_message_id(&message.id))
+        .count()
+}
 const RECENT_RPC_STDERR_LINE_BYTES: usize = 4096;
 
 pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Result<(), String> {
@@ -684,9 +706,6 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         OmpRpcFrame::MessageUpdate { message, .. } => {
             let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
             if let Some(mut message) = map_omp_message(&message) {
-                if message.timestamp.is_none() {
-                    message.timestamp = Some(event_timestamp);
-                }
                 message.is_new = true;
                 // Use a stable sentinel ID so the frontend always keyed to the same node
                 // while streaming; the real ID arrives with message_end.
@@ -696,6 +715,15 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 state
                     .events
                     .mutate_session_delta(state, &target_session_id, |record| {
+                        if message.timestamp.is_none() {
+                            message.timestamp = record
+                                .streaming_message
+                                .as_ref()
+                                .filter(|existing| existing.id == message.id)
+                                .and_then(|existing| existing.timestamp)
+                                .or(Some(event_timestamp));
+                        }
+                        message.refresh_render_hash();
                         record.streaming_message = Some(message);
                         let projection = record.projection();
                         let replace_from = projection.transcript.len().saturating_sub(1);
@@ -709,32 +737,50 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         }
         OmpRpcFrame::MessageEnd { message } => {
             let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
-            if let Some(mut message) = map_omp_message(&message) {
-                if message.timestamp.is_none() {
-                    message.timestamp = Some(event_timestamp);
+            let source_message = message.clone();
+            if let Some(mut transcript_message) = map_omp_message(&message) {
+                if transcript_message.timestamp.is_none() {
+                    transcript_message.timestamp = Some(event_timestamp);
                 }
-                message.is_new = true;
+                transcript_message.is_new = true;
                 // Clear streaming_message and push the final message atomically in a single
                 // lock so no snapshot can fire showing a gap between the two.
                 let delta_sent = state
                     .events
                     .mutate_session_delta(state, &target_session_id, |record| {
                         record.streaming_message = None;
-                        record.live_message_ids.insert(message.id.clone());
+                        let replaces_pending_prompt =
+                            matches!(transcript_message.role, MessageRole::User)
+                                && record.messages.last().is_some_and(|existing| {
+                                    existing.id.starts_with("__pending_prompt:")
+                                });
+                        if transcript_message.id.is_empty() {
+                            let visible_ordinal = if replaces_pending_prompt {
+                                projected_message_ordinal_for_pending_prompt(record)
+                            } else {
+                                projected_message_ordinal_for_append(record)
+                            };
+                            assign_projected_message_id(
+                                &mut transcript_message,
+                                &source_message,
+                                visible_ordinal,
+                            );
+                        }
+                        transcript_message.refresh_render_hash();
+                        record
+                            .live_message_ids
+                            .insert(transcript_message.id.clone());
                         if let Some(existing) = record
                             .messages
                             .iter_mut()
-                            .find(|existing| existing.id == message.id)
+                            .find(|existing| existing.id == transcript_message.id)
                         {
-                            *existing = message;
-                        } else if matches!(message.role, MessageRole::User)
-                            && record.messages.last().is_some_and(|existing| {
-                                existing.id.starts_with("__pending_prompt:")
-                            })
-                        {
-                            *record.messages.last_mut().expect("last message exists") = message;
+                            *existing = transcript_message;
+                        } else if replaces_pending_prompt {
+                            *record.messages.last_mut().expect("last message exists") =
+                                transcript_message;
                         } else {
-                            record.messages.push(message);
+                            record.messages.push(transcript_message);
                         }
                         record.updated_at = Timestamp::now();
                         let projection = record.projection();
@@ -761,18 +807,18 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 .events
                 .mutate_session_delta(state, &target_session_id, |record| {
                     let insert_after_count = record.messages.len();
-                    record.active_tool_calls.push(ToolCard {
+                    record.active_tool_calls.push(ToolCard::new(
                         tool_call_id,
-                        timestamp: Some(event_timestamp),
+                        Some(event_timestamp),
                         tool_name,
                         intent,
                         args,
-                        is_active: true,
-                        is_error: false,
-                        partial_result: None,
-                        result: None,
+                        true,
+                        false,
+                        None,
+                        None,
                         insert_after_count,
-                    });
+                    ));
                     let projection = record.projection();
                     let replace_from = projection.transcript.len().saturating_sub(1);
                     Some(SessionProjectionDelta::from_projection_replace_tail(
@@ -807,12 +853,14 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         };
                         card.result = partial_result;
                         card.partial_result = None;
+                        card.refresh_render_hash();
                         if let Some(todo_phases) = todo_phases {
                             record.todo_phases = Some(todo_phases);
                         }
                         record.tool_cards.push(card);
                     } else {
                         record.active_tool_calls[pos].partial_result = partial_result;
+                        record.active_tool_calls[pos].refresh_render_hash();
                     }
                     let projection = record.projection();
                     let replace_from = projection
@@ -860,6 +908,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             card.is_error = false;
                             card.result = result.clone();
                             card.partial_result = None;
+                            card.refresh_render_hash();
                         } else {
                             let mut card = record.active_tool_calls.remove(pos);
                             card.is_active = false;
@@ -873,6 +922,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             }
                             card.result = result.clone();
                             card.partial_result = None;
+                            card.refresh_render_hash();
                             record.tool_cards.push(card);
                         }
                     }
@@ -1074,13 +1124,13 @@ async fn prepend_plan_execution_carryover(
     );
     messages.insert(
         0,
-        TranscriptMessage {
+        TranscriptMessage::new(
             id,
-            role: MessageRole::System,
-            blocks: vec![ContentBlock::Text { text }],
-            timestamp: None,
-            is_new: false,
-        },
+            MessageRole::System,
+            vec![ContentBlock::Text { text }],
+            None,
+            false,
+        ),
     );
 }
 
@@ -1686,6 +1736,7 @@ pub(crate) fn replace_record_transcript(
         .map(|mut msg| {
             if record.live_message_ids.contains(&msg.id) {
                 msg.is_new = true;
+                msg.refresh_render_hash();
             }
             msg
         })

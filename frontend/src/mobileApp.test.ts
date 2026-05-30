@@ -115,6 +115,7 @@ function projection(sessionId: string, overrides: Partial<SessionProjection> = {
         blocks: [{ kind: "text", text: `Transcript ${sessionId}` }],
         timestamp: null,
         isNew: false,
+        renderHash: "test-mobileApp.test-117",
       },
     ],
     isBusy: false,
@@ -316,6 +317,7 @@ describe("mountMobileApp", () => {
           blocks: [{ kind: "text", text: "Delta transcript" }],
           timestamp: null,
           isNew: true,
+          renderHash: "test-mobileApp.test-318",
         }],
         isBusy: false,
         tokensTotal: 10,
@@ -327,6 +329,115 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Transcript live");
     expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Delta transcript");
     expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Live");
+  });
+
+  it("reuses unchanged mobile tool-card DOM from session delta tails", () => {
+    const { connection } = createHarness();
+    const stableTool = {
+      kind: "tool" as const,
+      toolCallId: "tool-stable",
+      toolName: "bash",
+      args: { command: "echo stable" },
+      isActive: false,
+      isError: false,
+      result: { text: "stable result" },
+      renderHash: "stable-hash",
+    };
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [{
+          kind: "tool",
+          toolCallId: "tool-changing",
+          toolName: "bash",
+          args: { command: "echo old" },
+          isActive: true,
+          isError: false,
+          partialResult: { text: "old partial" },
+          renderHash: "changing-old",
+        }, stableTool],
+      }),
+    });
+    const initialCards = document.querySelectorAll<HTMLElement>("#mobileTranscript .tool-card");
+    const changingCard = initialCards[0];
+    const stableCard = initialCards[1];
+    if (!changingCard || !stableCard) throw new Error("tool cards missing");
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "live",
+      state: {
+        summary: summary("live"),
+        transcriptReplaceFrom: 0,
+        transcriptAppend: [{
+          kind: "tool",
+          toolCallId: "tool-changing",
+          toolName: "bash",
+          args: { command: "echo old" },
+          isActive: false,
+          isError: false,
+          result: { text: "new final" },
+          renderHash: "changing-new",
+        }, stableTool],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    });
+
+    const updatedCards = document.querySelectorAll<HTMLElement>("#mobileTranscript .tool-card");
+    expect(updatedCards[0]).not.toBe(changingCard);
+    expect(updatedCards[0]?.textContent).toContain("new final");
+    expect(updatedCards[1]).toBe(stableCard);
+  });
+
+  it("updates mobile tool-card DOM structurally when renderHash is absent", () => {
+    const { connection } = createHarness();
+    const legacyTool = {
+      kind: "tool" as const,
+      toolCallId: "tool-legacy",
+      toolName: "bash",
+      args: { command: "echo legacy" },
+      isActive: true,
+      isError: false,
+      partialResult: { text: "old partial" },
+    };
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { transcript: [legacyTool] }),
+    });
+    const initialCard = document.querySelector<HTMLElement>("#mobileTranscript .tool-card");
+    if (!initialCard) throw new Error("tool card missing");
+
+    connection.emit({
+      type: "session.delta",
+      sessionId: "live",
+      state: {
+        summary: summary("live"),
+        transcriptReplaceFrom: 0,
+        transcriptAppend: [{
+          ...legacyTool,
+          isActive: false,
+          partialResult: undefined,
+          result: { text: "new final" },
+        }],
+        isBusy: false,
+        tokensTotal: 0,
+        costUsd: 0,
+        todoPhases: [],
+      },
+    });
+
+    const updatedCard = document.querySelector<HTMLElement>("#mobileTranscript .tool-card");
+    expect(updatedCard).not.toBe(initialCard);
+    expect(updatedCard?.textContent).toContain("new final");
   });
 
   it("keeps mobile copy controls stable across changing active snapshots", () => {
@@ -358,6 +469,7 @@ describe("mountMobileApp", () => {
           blocks: [{ kind: "text", text: "Updated transcript" }],
           timestamp: null,
           isNew: false,
+          renderHash: "test-mobileApp.test-424",
         }],
       }),
     });
@@ -450,6 +562,7 @@ describe("mountMobileApp", () => {
             ],
             timestamp: null,
             isNew: false,
+            renderHash: "test-mobileApp.test-516",
           },
           {
             kind: "tool",
@@ -458,6 +571,7 @@ describe("mountMobileApp", () => {
             args: {},
             isActive: false,
             isError: false,
+            renderHash: "tool-1-hash",
           },
         ],
       }),
@@ -711,6 +825,7 @@ describe("mountMobileApp", () => {
           blocks: [{ kind: "text", text: "line one\nline two" }],
           timestamp: null,
           isNew: false,
+          renderHash: "test-mobileApp.test-777",
         }],
       }),
     });

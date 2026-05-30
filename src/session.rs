@@ -1,8 +1,34 @@
 use crate::Timestamp;
-use std::collections::HashSet;
+use std::{
+    collections::HashSet,
+    io::{self, Write},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+const MESSAGE_RENDER_HASH_VERSION: &str = "message-render-v1";
+const TOOL_CARD_RENDER_HASH_VERSION: &str = "tool-card-render-v1";
+
+struct Blake3Writer<'a>(&'a mut blake3::Hasher);
+
+impl Write for Blake3Writer<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn hash_json_field<T: Serialize>(hasher: &mut blake3::Hasher, name: &str, value: &T) {
+    hasher.update(name.as_bytes());
+    hasher.update(b"=");
+    serde_json::to_writer(Blake3Writer(hasher), value)
+        .expect("render hash JSON serialization cannot fail");
+    hasher.update(b";");
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -381,6 +407,41 @@ pub(crate) struct TranscriptMessage {
     pub(crate) timestamp: Option<Timestamp>,
     /// True when this message arrived via a live `message_end` event rather than a historical `get_messages` load.
     pub(crate) is_new: bool,
+    /// Deterministic fingerprint of fields that affect message DOM rendering.
+    pub(crate) render_hash: String,
+}
+
+impl TranscriptMessage {
+    pub(crate) fn new(
+        id: String,
+        role: MessageRole,
+        blocks: Vec<ContentBlock>,
+        timestamp: Option<Timestamp>,
+        is_new: bool,
+    ) -> Self {
+        let mut message = Self {
+            id,
+            role,
+            blocks,
+            timestamp,
+            is_new,
+            render_hash: String::new(),
+        };
+        message.refresh_render_hash();
+        message
+    }
+
+    pub(crate) fn refresh_render_hash(&mut self) {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(MESSAGE_RENDER_HASH_VERSION.as_bytes());
+        hasher.update(b";");
+        hash_json_field(&mut hasher, "id", &self.id);
+        hash_json_field(&mut hasher, "role", &self.role);
+        hash_json_field(&mut hasher, "blocks", &self.blocks);
+        hash_json_field(&mut hasher, "timestamp", &self.timestamp);
+        hash_json_field(&mut hasher, "isNew", &self.is_new);
+        self.render_hash = hasher.finalize().to_hex().to_string();
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -430,11 +491,61 @@ pub(crate) struct ToolCard {
     pub(crate) partial_result: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) result: Option<Value>,
+    /// Deterministic fingerprint of fields that affect tool-card DOM rendering.
+    pub(crate) render_hash: String,
     /// messages.len() at the time tool_execution_start fired.
     /// This card appears after record.messages[insert_after_count - 1]
     /// (or before all messages when 0).
     #[serde(skip)]
     pub(crate) insert_after_count: usize,
+}
+
+impl ToolCard {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        tool_call_id: String,
+        timestamp: Option<Timestamp>,
+        tool_name: String,
+        intent: Option<String>,
+        args: Value,
+        is_active: bool,
+        is_error: bool,
+        partial_result: Option<Value>,
+        result: Option<Value>,
+        insert_after_count: usize,
+    ) -> Self {
+        let mut card = Self {
+            tool_call_id,
+            timestamp,
+            tool_name,
+            intent,
+            args,
+            is_active,
+            is_error,
+            partial_result,
+            result,
+            render_hash: String::new(),
+            insert_after_count,
+        };
+        card.refresh_render_hash();
+        card
+    }
+
+    pub(crate) fn refresh_render_hash(&mut self) {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(TOOL_CARD_RENDER_HASH_VERSION.as_bytes());
+        hasher.update(b";");
+        hash_json_field(&mut hasher, "toolCallId", &self.tool_call_id);
+        hash_json_field(&mut hasher, "timestamp", &self.timestamp);
+        hash_json_field(&mut hasher, "toolName", &self.tool_name);
+        hash_json_field(&mut hasher, "intent", &self.intent);
+        hash_json_field(&mut hasher, "args", &self.args);
+        hash_json_field(&mut hasher, "isActive", &self.is_active);
+        hash_json_field(&mut hasher, "isError", &self.is_error);
+        hash_json_field(&mut hasher, "partialResult", &self.partial_result);
+        hash_json_field(&mut hasher, "result", &self.result);
+        self.render_hash = hasher.finalize().to_hex().to_string();
+    }
 }
 
 /// A single entry in the unified session transcript.
@@ -463,15 +574,15 @@ mod tests {
     use super::*;
 
     fn test_message(id: &str) -> TranscriptEntry {
-        TranscriptEntry::Message(TranscriptMessage {
-            id: id.to_string(),
-            role: MessageRole::Assistant,
-            blocks: vec![ContentBlock::Text {
+        TranscriptEntry::Message(TranscriptMessage::new(
+            id.to_string(),
+            MessageRole::Assistant,
+            vec![ContentBlock::Text {
                 text: id.to_string(),
             }],
-            timestamp: None,
-            is_new: true,
-        })
+            None,
+            true,
+        ))
     }
 
     fn test_summary(message_count: usize) -> SessionSummary {
@@ -523,5 +634,53 @@ mod tests {
         assert_eq!(delta.summary.session_id, "s1");
         assert!(delta.is_busy);
         assert_eq!(delta.tokens_total, 42);
+    }
+
+    #[test]
+    fn message_render_hash_changes_only_when_rendered_fields_change() {
+        let mut message = TranscriptMessage::new(
+            "m1".to_string(),
+            MessageRole::Assistant,
+            vec![ContentBlock::Text {
+                text: "hello".to_string(),
+            }],
+            None,
+            false,
+        );
+        let initial = message.render_hash.clone();
+
+        message.refresh_render_hash();
+        assert_eq!(message.render_hash, initial);
+
+        message.blocks = vec![ContentBlock::Text {
+            text: "hello again".to_string(),
+        }];
+        message.refresh_render_hash();
+        assert_ne!(message.render_hash, initial);
+    }
+
+    #[test]
+    fn tool_card_render_hash_ignores_insert_position() {
+        let mut card = ToolCard::new(
+            "tool-1".to_string(),
+            None,
+            "bash".to_string(),
+            Some("running tests".to_string()),
+            serde_json::json!({ "command": "cargo test" }),
+            true,
+            false,
+            Some(serde_json::json!({ "text": "running" })),
+            None,
+            1,
+        );
+        let initial = card.render_hash.clone();
+
+        card.insert_after_count = 99;
+        card.refresh_render_hash();
+        assert_eq!(card.render_hash, initial);
+
+        card.partial_result = Some(serde_json::json!({ "text": "done" }));
+        card.refresh_render_hash();
+        assert_ne!(card.render_hash, initial);
     }
 }

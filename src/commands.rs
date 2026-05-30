@@ -2053,13 +2053,7 @@ fn optimistic_prompt_message(
             }
         }
     }
-    TranscriptMessage {
-        id,
-        role: MessageRole::User,
-        blocks,
-        timestamp: Some(Timestamp::now()),
-        is_new: true,
-    }
+    TranscriptMessage::new(id, MessageRole::User, blocks, Some(Timestamp::now()), true)
 }
 
 pub(crate) async fn remove_optimistic_prompt_message(

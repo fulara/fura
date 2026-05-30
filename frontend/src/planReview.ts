@@ -58,6 +58,7 @@ export function planReviewTranscriptMessage(review: PendingPlanReview): Transcri
     blocks: [{ kind: "text", text: review.content }],
     timestamp: null,
     isNew: false,
+    renderHash: planReviewRenderKey(review),
   };
 }
 

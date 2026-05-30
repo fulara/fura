@@ -14,6 +14,7 @@ export type TranscriptMessage = {
   blocks: ContentBlock[];
   timestamp?: number | null;
   isNew: boolean;
+  renderHash?: string;
 };
 
 export type AgentProgress = {
@@ -79,6 +80,7 @@ export type ToolCard = {
   isError: boolean;
   partialResult?: unknown;
   result?: unknown;
+  renderHash?: string;
 };
 
 export type TranscriptEntry =

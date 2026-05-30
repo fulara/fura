@@ -449,13 +449,13 @@ pub(crate) mod tests {
     }
 
     fn text_message(id: &str, text: &str) -> TranscriptMessage {
-        TranscriptMessage {
-            id: id.into(),
-            role: MessageRole::Assistant,
-            blocks: vec![ContentBlock::Text { text: text.into() }],
-            timestamp: Timestamp::from_rpc(&serde_json::json!(0)),
-            is_new: false,
-        }
+        TranscriptMessage::new(
+            id.into(),
+            MessageRole::Assistant,
+            vec![ContentBlock::Text { text: text.into() }],
+            Timestamp::from_rpc(&serde_json::json!(0)),
+            false,
+        )
     }
 
     fn test_record() -> SessionRecord {
@@ -2037,15 +2037,15 @@ pub(crate) mod tests {
             state
                 .events
                 .mutate_session_snapshot(&state, "s1", |record| {
-                    record.messages.push(TranscriptMessage {
-                        id: "m1".to_string(),
-                        role: MessageRole::Assistant,
-                        blocks: vec![ContentBlock::Text {
+                    record.messages.push(TranscriptMessage::new(
+                        "m1".to_string(),
+                        MessageRole::Assistant,
+                        vec![ContentBlock::Text {
                             text: "newer".to_string(),
                         }],
-                        timestamp: None,
-                        is_new: true,
-                    });
+                        None,
+                        true,
+                    ));
                 })
                 .await
         );
@@ -4411,6 +4411,78 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn map_omp_message_preserves_missing_id_for_live_streaming() {
+        let msg = map_omp_message(&serde_json::json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "partial" }]
+        }))
+        .expect("should map");
+        assert!(
+            msg.id.is_empty(),
+            "live mapper must leave missing IDs empty for the streaming sentinel"
+        );
+    }
+
+    #[test]
+    fn projected_messages_without_upstream_ids_get_stable_distinct_ids() {
+        let raw = serde_json::json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "historical without id" }]
+        });
+        let values = vec![raw.clone(), raw];
+
+        let (first_messages, first_tools) = project_omp_transcript(&values);
+        let (second_messages, second_tools) = project_omp_transcript(&values);
+
+        assert!(first_tools.is_empty());
+        assert!(second_tools.is_empty());
+        assert_eq!(first_messages.len(), 2);
+        assert_eq!(second_messages.len(), 2);
+        assert_ne!(first_messages[0].id, first_messages[1].id);
+        assert_eq!(first_messages[0].id, second_messages[0].id);
+        assert_eq!(first_messages[1].id, second_messages[1].id);
+        assert_eq!(
+            first_messages[0].render_hash,
+            second_messages[0].render_hash
+        );
+        assert_eq!(
+            first_messages[1].render_hash,
+            second_messages[1].render_hash
+        );
+    }
+
+    #[test]
+    fn suppressed_events_do_not_perturb_projected_fallback_ids() {
+        let visible = serde_json::json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "visible without id" }]
+        });
+        let with_suppressed = vec![
+            serde_json::json!({
+                "role": "hookMessage",
+                "display": false,
+                "text": "hidden"
+            }),
+            visible.clone(),
+        ];
+        let without_suppressed = vec![visible];
+
+        let (messages_with_suppressed, _) = project_omp_transcript(&with_suppressed);
+        let (messages_without_suppressed, _) = project_omp_transcript(&without_suppressed);
+
+        assert_eq!(messages_with_suppressed.len(), 1);
+        assert_eq!(messages_without_suppressed.len(), 1);
+        assert_eq!(
+            messages_with_suppressed[0].id,
+            messages_without_suppressed[0].id
+        );
+        assert_eq!(
+            messages_with_suppressed[0].render_hash,
+            messages_without_suppressed[0].render_hash
+        );
+    }
+
+    #[test]
     fn replace_messages_preserves_is_new_for_live_ids() {
         let mut record = test_record();
         record.live_message_ids.insert("live1".to_string());
@@ -4547,15 +4619,15 @@ pub(crate) mod tests {
     async fn user_message_end_replaces_optimistic_pending_prompt() {
         let state = test_state(8, None);
         let mut record = test_record();
-        record.messages.push(TranscriptMessage {
-            id: "__pending_prompt:test".to_string(),
-            role: MessageRole::User,
-            blocks: vec![ContentBlock::Text {
+        record.messages.push(TranscriptMessage::new(
+            "__pending_prompt:test".to_string(),
+            MessageRole::User,
+            vec![ContentBlock::Text {
                 text: "hello there".to_string(),
             }],
-            timestamp: Some(Timestamp::now()),
-            is_new: true,
-        });
+            Some(Timestamp::now()),
+            true,
+        ));
         state
             .sessions
             .write()
@@ -4583,22 +4655,231 @@ pub(crate) mod tests {
         assert_eq!(record.messages[0].role, MessageRole::User);
     }
 
+    #[tokio::test]
+    async fn live_missing_id_message_update_uses_streaming_sentinel() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "message_update",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "partial" }]
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        let streaming = record
+            .streaming_message
+            .as_ref()
+            .expect("streaming message set");
+        assert_eq!(streaming.id, "__streaming__");
+        assert!(!streaming.render_hash.is_empty());
+    }
+
+    #[tokio::test]
+    async fn timestampless_streaming_updates_keep_stable_render_hash() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        for _ in 0..2 {
+            apply_rpc_frame(
+                &state,
+                "s1",
+                &serde_json::json!({
+                    "type": "message_update",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{ "type": "text", "text": "same partial" }]
+                    }
+                }),
+            )
+            .await;
+        }
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        let streaming = record
+            .streaming_message
+            .as_ref()
+            .expect("streaming message set");
+        let first_timestamp = streaming.timestamp;
+        let first_hash = streaming.render_hash.clone();
+        drop(sessions);
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "message_update",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "same partial" }]
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        let streaming = record
+            .streaming_message
+            .as_ref()
+            .expect("streaming message set");
+        assert_eq!(streaming.timestamp, first_timestamp);
+        assert_eq!(streaming.render_hash, first_hash);
+    }
+
+    #[tokio::test]
+    async fn live_missing_id_message_end_appends_distinct_messages() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        for text in ["same final content", "same final content"] {
+            apply_rpc_frame(
+                &state,
+                "s1",
+                &serde_json::json!({
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "content": [{ "type": "text", "text": text }]
+                    }
+                }),
+            )
+            .await;
+        }
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert_eq!(record.messages.len(), 2);
+        assert!(record.messages[0].id.starts_with("__projected:message:"));
+        assert!(record.messages[1].id.starts_with("__projected:message:"));
+        assert_ne!(record.messages[0].id, record.messages[1].id);
+        assert_ne!(record.messages[0].id, "__streaming__");
+        assert_ne!(record.messages[1].id, "__streaming__");
+        assert!(record.live_message_ids.contains(&record.messages[0].id));
+        assert!(record.live_message_ids.contains(&record.messages[1].id));
+        assert!(!record.messages[0].render_hash.is_empty());
+        assert!(!record.messages[1].render_hash.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_missing_id_message_end_matches_historical_projected_id() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "message_end",
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "same after reload" }]
+                }
+            }),
+        )
+        .await;
+
+        let historical = serde_json::json!({
+            "role": "assistant",
+            "content": [{ "type": "text", "text": "same after reload" }]
+        });
+        let (projected_messages, _) = project_omp_transcript(&[historical]);
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert_eq!(record.messages.len(), 1);
+        assert_eq!(projected_messages.len(), 1);
+        assert_eq!(record.messages[0].id, projected_messages[0].id);
+    }
+
+    #[tokio::test]
+    async fn synthetic_carryover_does_not_perturb_live_projected_id() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.messages.push(TranscriptMessage::new(
+            "approved-plan:carryover".to_string(),
+            MessageRole::System,
+            vec![ContentBlock::Text {
+                text: "plan carryover".to_string(),
+            }],
+            None,
+            false,
+        ));
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "message_end",
+                "timestamp": 1770000005000_u64,
+                "message": {
+                    "role": "assistant",
+                    "content": [{ "type": "text", "text": "not shifted by carryover" }]
+                }
+            }),
+        )
+        .await;
+
+        let historical = serde_json::json!({
+            "role": "assistant",
+            "timestamp": 1770000005000_u64,
+            "content": [{ "type": "text", "text": "not shifted by carryover" }]
+        });
+        let (projected_messages, _) = project_omp_transcript(&[historical]);
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert_eq!(record.messages.len(), 2);
+        assert_eq!(projected_messages.len(), 1);
+        assert_eq!(record.messages[1].id, projected_messages[0].id);
+    }
+
     #[test]
     fn active_tool_work_keeps_projection_busy() {
         let mut record = test_record();
         record.status = SessionStatus::Idle;
-        record.active_tool_calls.push(ToolCard {
-            tool_call_id: "tool-1".to_string(),
-            timestamp: Timestamp::from_rpc(&serde_json::json!(0)),
-            tool_name: "task".to_string(),
-            intent: None,
-            args: Value::Null,
-            is_active: true,
-            is_error: false,
-            partial_result: None,
-            result: None,
-            insert_after_count: 0,
-        });
+        record.active_tool_calls.push(ToolCard::new(
+            "tool-1".to_string(),
+            Timestamp::from_rpc(&serde_json::json!(0)),
+            "task".to_string(),
+            None,
+            Value::Null,
+            true,
+            false,
+            None,
+            None,
+            0,
+        ));
 
         assert!(record.projection().is_busy);
         assert!(matches!(record.summary().status, SessionStatus::Busy));

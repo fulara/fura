@@ -32,24 +32,14 @@ export function transcriptMessageRenderCacheKey(
 }
 
 function transcriptMessageRenderSignature(message: TranscriptMessage): string {
-  let signature = `id:${message.id};role:${message.role};ts:${message.timestamp ?? ""};new:${message.isNew ? 1 : 0};blocks:${message.blocks.length};`;
-  for (const block of message.blocks) {
-    switch (block.kind) {
-      case "text":
-        signature += `text:${block.text.length}:${block.text};`;
-        break;
-      case "image":
-        signature += `image:${block.mimeType.length}:${block.mimeType}:${block.data.length}:${block.data}:${block.alt?.length ?? -1}:${block.alt ?? ""};`;
-        break;
-      case "thinking":
-        signature += `thinking:${block.thinking.length}:${block.thinking};`;
-        break;
-      case "redactedthinking":
-        signature += "redactedthinking;";
-        break;
-    }
-  }
-  return signature;
+  if (message.renderHash) return `hash:${message.renderHash}`;
+  return `legacy:${JSON.stringify([
+    message.id,
+    message.role,
+    message.timestamp ?? null,
+    message.isNew,
+    message.blocks,
+  ])}`;
 }
 
 
@@ -328,7 +318,7 @@ function renderMarkdownReviewPreview(
 }
 
 function markdownReviewBlocks(text: string): Array<{ line: TranscriptReviewLine; markdown: string }> {
-  const lines = transcriptReviewLines({ id: "markdown-preview", role: "assistant", blocks: [{ kind: "text", text }], timestamp: null, isNew: false });
+  const lines = transcriptReviewLines({ id: "markdown-preview", role: "assistant", blocks: [{ kind: "text", text }], timestamp: null, isNew: false, renderHash: `markdown-preview:${text}` });
   const tokens = marked.lexer(text.trim());
   const blocks: Array<{ line: TranscriptReviewLine; markdown: string }> = [];
   let searchFrom = 0;

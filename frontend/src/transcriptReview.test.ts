@@ -8,6 +8,7 @@ function message(overrides: Partial<TranscriptMessage> = {}): TranscriptMessage 
     role: "assistant",
     isNew: false,
     blocks: [{ kind: "text", text: "first\nsecond\nthird" }],
+    renderHash: "test-review-hash",
     ...overrides,
   };
 }

@@ -4651,6 +4651,7 @@ function renderControlTranscriptMessage(message: ControlChatMessage, index: numb
     blocks: [{ kind: "text", text: message.text }],
     timestamp: null,
     isNew: false,
+    renderHash: controlMessageRenderKey(message, index),
   });
   const roleLabel = article.querySelector(".message-heading strong");
   if (roleLabel && message.role === "assistant") roleLabel.textContent = "Ask Fura";
@@ -4712,6 +4713,24 @@ function nonEmptyTodoPhases(phases: TodoPhase[]): TodoPhase[] {
   return phases.filter(phase => phase.tasks.length > 0);
 }
 
+function toolCardRenderKey(card: ToolCard): string {
+  const renderContentKey = card.renderHash ? `hash:${card.renderHash}` : `legacy:${JSON.stringify([
+    card.timestamp ?? null,
+    card.toolName,
+    card.intent ?? null,
+    card.args,
+    card.isActive,
+    card.isError,
+    card.partialResult ?? null,
+    card.result ?? null,
+  ])}`;
+  return `${card.toolCallId.length}:${card.toolCallId}:${renderContentKey}`;
+}
+
+function readToolGroupRenderKey(cards: Array<{ kind: "tool" } & ToolCard>): string {
+  return JSON.stringify(cards.map(card => toolCardRenderKey(card)));
+}
+
 function todoPhasesRenderKey(phases: TodoPhase[]): string {
   return JSON.stringify(phases.map(phase => [
     phase.name,
@@ -4751,23 +4770,24 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
       });
       continue;
     }
-
     if (!showToolBubbles) continue;
 
-    if (entry.toolName === "read" && !entry.isError) {
+    if (isCompactReadCard(entry)) {
       const readCards = [entry];
       while (isCompactReadCard(projection.transcript[i + 1])) {
         readCards.push(projection.transcript[++i] as { kind: "tool" } & ToolCard);
       }
       items.push({
-        key: `read-group:${startIndex}:${readCards.map(card => card.toolCallId).join("|")}`,
+        key: `read-group:${readToolGroupRenderKey(readCards)}`,
+        cacheable: true,
         render: () => (readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards)),
       });
       continue;
     }
 
     items.push({
-      key: `tool:${entry.toolCallId}:${startIndex}`,
+      key: `tool:${toolCardRenderKey(entry)}`,
+      cacheable: true,
       render: () => renderToolCard(entry),
     });
   }
@@ -4803,22 +4823,23 @@ function buildToolsRenderItems(tools: Array<{ kind: "tool" } & ToolCard>): Panel
   const items: PanelRenderItem[] = [];
   for (let i = 0; i < tools.length; i++) {
     const entry = tools[i];
-    const startIndex = i;
 
-    if (entry.toolName === "read" && !entry.isError) {
+    if (isCompactReadCard(entry)) {
       const readCards = [entry];
       while (i + 1 < tools.length && isCompactReadCard(tools[i + 1])) {
         readCards.push(tools[++i]);
       }
       items.push({
-        key: `read-group:${startIndex}:${readCards.map(card => card.toolCallId).join("|")}`,
+        key: `read-group:${readToolGroupRenderKey(readCards)}`,
+        cacheable: true,
         render: () => (readCards.length === 1 ? renderReadToolCard(entry) : renderReadToolGroup(readCards)),
       });
       continue;
     }
 
     items.push({
-      key: `tool:${entry.toolCallId}:${startIndex}`,
+      key: `tool:${toolCardRenderKey(entry)}`,
+      cacheable: true,
       render: () => renderToolCard(entry),
     });
   }

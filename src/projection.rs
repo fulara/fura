@@ -1,15 +1,83 @@
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    io::{self, Write},
+};
 
+use serde::Serialize;
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::{ContentBlock, MessageRole, Timestamp, ToolCard, TranscriptMessage};
 
+struct Blake3Writer<'a>(&'a mut blake3::Hasher);
+
+impl Write for Blake3Writer<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn hash_json<T: Serialize>(hasher: &mut blake3::Hasher, value: &T) {
+    serde_json::to_writer(Blake3Writer(hasher), value)
+        .expect("projected message id JSON serialization cannot fail");
+}
+
+fn upstream_message_id(value: &Value) -> String {
+    value
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .unwrap_or("")
+        .to_string()
+}
+
+pub(crate) fn projected_message_kind(value: &Value) -> &'static str {
+    match value.get("role").and_then(Value::as_str) {
+        Some("bashExecution") => "bashExecution",
+        Some("pythonExecution") => "pythonExecution",
+        _ => "message",
+    }
+}
+
+fn projected_message_id_from_message(
+    kind: &str,
+    visible_ordinal: usize,
+    message: &TranscriptMessage,
+) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"projected-message-id-v2;");
+    hasher.update(kind.as_bytes());
+    hasher.update(b";ordinal=");
+    hasher.update(&(visible_ordinal as u64).to_le_bytes());
+    hasher.update(b";role=");
+    hash_json(&mut hasher, &message.role);
+    // Do not include timestamp: live handling may synthesize one for display when the
+    // persisted frame has none, while historical replay cannot reconstruct that value.
+    hasher.update(b";blocks=");
+    hash_json(&mut hasher, &message.blocks);
+    format!("__projected:{kind}:{}", hasher.finalize().to_hex())
+}
+
+pub(crate) fn assign_projected_message_id(
+    message: &mut TranscriptMessage,
+    value: &Value,
+    visible_ordinal: usize,
+) {
+    if !message.id.is_empty() {
+        return;
+    }
+    let kind = projected_message_kind(value);
+    message.id = projected_message_id_from_message(kind, visible_ordinal, message);
+}
 pub(crate) fn value_timestamp(value: &Value) -> Option<Timestamp> {
     value.get("timestamp").and_then(Timestamp::from_rpc)
 }
 
-pub(crate) fn map_bash_execution_message(value: &Value) -> Option<TranscriptMessage> {
+fn map_bash_execution_message(value: &Value) -> Option<TranscriptMessage> {
     let command = value.get("command").and_then(|v| v.as_str())?;
     // Commands marked excludeFromContext are internal ops (e.g. injected context reads).
     if value.get("excludeFromContext").and_then(|v| v.as_bool()) == Some(true) {
@@ -50,22 +118,18 @@ pub(crate) fn map_bash_execution_message(value: &Value) -> Option<TranscriptMess
         }
     }
 
-    Some(TranscriptMessage {
-        id: value
-            .get("id")
-            .and_then(|id| id.as_str())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        role: MessageRole::System,
-        blocks: vec![ContentBlock::Text {
+    Some(TranscriptMessage::new(
+        upstream_message_id(value),
+        MessageRole::System,
+        vec![ContentBlock::Text {
             text: format!("```bash\n{body}\n```"),
         }],
-        timestamp: value_timestamp(value),
-        is_new: false,
-    })
+        value_timestamp(value),
+        false,
+    ))
 }
 
-pub(crate) fn map_python_execution_message(value: &Value) -> Option<TranscriptMessage> {
+fn map_python_execution_message(value: &Value) -> Option<TranscriptMessage> {
     let code = value.get("code").and_then(|v| v.as_str())?;
     if value.get("excludeFromContext").and_then(|v| v.as_bool()) == Some(true) {
         return None;
@@ -116,17 +180,13 @@ pub(crate) fn map_python_execution_message(value: &Value) -> Option<TranscriptMe
         }
     }
 
-    Some(TranscriptMessage {
-        id: value
-            .get("id")
-            .and_then(|id| id.as_str())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
-        role: MessageRole::System,
-        blocks: vec![ContentBlock::Text { text }],
-        timestamp: value_timestamp(value),
-        is_new: false,
-    })
+    Some(TranscriptMessage::new(
+        upstream_message_id(value),
+        MessageRole::System,
+        vec![ContentBlock::Text { text }],
+        value_timestamp(value),
+        false,
+    ))
 }
 
 pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage>, Vec<ToolCard>) {
@@ -140,7 +200,9 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
 
     for value in values {
         if let Some(mut message) = map_omp_message(value) {
+            assign_projected_message_id(&mut message, value, visible_message_count);
             message.is_new = false;
+            message.refresh_render_hash();
             messages.push(message);
             visible_message_count += 1;
         }
@@ -217,18 +279,18 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
             .get("isError")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
-        tool_cards.push(ToolCard {
-            tool_call_id: tool_call_id.to_string(),
-            timestamp: timestamp.or_else(|| value_timestamp(value)),
+        tool_cards.push(ToolCard::new(
+            tool_call_id.to_string(),
+            timestamp.or_else(|| value_timestamp(value)),
             tool_name,
             intent,
             args,
-            is_active: false,
+            false,
             is_error,
-            partial_result: None,
-            result: Some(Value::Object(result)),
+            None,
+            Some(Value::Object(result)),
             insert_after_count,
-        });
+        ));
     }
 
     (messages, tool_cards)
@@ -299,17 +361,13 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
         blocks
     };
 
-    Some(TranscriptMessage {
-        id: value
-            .get("id")
-            .and_then(|id| id.as_str())
-            .map(ToString::to_string)
-            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+    Some(TranscriptMessage::new(
+        upstream_message_id(value),
         role,
         blocks,
-        timestamp: value_timestamp(value),
-        is_new: false, // caller sets true for live message_end events
-    })
+        value_timestamp(value),
+        false, // caller sets true for live message_end events
+    ))
 }
 
 pub(crate) fn parse_role(role: &str) -> MessageRole {
@@ -427,4 +485,78 @@ pub(crate) fn content_to_text(value: &Value) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_omp_message_preserves_missing_id_for_live_streaming() {
+        let value = serde_json::json!({
+            "role": "assistant",
+            "content": "streaming"
+        });
+
+        let message = map_omp_message(&value).expect("message should map");
+
+        assert_eq!(message.id, "");
+    }
+
+    #[test]
+    fn projected_messages_without_upstream_ids_get_stable_distinct_ids() {
+        let values = vec![
+            serde_json::json!({
+                "role": "assistant",
+                "content": "first"
+            }),
+            serde_json::json!({
+                "role": "assistant",
+                "content": "second"
+            }),
+        ];
+
+        let (messages, _) = project_omp_transcript(&values);
+        let (messages_again, _) = project_omp_transcript(&values);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].id.starts_with("__projected:message:"));
+        assert!(messages[1].id.starts_with("__projected:message:"));
+        assert_ne!(messages[0].id, messages[1].id);
+        assert_eq!(messages[0].id, messages_again[0].id);
+        assert_eq!(messages[1].id, messages_again[1].id);
+    }
+
+    #[test]
+    fn suppressed_events_do_not_perturb_projected_fallback_ids() {
+        let visible_before = serde_json::json!({
+            "role": "assistant",
+            "content": "before"
+        });
+        let visible_after = serde_json::json!({
+            "role": "assistant",
+            "content": "after"
+        });
+        let values_without_suppressed = vec![visible_before.clone(), visible_after.clone()];
+        let values_with_suppressed = vec![
+            visible_before,
+            serde_json::json!({
+                "role": "hookMessage",
+                "content": "hidden hook"
+            }),
+            serde_json::json!({
+                "role": "developer",
+                "attribution": "agent",
+                "content": "hidden agent note"
+            }),
+            visible_after,
+        ];
+
+        let (messages_without, _) = project_omp_transcript(&values_without_suppressed);
+        let (messages_with, _) = project_omp_transcript(&values_with_suppressed);
+
+        assert_eq!(messages_without.len(), 2);
+        assert_eq!(messages_with.len(), 2);
+        assert_eq!(messages_without[1].id, messages_with[1].id);
+    }
 }

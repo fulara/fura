@@ -1700,15 +1700,15 @@ mod tests {
     }
 
     fn test_message(id: &str, text: &str) -> TranscriptEntry {
-        TranscriptEntry::Message(TranscriptMessage {
-            id: id.to_string(),
-            role: MessageRole::Assistant,
-            blocks: vec![ContentBlock::Text {
+        TranscriptEntry::Message(TranscriptMessage::new(
+            id.to_string(),
+            MessageRole::Assistant,
+            vec![ContentBlock::Text {
                 text: text.to_string(),
             }],
-            timestamp: None,
-            is_new: true,
-        })
+            None,
+            true,
+        ))
     }
 
     fn test_projection(session_id: &str, entries: Vec<TranscriptEntry>) -> SessionProjection {
