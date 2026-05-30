@@ -21,8 +21,9 @@ use tracing::{error, info, warn};
 
 use crate::{
     AppState, AuthSession, ClientMessage, PlanApprovalMode, ServerMessage,
-    append_bridge_debug_event, append_event_debug_client_message, append_event_debug_server_message,
-    client_config, handle_client_message, refresh_session_catalog, sessions_snapshot_from_map,
+    append_bridge_debug_event, append_event_debug_client_message,
+    append_event_debug_server_message, client_config, handle_client_message,
+    refresh_session_catalog, sessions_snapshot_from_map,
 };
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
