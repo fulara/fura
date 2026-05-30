@@ -168,6 +168,7 @@ async fn main() -> anyhow::Result<()> {
         active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
         active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
         events: WsEventCoordinator::new(events),
+        session_dialog_owners: Arc::new(RwLock::new(HashMap::new())),
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
             args: rpc_args,
@@ -867,6 +868,7 @@ pub(crate) mod tests {
             active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
             active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
             events: WsEventCoordinator::new(events),
+            session_dialog_owners: Arc::new(RwLock::new(HashMap::new())),
             session_host_tools: Arc::new(RwLock::new(HashMap::new())),
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),

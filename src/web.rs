@@ -453,6 +453,117 @@ async fn append_websocket_debug_event(
     append_bridge_debug_event(state, event_type, fields).await;
 }
 
+fn dialog_owner_session_id(message: &ClientMessage) -> Option<&str> {
+    match message {
+        // Only explicit foreground interactions should claim RPC UI ownership. Passive recovery
+        // traffic like state.refresh must not steal the next modal from the tab that initiated it.
+        ClientMessage::SessionAttach { session_id }
+        | ClientMessage::PromptSend { session_id, .. }
+        | ClientMessage::PlanApprove { session_id, .. }
+        | ClientMessage::PlanDiscuss { session_id }
+        | ClientMessage::DialogRespond { session_id, .. }
+        | ClientMessage::ModelSet { session_id, .. }
+        | ClientMessage::GoalStart { session_id, .. }
+        | ClientMessage::GoalControl { session_id, .. }
+        | ClientMessage::GoalSetBudget { session_id, .. }
+        | ClientMessage::SessionFork { session_id, .. }
+        | ClientMessage::SessionHandoff { session_id, .. }
+        | ClientMessage::RawRpc { session_id, .. }
+        | ClientMessage::ConflictAgentRun { session_id, .. }
+        | ClientMessage::ReviewAgentReviewStart { session_id, .. } => Some(session_id.as_str()),
+        ClientMessage::SessionDetach { .. }
+        | ClientMessage::StateRefresh { .. }
+        | ClientMessage::ModelList { .. }
+        | ClientMessage::PromptAbort { .. }
+        | ClientMessage::SessionStop { .. }
+        | ClientMessage::SessionDelete { .. }
+        | ClientMessage::CodeWorkspaceOpen { .. }
+        | ClientMessage::SessionOpen { .. }
+        | ClientMessage::SessionList
+        | ClientMessage::SessionCreate { .. }
+        | ClientMessage::SessionSetCategory { .. }
+        | ClientMessage::ConfigSet { .. }
+        | ClientMessage::ConfigModelCatalogList { .. }
+        | ClientMessage::ControlPrompt { .. }
+        | ClientMessage::ControlAbort { .. }
+        | ClientMessage::VoiceStart { .. }
+        | ClientMessage::VoiceAudio { .. }
+        | ClientMessage::VoiceStop { .. }
+        | ClientMessage::SessionChangesRequest { .. }
+        | ClientMessage::SessionChangesSnapshot { .. }
+        | ClientMessage::CompareDiffRequest { .. }
+        | ClientMessage::DiffCancel { .. }
+        | ClientMessage::DiffContentRequest { .. }
+        | ClientMessage::DiffReviewWorktreeEnsure { .. }
+        | ClientMessage::DiffReviewWorktreeCheckout { .. }
+        | ClientMessage::CodeWorkspaceOpenRoot { .. }
+        | ClientMessage::CodeTreeList { .. }
+        | ClientMessage::CodeFileOpen { .. }
+        | ClientMessage::CodeFileClose { .. }
+        | ClientMessage::CodeFileSearch { .. }
+        | ClientMessage::ConflictScan { .. }
+        | ClientMessage::ConflictFileOpen { .. }
+        | ClientMessage::ConflictFilePreviewMagicWand { .. }
+        | ClientMessage::ConflictFileWriteResult { .. }
+        | ClientMessage::ConflictFileStageResolved { .. }
+        | ClientMessage::ReviewCommentsList { .. }
+        | ClientMessage::ReviewCommentCreate { .. }
+        | ClientMessage::ReviewCommentUpdate { .. }
+        | ClientMessage::ReviewCommentMarkFlushed { .. }
+        | ClientMessage::ReviewCommentDelete { .. } => None,
+    }
+}
+
+async fn note_dialog_owner_for_message(
+    state: &AppState,
+    connection_id: u64,
+    message: &ClientMessage,
+) {
+    match message {
+        ClientMessage::SessionDetach { session_id } => {
+            let mut owners = state.session_dialog_owners.write().await;
+            if owners.get(session_id) == Some(&connection_id) {
+                owners.remove(session_id);
+            }
+        }
+        _ => {
+            let Some(session_id) = dialog_owner_session_id(message) else {
+                return;
+            };
+            state
+                .session_dialog_owners
+                .write()
+                .await
+                .insert(session_id.to_string(), connection_id);
+        }
+    }
+}
+
+async fn clear_dialog_owners_for_connection(state: &AppState, connection_id: u64) {
+    state
+        .session_dialog_owners
+        .write()
+        .await
+        .retain(|_, owner| *owner != connection_id);
+}
+
+async fn should_deliver_server_message(
+    state: &AppState,
+    connection_id: u64,
+    message: &ServerMessage,
+) -> bool {
+    match message {
+        ServerMessage::DialogRequest { session_id, .. } => {
+            let owners = state.session_dialog_owners.read().await;
+            match owners.get(session_id) {
+                Some(owner) => *owner == connection_id,
+                None => true,
+            }
+        }
+        _ => true,
+    }
+}
+
 pub(crate) async fn handle_socket(
     mut socket: WebSocket,
     state: AppState,
@@ -472,147 +583,53 @@ pub(crate) async fn handle_socket(
         Map::new(),
     )
     .await;
-    let mut event_rx = state.events.subscribe();
 
-    let config = client_config(&state).await;
-    outbound_seq += 1;
-    if send_json_with_context(
-        &state,
-        &mut socket,
-        &ServerMessage::Hello {
-            server_version: env!("CARGO_PKG_VERSION"),
-            protocol_version: 1,
-            config,
-        },
-        Some(SendLogContext {
-            connection_id,
-            outbound_seq,
+    let run = async {
+        let mut event_rx = state.events.subscribe();
+
+        let config = client_config(&state).await;
+        outbound_seq += 1;
+        if send_json_with_context(
+            &state,
+            &mut socket,
+            &ServerMessage::Hello {
+                server_version: env!("CARGO_PKG_VERSION"),
+                protocol_version: 1,
+                config,
+            },
+            Some(SendLogContext {
+                connection_id,
+                outbound_seq,
+                update_mode,
+                source: "initial",
+            }),
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
+
+        if send_sessions_snapshot(
+            &mut socket,
+            &state,
             update_mode,
-            source: "initial",
-        }),
-    )
-    .await
-    .is_err()
-    {
-        return;
-    }
+            connection_id,
+            &mut outbound_seq,
+        )
+        .await
+        .is_err()
+        {
+            return;
+        }
 
-    if send_sessions_snapshot(
-        &mut socket,
-        &state,
-        update_mode,
-        connection_id,
-        &mut outbound_seq,
-    )
-    .await
-    .is_err()
-    {
-        return;
-    }
-
-    loop {
-        tokio::select! {
-            frame = socket.recv() => {
-                let Some(frame) = frame else {
-                    append_websocket_debug_event(
-                        &state,
-                        "websocket.close",
-                        connection_id,
-                        update_mode,
-                        outbound_seq,
-                        Some(opened_at.elapsed().as_millis()),
-                        Map::new(),
-                    )
-                    .await;
-                    return;
-                };
-                match handle_websocket_frame(
-                    &mut socket,
-                    &state,
-                    frame,
-                    update_mode,
-                    connection_id,
-                    &mut outbound_seq,
-                    opened_at,
-                ).await {
-                    Ok(FrameOutcome::Continue) => {}
-                    Ok(FrameOutcome::Resynced) => {
-                        event_rx = state.events.subscribe();
-                    }
-                    Err(_) => return,
-                }
-            }
-            event = event_rx.recv() => {
-                match event {
-                    Ok(message) => {
-                        let messages = match collect_outbound_events(message, &mut event_rx, update_mode) {
-                            Ok(messages) => messages,
-                            Err(OutboundCollectError::Lagged(skipped)) => {
-                                warn!(skipped, "websocket client lagged behind bridge events");
-                                let mut fields = Map::new();
-                                fields.insert("skipped".to_string(), Value::Number(skipped.into()));
-                                append_websocket_debug_event(
-                                    &state,
-                                    "websocket.lagged",
-                                    connection_id,
-                                    update_mode,
-                                    outbound_seq,
-                                    Some(opened_at.elapsed().as_millis()),
-                                    fields,
-                                )
-                                .await;
-                                return;
-                            }
-                            Err(OutboundCollectError::Closed) => {
-                                append_websocket_debug_event(
-                                    &state,
-                                    "websocket.event_channel_closed",
-                                    connection_id,
-                                    update_mode,
-                                    outbound_seq,
-                                    Some(opened_at.elapsed().as_millis()),
-                                    Map::new(),
-                                )
-                                .await;
-                                return;
-                            }
-                        };
-                        for message in messages {
-                            let send_result = send_client_message(
-                                &mut socket,
-                                &state,
-                                message,
-                                update_mode,
-                                connection_id,
-                                &mut outbound_seq,
-                                "broadcast",
-                            )
-                            .await;
-                            if send_result.is_err() {
-                                return;
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        warn!(skipped, "websocket client lagged behind bridge events");
-                        let mut fields = Map::new();
-                        fields.insert("skipped".to_string(), Value::Number(skipped.into()));
+        loop {
+            tokio::select! {
+                frame = socket.recv() => {
+                    let Some(frame) = frame else {
                         append_websocket_debug_event(
                             &state,
-                            "websocket.lagged",
-                            connection_id,
-                            update_mode,
-                            outbound_seq,
-                            Some(opened_at.elapsed().as_millis()),
-                            fields,
-                        )
-                        .await;
-                        return;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        append_websocket_debug_event(
-                            &state,
-                            "websocket.event_channel_closed",
+                            "websocket.close",
                             connection_id,
                             update_mode,
                             outbound_seq,
@@ -621,11 +638,114 @@ pub(crate) async fn handle_socket(
                         )
                         .await;
                         return;
+                    };
+                    match handle_websocket_frame(
+                        &mut socket,
+                        &state,
+                        frame,
+                        update_mode,
+                        connection_id,
+                        &mut outbound_seq,
+                        opened_at,
+                    ).await {
+                        Ok(FrameOutcome::Continue) => {}
+                        Ok(FrameOutcome::Resynced) => {
+                            event_rx = state.events.subscribe();
+                        }
+                        Err(_) => return,
+                    }
+                }
+                event = event_rx.recv() => {
+                    match event {
+                        Ok(message) => {
+                            let messages = match collect_outbound_events(message, &mut event_rx, update_mode) {
+                                Ok(messages) => messages,
+                                Err(OutboundCollectError::Lagged(skipped)) => {
+                                    warn!(skipped, "websocket client lagged behind bridge events");
+                                    let mut fields = Map::new();
+                                    fields.insert("skipped".to_string(), Value::Number(skipped.into()));
+                                    append_websocket_debug_event(
+                                        &state,
+                                        "websocket.lagged",
+                                        connection_id,
+                                        update_mode,
+                                        outbound_seq,
+                                        Some(opened_at.elapsed().as_millis()),
+                                        fields,
+                                    )
+                                    .await;
+                                    return;
+                                }
+                                Err(OutboundCollectError::Closed) => {
+                                    append_websocket_debug_event(
+                                        &state,
+                                        "websocket.event_channel_closed",
+                                        connection_id,
+                                        update_mode,
+                                        outbound_seq,
+                                        Some(opened_at.elapsed().as_millis()),
+                                        Map::new(),
+                                    )
+                                    .await;
+                                    return;
+                                }
+                            };
+                            for message in messages {
+                                if !should_deliver_server_message(&state, connection_id, &message).await {
+                                    continue;
+                                }
+                                let send_result = send_client_message(
+                                    &mut socket,
+                                    &state,
+                                    message,
+                                    update_mode,
+                                    connection_id,
+                                    &mut outbound_seq,
+                                    "broadcast",
+                                )
+                                .await;
+                                if send_result.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            warn!(skipped, "websocket client lagged behind bridge events");
+                            let mut fields = Map::new();
+                            fields.insert("skipped".to_string(), Value::Number(skipped.into()));
+                            append_websocket_debug_event(
+                                &state,
+                                "websocket.lagged",
+                                connection_id,
+                                update_mode,
+                                outbound_seq,
+                                Some(opened_at.elapsed().as_millis()),
+                                fields,
+                            )
+                            .await;
+                            return;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            append_websocket_debug_event(
+                                &state,
+                                "websocket.event_channel_closed",
+                                connection_id,
+                                update_mode,
+                                outbound_seq,
+                                Some(opened_at.elapsed().as_millis()),
+                                Map::new(),
+                            )
+                            .await;
+                            return;
+                        }
                     }
                 }
             }
         }
-    }
+    };
+
+    run.await;
+    clear_dialog_owners_for_connection(&state, connection_id).await;
 }
 
 fn client_text_frame_too_large(text: &str) -> bool {
@@ -722,6 +842,7 @@ pub(crate) async fn handle_websocket_frame(
                         &text,
                     )
                     .await;
+                    note_dialog_owner_for_message(state, connection_id, &message).await;
                     let outcome = if client_message_resyncs_stream(&message, update_mode) {
                         FrameOutcome::Resynced
                     } else {
@@ -1556,7 +1677,7 @@ mod tests {
     use crate::{
         ContentBlock, MessageRole, SessionKind, SessionMode, SessionProjection,
         SessionProjectionDelta, SessionStatus, SessionSummary, Timestamp, TranscriptEntry,
-        TranscriptMessage,
+        TranscriptMessage, tests::test_state,
     };
 
     fn test_summary(session_id: &str, message_count: usize) -> SessionSummary {
@@ -1711,6 +1832,107 @@ mod tests {
             &ClientMessage::SessionList,
             WebSocketUpdateMode::ConflateAndDelta,
         ));
+    }
+
+    #[tokio::test]
+    async fn dialog_requests_only_reach_the_last_owner_connection() {
+        let state = test_state(8, None);
+        note_dialog_owner_for_message(
+            &state,
+            7,
+            &ClientMessage::SessionAttach {
+                session_id: "s1".to_string(),
+            },
+        )
+        .await;
+        note_dialog_owner_for_message(
+            &state,
+            9,
+            &ClientMessage::PromptSend {
+                session_id: "s1".to_string(),
+                text: "/review".to_string(),
+                images: None,
+                behavior: None,
+            },
+        )
+        .await;
+
+        let message = ServerMessage::DialogRequest {
+            session_id: "s1".to_string(),
+            dialog: serde_json::json!({
+                "id": "dialog-1",
+                "method": "select",
+                "title": "Review Mode",
+                "options": ["A", "B"],
+            }),
+        };
+
+        assert!(!should_deliver_server_message(&state, 7, &message).await);
+        assert!(should_deliver_server_message(&state, 9, &message).await);
+    }
+
+    #[tokio::test]
+    async fn state_refresh_does_not_steal_dialog_owner() {
+        let state = test_state(8, None);
+        note_dialog_owner_for_message(
+            &state,
+            9,
+            &ClientMessage::PromptSend {
+                session_id: "s1".to_string(),
+                text: "/review".to_string(),
+                images: None,
+                behavior: None,
+            },
+        )
+        .await;
+        note_dialog_owner_for_message(
+            &state,
+            7,
+            &ClientMessage::StateRefresh {
+                session_id: "s1".to_string(),
+            },
+        )
+        .await;
+
+        let message = ServerMessage::DialogRequest {
+            session_id: "s1".to_string(),
+            dialog: serde_json::json!({
+                "id": "dialog-1",
+                "method": "select",
+                "title": "Review Mode",
+                "options": ["A", "B"],
+            }),
+        };
+
+        assert!(!should_deliver_server_message(&state, 7, &message).await);
+        assert!(should_deliver_server_message(&state, 9, &message).await);
+    }
+
+    #[tokio::test]
+    async fn clearing_connection_owners_restores_dialog_broadcast_fallback() {
+        let state = test_state(8, None);
+        note_dialog_owner_for_message(
+            &state,
+            7,
+            &ClientMessage::SessionAttach {
+                session_id: "s1".to_string(),
+            },
+        )
+        .await;
+        clear_dialog_owners_for_connection(&state, 7).await;
+
+        let message = ServerMessage::DialogRequest {
+            session_id: "s1".to_string(),
+            dialog: serde_json::json!({
+                "id": "dialog-1",
+                "method": "confirm",
+                "title": "Continue?",
+                "message": "Proceed?",
+            }),
+        };
+
+        assert!(should_deliver_server_message(&state, 7, &message).await);
+        assert!(should_deliver_server_message(&state, 9, &message).await);
     }
 
     #[test]

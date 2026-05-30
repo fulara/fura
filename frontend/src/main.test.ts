@@ -454,6 +454,30 @@ describe("desktop extension dialogs", () => {
       response: { value: "Focus on concurrency and missed errors." },
     });
   });
+
+  it("sends cancelled=true when the active dialog is dismissed", async () => {
+    const { connection } = await createHarness();
+    connection.emit({
+      type: "dialog.request",
+      sessionId: "live",
+      dialog: {
+        id: "select-cancel-1",
+        method: "select",
+        title: "Review Mode",
+        options: ["Review uncommitted changes", "Review a commit"],
+      },
+    });
+
+    document.querySelector<HTMLButtonElement>("#extensionDialogCancel")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "dialog.respond",
+      sessionId: "live",
+      dialogId: "select-cancel-1",
+      response: { cancelled: true },
+    });
+    expect(document.querySelector<HTMLElement>("#extensionDialogOverlay")?.hidden).toBe(true);
+  });
 });
 
 
