@@ -688,7 +688,9 @@ const highlightCache = new Map<string, { html: string; className: string }>();
 // settled code blocks are re-highlighted at most once instead of on every tick. LRU by
 // reinsertion: blocks read each tick stay warm; transient (growing-block) keys age out.
 function highlightToHtml(lang: string, code: string): { html: string; className: string } {
-  const key = `${lang}\u0000${code}`;
+  // Length-prefix `lang` so the separator can never be ambiguous when either field
+  // itself contains U+0000 (no aliasing between distinct (lang, code) pairs).
+  const key = `${lang.length}\u0000${lang}${code}`;
   const cached = highlightCache.get(key);
   if (cached) {
     highlightCache.delete(key);
@@ -715,8 +717,9 @@ function isUnterminatedFence(raw: string): boolean {
   const firstNewline = trimmed.indexOf("\n");
   if (firstNewline === -1) return true; // only the opening fence typed so far
   const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim();
-  const closing = opening[1][0] === "`" ? /^`{3,}$/ : /^~{3,}$/;
-  return !closing.test(lastLine);
+  // A closing fence must be the same marker and at least as long as the opener.
+  const closing = opening[1][0] === "`" ? /^`+$/ : /^~+$/;
+  return !(closing.test(lastLine) && lastLine.length >= opening[1].length);
 }
 
 export function renderCodeBlock(lang: string, code: string, options: RenderCodeBlockOptions = {}): HTMLElement {

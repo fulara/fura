@@ -405,6 +405,28 @@ describe("transcript code highlighting performance", () => {
     // Highlighted: highlight.js wraps keywords in spans.
     expect(codeEl?.querySelector("span")).not.toBeNull();
   });
+
+  it("treats a longer-opened fence as still streaming when only a shorter fence has arrived", () => {
+    const highlightSpy = vi.spyOn(hljs, "highlight");
+    const highlightAutoSpy = vi.spyOn(hljs, "highlightAuto");
+
+    // Opened with four backticks; a three-backtick line is code content, not a close.
+    const node = renderMarkdown("````ts\nconst quadProbe = 1;\n```");
+    const codeEl = node.querySelector<HTMLElement>("pre code");
+
+    expect(codeEl?.textContent).toContain("const quadProbe = 1;");
+    expect(codeEl?.querySelector("span")).toBeNull();
+    expect(highlightSpy).not.toHaveBeenCalled();
+    expect(highlightAutoSpy).not.toHaveBeenCalled();
+  });
+
+  it("highlights a closed tilde fence", () => {
+    const node = renderMarkdown("~~~ts\nconst tildeProbe = 9;\n~~~");
+    const codeEl = node.querySelector<HTMLElement>("pre code");
+
+    expect(codeEl?.textContent).toContain("const tildeProbe = 9;");
+    expect(codeEl?.querySelector("span")).not.toBeNull();
+  });
 });
 
 describe("renderBlock", () => {
