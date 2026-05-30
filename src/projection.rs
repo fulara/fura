@@ -270,11 +270,12 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
     let blocks = if let Some(content) = value.get("content") {
         content_to_blocks(content)
     } else if let Some(text) = value.get("text").and_then(|v| v.as_str()) {
-        let trimmed = text.trim().to_string();
-        if trimmed.is_empty() {
+        if text.trim().is_empty() {
             vec![]
         } else {
-            vec![ContentBlock::Text { text: trimmed }]
+            vec![ContentBlock::Text {
+                text: text.to_string(),
+            }]
         }
     } else {
         // No recognizable content field — skip rather than dumping raw JSON.
@@ -324,19 +325,20 @@ pub(crate) fn parse_role(role: &str) -> MessageRole {
 pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
     match value {
         Value::String(text) => {
-            let text = text.trim().to_string();
-            if text.is_empty() {
+            if text.trim().is_empty() {
                 Vec::new()
             } else {
-                vec![ContentBlock::Text { text }]
+                vec![ContentBlock::Text { text: text.clone() }]
             }
         }
         Value::Array(items) => {
             let mut blocks = Vec::new();
+            let mut pending_text = String::new();
             for item in items {
                 let item_type = item.get("type").and_then(|value| value.as_str());
                 match item_type {
                     Some("thinking") => {
+                        flush_text_block(&mut blocks, &mut pending_text);
                         let thinking = item
                             .get("thinking")
                             .and_then(|value| value.as_str())
@@ -349,20 +351,21 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
                         }
                     }
                     Some("redactedThinking") => {
+                        flush_text_block(&mut blocks, &mut pending_text);
                         blocks.push(ContentBlock::RedactedThinking);
                     }
                     Some("text") | None => {
                         let text = item
                             .get("text")
                             .and_then(|value| value.as_str())
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if !text.is_empty() {
-                            blocks.push(ContentBlock::Text { text });
+                            .unwrap_or("");
+                        if !pending_text.is_empty() {
+                            pending_text.push('\n');
                         }
+                        pending_text.push_str(text);
                     }
                     Some("image") => {
+                        flush_text_block(&mut blocks, &mut pending_text);
                         let data = item
                             .get("data")
                             .and_then(|value| value.as_str())
@@ -389,13 +392,26 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
                             });
                         }
                     }
-                    // toolCall blocks are separate messages/events in the RPC event stream
-                    _ => {}
+                    // toolCall blocks are separate messages/events in the RPC event stream.
+                    // Unknown items may still be meaningful upstream, so they remain a text
+                    // merge boundary even when Fura does not render them directly.
+                    _ => flush_text_block(&mut blocks, &mut pending_text),
                 }
             }
+            flush_text_block(&mut blocks, &mut pending_text);
             blocks
         }
         _ => Vec::new(),
+    }
+}
+
+fn flush_text_block(blocks: &mut Vec<ContentBlock>, pending_text: &mut String) {
+    if !pending_text.trim().is_empty() {
+        blocks.push(ContentBlock::Text {
+            text: std::mem::take(pending_text),
+        });
+    } else {
+        pending_text.clear();
     }
 }
 
