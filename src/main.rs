@@ -4209,33 +4209,6 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn coalesces_adjacent_text_content_items() {
-        let message = map_omp_message(&serde_json::json!({
-            "id": "review-diff",
-            "role": "user",
-            "content": [
-                { "type": "text", "text": "```diff" },
-                { "type": "text", "text": "diff --git a/src/main.ts b/src/main.ts" },
-                { "type": "text", "text": " context line keeps diff prefix" },
-                { "type": "text", "text": "" },
-                { "type": "text", "text": "-const old = true;" },
-                { "type": "text", "text": "+const newValue = true;" },
-                { "type": "text", "text": "```" }
-            ]
-        }))
-        .expect("message should map");
-
-        assert_eq!(message.blocks.len(), 1);
-        match &message.blocks[0] {
-            ContentBlock::Text { text } => assert_eq!(
-                text,
-                "```diff\ndiff --git a/src/main.ts b/src/main.ts\n context line keeps diff prefix\n\n-const old = true;\n+const newValue = true;\n```"
-            ),
-            other => panic!("unexpected block: {other:?}"),
-        }
-    }
-
-    #[test]
     fn maps_image_content_block_without_exposing_base64_as_text() {
         let message = map_omp_message(&serde_json::json!({
             "id": "img1",

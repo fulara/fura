@@ -340,6 +340,119 @@ describe("renderMarkdown", () => {
     expect(node.querySelector("a")).toBeNull();
     expect(node.textContent).toContain("bad");
   });
+
+  it("renders a /review <diff> block as one diff code block instead of shredded markdown", () => {
+    const review = [
+      "## Code Review Request",
+      "",
+      "### Diff",
+      "",
+      "<diff>",
+      "diff --git a/.gitignore b/.gitignore",
+      "@@ -9,6 +9,7 @@",
+      " /bridge-debug*.jsonl",
+      "+rotated-logs/",
+      "",
+      " /.cert",
+      "-const old = <b>raw</b>;",
+      "</diff>",
+      "",
+      "### Additional Instructions",
+      "",
+      "Be thorough.",
+    ].join("\n");
+
+    const node = renderMarkdown(review);
+
+    const codeBlocks = node.querySelectorAll(".code-block");
+    expect(codeBlocks.length).toBe(1);
+    const code = codeBlocks[0].querySelector("code");
+    expect(code?.textContent).toContain("diff --git a/.gitignore b/.gitignore");
+    expect(code?.textContent).toContain("+rotated-logs/");
+    // The blank context line must stay inside the single diff block, not split it.
+    expect(code?.textContent).toContain(" /.cert");
+    // Raw HTML inside the diff is escaped by the highlighter, never injected.
+    expect(code?.querySelector("b")).toBeNull();
+    expect(code?.textContent).toContain("<b>raw</b>");
+
+    // Surrounding Markdown still renders, and the diff is not shredded into
+    // stray list items or leaked `<diff>` literals.
+    expect(node.querySelector("h2")?.textContent).toBe("Code Review Request");
+    expect([...node.querySelectorAll("h3")].map(h => h.textContent)).toEqual(["Diff", "Additional Instructions"]);
+    expect(node.querySelector("ul, ol")).toBeNull();
+    expect(node.textContent).not.toContain("<diff>");
+    expect(node.textContent).not.toContain("</diff>");
+  });
+
+  it("does not hijack a literal <diff> tag inside a fenced code block", () => {
+    const text = [
+      "Explaining the review format:",
+      "",
+      "```md",
+      "<diff>",
+      "-old",
+      "+new",
+      "",
+      "context",
+      "</diff>",
+      "```",
+      "",
+      "Done.",
+    ].join("\n");
+
+    const node = renderMarkdown(text);
+
+    // Exactly one code block: the fence itself, rendered verbatim with its tags.
+    const codeBlocks = node.querySelectorAll(".code-block");
+    expect(codeBlocks.length).toBe(1);
+    expect(codeBlocks[0].querySelector(".code-lang")?.textContent).toBe("md");
+    const code = codeBlocks[0].querySelector("code");
+    expect(code?.textContent).toContain("<diff>");
+    expect(code?.textContent).toContain("</diff>");
+    // Surrounding prose is intact; the fence was not split apart.
+    expect(node.textContent).toContain("Explaining the review format:");
+    expect(node.textContent).toContain("Done.");
+  });
+
+  it("keeps a diff intact when its body contains fence-like context lines", () => {
+    // Reviewing a Markdown/TS file means the unified diff carries lines like a
+    // space-indented ``` (a context line). The Markdown lexer would treat that as
+    // a code fence and split the diff; extraction from raw text must not.
+    const review = [
+      "### Diff",
+      "",
+      "<diff>",
+      "diff --git a/README.md b/README.md",
+      "@@ -1,5 +1,5 @@",
+      " # Title",
+      " ",
+      " ```ts",
+      "-const a = 1;",
+      "+const a = 2;",
+      " ```",
+      " done",
+      "</diff>",
+      "",
+      "### Notes",
+    ].join("\n");
+
+    const node = renderMarkdown(review);
+
+    const codeBlocks = node.querySelectorAll(".code-block");
+    expect(codeBlocks.length).toBe(1);
+    expect(codeBlocks[0].querySelector(".code-lang")?.textContent).toBe("diff");
+    const code = codeBlocks[0].querySelector("code");
+    // Whole diff stayed in one block, including the fence-like context lines.
+    expect(code?.textContent).toContain("diff --git a/README.md b/README.md");
+    expect(code?.textContent).toContain("```ts");
+    expect(code?.textContent).toContain("-const a = 1;");
+    expect(code?.textContent).toContain("+const a = 2;");
+    expect(code?.textContent).toContain(" done");
+    // Headings on both sides render; nothing leaked or shredded.
+    expect([...node.querySelectorAll("h3")].map(h => h.textContent)).toEqual(["Diff", "Notes"]);
+    expect(node.textContent).not.toContain("<diff>");
+    expect(node.textContent).not.toContain("</diff>");
+  });
 });
 
 describe("renderCodeBlock", () => {

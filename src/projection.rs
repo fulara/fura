@@ -391,12 +391,10 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
         }
         Value::Array(items) => {
             let mut blocks = Vec::new();
-            let mut pending_text = String::new();
             for item in items {
                 let item_type = item.get("type").and_then(|value| value.as_str());
                 match item_type {
                     Some("thinking") => {
-                        flush_text_block(&mut blocks, &mut pending_text);
                         let thinking = item
                             .get("thinking")
                             .and_then(|value| value.as_str())
@@ -409,7 +407,6 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
                         }
                     }
                     Some("redactedThinking") => {
-                        flush_text_block(&mut blocks, &mut pending_text);
                         blocks.push(ContentBlock::RedactedThinking);
                     }
                     Some("text") | None => {
@@ -417,13 +414,13 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
                             .get("text")
                             .and_then(|value| value.as_str())
                             .unwrap_or("");
-                        if !pending_text.is_empty() {
-                            pending_text.push('\n');
+                        if !text.trim().is_empty() {
+                            blocks.push(ContentBlock::Text {
+                                text: text.to_string(),
+                            });
                         }
-                        pending_text.push_str(text);
                     }
                     Some("image") => {
-                        flush_text_block(&mut blocks, &mut pending_text);
                         let data = item
                             .get("data")
                             .and_then(|value| value.as_str())
@@ -450,26 +447,14 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
                             });
                         }
                     }
-                    // toolCall blocks are separate messages/events in the RPC event stream.
-                    // Unknown items may still be meaningful upstream, so they remain a text
-                    // merge boundary even when Fura does not render them directly.
-                    _ => flush_text_block(&mut blocks, &mut pending_text),
+                    // toolCall blocks arrive as separate messages/events in the RPC
+                    // event stream; other unknown item types are not rendered by Fura.
+                    _ => {}
                 }
             }
-            flush_text_block(&mut blocks, &mut pending_text);
             blocks
         }
         _ => Vec::new(),
-    }
-}
-
-fn flush_text_block(blocks: &mut Vec<ContentBlock>, pending_text: &mut String) {
-    if !pending_text.trim().is_empty() {
-        blocks.push(ContentBlock::Text {
-            text: std::mem::take(pending_text),
-        });
-    } else {
-        pending_text.clear();
     }
 }
 

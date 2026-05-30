@@ -444,7 +444,79 @@ export function renderMarkdown(text: string): HTMLElement {
   const wrapper = mkEl("div");
   wrapper.className = "markdown-body";
 
-  const tokens = marked.lexer(text.trim());
+  appendMarkdownWithDiffBlocks(wrapper, text.trim());
+
+  if (!wrapper.hasChildNodes() && text.trim()) {
+    const p = mkEl("p");
+    p.textContent = text.trim();
+    wrapper.append(p);
+  }
+
+  return wrapper;
+}
+
+// OMP's `/review` command embeds the raw unified diff inside `<diff>…</diff>`
+// tags rather than a fenced code block. Markdown would shred such a diff into
+// dozens of stray paragraphs/lists (every `-`, `@@`, and context line becomes
+// its own block, and blank context lines close the surrounding HTML block), so
+// extract those regions from the raw text and render them as a real diff code
+// block instead.
+//
+// The diff is pulled straight out of the source — never via the Markdown lexer —
+// because a unified diff routinely contains fence-like context lines (e.g. a
+// space-indented ``` from a reviewed Markdown file) that the lexer would
+// otherwise treat as a code fence and split the diff apart. The only thing the
+// lexer is consulted for is to leave a literal `<diff>` that lives inside a real
+// fenced code block untouched (see `fencedCodeRanges`).
+function appendMarkdownWithDiffBlocks(wrapper: HTMLElement, text: string): void {
+  const fences = fencedCodeRanges(text);
+  const insideFence = (index: number): boolean =>
+    fences.some(([start, end]) => index >= start && index < end);
+  const diffBlock = /<diff>\n([\s\S]*?)\n<\/diff>/g;
+  let cursor = 0;
+  for (let match = diffBlock.exec(text); match; match = diffBlock.exec(text)) {
+    // A `<diff>` opening inside a fenced code block is real code, not a review
+    // diff; leave it for the Markdown renderer to emit verbatim.
+    if (insideFence(match.index)) continue;
+    appendMarkdownTokens(wrapper, text.slice(cursor, match.index));
+    wrapper.append(renderCodeBlock("diff", match[1]));
+    cursor = diffBlock.lastIndex;
+  }
+  appendMarkdownTokens(wrapper, text.slice(cursor));
+}
+
+// Character ranges of fenced code blocks, in `text`'s own coordinates. This is a
+// deliberately small CommonMark-ish line scan rather than a reuse of the Markdown
+// lexer: the lexer normalises line endings, which would desync these offsets from
+// the raw text the `<diff>` regex runs against.
+function fencedCodeRanges(text: string): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  const opener = /^ {0,3}(`{3,}|~{3,})/;
+  const closer = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+  let offset = 0;
+  let open: { fence: string; start: number } | null = null;
+  for (const line of text.split("\n")) {
+    const lineStart = offset;
+    offset += line.length + 1; // account for the split "\n"
+    if (!open) {
+      const match = opener.exec(line);
+      if (match) open = { fence: match[1], start: lineStart };
+    } else {
+      const match = closer.exec(line);
+      if (match && match[1][0] === open.fence[0] && match[1].length >= open.fence.length) {
+        ranges.push([open.start, offset]);
+        open = null;
+      }
+    }
+  }
+  if (open) ranges.push([open.start, text.length]);
+  return ranges;
+}
+
+function appendMarkdownTokens(wrapper: HTMLElement, text: string): void {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  const tokens = marked.lexer(trimmed);
   const lastIndex = tokens.length - 1;
   tokens.forEach((token, index) => {
     // The final, still-streaming code fence is re-tokenized on every delta. Render it as
@@ -455,14 +527,6 @@ export function renderMarkdown(text: string): HTMLElement {
       : renderMarkdownToken(token);
     if (node) wrapper.append(node);
   });
-
-  if (!wrapper.hasChildNodes() && text.trim()) {
-    const p = mkEl("p");
-    p.textContent = text.trim();
-    wrapper.append(p);
-  }
-
-  return wrapper;
 }
 
 function renderMarkdownToken(token: Token): Node | null {
