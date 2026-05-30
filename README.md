@@ -120,6 +120,19 @@ FURA_TLS_KEY=/path/to/<machine>.<tailnet>.ts.net.key \
 ```
 
 
+### Detached restart helper
+
+```bash
+./restart-fura.sh
+```
+
+Defaults to restarting `./run-local-omp.sh` in the background. Pass a different launcher if needed, for example:
+
+```bash
+./restart-fura.sh run-local-with-tailscale.sh
+./restart-fura.sh --dry-run run-mock-rpc.sh -- --bind 127.0.0.1:38888
+```
+
 ### Mock RPC (no OMP required)
 
 ```bash
