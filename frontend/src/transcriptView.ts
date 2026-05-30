@@ -445,10 +445,16 @@ export function renderMarkdown(text: string): HTMLElement {
   wrapper.className = "markdown-body";
 
   const tokens = marked.lexer(text.trim());
-  for (const token of tokens) {
-    const node = renderMarkdownToken(token);
+  const lastIndex = tokens.length - 1;
+  tokens.forEach((token, index) => {
+    // The final, still-streaming code fence is re-tokenized on every delta. Render it as
+    // plain text until its closing ``` arrives, so we don't re-run syntax highlighting
+    // (which is O(n^2) over the message) on a block whose content changes every tick.
+    const node = token.type === "code" && index === lastIndex && isUnterminatedFence(token.raw)
+      ? renderCodeBlock((token as Tokens.Code).lang ?? "", (token as Tokens.Code).text, { highlight: false })
+      : renderMarkdownToken(token);
     if (node) wrapper.append(node);
-  }
+  });
 
   if (!wrapper.hasChildNodes() && text.trim()) {
     const p = mkEl("p");
@@ -672,8 +678,50 @@ function tokenText(token: Token): string {
   return "";
 }
 
-export function renderCodeBlock(lang: string, code: string): HTMLElement {
-  if (lang.trim().toLowerCase() === "mermaid") {
+type RenderCodeBlockOptions = { highlight?: boolean };
+
+const HIGHLIGHT_CACHE_LIMIT = 200;
+const highlightCache = new Map<string, { html: string; className: string }>();
+
+// Syntax highlighting dominates transcript render cost, and the streaming reconciler
+// rebuilds a message's whole body on every delta. Memoize by (lang, code) so already
+// settled code blocks are re-highlighted at most once instead of on every tick. LRU by
+// reinsertion: blocks read each tick stay warm; transient (growing-block) keys age out.
+function highlightToHtml(lang: string, code: string): { html: string; className: string } {
+  const key = `${lang}\u0000${code}`;
+  const cached = highlightCache.get(key);
+  if (cached) {
+    highlightCache.delete(key);
+    highlightCache.set(key, cached);
+    return cached;
+  }
+  const result = lang && hljs.getLanguage(lang)
+    ? { html: hljs.highlight(code, { language: lang }).value, className: `hljs language-${lang}` }
+    : { html: hljs.highlightAuto(code).value, className: "hljs" };
+  highlightCache.set(key, result);
+  if (highlightCache.size > HIGHLIGHT_CACHE_LIMIT) {
+    const oldest = highlightCache.keys().next().value;
+    if (oldest !== undefined) highlightCache.delete(oldest);
+  }
+  return result;
+}
+
+// A fenced block with no closing ``` yet is still streaming. An unterminated fence
+// always consumes the rest of the input, so it can only ever be the last token.
+function isUnterminatedFence(raw: string): boolean {
+  const opening = raw.match(/^(`{3,}|~{3,})/);
+  if (!opening) return false; // indented code block: complete by construction
+  const trimmed = raw.replace(/\s+$/, "");
+  const firstNewline = trimmed.indexOf("\n");
+  if (firstNewline === -1) return true; // only the opening fence typed so far
+  const lastLine = trimmed.slice(trimmed.lastIndexOf("\n") + 1).trim();
+  const closing = opening[1][0] === "`" ? /^`{3,}$/ : /^~{3,}$/;
+  return !closing.test(lastLine);
+}
+
+export function renderCodeBlock(lang: string, code: string, options: RenderCodeBlockOptions = {}): HTMLElement {
+  const highlight = options.highlight ?? true;
+  if (highlight && lang.trim().toLowerCase() === "mermaid") {
     return renderMermaidBlock(code);
   }
 
@@ -703,11 +751,13 @@ export function renderCodeBlock(lang: string, code: string): HTMLElement {
 
   const pre = mkEl("pre");
   const codeEl = mkEl("code");
-  if (lang && hljs.getLanguage(lang)) {
-    codeEl.innerHTML = hljs.highlight(code, { language: lang }).value;
-    codeEl.className = `hljs language-${lang}`;
+  if (highlight) {
+    const { html, className } = highlightToHtml(lang, code);
+    codeEl.innerHTML = html;
+    codeEl.className = className;
   } else {
-    codeEl.innerHTML = hljs.highlightAuto(code).value;
+    // Plain until the fence closes; keep the hljs surface so only token colors change later.
+    codeEl.textContent = code;
     codeEl.className = "hljs";
   }
   pre.append(codeEl);

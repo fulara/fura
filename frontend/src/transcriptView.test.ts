@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import hljs from "highlight.js/lib/common";
 import { messageText, renderBlock, renderCodeBlock, renderMarkdown, renderMessage, updateRenderedMessage } from "./transcriptView";
 import type { TranscriptMessage } from "./protocol";
 
@@ -362,6 +363,47 @@ describe("renderCodeBlock", () => {
     vi.runAllTimers();
     expect(button?.textContent).toBe("Copy");
     vi.useRealTimers();
+  });
+});
+
+describe("transcript code highlighting performance", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("re-highlights identical code at most once (memoized across renders)", () => {
+    const highlightSpy = vi.spyOn(hljs, "highlight");
+    // Unique content so other tests' cache entries cannot satisfy this one.
+    const code = "const memoizationProbe = 4242;";
+
+    renderCodeBlock("ts", code);
+    renderCodeBlock("ts", code);
+    renderCodeBlock("ts", code);
+
+    expect(highlightSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders the still-streaming trailing code fence as plain text", () => {
+    const highlightSpy = vi.spyOn(hljs, "highlight");
+    const highlightAutoSpy = vi.spyOn(hljs, "highlightAuto");
+
+    const node = renderMarkdown("intro\n\n```ts\nconst streamingProbe = 1;\nconst half =");
+    const codeEl = node.querySelector<HTMLElement>("pre code");
+
+    expect(codeEl?.textContent).toContain("const half =");
+    // Plain render: no highlight.js tokens (no <span>) and no highlighter invoked.
+    expect(codeEl?.querySelector("span")).toBeNull();
+    expect(highlightSpy).not.toHaveBeenCalled();
+    expect(highlightAutoSpy).not.toHaveBeenCalled();
+  });
+
+  it("highlights a closed code fence", () => {
+    const node = renderMarkdown("```ts\nconst closedProbe = 7;\n```");
+    const codeEl = node.querySelector<HTMLElement>("pre code");
+
+    expect(codeEl?.textContent).toContain("const closedProbe = 7;");
+    // Highlighted: highlight.js wraps keywords in spans.
+    expect(codeEl?.querySelector("span")).not.toBeNull();
   });
 });
 
