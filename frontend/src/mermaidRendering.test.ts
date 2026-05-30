@@ -159,6 +159,8 @@ describe("renderMermaidBlock", () => {
     document.body.append(node);
     node.querySelector<HTMLButtonElement>(".mermaid-action")?.click();
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(writeText).toHaveBeenCalledWith("flowchart LR\n  Source --> Preview");
     expect(node.querySelector<HTMLButtonElement>(".mermaid-action")?.textContent).toBe("Copied");

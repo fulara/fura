@@ -1,5 +1,5 @@
 import type { Mermaid } from "mermaid";
-import { mkEl } from "./dom";
+import { copyTextToClipboard, mkEl } from "./dom";
 
 export type MermaidRenderState = {
   source: string;
@@ -138,12 +138,8 @@ export function renderMermaidBlock(source: string): HTMLElement {
   copySource.textContent = "Copy source";
   copySource.addEventListener("click", async () => {
     copySource.disabled = true;
-    try {
-      await navigator.clipboard.writeText(source);
-      setButtonStatus(copySource, "Copied", wrapper.ownerDocument, "Copy source");
-    } catch {
-      setButtonStatus(copySource, "Copy unavailable", wrapper.ownerDocument, "Copy source");
-    }
+    const copied = await copyTextToClipboard(source, wrapper.ownerDocument);
+    setButtonStatus(copySource, copied ? "Copied" : "Copy unavailable", wrapper.ownerDocument, "Copy source");
   });
 
   const saveSvg = mkEl("button");

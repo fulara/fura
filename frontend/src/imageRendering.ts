@@ -60,12 +60,15 @@ function imageBlob(image: RenderableImage): Blob | null {
   }
 }
 
-async function copyImageToClipboard(image: RenderableImage): Promise<void> {
+async function copyImageToClipboard(image: RenderableImage, owner: Document): Promise<void> {
+  const view = owner.defaultView ?? window;
+  const clipboard = view.navigator?.clipboard;
+  const ClipboardItemCtor = view.ClipboardItem;
   const blob = imageBlob(image);
-  if (!blob || !navigator.clipboard || typeof ClipboardItem === "undefined") {
+  if (!blob || !clipboard?.write || typeof ClipboardItemCtor === "undefined") {
     throw new Error("Image clipboard is not supported in this browser.");
   }
-  await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })]);
+  await clipboard.write([new ClipboardItemCtor({ [blob.type]: blob })]);
 }
 
 export function renderImageAttachment(image: RenderableImage, className: string): HTMLElement {
@@ -147,7 +150,7 @@ export function openImageLightbox(image: RenderableImage, owner: Document = docu
   copy.addEventListener("click", async () => {
     copy.disabled = true;
     try {
-      await copyImageToClipboard(image);
+      await copyImageToClipboard(image, owner);
       copy.textContent = "Copied";
     } catch {
       copy.textContent = "Copy unavailable";
