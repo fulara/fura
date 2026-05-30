@@ -98,6 +98,8 @@ describe("renderMessage", () => {
     const button = node.querySelector<HTMLButtonElement>("header button");
     button?.click();
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
 
     expect(writeText).toHaveBeenCalledWith("Copy me");
     expect(button?.textContent).toBe("Copied");
@@ -350,6 +352,8 @@ describe("renderCodeBlock", () => {
     expect(button).not.toBeNull();
 
     button?.click();
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
 
     expect(writeText).toHaveBeenCalledWith("const answer = 42;");

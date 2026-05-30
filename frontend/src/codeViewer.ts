@@ -1,5 +1,5 @@
 import hljs from "highlight.js/lib/common";
-import { setRenderDocument, mkEl } from "./dom";
+import { setRenderDocument, mkEl, copyTextToClipboard } from "./dom";
 import type { CodeFileComment } from "./codeComments";
 import type { CodeFileContent, CodeWorkspaceSummary } from "./protocol";
 
@@ -357,9 +357,10 @@ function renderCodeMain(state: CodeViewerState, actions: CodeViewerActions): HTM
   copy.type = "button";
   copy.textContent = "Copy";
   copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(state.file?.text ?? "");
-    copy.textContent = "Copied";
-    window.setTimeout(() => { copy.textContent = "Copy"; }, 900);
+    const owner = copy.ownerDocument;
+    const copied = await copyTextToClipboard(state.file?.text ?? "", owner);
+    copy.textContent = copied ? "Copied" : "Copy failed";
+    (owner.defaultView ?? window).setTimeout(() => { copy.textContent = "Copy"; }, 900);
   });
 
   actionsBar.append(preview, flush, copy);

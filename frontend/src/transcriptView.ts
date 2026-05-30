@@ -1,6 +1,6 @@
 import hljs from "highlight.js/lib/common";
 import { marked, type Token, type Tokens } from "marked";
-import { mkEl, mkFrag, mkText } from "./dom";
+import { copyTextToClipboard, mkEl, mkFrag, mkText } from "./dom";
 import { appendEventTimestamp } from "./eventTime";
 import { imagePlaceholderText, renderImageAttachment } from "./imageRendering";
 import { renderMermaidBlock } from "./mermaidRendering";
@@ -102,9 +102,10 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
   copy.type = "button";
   copy.textContent = "Copy";
   copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(messageText(renderedMessageState.get(article)?.message ?? message));
-    copy.textContent = "Copied";
-    window.setTimeout(() => {
+    const owner = article.ownerDocument;
+    const copied = await copyTextToClipboard(messageText(renderedMessageState.get(article)?.message ?? message), owner);
+    copy.textContent = copied ? "Copied" : "Copy failed";
+    (owner.defaultView ?? window).setTimeout(() => {
       copy.textContent = "Copy";
     }, 900);
   });
@@ -691,9 +692,10 @@ export function renderCodeBlock(lang: string, code: string): HTMLElement {
   copyBtn.className = "code-copy";
   copyBtn.textContent = "Copy";
   copyBtn.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(code);
-    copyBtn.textContent = "Copied";
-    window.setTimeout(() => { copyBtn.textContent = "Copy"; }, 900);
+    const owner = wrapper.ownerDocument;
+    const copied = await copyTextToClipboard(code, owner);
+    copyBtn.textContent = copied ? "Copied" : "Copy failed";
+    (owner.defaultView ?? window).setTimeout(() => { copyBtn.textContent = "Copy"; }, 900);
   });
 
   header.append(langLabel, copyBtn);
