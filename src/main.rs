@@ -367,12 +367,14 @@ fn log_server_ready(
         );
     }
     if let Some(path) = state.bridge_debug_file.as_ref() {
+        rotate_debug_log(path);
         warn!(
             path = %path.display(),
             "bridge debug file is enabled; raw RPC frames may include prompts, file contents, command output, and secrets"
         );
     }
     if let Some(path) = state.event_debug_file.as_ref() {
+        rotate_debug_log(path);
         warn!(
             path = %path.display(),
             "event debug file is enabled; large text fields are truncated but prompts and previews may still include sensitive data"

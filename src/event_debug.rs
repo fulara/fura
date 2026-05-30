@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::path::Path;
 
 use serde_json::{Map, Value, json};
@@ -8,6 +9,122 @@ use crate::{
     AppState, ClientMessage, ContentBlock, ServerMessage, SessionProjection,
     SessionProjectionDelta, Timestamp, TranscriptEntry,
 };
+
+/// Number of rotated copies retained per debug log file.
+const ROTATED_LOG_RETENTION: usize = 5;
+
+/// Rotate an existing debug log into a sibling `rotated-logs/` directory.
+///
+/// Called once per file at startup, before the first append, so each Fura run
+/// starts a fresh log while the previous run is preserved. Best-effort: every
+/// failure is logged via `warn!` and swallowed so it can never abort startup.
+/// A missing or empty file is a no-op (we never create empty rotations).
+pub(crate) fn rotate_debug_log(path: &Path) {
+    match std::fs::metadata(path) {
+        // Skip empty files so the very first run does not stash a 0-byte copy.
+        Ok(metadata) if metadata.len() == 0 => return,
+        Ok(_) => {}
+        // No file yet: nothing to rotate, and not an error worth logging.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        // Any other failure (permissions, I/O) must surface, never silently skip.
+        Err(error) => {
+            warn!(path = %path.display(), %error, "failed to inspect debug log; skipping rotation");
+            return;
+        }
+    }
+
+    let Some(file_name) = path.file_name() else {
+        warn!(path = %path.display(), "debug log path has no file name; skipping rotation");
+        return;
+    };
+
+    let rotated_dir = match path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        Some(parent) => parent.join("rotated-logs"),
+        None => std::path::PathBuf::from("rotated-logs"),
+    };
+    if let Err(error) = std::fs::create_dir_all(&rotated_dir) {
+        warn!(dir = %rotated_dir.display(), %error, "failed to create rotated debug log directory");
+        return;
+    }
+
+    // Zero-pad millis to the full width of u64 so a lexicographic sort over the
+    // rotated names matches chronological order, keeping `sort()` pruning correct.
+    let mut rotated_name = file_name.to_os_string();
+    rotated_name.push(format!(".{:020}", Timestamp::now().millis()));
+    let rotated_path = rotated_dir.join(&rotated_name);
+    if let Err(error) = move_file(path, &rotated_path) {
+        warn!(
+            from = %path.display(),
+            to = %rotated_path.display(),
+            %error,
+            "failed to rotate debug log"
+        );
+        return;
+    }
+
+    prune_rotated_logs(&rotated_dir, file_name);
+}
+
+/// Move `from` to `to`, falling back to copy+remove when `rename` fails (e.g.
+/// the rotated directory lives on a different mount than the original file).
+fn move_file(from: &Path, to: &Path) -> std::io::Result<()> {
+    match std::fs::rename(from, to) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            std::fs::copy(from, to)?;
+            std::fs::remove_file(from)
+        }
+    }
+}
+
+/// Keep only the `ROTATED_LOG_RETENTION` newest rotations of `file_name`,
+/// deleting the oldest. Rotated names are `<file_name>.<zero-padded millis>`, so
+/// a plain lexicographic sort yields chronological order.
+fn prune_rotated_logs(dir: &Path, file_name: &OsStr) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) => {
+            warn!(dir = %dir.display(), %error, "failed to list rotated debug logs");
+            return;
+        }
+    };
+
+    let mut rotated: Vec<std::path::PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|entry_path| is_rotation_of(entry_path, file_name))
+        .collect();
+
+    if rotated.len() <= ROTATED_LOG_RETENTION {
+        return;
+    }
+
+    rotated.sort();
+    let stale_count = rotated.len() - ROTATED_LOG_RETENTION;
+    for stale in rotated.into_iter().take(stale_count) {
+        if let Err(error) = std::fs::remove_file(&stale) {
+            warn!(path = %stale.display(), %error, "failed to remove stale rotated debug log");
+        }
+    }
+}
+
+/// A rotation of `base` is exactly `<base>.<digits>`: the stem equals the
+/// original file name and the extension is the all-digit millisecond suffix this
+/// module writes. Matching on this structure (rather than a `<base>.` text
+/// prefix) keeps two configured logs whose names share a dotted prefix from
+/// colliding, and works for non-UTF-8 file names.
+fn is_rotation_of(entry: &Path, base: &OsStr) -> bool {
+    entry.file_stem() == Some(base)
+        && entry
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                !extension.is_empty() && extension.bytes().all(|byte| byte.is_ascii_digit())
+            })
+}
 
 const PREVIEW_CHARS: usize = 100;
 
@@ -460,4 +577,193 @@ pub(crate) async fn append_event_debug_server_message(state: &AppState, message:
     };
     let record = summarize_server_event(message);
     append_jsonl(path, &record).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{env, fs};
+    use uuid::Uuid;
+
+    fn unique_temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = env::temp_dir().join(format!("fura-rotate-{label}-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
+
+    #[test]
+    fn rotate_debug_log_moves_nonempty_file_into_rotated_logs() {
+        let dir = unique_temp_dir("move");
+        let log_path = dir.join("bridge-debug.jsonl");
+        fs::write(&log_path, b"frame-one\nframe-two\n").expect("log should be written");
+
+        rotate_debug_log(&log_path);
+
+        assert!(!log_path.exists(), "original log should be moved away");
+
+        let rotated: Vec<std::path::PathBuf> = fs::read_dir(dir.join("rotated-logs"))
+            .expect("rotated-logs should exist")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        assert_eq!(
+            rotated.len(),
+            1,
+            "exactly one rotation expected: {rotated:?}"
+        );
+
+        let name = rotated[0]
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("rotated name");
+        assert!(
+            name.starts_with("bridge-debug.jsonl."),
+            "rotation should keep the prefix: {name}"
+        );
+        assert_eq!(
+            fs::read(&rotated[0]).expect("rotated content"),
+            b"frame-one\nframe-two\n",
+            "rotated content should be preserved verbatim"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_debug_log_is_noop_for_empty_or_missing_file() {
+        let dir = unique_temp_dir("noop");
+        let rotated_dir = dir.join("rotated-logs");
+
+        // Empty file: left in place, no rotated-logs directory created.
+        let empty_path = dir.join("event-debug.jsonl");
+        fs::write(&empty_path, b"").expect("empty log should be written");
+        rotate_debug_log(&empty_path);
+        assert!(empty_path.exists(), "empty log should be left untouched");
+        assert!(
+            !rotated_dir.exists(),
+            "no rotated-logs directory should be created for an empty file"
+        );
+
+        // Missing file: nothing created.
+        let missing_path = dir.join("missing.jsonl");
+        rotate_debug_log(&missing_path);
+        assert!(!missing_path.exists(), "missing log should stay absent");
+        assert!(
+            !rotated_dir.exists(),
+            "no rotated-logs directory should be created for a missing file"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_debug_log_retains_only_five_newest_rotations() {
+        let dir = unique_temp_dir("retain");
+        let rotated_dir = dir.join("rotated-logs");
+        fs::create_dir_all(&rotated_dir).expect("rotated-logs dir should be created");
+
+        let file_name = "bridge-debug.jsonl";
+        // Seed seven existing rotations with fixed, lexicographically sortable
+        // names. Ordering is driven purely by the embedded counter, never sleeps.
+        for index in 1..=7u64 {
+            fs::write(
+                rotated_dir.join(format!("{file_name}.{index:020}")),
+                format!("seed-{index}"),
+            )
+            .expect("seed rotation should be written");
+        }
+
+        // A non-empty current log triggers an eighth, newest rotation: its real
+        // millis timestamp sorts after every fixed-width seed counter.
+        let log_path = dir.join(file_name);
+        fs::write(&log_path, b"current-run\n").expect("current log should be written");
+        rotate_debug_log(&log_path);
+
+        let prefix = format!("{file_name}.");
+        let retained: Vec<String> = fs::read_dir(&rotated_dir)
+            .expect("rotated-logs should exist")
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .filter(|name| name.starts_with(&prefix))
+            .collect();
+        assert_eq!(
+            retained.len(),
+            ROTATED_LOG_RETENTION,
+            "only the five newest rotations should remain: {retained:?}"
+        );
+
+        // The three oldest seeds are pruned; seeds 4..=7 survive alongside the
+        // freshly rotated current run.
+        for index in 1..=3u64 {
+            assert!(
+                !rotated_dir
+                    .join(format!("{file_name}.{index:020}"))
+                    .exists(),
+                "oldest rotation {index} should be removed"
+            );
+        }
+        for index in 4..=7u64 {
+            assert!(
+                rotated_dir
+                    .join(format!("{file_name}.{index:020}"))
+                    .exists(),
+                "recent rotation {index} should be retained"
+            );
+        }
+        assert!(!log_path.exists(), "current log should be rotated away");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotate_debug_log_prunes_only_structural_rotations() {
+        let dir = unique_temp_dir("match");
+        let rotated_dir = dir.join("rotated-logs");
+        fs::create_dir_all(&rotated_dir).expect("rotated-logs dir should be created");
+
+        let file_name = "bridge-debug.jsonl";
+        // Six real rotations: with the fresh one this exceeds retention by two.
+        for index in 1..=6u64 {
+            fs::write(rotated_dir.join(format!("{file_name}.{index:020}")), "seed")
+                .expect("seed rotation should be written");
+        }
+        // Unrelated siblings that must never be counted or pruned: a non-digit
+        // extension, and another log's rotation whose stem differs.
+        let non_digit = rotated_dir.join(format!("{file_name}.bak"));
+        let other_log = rotated_dir.join(format!("fura-events.jsonl.{:020}", 1u64));
+        fs::write(&non_digit, "keep").expect("sibling should be written");
+        fs::write(&other_log, "keep").expect("sibling should be written");
+
+        let log_path = dir.join(file_name);
+        fs::write(&log_path, b"current-run\n").expect("current log should be written");
+        rotate_debug_log(&log_path);
+
+        // 6 seeds + 1 fresh = 7 matching rotations -> the two oldest are pruned.
+        assert!(
+            !rotated_dir
+                .join(format!("{file_name}.{:020}", 1u64))
+                .exists(),
+            "oldest matching rotation should be removed"
+        );
+        assert!(
+            !rotated_dir
+                .join(format!("{file_name}.{:020}", 2u64))
+                .exists(),
+            "second oldest matching rotation should be removed"
+        );
+        assert!(
+            non_digit.exists(),
+            "non-digit-extension sibling must not be treated as a rotation"
+        );
+        assert!(
+            other_log.exists(),
+            "another log's rotation must not be pruned by this file"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
 }

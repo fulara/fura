@@ -9,6 +9,7 @@
 /bridge-debug*.jsonl
 /fura-events*.jsonl
 /fura-restart.log
+rotated-logs/
 
 /.cert
 
