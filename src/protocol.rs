@@ -899,8 +899,6 @@ pub(crate) enum ClientMessage {
         content: String,
         approval_mode: Option<PlanApprovalMode>,
     },
-    #[serde(rename = "plan.discuss")]
-    PlanDiscuss { session_id: String },
     #[serde(rename = "raw.rpc")]
     RawRpc { session_id: String, command: Value },
     #[serde(rename = "review.comments.list")]

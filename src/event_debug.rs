@@ -43,7 +43,6 @@ fn append_usize_field(record: &mut Map<String, Value>, key: &str, value: usize) 
 fn append_plan_mode_summary(record: &mut Map<String, Value>, plan_mode: Option<&Value>) {
     if let Some(plan_mode) = plan_mode.and_then(Value::as_object) {
         append_bool_field(record, "planModeEnabled", plan_mode.get("enabled"));
-        append_bool_field(record, "planModeDiscussion", plan_mode.get("discussion"));
         append_string_field(record, "planModeWorkflow", plan_mode.get("workflow"));
     }
 }
@@ -99,10 +98,6 @@ fn first_transcript_text(entries: &[TranscriptEntry]) -> Option<&str> {
 fn append_projection_plan_summary(record: &mut Map<String, Value>, projection: &SessionProjection) {
     if let Some(plan_mode) = projection.plan_mode.as_ref() {
         record.insert("planModeEnabled".to_string(), json!(plan_mode.enabled));
-        record.insert(
-            "planModeDiscussion".to_string(),
-            json!(plan_mode.discussion),
-        );
         if let Some(workflow) = plan_mode.workflow.as_ref() {
             record.insert("planModeWorkflow".to_string(), json!(workflow));
         }
@@ -123,10 +118,6 @@ fn append_projection_plan_summary(record: &mut Map<String, Value>, projection: &
 fn append_delta_plan_summary(record: &mut Map<String, Value>, delta: &SessionProjectionDelta) {
     if let Some(plan_mode) = delta.plan_mode.as_ref() {
         record.insert("planModeEnabled".to_string(), json!(plan_mode.enabled));
-        record.insert(
-            "planModeDiscussion".to_string(),
-            json!(plan_mode.discussion),
-        );
         if let Some(workflow) = plan_mode.workflow.as_ref() {
             record.insert("planModeWorkflow".to_string(), json!(workflow));
         }
@@ -220,11 +211,6 @@ pub(crate) fn summarize_rpc_event(session_id: &str, raw_line: &str) -> Map<Strin
 
 pub(crate) fn summarize_client_event(message: &ClientMessage) -> Map<String, Value> {
     let record = match message {
-        ClientMessage::PlanDiscuss { session_id } => {
-            let mut record = event_record("client_to_bridge", "plan.discuss");
-            insert_session_id(&mut record, session_id);
-            record
-        }
         ClientMessage::PlanApprove {
             session_id,
             plan_file_path,

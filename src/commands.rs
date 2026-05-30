@@ -359,7 +359,6 @@ pub(crate) async fn handle_client_message(
             )
             .await
         }
-        ClientMessage::PlanDiscuss { session_id } => handle_plan_discuss(state, session_id).await,
         ClientMessage::RawRpc {
             session_id,
             mut command,
@@ -1011,18 +1010,6 @@ async fn handle_plan_approve(
 
 fn short_session_id(session_id: &str) -> String {
     session_id.chars().take(8).collect()
-}
-
-async fn handle_plan_discuss(state: &AppState, session_id: String) -> Vec<ServerMessage> {
-    info!(action = "plan.discuss", session_id = %session_id);
-    let command = discuss_plan_mode_command(next_rpc_id());
-    match send_rpc_command(state, &session_id, command).await {
-        Ok(()) => Vec::new(),
-        Err(message) => vec![ServerMessage::Error {
-            request_id: None,
-            message,
-        }],
-    }
 }
 
 pub(crate) async fn set_session_category(

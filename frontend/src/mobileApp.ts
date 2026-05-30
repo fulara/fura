@@ -65,9 +65,7 @@ import {
 } from "./transcriptReview";
 import {
   buildPlanReviewPrompt,
-  buildMoveBackToPlanPrompt,
   createApprovePlanReviewMessage,
-  createDiscussPlanReviewMessage,
   pendingPlanReviewFromMessage,
   renderPlanReviewCard,
   planReviewTranscriptMessage,
@@ -636,7 +634,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
     if ((!text && pendingImages.length === 0) || !activeSessionId) return;
-    if (hasPendingPlanReview(activeSessionId)) return;
     sendPromptWithBusyHandling({
       sessionId: activeSessionId,
       text,
@@ -956,9 +953,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     unreadSessions.add(message.sessionId);
     renderSessions();
   }
-  function hasPendingPlanReview(sessionId: string): boolean {
-    return visiblePlanReviews.get(sessionId)?.mode === "pending";
-  }
 
   function samePendingPlanReview(left: PendingPlanReview, right: PendingPlanReview): boolean {
     return left.sessionId === right.sessionId
@@ -987,11 +981,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
     const existing = visiblePlanReviews.get(sessionId);
-    const mode: VisiblePlanReview["mode"] = projection.planMode?.discussion
-      ? "discussing"
-      : existing && existing.mode !== "pending" && samePendingPlanReview(existing.review, pending)
-        ? existing.mode
-        : "pending";
+    const mode: VisiblePlanReview["mode"] = existing && existing.mode === "refining" && samePendingPlanReview(existing.review, pending)
+      ? "refining"
+      : "pending";
     visiblePlanReviews.set(sessionId, { review: pending, mode });
   }
 
@@ -1026,24 +1018,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (activeSessionId === review.sessionId) promptInput.focus();
   }
 
-  function discussPendingPlanReview(review: PendingPlanReview): void {
-    const accepted = send(createDiscussPlanReviewMessage(review));
-    if (!accepted) return;
-    visiblePlanReviews.set(review.sessionId, { review, mode: "discussing" });
-    renderActiveSession();
-    if (activeSessionId === review.sessionId) promptInput.focus();
-  }
-
-  function moveBackToPlanReview(review: PendingPlanReview): void {
-    const accepted = send(createPromptSendMessage(
-      review.sessionId,
-      buildMoveBackToPlanPrompt(review),
-      [],
-      "followUp",
-    ));
-    if (!accepted) return;
-    if (activeSessionId === review.sessionId) promptInput.focus();
-  }
   function renderBusyPromptChoice(): void {
     const draft = busyPromptDraft;
     const shouldShow = Boolean(draft && draft.sessionId === activeSessionId);
@@ -1449,10 +1423,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const projection = projections.get(activeSessionId);
     const summary = sessions.find(session => session.sessionId === activeSessionId);
     const isBusy = projection?.isBusy ?? summary?.status === "busy";
-    const hasPendingPlan = hasPendingPlanReview(activeSessionId);
-    if (hasPendingPlan) {
-      composerStatus.textContent = "Plan review waiting";
-    } else if (isBusy) {
+    if (isBusy) {
       composerStatus.textContent = "Agent busy";
     } else if (pendingImages.length > 0) {
       composerStatus.textContent = `${pendingImages.length} image${pendingImages.length === 1 ? "" : "s"} attached`;
@@ -2245,16 +2216,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     const isBusy = projection?.isBusy ?? summary.status === "busy";
-    const hasPendingPlan = hasPendingPlanReview(activeSessionId);
     sessionTitle.textContent = summary.title || `Session ${shortId(summary.sessionId)}`;
     sessionMeta.hidden = true;
     sessionMeta.textContent = "";
     updateMobileStatusBar(projection, summary);
-    promptInput.disabled = !projection || hasPendingPlan;
-    sendButton.disabled = !projection || hasPendingPlan;
-    imageInput.disabled = !projection || hasPendingPlan;
+    promptInput.disabled = !projection;
+    sendButton.disabled = !projection;
+    imageInput.disabled = !projection;
     renderMobileImagePreviews();
-    promptInput.placeholder = hasPendingPlan ? "Choose Approve and execute, Refine plan, or Discuss plan first…" : "Send a prompt…";
+    promptInput.placeholder = "Send a prompt…";
     updateComposerStatus();
     renderTranscript(projection);
     renderBusyPromptChoice();
@@ -2333,8 +2303,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         {
           onApprove: approvePendingPlanReview,
           onRefine: refinePendingPlanReview,
-          onDiscuss: discussPendingPlanReview,
-          onBackToPlan: moveBackToPlanReview,
         },
         visiblePlanReview.mode,
         visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,

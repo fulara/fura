@@ -2217,10 +2217,6 @@ h2 {
   background: rgba(127, 140, 255, 0.12);
 }
 
-.plan-review-discuss {
-  border-color: rgba(120, 208, 255, 0.45);
-  background: rgba(120, 208, 255, 0.12);
-}
 
 .prompt-form {
   display: grid;

@@ -280,7 +280,6 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::ConflictFileStageResolved { .. } => "conflict.file.stageResolved",
         ClientMessage::ConflictAgentRun { .. } => "conflict.agent.run",
         ClientMessage::PlanApprove { .. } => "plan.approve",
-        ClientMessage::PlanDiscuss { .. } => "plan.discuss",
         ClientMessage::RawRpc { .. } => "raw.rpc",
         ClientMessage::ReviewCommentsList { .. } => "review.comments.list",
         ClientMessage::ReviewCommentCreate { .. } => "review.comment.create",
@@ -322,8 +321,7 @@ fn client_message_debug_fields(
         | ClientMessage::StateRefresh { session_id }
         | ClientMessage::PromptAbort { session_id }
         | ClientMessage::ModelList { session_id }
-        | ClientMessage::CodeWorkspaceOpen { session_id }
-        | ClientMessage::PlanDiscuss { session_id } => {
+        | ClientMessage::CodeWorkspaceOpen { session_id } => {
             fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
         }
         ClientMessage::SessionDelete {
@@ -460,7 +458,6 @@ fn dialog_owner_session_id(message: &ClientMessage) -> Option<&str> {
         ClientMessage::SessionAttach { session_id }
         | ClientMessage::PromptSend { session_id, .. }
         | ClientMessage::PlanApprove { session_id, .. }
-        | ClientMessage::PlanDiscuss { session_id }
         | ClientMessage::DialogRespond { session_id, .. }
         | ClientMessage::ModelSet { session_id, .. }
         | ClientMessage::GoalStart { session_id, .. }

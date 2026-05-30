@@ -583,7 +583,7 @@ pub(crate) mod tests {
         assert!(record.goal_mode.is_none());
     }
     #[test]
-    fn rpc_state_update_keeps_pending_plan_while_discussing() {
+    fn rpc_state_update_keeps_pending_plan_while_plan_mode_active() {
         let mut record = test_record();
         record.pending_plan_review = Some(PendingPlanReviewProjection {
             plan_file_path: "local://PLAN.md".to_string(),
@@ -605,7 +605,6 @@ pub(crate) mod tests {
                 enabled: true,
                 plan_file_path: "local://PLAN.md".to_string(),
                 workflow: Some("parallel".to_string()),
-                discussion: true,
             })),
             None,
             None,
@@ -613,7 +612,7 @@ pub(crate) mod tests {
 
         assert!(
             record.pending_plan_review.is_some(),
-            "discussion mode still needs pending plan content to render the plan card"
+            "plan mode still needs pending plan content to render the plan card"
         );
     }
 
@@ -640,7 +639,6 @@ pub(crate) mod tests {
                 enabled: false,
                 plan_file_path: "local://PLAN.md".to_string(),
                 workflow: Some("parallel".to_string()),
-                discussion: false,
             })),
             None,
             None,
@@ -1208,9 +1206,6 @@ pub(crate) mod tests {
                 true,
                 false,
             ),
-            "command-discuss-plan-mode" => {
-                discuss_plan_mode_command("cmd-plan-discuss-1".to_string())
-            }
             "command-goal-mode-create" => goal_mode_command(
                 "cmd-goal-create-1".to_string(),
                 "create",
@@ -1321,7 +1316,7 @@ pub(crate) mod tests {
                         .expect("get_available_models data should decode");
                         assert!(!data.models.is_empty());
                     }
-                    "set_plan_mode" | "discuss_plan_mode" => {
+                    "set_plan_mode" => {
                         let data: OmpPlanModeResponse = response
                             .data_as()
                             .expect("plan mode response data should decode");
@@ -2204,7 +2199,6 @@ pub(crate) mod tests {
             enabled: true,
             plan_file_path: "local://PLAN.md".to_string(),
             workflow: Some("parallel".to_string()),
-            discussion: false,
         });
         state
             .sessions
@@ -2422,59 +2416,6 @@ pub(crate) mod tests {
         assert!(text.contains("# Approved plan: APPROVED"));
         assert!(text.contains("# Approved plan"));
         assert!(text.contains("Approved artifact: `local://APPROVED.md`"));
-    }
-
-    #[tokio::test]
-    async fn discuss_plan_mode_response_marks_projection_as_discussing() {
-        let state = test_state(8, None);
-        let mut record = test_record();
-        record.plan_mode = Some(PlanModeProjection {
-            enabled: true,
-            plan_file_path: "local://PLAN.md".to_string(),
-            workflow: Some("parallel".to_string()),
-            discussion: false,
-        });
-        state
-            .sessions
-            .write()
-            .await
-            .insert("s1".to_string(), record);
-        map_test_transport(&state, "transport-1", "s1").await;
-        let mut events = state.events.subscribe();
-
-        apply_rpc_response(
-            &state,
-            "transport-1",
-            &serde_json::json!({
-                "type": "response",
-                "command": "discuss_plan_mode",
-                "success": true,
-                "data": {
-                    "planMode": {
-                        "enabled": true,
-                        "planFilePath": "local://PLAN.md",
-                        "workflow": "parallel",
-                        "discussion": false
-                    }
-                }
-            }),
-        )
-        .await;
-
-        match events.recv().await.expect("discussion snapshot event") {
-            ServerMessage::SessionSnapshot { session_id, state } => {
-                assert_eq!(session_id, "s1");
-                let plan_mode = state.plan_mode.expect("plan mode should remain active");
-                assert!(plan_mode.enabled);
-                assert_eq!(plan_mode.plan_file_path, "local://PLAN.md");
-                assert_eq!(plan_mode.workflow.as_deref(), Some("parallel"));
-                assert!(
-                    plan_mode.discussion,
-                    "Fura must own discussion state even when OMP returns discussion=false"
-                );
-            }
-            other => panic!("unexpected event: {other:?}"),
-        }
     }
 
     #[tokio::test]

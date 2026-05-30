@@ -5,7 +5,7 @@ import type { ClientMessage, PlanApprovalMode, ServerMessage, TranscriptMessage 
 
 export type PlanReviewMessage = Extract<ServerMessage, { type: "plan.review" }>;
 export type PendingPlanReview = Omit<PlanReviewMessage, "type">;
-export type PlanReviewMode = "pending" | "refining" | "discussing";
+export type PlanReviewMode = "pending" | "refining";
 export type VisiblePlanReview = { review: PendingPlanReview; mode: PlanReviewMode };
 type PlanReviewLineReviewOptions = {
   active: boolean;
@@ -41,12 +41,6 @@ export function createApprovePlanReviewMessage(review: PendingPlanReview, approv
   };
 }
 
-export function createDiscussPlanReviewMessage(review: PendingPlanReview): ClientMessage {
-  return {
-    type: "plan.discuss",
-    sessionId: review.sessionId,
-  };
-}
 
 export function planReviewRenderKey(review: PendingPlanReview, mode: PlanReviewMode = "pending"): string {
   return [mode, review.sessionId, review.planFilePath, review.finalPlanFilePath, review.title ?? "", review.content].join("\u0000");
@@ -71,25 +65,12 @@ export function buildPlanReviewPrompt(review: PendingPlanReview, comments: Trans
   });
 }
 
-export function buildMoveBackToPlanPrompt(review: PendingPlanReview): string {
-  const planPath = review.planFilePath || "the current plan file";
-  return [
-    "We are done discussing the current plan.",
-    "Review only the conversation that happened after you presented the current plan for approval.",
-    "Decide whether that discussion requires changes to the plan.",
-    `If changes are needed, update ${planPath}; otherwise leave it unchanged.`,
-    "Then present the final plan for approval again using the normal plan-mode approval flow.",
-    "Do not begin implementation.",
-  ].join(" ");
-}
 
 export function renderPlanReviewCard(
   review: PendingPlanReview,
   actions: {
     onApprove: (review: PendingPlanReview, approvalMode: PlanApprovalMode) => void;
     onRefine: (review: PendingPlanReview) => void;
-    onDiscuss: (review: PendingPlanReview) => void;
-    onBackToPlan: (review: PendingPlanReview) => void;
   },
   mode: PlanReviewMode = "pending",
   lineReview?: PlanReviewLineReviewOptions,
@@ -97,7 +78,7 @@ export function renderPlanReviewCard(
   const card = mkEl("section");
   card.className = `plan-review-card plan-review-${mode}`;
   card.setAttribute("role", "region");
-  card.setAttribute("aria-label", mode === "pending" ? "Plan ready for review" : mode === "refining" ? "Plan available while refining" : "Plan available while discussing");
+  card.setAttribute("aria-label", mode === "pending" ? "Plan ready for review" : "Plan available while refining");
 
   const header = mkEl("header");
   const headingGroup = mkEl("div");
@@ -107,9 +88,7 @@ export function renderPlanReviewCard(
   const title = mkEl("h3");
   title.textContent = mode === "pending"
     ? review.title ? `Plan ready: ${review.title}` : "Plan ready"
-    : mode === "refining"
-      ? review.title ? `Refining plan: ${review.title}` : "Refining plan"
-      : review.title ? `Discussing plan: ${review.title}` : "Discussing plan";
+    : review.title ? `Refining plan: ${review.title}` : "Refining plan";
   headingGroup.append(kicker, title);
 
   const meta = mkEl("p");
@@ -121,10 +100,8 @@ export function renderPlanReviewCard(
   body.className = "plan-review-body";
   const explanation = mkEl("p");
   explanation.textContent = mode === "pending"
-    ? "This session is waiting for your plan decision. Execute starts a fresh execution session; compact keeps the current session but distills planning context first; keep context executes in this session without compaction."
-    : mode === "refining"
-      ? "Use the composer below to tell the agent what to change. This plan stays visible as reference while you refine it."
-      : "Use the composer below to ask questions about the plan. The agent should discuss it without rewriting the plan unless you ask for changes.";
+    ? "This session is waiting for your plan decision. Execute starts a fresh execution session; compact keeps the current session but distills planning context first; keep context executes in this session without compaction. You can also ask questions in the composer while the plan stays visible."
+    : "Use the composer below to tell the agent what to change. This plan stays visible as reference while you refine it.";
 
   const details = mkEl("details");
   details.open = true;
@@ -171,27 +148,13 @@ export function renderPlanReviewCard(
     refine.textContent = "Refine plan";
     refine.addEventListener("click", () => actions.onRefine(review));
 
-    const discuss = mkEl("button");
-    discuss.type = "button";
-    discuss.className = "plan-review-discuss";
-    discuss.textContent = "Discuss plan";
-    discuss.addEventListener("click", () => actions.onDiscuss(review));
-    footer.append(approve, compact, keep, refine, discuss);
+    footer.append(approve, compact, keep, refine);
   } else {
     const status = mkEl("p");
     status.className = "plan-review-refining-status";
-    status.textContent = mode === "refining"
-      ? "Refinement mode: write the changes you want in the prompt composer."
-      : "Discussion mode: ask questions about the plan in the prompt composer.";
+    status.textContent = "Refinement mode: write the changes you want in the prompt composer.";
 
-    const back = mkEl("button");
-    back.type = "button";
-    back.className = "plan-review-back-to-plan";
-    back.textContent = "Move back to plan";
-    back.title = "Return to the plan decision state with approve, refine, and discuss actions.";
-    back.addEventListener("click", () => actions.onBackToPlan(review));
-
-    footer.append(status, back);
+    footer.append(status);
   }
 
   card.append(header, body, footer);

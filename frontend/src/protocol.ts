@@ -132,7 +132,6 @@ export type PlanModeProjection = {
   enabled: boolean;
   planFilePath: string;
   workflow?: string | null;
-  discussion?: boolean;
 };
 
 export type PendingPlanReviewProjection = {
@@ -757,7 +756,6 @@ export type ClientMessage =
       content: string;
       approvalMode?: PlanApprovalMode;
     }
-  | { type: "plan.discuss"; sessionId: string }
   | { type: "raw.rpc"; sessionId: string; command: unknown }
   | { type: "review.comments.list"; sessionId: string; comparisonKey?: string | null }
   | { type: "review.comment.create"; sessionId: string; repoRoot: string; comparisonKey: string; anchor: DiffLineLocation; body: string }

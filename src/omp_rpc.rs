@@ -200,7 +200,6 @@ pub(crate) struct OmpPlanModeState {
     pub(crate) plan_file_path: Option<String>,
     pub(crate) workflow: Option<String>,
     pub(crate) reentry: Option<bool>,
-    pub(crate) discussion: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -382,8 +381,6 @@ pub(crate) enum OmpRpcCommand {
     },
     #[serde(rename = "set_host_uri_schemes")]
     SetHostUriSchemes { id: String, schemes: Vec<Value> },
-    #[serde(rename = "discuss_plan_mode")]
-    DiscussPlanMode { id: String },
     #[serde(rename = "goal_mode")]
     GoalMode {
         id: String,
@@ -534,10 +531,6 @@ pub(crate) fn approve_plan_mode_command(
         compact_before_execute,
     }
     .into_value()
-}
-
-pub(crate) fn discuss_plan_mode_command(id: String) -> Value {
-    OmpRpcCommand::DiscussPlanMode { id }.into_value()
 }
 
 pub(crate) fn repo_diff_get_command(

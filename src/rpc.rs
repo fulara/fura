@@ -1014,7 +1014,6 @@ fn map_plan_mode_state_projection(value: Option<&OmpPlanModeState>) -> Option<Pl
             .clone()
             .unwrap_or_else(|| "local://PLAN.md".to_string()),
         workflow: value.workflow.clone(),
-        discussion: value.discussion.unwrap_or(false),
     })
 }
 
@@ -1399,19 +1398,6 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             if let Err(message) = refresh_rpc_state(state, session_id).await {
                 warn!(session_id = %session_id, %message, "post-plan-approval refresh failed");
             }
-        }
-        Some("discuss_plan_mode") => {
-            let mut plan_mode = rpc_response_data_as::<OmpPlanModeResponse>(frame)
-                .and_then(|data| map_plan_mode_state_projection(data.plan_mode.as_ref()));
-            if let Some(plan_mode) = plan_mode.as_mut() {
-                plan_mode.discussion = true;
-            }
-            state
-                .events
-                .mutate_session_snapshot(state, &current_session_id, |record| {
-                    record.plan_mode = plan_mode;
-                })
-                .await;
         }
 
         Some("set_plan_mode") => {

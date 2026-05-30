@@ -129,9 +129,7 @@ import {
 } from "./transcriptReview";
 import {
   buildPlanReviewPrompt,
-  buildMoveBackToPlanPrompt,
   createApprovePlanReviewMessage,
-  createDiscussPlanReviewMessage,
   pendingPlanReviewFromMessage,
   planReviewRenderKey,
   renderPlanReviewCard,
@@ -2472,11 +2470,9 @@ function syncVisiblePlanReviewFromProjection(sessionId: string, projection: Sess
     return;
   }
   const existing = visiblePlanReviews.get(sessionId);
-  const mode: VisiblePlanReview["mode"] = projection.planMode?.discussion
-    ? "discussing"
-    : existing && existing.mode !== "pending" && samePendingPlanReview(existing.review, pending)
-      ? existing.mode
-      : "pending";
+  const mode: VisiblePlanReview["mode"] = existing && existing.mode === "refining" && samePendingPlanReview(existing.review, pending)
+    ? "refining"
+    : "pending";
   visiblePlanReviews.set(sessionId, { review: pending, mode });
 }
 
@@ -2516,23 +2512,6 @@ function refinePendingPlanReview(review: PendingPlanReview): void {
   }
 }
 
-function discussPendingPlanReview(review: PendingPlanReview): void {
-  const accepted = send(createDiscussPlanReviewMessage(review));
-  if (!accepted) return;
-  visiblePlanReviews.set(review.sessionId, { review, mode: "discussing" });
-  markTranscriptViewDirty();
-  render();
-  if (workspaceMode === "session" && activeSessionId === review.sessionId) {
-    promptInput.focus();
-  }
-}
-
-function moveBackToPlanReview(review: PendingPlanReview): void {
-  sendPromptMessage(review.sessionId, buildMoveBackToPlanPrompt(review), [], "followUp");
-  if (workspaceMode === "session" && activeSessionId === review.sessionId) {
-    promptInput.focus();
-  }
-}
 function persistPromptDraftForWorkspace(): void {
   if (workspaceMode === "controller") controllerPromptDraft = promptInput.value;
   else sessionPromptDraft = promptInput.value;
@@ -4808,8 +4787,6 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
         {
           onApprove: approvePendingPlanReview,
           onRefine: refinePendingPlanReview,
-          onDiscuss: discussPendingPlanReview,
-          onBackToPlan: moveBackToPlanReview,
         },
         visiblePlanReview.mode,
         visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,

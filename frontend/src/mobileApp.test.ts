@@ -654,7 +654,6 @@ describe("mountMobileApp", () => {
       type: "session.snapshot",
       sessionId: "live",
       state: projection("live", {
-        planMode: { enabled: true, planFilePath: "local://PLAN.md", discussion: false },
         pendingPlanReview: {
           planFilePath: "local://PLAN.md",
           finalPlanFilePath: "local://FINAL.md",
@@ -665,8 +664,8 @@ describe("mountMobileApp", () => {
     });
 
     expect(document.querySelector(".plan-review-card")?.textContent).toContain("Plan ready: Recovered review");
-    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
-    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Plan review waiting");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("");
 
     document.querySelector<HTMLButtonElement>(".plan-review-approve")?.click();
     expect(connection.sent).toContainEqual({
@@ -1103,7 +1102,7 @@ describe("mountMobileApp", () => {
     expect(input.value).toBe("");
   });
 
-  it("renders session-scoped plan review and blocks prompts until refine or approve", () => {
+  it("renders session-scoped plan review while still allowing plan questions", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     clickSession();
@@ -1119,45 +1118,18 @@ describe("mountMobileApp", () => {
     });
 
     expect(document.querySelector(".plan-review-card")?.textContent).toContain("Plan ready: Review me");
-    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
-    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(true);
-    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Plan review waiting");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(false);
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("");
 
     const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
     const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
     if (!input || !form) throw new Error("prompt form missing");
-    input.value = "should not send";
+    input.value = "question about plan";
     form.requestSubmit();
-    expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "should not send")).toBe(false);
+    expect(connection.sent.some(message => message.type === "prompt.send" && message.text === "question about plan")).toBe(true);
+    connection.sent = [];
 
-    document.querySelector<HTMLButtonElement>(".plan-review-discuss")?.click();
-    expect(connection.sent).toContainEqual({ type: "plan.discuss", sessionId: "live" });
-    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Discussing plan: Review me");
-    expect(input.disabled).toBe(false);
-    connection.emit({
-      type: "session.snapshot",
-      sessionId: "live",
-      state: projection("live", {
-        planMode: { enabled: true, planFilePath: "local://PLAN.md", discussion: false },
-        pendingPlanReview: {
-          planFilePath: "local://PLAN.md",
-          finalPlanFilePath: "local://FINAL.md",
-          title: "Review me",
-          content: "Plan body",
-        },
-      }),
-    });
-    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Discussing plan: Review me");
-
-    document.querySelector<HTMLButtonElement>(".plan-review-back-to-plan")?.click();
-    expect(connection.sent.some(message =>
-      message.type === "prompt.send" &&
-      message.sessionId === "live" &&
-      message.behavior === "followUp" &&
-      message.text.includes("Decide whether that discussion requires changes to the plan") &&
-      message.text.includes("present the final plan for approval again")
-    )).toBe(true);
-    expect(document.querySelector(".plan-review-card")?.textContent).toContain("Discussing plan: Review me");
 
     connection.emit({
       type: "plan.review",
@@ -1168,7 +1140,7 @@ describe("mountMobileApp", () => {
       content: "Plan body",
     });
     expect(document.querySelector(".plan-review-card")?.textContent).toContain("Plan ready: Review me");
-    expect(input.disabled).toBe(true);
+    expect(input.disabled).toBe(false);
 
     document.querySelector<HTMLButtonElement>(".plan-review-refine")?.click();
     expect(document.querySelector(".plan-review-card")?.textContent).toContain("Refining plan: Review me");
