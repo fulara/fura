@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection } from "./connection";
-import type { ClientMessage, DiffRow, ReviewComment, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
+import type { ClientMessage, DiffRow, PendingAskProjection, ReviewComment, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
 
 class FakeConnection implements FuraConnection {
   sent: ClientMessage[] = [];
@@ -67,6 +67,7 @@ function summary(sessionId: string, overrides: Partial<SessionSummary> = {}): Se
     timestamp: overrides.timestamp,
     category: overrides.category,
     worktree: overrides.worktree,
+    awaitingAsk: overrides.awaitingAsk,
   };
 }
 
@@ -358,7 +359,7 @@ describe("desktop Goal Mode panel", () => {
   });
 });
 
-describe("desktop extension dialogs", () => {
+describe("desktop ask cards", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
@@ -366,79 +367,37 @@ describe("desktop extension dialogs", () => {
     vi.useRealTimers();
   });
 
-  it("renders open_url requests as safe links without sending dialog responses", async () => {
-    const { connection } = await createHarness();
-    connection.emit({
-      type: "dialog.request",
-      sessionId: "live",
-      dialog: {
-        id: "open-1",
-        method: "open_url",
-        title: "Sign in",
-        instructions: "Open the browser link.",
-        url: "https://auth.example.test/start",
-      },
-    });
-
-    const overlay = document.querySelector<HTMLElement>("#extensionDialogOverlay");
-    expect(overlay?.hidden).toBe(false);
-    expect(document.querySelector("#extensionDialogTitle")?.textContent).toBe("Sign in");
-    expect(document.querySelector("#extensionDialogBody")?.textContent).toContain("Open the browser link.");
-    expect(document.querySelector<HTMLAnchorElement>("#extensionDialogField a")?.href).toBe("https://auth.example.test/start");
-    expect(document.querySelector<HTMLButtonElement>("#extensionDialogSubmit")?.hidden).toBe(true);
-
-    document.querySelector<HTMLButtonElement>("#extensionDialogCancel")?.click();
-
-    expect(overlay?.hidden).toBe(true);
-    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
-  });
-
-  it("shows notify dialog requests as visible session notices", async () => {
-    const { connection } = await createHarness();
-    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+  function activateSessionWithAsk(
+    connection: FakeConnection,
+    pendingAsk: PendingAskProjection,
+    awaitingAsk: boolean,
+  ): void {
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live", { awaitingAsk })] });
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
-    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
-
     connection.emit({
-      type: "dialog.request",
+      type: "session.snapshot",
       sessionId: "live",
-      dialog: {
-        id: "notify-1",
-        method: "notify",
-        message: "No uncommitted changes found",
-        notifyType: "warning",
-      },
+      state: projection("live", { pendingAsk, summary: summary("live", { awaitingAsk }) }),
     });
+  }
 
-    expect(document.querySelector<HTMLElement>("#extensionDialogOverlay")?.hidden).toBe(true);
-    const notice = document.querySelector<HTMLElement>(".session-notice.notice-warning");
-    expect(notice?.textContent).toContain("warning: No uncommitted changes found");
-    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
-  });
-
-
-  it("renders select dialog requests and sends selected values", async () => {
+  it("renders a select ask inline, locks the composer, and responds with the chosen option", async () => {
     const { connection } = await createHarness();
-    connection.emit({
-      type: "dialog.request",
-      sessionId: "live",
-      dialog: {
-        id: "select-1",
-        method: "select",
-        title: "Review Mode",
-        options: ["Review uncommitted changes", "Review a commit"],
-      },
-    });
+    activateSessionWithAsk(
+      connection,
+      { id: "select-1", method: "select", title: "Review Mode", options: ["Review uncommitted changes", "Review a commit"] },
+      true,
+    );
 
-    const overlay = document.querySelector<HTMLElement>("#extensionDialogOverlay");
-    expect(overlay?.hidden).toBe(false);
-    expect(document.querySelector("#extensionDialogTitle")?.textContent).toBe("Review Mode");
+    const card = document.querySelector<HTMLElement>(".ask-card");
+    expect(card).not.toBeNull();
+    expect(card?.querySelector(".ask-card-title")?.textContent).toBe("Review Mode");
+    expect(document.querySelector<HTMLTextAreaElement>("#promptInput")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>("#sendButton")?.disabled).toBe(true);
 
-    const select = document.querySelector<HTMLSelectElement>("#extensionDialogField select");
-    if (!select) throw new Error("dialog select missing");
-    select.value = "Review a commit";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    document.querySelector<HTMLFormElement>("#extensionDialogForm")?.requestSubmit();
+    [...document.querySelectorAll<HTMLButtonElement>(".ask-card-option")]
+      .find(button => button.textContent === "Review a commit")
+      ?.click();
 
     expect(connection.sent).toContainEqual({
       type: "dialog.respond",
@@ -446,30 +405,21 @@ describe("desktop extension dialogs", () => {
       dialogId: "select-1",
       response: { value: "Review a commit" },
     });
-    expect(overlay?.hidden).toBe(true);
   });
 
-  it("renders editor dialog requests and sends edited values", async () => {
+  it("renders an editor ask with prefill and sends the edited value", async () => {
     const { connection } = await createHarness();
-    connection.emit({
-      type: "dialog.request",
-      sessionId: "live",
-      dialog: {
-        id: "editor-1",
-        method: "editor",
-        title: "Enter custom review instructions",
-        prefill: "Focus on correctness.",
-        promptStyle: true,
-      },
-    });
+    activateSessionWithAsk(
+      connection,
+      { id: "editor-1", method: "editor", title: "Custom instructions", prefill: "Focus on correctness.", promptStyle: true },
+      true,
+    );
 
-    const textarea = document.querySelector<HTMLTextAreaElement>("#extensionDialogField textarea");
-    if (!textarea) throw new Error("dialog editor missing");
-    expect(textarea.rows).toBe(6);
+    const textarea = document.querySelector<HTMLTextAreaElement>(".ask-card .ask-card-input");
+    if (!textarea) throw new Error("ask editor missing");
     expect(textarea.value).toBe("Focus on correctness.");
     textarea.value = "Focus on concurrency and missed errors.";
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    document.querySelector<HTMLFormElement>("#extensionDialogForm")?.requestSubmit();
+    document.querySelector<HTMLButtonElement>(".ask-card .ask-card-submit")?.click();
 
     expect(connection.sent).toContainEqual({
       type: "dialog.respond",
@@ -479,20 +429,38 @@ describe("desktop extension dialogs", () => {
     });
   });
 
-  it("sends cancelled=true when the active dialog is dismissed", async () => {
+  it("renders open_url asks as a safe link without locking the composer", async () => {
     const { connection } = await createHarness();
-    connection.emit({
-      type: "dialog.request",
-      sessionId: "live",
-      dialog: {
-        id: "select-cancel-1",
-        method: "select",
-        title: "Review Mode",
-        options: ["Review uncommitted changes", "Review a commit"],
-      },
-    });
+    activateSessionWithAsk(
+      connection,
+      { id: "open-1", method: "open_url", title: "Sign in", instructions: "Open the browser link.", url: "https://auth.example.test/start" },
+      false,
+    );
 
-    document.querySelector<HTMLButtonElement>("#extensionDialogCancel")?.click();
+    const card = document.querySelector<HTMLElement>(".ask-card");
+    expect(card?.querySelector(".ask-card-body")?.textContent).toContain("Open the browser link.");
+    expect(card?.querySelector<HTMLAnchorElement>("a.ask-card-option")?.href).toBe("https://auth.example.test/start");
+    expect(document.querySelector<HTMLTextAreaElement>("#promptInput")?.disabled).toBe(false);
+
+    card?.querySelector<HTMLButtonElement>(".ask-card-cancel")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "dialog.respond",
+      sessionId: "live",
+      dialogId: "open-1",
+      response: { cancelled: true },
+    });
+  });
+
+  it("sends cancelled=true when a blocking ask is cancelled", async () => {
+    const { connection } = await createHarness();
+    activateSessionWithAsk(
+      connection,
+      { id: "select-cancel-1", method: "select", title: "Review Mode", options: ["A", "B"] },
+      true,
+    );
+
+    document.querySelector<HTMLButtonElement>(".ask-card .ask-card-cancel")?.click();
 
     expect(connection.sent).toContainEqual({
       type: "dialog.respond",
@@ -500,7 +468,6 @@ describe("desktop extension dialogs", () => {
       dialogId: "select-cancel-1",
       response: { cancelled: true },
     });
-    expect(document.querySelector<HTMLElement>("#extensionDialogOverlay")?.hidden).toBe(true);
   });
 });
 

@@ -168,7 +168,6 @@ async fn main() -> anyhow::Result<()> {
         active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
         active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
         events: WsEventCoordinator::new(events),
-        session_dialog_owners: Arc::new(RwLock::new(HashMap::new())),
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
             args: rpc_args,
@@ -491,6 +490,7 @@ pub(crate) mod tests {
             plan_mode: None,
             goal_mode: None,
             pending_plan_review: None,
+            pending_ask: None,
         }
     }
 
@@ -868,7 +868,6 @@ pub(crate) mod tests {
             active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
             active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
             events: WsEventCoordinator::new(events),
-            session_dialog_owners: Arc::new(RwLock::new(HashMap::new())),
             session_host_tools: Arc::new(RwLock::new(HashMap::new())),
             rpc_config: Arc::new(RpcConfig {
                 program: "omp".into(),
@@ -2421,7 +2420,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn extension_ui_request_event_emits_dialog_request() {
+    async fn blocking_extension_ui_request_sets_session_pending_ask() {
         let state = test_state(8, None);
         state
             .sessions
@@ -2445,15 +2444,112 @@ pub(crate) mod tests {
         )
         .await;
 
-        match events.recv().await.expect("dialog request event") {
-            ServerMessage::DialogRequest { session_id, dialog } => {
+        match events.recv().await.expect("session snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
                 assert_eq!(session_id, "s1");
+                assert!(state.summary.awaiting_ask);
+                let dialog = state.pending_ask.expect("pending ask present");
                 assert_eq!(dialog["id"], "dialog-1");
                 assert_eq!(dialog["method"], "confirm");
                 assert_eq!(dialog["title"], "Continue?");
                 assert_eq!(dialog["message"], "Approve the operation?");
                 assert_eq!(dialog["timeout"], 30000);
                 assert!(dialog.get("type").is_none());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn notify_extension_ui_request_emits_session_notice() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        map_test_transport(&state, "transport-1", "s1").await;
+        let mut events = state.events.subscribe();
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "extension_ui_request",
+                "id": "notify-1",
+                "method": "notify",
+                "message": "No uncommitted changes found",
+                "notifyType": "warning"
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("notice event") {
+            ServerMessage::SessionNotice {
+                session_id,
+                level,
+                text,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert!(matches!(level, NoticeLevel::Warning));
+                assert_eq!(text, "warning: No uncommitted changes found");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(
+            state
+                .sessions
+                .read()
+                .await
+                .get("s1")
+                .and_then(|record| record.pending_ask.clone())
+                .is_none(),
+            "notify must not enter the ask state"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_extension_ui_request_clears_matching_pending_ask() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        map_test_transport(&state, "transport-1", "s1").await;
+        let mut events = state.events.subscribe();
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "extension_ui_request",
+                "id": "dialog-1",
+                "method": "select",
+                "title": "Pick one",
+                "options": ["a", "b"]
+            }),
+        )
+        .await;
+        events.recv().await.expect("pending ask snapshot");
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "extension_ui_request",
+                "id": "cancel-1",
+                "method": "cancel",
+                "targetId": "dialog-1"
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("cancel snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert!(!state.summary.awaiting_ask);
+                assert!(state.pending_ask.is_none());
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -3380,6 +3476,44 @@ pub(crate) mod tests {
         );
         assert!(command.get("requestId").is_none());
         assert!(command.get("response").is_none());
+    }
+
+    #[tokio::test]
+    async fn dialog_respond_clears_session_pending_ask() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.pending_ask = Some(serde_json::json!({
+            "id": "dialog-1",
+            "method": "select",
+            "title": "Pick one",
+            "options": ["a", "b"],
+        }));
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        let _commands = register_test_transport(&state, "s1", "s1", 4).await;
+        let mut events = state.events.subscribe();
+
+        handle_client_message(
+            &state,
+            ClientMessage::DialogRespond {
+                session_id: "s1".to_string(),
+                dialog_id: "dialog-1".to_string(),
+                response: serde_json::json!({ "value": "a" }),
+            },
+        )
+        .await;
+
+        match events.recv().await.expect("cleared snapshot event") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert!(state.pending_ask.is_none());
+                assert!(!state.summary.awaiting_ask);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
     }
 
     #[tokio::test]

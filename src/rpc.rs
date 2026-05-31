@@ -961,21 +961,79 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             id,
             method,
             payload,
-        } => {
-            let mut dialog = serde_json::Map::from_iter(payload);
-            dialog.insert("id".to_string(), Value::String(id));
-            dialog.insert("method".to_string(), Value::String(method));
-            let _ = state
-                .events
-                .emit(
-                    state,
-                    ServerMessage::DialogRequest {
-                        session_id: target_session_id,
-                        dialog: Value::Object(dialog),
-                    },
-                )
-                .await;
-        }
+        } => match method.as_str() {
+            // Non-blocking status message: surface as a session notice, not an ask.
+            "notify" => {
+                let body = payload
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .or_else(|| payload.get("title").and_then(Value::as_str))
+                    .unwrap_or("");
+                let notify_type = payload.get("notifyType").and_then(Value::as_str);
+                let level = match notify_type.map(str::to_ascii_lowercase).as_deref() {
+                    Some("error") => NoticeLevel::Error,
+                    Some("warning") => NoticeLevel::Warning,
+                    _ => NoticeLevel::Info,
+                };
+                let text = match notify_type {
+                    Some(kind) => format!("{kind}: {body}"),
+                    None => body.to_string(),
+                };
+                let _ = state
+                    .events
+                    .emit(state, notice(target_session_id, level, text))
+                    .await;
+            }
+            // The agent withdrew a pending request; clear the ask if it still matches.
+            "cancel" => {
+                if let Some(target_id) = payload
+                    .get("targetId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                {
+                    let session_id = target_session_id.clone();
+                    state
+                        .events
+                        .mutate_session_and_emit(state, &target_session_id, move |record| {
+                            let current_id = record
+                                .pending_ask
+                                .as_ref()
+                                .and_then(|pending| pending.get("id"))
+                                .and_then(Value::as_str);
+                            if current_id != Some(target_id.as_str()) {
+                                return None;
+                            }
+                            record.pending_ask = None;
+                            Some(ServerMessage::SessionSnapshot {
+                                session_id,
+                                state: record.projection(),
+                            })
+                        })
+                        .await;
+                }
+            }
+            // Blocking request awaiting a user response: the session enters its ask state.
+            "select" | "confirm" | "input" | "editor" | "open_url" => {
+                let mut dialog = payload;
+                dialog.insert("id".to_string(), Value::String(id));
+                dialog.insert("method".to_string(), Value::String(method));
+                state
+                    .events
+                    .mutate_session_snapshot(state, &target_session_id, |record| {
+                        record.pending_ask = Some(Value::Object(dialog));
+                    })
+                    .await;
+            }
+            // TUI chrome updates (setStatus/setWidget/setTitle/set_editor_text) have no Fura
+            // surface and await no response; drop them rather than surfacing a dead control.
+            other => {
+                debug!(
+                    session_id = %target_session_id,
+                    method = other,
+                    "ignored non-ask extension UI request"
+                );
+            }
+        },
         OmpRpcFrame::HostToolCall {
             id,
             tool_call_id,

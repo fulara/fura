@@ -2683,6 +2683,7 @@ mod tests {
             plan_mode: None,
             goal_mode: None,
             pending_plan_review: None,
+            pending_ask: None,
         }
     }
 

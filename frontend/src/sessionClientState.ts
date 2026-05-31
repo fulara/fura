@@ -67,6 +67,7 @@ export function applySessionDelta(
     pendingPlanReview: delta.pendingPlanReview,
     goalMode: delta.goalMode,
     todoPhases: delta.todoPhases,
+    pendingAsk: delta.pendingAsk,
   };
   return applySessionSnapshot(sessions, projections, sessionId, projection);
 }

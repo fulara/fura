@@ -353,6 +353,17 @@ h2 {
   box-shadow: 0 0 9px rgba(127, 140, 255, 0.55);
 }
 
+.session-status-ask {
+  border-color: rgba(255, 196, 87, 0.5);
+  background: rgba(255, 196, 87, 0.16);
+  color: #ffd681;
+}
+
+.session-status-ask::before {
+  background: #ffc457;
+  box-shadow: 0 0 9px rgba(255, 196, 87, 0.6);
+}
+
 .session-status-available {
   border-color: rgba(155, 164, 181, 0.18);
   background: rgba(155, 164, 181, 0.1);
@@ -2220,6 +2231,109 @@ h2 {
 .plan-review-refine {
   border-color: rgba(127, 140, 255, 0.45);
   background: rgba(127, 140, 255, 0.12);
+}
+
+.ask-card {
+  display: grid;
+  gap: 0.75rem;
+  border: 1px solid rgba(255, 196, 87, 0.42);
+  border-radius: 0.85rem;
+  background: rgba(38, 30, 14, 0.55);
+  padding: 1rem 1.1rem;
+  margin: 0.75rem 0;
+}
+
+.ask-card-header {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.ask-card-kicker {
+  margin: 0;
+  color: #f0d79a;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.ask-card-title {
+  margin: 0;
+  color: #f4f7fb;
+  font-size: 1.02rem;
+}
+
+.ask-card-body {
+  margin: 0;
+  color: #d5dceb;
+  white-space: pre-wrap;
+}
+
+.ask-card-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.ask-card-entry {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.ask-card-input {
+  width: 100%;
+  resize: vertical;
+  min-height: 2.4rem;
+}
+
+.ask-card-option {
+  border-color: rgba(255, 196, 87, 0.45);
+  background: rgba(255, 196, 87, 0.12);
+  color: #ffe6b0;
+}
+
+.ask-card-option:hover:not(:disabled) {
+  background: rgba(255, 196, 87, 0.2);
+}
+
+.ask-card-confirm {
+  border-color: rgba(135, 226, 164, 0.55);
+  background: rgba(80, 180, 120, 0.16);
+  color: #dfffea;
+}
+
+.ask-card-open-url {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.ask-card-url {
+  overflow-wrap: anywhere;
+  border: 1px solid #3a3322;
+  border-radius: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  font-size: 0.82rem;
+  color: #c7cedc;
+}
+
+.ask-card-status {
+  margin: 0;
+  color: #9ba4b5;
+  font-size: 0.8rem;
+}
+
+.ask-card-status:empty {
+  display: none;
+}
+
+.ask-card-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ask-card-empty {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 0.85rem;
 }
 
 

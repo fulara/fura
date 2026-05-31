@@ -71,6 +71,10 @@ pub(crate) struct SessionRecord {
     pub(crate) plan_mode: Option<PlanModeProjection>,
     pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
+    /// Raw OMP extension UI request awaiting a user response (the agent `ask` flow),
+    /// or `None` when the session is not waiting on one. Carried verbatim so the
+    /// frontend reuses its single dialog parser.
+    pub(crate) pending_ask: Option<Value>,
 }
 
 impl SessionRecord {
@@ -90,6 +94,7 @@ impl SessionRecord {
             category: self.category.clone(),
             worktree: self.worktree.clone(),
             goal_mode: self.goal_mode.clone(),
+            awaiting_ask: self.awaiting_ask(),
         }
     }
 
@@ -103,6 +108,29 @@ impl SessionRecord {
             _ if self.has_active_work() => SessionStatus::Busy,
             status => status,
         }
+    }
+
+    pub(crate) fn is_terminal(&self) -> bool {
+        matches!(
+            self.status,
+            SessionStatus::Exited | SessionStatus::Available | SessionStatus::Error
+        )
+    }
+
+    /// A pending ask only surfaces while the session can still answer it.
+    fn projected_pending_ask(&self) -> Option<Value> {
+        if self.is_terminal() {
+            return None;
+        }
+        self.pending_ask.clone()
+    }
+
+    /// True when the session is blocked on a user decision (select/confirm/input/editor).
+    fn awaiting_ask(&self) -> bool {
+        self.projected_pending_ask()
+            .as_ref()
+            .and_then(ask_method)
+            .is_some_and(is_blocking_ask_method)
     }
 
     fn effective_todo_phases(&self) -> Vec<TodoPhaseProjection> {
@@ -169,8 +197,18 @@ impl SessionRecord {
             pending_plan_review: self.pending_plan_review.clone(),
             goal_mode: self.goal_mode.clone(),
             todo_phases: self.effective_todo_phases(),
+            pending_ask: self.projected_pending_ask(),
         }
     }
+}
+
+pub(crate) fn ask_method(pending: &Value) -> Option<&str> {
+    pending.get("method").and_then(Value::as_str)
+}
+
+/// Blocking ask methods require a user response and lock the composer.
+pub(crate) fn is_blocking_ask_method(method: &str) -> bool {
+    matches!(method, "select" | "confirm" | "input" | "editor")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -216,6 +254,7 @@ pub(crate) struct SessionSummary {
     pub(crate) category: Option<String>,
     pub(crate) worktree: Option<SessionWorktreeSummary>,
     pub(crate) goal_mode: Option<GoalModeProjection>,
+    pub(crate) awaiting_ask: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -241,6 +280,7 @@ pub(crate) struct SessionProjection {
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
     pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
+    pub(crate) pending_ask: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -261,6 +301,7 @@ pub(crate) struct SessionProjectionDelta {
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
     pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
+    pub(crate) pending_ask: Option<Value>,
 }
 
 impl SessionProjectionDelta {
@@ -284,6 +325,7 @@ impl SessionProjectionDelta {
             pending_plan_review: projection.pending_plan_review.clone(),
             goal_mode: projection.goal_mode.clone(),
             todo_phases: projection.todo_phases.clone(),
+            pending_ask: projection.pending_ask.clone(),
         }
     }
 }
@@ -600,6 +642,7 @@ mod tests {
             category: None,
             worktree: None,
             goal_mode: None,
+            awaiting_ask: false,
         }
     }
 
@@ -623,6 +666,7 @@ mod tests {
             plan_mode: None,
             goal_mode: None,
             pending_plan_review: None,
+            pending_ask: None,
             todo_phases: Vec::new(),
         };
 

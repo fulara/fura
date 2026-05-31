@@ -11,12 +11,11 @@ import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from 
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { reconcileChildren, setRenderDocument } from "./dom";
 import {
-  extensionDialogBodyText,
-  extensionDialogHttpUrl,
-  formatExtensionDialogNotification,
-  parseExtensionDialogRequest,
-  type ExtensionDialogRequest,
-} from "./extensionDialog";
+  askCardRenderKey,
+  parsePendingAsk,
+  renderAskCard,
+  type PendingAsk,
+} from "./askCard";
 import {
   busyPromptAttachmentNote as formatBusyPromptAttachmentNote,
   busyPromptDisplayText,
@@ -332,25 +331,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </section>
-      <section id="mobileDialogOverlay" class="mobile-dialog-overlay" hidden>
-        <div class="mobile-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileDialogTitle" aria-describedby="mobileDialogBody">
-          <header class="mobile-dialog-header">
-            <div>
-              <p id="mobileDialogKicker" class="mobile-dialog-kicker">Extension request</p>
-              <h2 id="mobileDialogTitle"></h2>
-            </div>
-          </header>
-          <div id="mobileDialogBody" class="mobile-dialog-body"></div>
-          <form id="mobileDialogForm" class="mobile-dialog-form">
-            <div id="mobileDialogField" class="mobile-dialog-field"></div>
-            <p id="mobileDialogStatus" class="mobile-dialog-status" aria-live="polite"></p>
-            <div class="mobile-dialog-actions">
-              <button id="mobileDialogCancel" type="button">Cancel</button>
-              <button id="mobileDialogSubmit" type="submit">Submit</button>
-            </div>
-          </form>
-        </div>
-      </section>
       <section id="mobileReviewPreviewOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog mobile-review-preview" role="dialog" aria-modal="true" aria-labelledby="mobileReviewPreviewTitle">
           <header class="mobile-dialog-header">
@@ -436,14 +416,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const busyPromptCancel = requireElement<HTMLButtonElement>(document, "mobileBusyPromptCancel");
   const busyPromptSteer = requireElement<HTMLButtonElement>(document, "mobileBusyPromptSteer");
   const busyPromptFollowUp = requireElement<HTMLButtonElement>(document, "mobileBusyPromptFollowUp");
-  const dialogOverlay = requireElement<HTMLElement>(document, "mobileDialogOverlay");
-  const dialogTitle = requireElement<HTMLHeadingElement>(document, "mobileDialogTitle");
-  const dialogBody = requireElement<HTMLDivElement>(document, "mobileDialogBody");
-  const dialogForm = requireElement<HTMLFormElement>(document, "mobileDialogForm");
-  const dialogField = requireElement<HTMLDivElement>(document, "mobileDialogField");
-  const dialogStatus = requireElement<HTMLParagraphElement>(document, "mobileDialogStatus");
-  const dialogCancel = requireElement<HTMLButtonElement>(document, "mobileDialogCancel");
-  const dialogSubmit = requireElement<HTMLButtonElement>(document, "mobileDialogSubmit");
   const reviewPreviewOverlay = requireElement<HTMLElement>(document, "mobileReviewPreviewOverlay");
   const reviewPreviewText = requireElement<HTMLTextAreaElement>(document, "mobileReviewPreviewText");
   const reviewPreviewStatus = requireElement<HTMLParagraphElement>(document, "mobileReviewPreviewStatus");
@@ -492,8 +464,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let controllerPromptDraft = "";
   let lastSessionMobileView: Exclude<MobileWorkspaceView, "controller"> = "transcript";
   let busyPromptDraft: BusyPromptDraft | null = null;
-  let activeDialog: ExtensionDialogRequest | null = null;
-  const dialogQueue: ExtensionDialogRequest[] = [];
   const sessionNotices = new Map<string, SessionNotice[]>();
 
 
@@ -647,11 +617,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     });
   });
 
-  dialogForm.addEventListener("submit", event => {
-    event.preventDefault();
-    submitActiveDialog();
-  });
-  dialogCancel.addEventListener("click", dismissOrCancelActiveDialog);
   busyPromptCancel.addEventListener("click", restoreBusyPromptDraft);
   busyPromptSteer.addEventListener("click", () => sendBusyPromptDraft("steer"));
   busyPromptFollowUp.addEventListener("click", () => sendBusyPromptDraft("followUp"));
@@ -1022,11 +987,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     if (activeSessionId === review.sessionId) promptInput.focus();
   }
 
-  function extensionNotifyLevel(request: ExtensionDialogRequest): SessionNotice["level"] {
-    const notifyType = request.notifyType?.toLowerCase();
-    return notifyType === "error" || notifyType === "warning" ? notifyType : "info";
-  }
-
   function appendSessionNotice(sessionId: string, notice: SessionNotice): void {
     const notices = sessionNotices.get(sessionId) ?? [];
     notices.push(notice);
@@ -1096,274 +1056,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     renderBusyPromptChoice();
     renderActiveSession();
   }
-
-
-  function handleDialogRequest(message: Extract<ServerMessage, { type: "dialog.request" }>): void {
-    const request = parseExtensionDialogRequest(message.sessionId, message.dialog);
-    if (!request) {
-      appendLog(`[${message.sessionId}] ignored malformed dialog request.`);
-      return;
-    }
-
-    switch (request.method) {
-      case "cancel":
-        cancelMobileDialog(request.targetId);
-        return;
-      case "notify": {
-        const text = formatExtensionDialogNotification(request);
-        appendLog(text);
-        appendSessionNotice(request.sessionId, { level: extensionNotifyLevel(request), text });
-        renderActiveSession();
-        return;
-      }
-      case "set_editor_text":
-        promptInput.value = request.text ?? "";
-        return;
-      case "setStatus":
-      case "setWidget":
-        return;
-      case "setTitle":
-        return;
-      default:
-        enqueueMobileDialog(request);
-    }
-  }
-
-  function enqueueMobileDialog(request: ExtensionDialogRequest): void {
-    if (activeDialog) {
-      dialogQueue.push(request);
-      appendLog(`Queued dialog request: ${request.title}`);
-      return;
-    }
-    activeDialog = request;
-    renderMobileDialog();
-  }
-
-  function cancelMobileDialog(targetId: string | undefined): void {
-    if (!targetId) return;
-    if (activeDialog?.id === targetId) {
-      activeDialog = null;
-      showNextMobileDialog();
-      return;
-    }
-    const queuedIndex = dialogQueue.findIndex(request => request.id === targetId);
-    if (queuedIndex >= 0) dialogQueue.splice(queuedIndex, 1);
-  }
-
-  function showNextMobileDialog(): void {
-    activeDialog = dialogQueue.shift() ?? null;
-    renderMobileDialog();
-  }
-
-  function dismissOrCancelActiveDialog(): void {
-    if (!activeDialog) return;
-    if (activeDialog.method === "open_url") {
-      showNextMobileDialog();
-      return;
-    }
-    respondToActiveDialog({ cancelled: true });
-  }
-
-  function submitActiveDialog(): void {
-    if (!activeDialog) return;
-    switch (activeDialog.method) {
-      case "confirm":
-        respondToActiveDialog({ confirmed: true });
-        return;
-      case "select": {
-        const select = dialogField.querySelector<HTMLSelectElement>("select[data-dialog-value]");
-        if (!select || select.selectedIndex < 0) {
-          dialogStatus.textContent = "Choose an option or cancel the request.";
-          return;
-        }
-        respondToActiveDialog({ value: select.value });
-        return;
-      }
-      case "input":
-      case "editor": {
-        const input = dialogField.querySelector<HTMLInputElement | HTMLTextAreaElement>("[data-dialog-value]");
-        respondToActiveDialog({ value: input?.value ?? "" });
-        return;
-      }
-      case "open_url":
-        showNextMobileDialog();
-        return;
-      default:
-        respondToActiveDialog({ cancelled: true });
-    }
-  }
-
-  function respondToActiveDialog(response: Record<string, unknown>): void {
-    if (!activeDialog) return;
-    const accepted = send({
-      type: "dialog.respond",
-      sessionId: activeDialog.sessionId,
-      dialogId: activeDialog.id,
-      response,
-    });
-    if (!accepted) {
-      dialogStatus.textContent = "Not connected to the Fura bridge.";
-      return;
-    }
-    showNextMobileDialog();
-  }
-
-  function renderMobileDialog(): void {
-    dialogOverlay.hidden = !activeDialog;
-    dialogBody.replaceChildren();
-    dialogField.replaceChildren();
-    dialogStatus.textContent = "";
-    dialogSubmit.hidden = false;
-    dialogSubmit.disabled = false;
-    dialogCancel.textContent = "Cancel";
-
-    if (!activeDialog) {
-      dialogTitle.textContent = "";
-      return;
-    }
-
-    dialogTitle.textContent = activeDialog.title;
-    const bodyText = extensionDialogBodyText(activeDialog);
-    if (bodyText) {
-      const paragraph = dialogBody.ownerDocument.createElement("p");
-      paragraph.textContent = bodyText;
-      dialogBody.append(paragraph);
-    }
-
-    if (activeDialog.timeoutMs !== undefined) {
-      dialogStatus.textContent = `Extension timeout: ${Math.ceil(activeDialog.timeoutMs / 1000)}s.`;
-    }
-
-    switch (activeDialog.method) {
-      case "confirm":
-        dialogSubmit.textContent = "Confirm";
-        break;
-      case "select":
-        renderMobileDialogSelect(activeDialog);
-        dialogSubmit.textContent = "Select";
-        break;
-      case "input":
-        renderMobileDialogInput(activeDialog);
-        dialogSubmit.textContent = "Submit";
-        break;
-      case "editor":
-        renderMobileDialogEditor(activeDialog);
-        dialogSubmit.textContent = "Submit";
-        break;
-      case "open_url":
-        renderMobileDialogOpenUrl(activeDialog);
-        dialogSubmit.hidden = true;
-        dialogCancel.textContent = "Dismiss";
-        break;
-      default:
-        dialogSubmit.hidden = true;
-        dialogCancel.textContent = "Dismiss";
-        if (!bodyText) {
-          const paragraph = dialogBody.ownerDocument.createElement("p");
-          paragraph.textContent = `Unsupported extension dialog method: ${activeDialog.method}.`;
-          dialogBody.append(paragraph);
-        }
-        break;
-    }
-
-    window.setTimeout(() => {
-      const target = dialogField.querySelector<HTMLElement>("[data-dialog-value]") ?? (dialogSubmit.hidden ? dialogCancel : dialogSubmit);
-      target.focus();
-    }, 0);
-  }
-
-  function renderMobileDialogSelect(request: ExtensionDialogRequest): void {
-    const label = dialogField.ownerDocument.createElement("label");
-    label.textContent = "Choice";
-    const select = dialogField.ownerDocument.createElement("select");
-    select.dataset.dialogValue = "true";
-    for (const option of request.options ?? []) {
-      const optionElement = dialogField.ownerDocument.createElement("option");
-      optionElement.value = option;
-      optionElement.textContent = option;
-      select.append(optionElement);
-    }
-    if (!select.options.length) {
-      select.disabled = true;
-      dialogSubmit.disabled = true;
-      dialogStatus.textContent = "No options were provided for this dialog.";
-    }
-    label.append(select);
-    dialogField.append(label);
-  }
-
-  function renderMobileDialogInput(request: ExtensionDialogRequest): void {
-    const label = dialogField.ownerDocument.createElement("label");
-    label.textContent = "Response";
-    const input = dialogField.ownerDocument.createElement("input");
-    input.dataset.dialogValue = "true";
-    input.autocomplete = "off";
-    input.spellcheck = false;
-    if (request.placeholder) input.placeholder = request.placeholder;
-    label.append(input);
-    dialogField.append(label);
-  }
-
-  function renderMobileDialogEditor(request: ExtensionDialogRequest): void {
-    const label = dialogField.ownerDocument.createElement("label");
-    label.textContent = "Response";
-    const textarea = dialogField.ownerDocument.createElement("textarea");
-    textarea.dataset.dialogValue = "true";
-    textarea.rows = request.promptStyle ? 6 : 10;
-    textarea.value = request.prefill ?? "";
-    label.append(textarea);
-    dialogField.append(label);
-  }
-
-  function renderMobileDialogOpenUrl(request: ExtensionDialogRequest): void {
-    const urlText = request.url ?? "";
-    const safeUrl = extensionDialogHttpUrl(request);
-    const wrapper = dialogField.ownerDocument.createElement("div");
-    wrapper.className = "mobile-dialog-open-url";
-
-    const label = dialogField.ownerDocument.createElement("p");
-    label.textContent = "URL";
-    const code = dialogField.ownerDocument.createElement("code");
-    code.textContent = urlText || "No URL provided.";
-    wrapper.append(label, code);
-
-    const actions = dialogField.ownerDocument.createElement("div");
-    actions.className = "mobile-dialog-open-url-actions";
-    if (safeUrl) {
-      const link = dialogField.ownerDocument.createElement("a");
-      link.href = safeUrl;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.textContent = "Open link";
-      actions.append(link);
-    } else {
-      const warning = dialogField.ownerDocument.createElement("p");
-      warning.className = "mobile-dialog-open-url-warning";
-      warning.textContent = "Fura only opens http:// and https:// extension URLs.";
-      wrapper.append(warning);
-    }
-
-    const copyButton = dialogField.ownerDocument.createElement("button");
-    copyButton.type = "button";
-    copyButton.textContent = "Copy URL";
-    copyButton.disabled = !urlText;
-    copyButton.addEventListener("click", async () => {
-      if (!urlText || !navigator.clipboard?.writeText) {
-        dialogStatus.textContent = "Clipboard copy is not available in this browser.";
-        return;
-      }
-      try {
-        await navigator.clipboard.writeText(urlText);
-        dialogStatus.textContent = "URL copied.";
-      } catch {
-        dialogStatus.textContent = "Could not copy URL.";
-      }
-    });
-    actions.append(copyButton);
-    wrapper.append(actions);
-    dialogField.append(wrapper);
-  }
-
 
   function openDeleteSessionPicker(sessionId: string): void {
     const session = sessions.find(candidate => candidate.sessionId === sessionId);
@@ -1797,9 +1489,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         }
         if (handleCreateError(message.requestId ?? null, message.message)) break;
         break;
-      case "dialog.request":
-        handleDialogRequest(message);
-        break;
       case "model.list":
       case "model.changed":
         break;
@@ -1866,7 +1555,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       },
       blockingUi: {
         modalOpen,
-        dialogOpen: Boolean(activeDialog),
+        dialogOpen: Boolean(activeSessionId && projections.get(activeSessionId)?.summary.awaitingAsk),
       },
     };
   }
@@ -2247,18 +1936,23 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     }
 
     const isBusy = projection?.isBusy ?? summary.status === "busy";
+    const awaitingAsk = Boolean(summary.awaitingAsk);
     sessionTitle.textContent = summary.title || `Session ${shortId(summary.sessionId)}`;
     sessionMeta.hidden = true;
     sessionMeta.textContent = "";
     updateMobileStatusBar(projection, summary);
-    promptInput.disabled = !projection;
-    sendButton.disabled = !projection;
-    imageInput.disabled = !projection;
+    promptInput.disabled = !projection || awaitingAsk;
+    sendButton.disabled = !projection || awaitingAsk;
+    imageInput.disabled = !projection || awaitingAsk;
     renderMobileImagePreviews();
-    promptInput.placeholder = "Send a prompt…";
+    promptInput.placeholder = awaitingAsk ? "Answer the agent's question above…" : "Send a prompt…";
     updateComposerStatus();
     renderTranscript(projection);
     renderBusyPromptChoice();
+  }
+
+  function respondToAsk(ask: PendingAsk, response: Record<string, unknown>): void {
+    send({ type: "dialog.respond", sessionId: ask.sessionId, dialogId: ask.id, response });
   }
 
 
@@ -2340,6 +2034,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         visiblePlanReview.mode,
         visiblePlanReview.mode === "refining" ? planReviewLineOptions(projection.summary.sessionId, visiblePlanReview.review) : undefined,
       ));
+    }
+    const pendingAsk = parsePendingAsk(projection.summary.sessionId, projection.pendingAsk);
+    if (pendingAsk) {
+      const askKey = `ask:${askCardRenderKey(pendingAsk)}`;
+      const cachedAsk = transcriptRenderCache.nodes.get(askKey);
+      const askNode = cachedAsk?.ownerDocument === transcript.ownerDocument
+        ? cachedAsk
+        : renderAskCard(pendingAsk, { onRespond: response => respondToAsk(pendingAsk, response) });
+      nextNodes.set(askKey, askNode);
+      desiredNodes.push(askNode);
     }
     if (desiredNodes.length === 0) {
       const empty = transcript.ownerDocument.createElement("p");

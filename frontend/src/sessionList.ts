@@ -2,6 +2,7 @@ import { shortPath } from "./format";
 import type { SessionSummary } from "./protocol";
 
 export function sessionStatusLabel(session: SessionSummary): string {
+  if (session.awaitingAsk) return "Needs answer";
   if (session.kind === "available") return "Saved";
   switch (session.status) {
     case "starting":
@@ -20,6 +21,7 @@ export function sessionStatusLabel(session: SessionSummary): string {
 }
 
 export function sessionStatusClass(session: SessionSummary): string {
+  if (session.awaitingAsk) return "ask";
   return session.kind === "available" ? "available" : session.status;
 }
 

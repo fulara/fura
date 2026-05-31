@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionStatus, FuraConnection } from "./connection";
 import { mountMobileApp, type MobileConnectionOptions } from "./mobileApp";
 import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
-import type { ClientMessage, ServerConfig, ServerMessage, SessionProjection, SessionSummary } from "./protocol";
+import type { ClientMessage, PendingAskProjection, ServerConfig, ServerMessage, SessionProjection, SessionSummary } from "./protocol";
 
 let fakeConnectionAutoOpen = true;
 class FakeConnection implements FuraConnection {
@@ -932,27 +932,31 @@ describe("mountMobileApp", () => {
     });
   });
 
-  it("renders confirm dialog requests and sends confirmed responses", () => {
-    const { connection } = createHarness();
+  function activateWithAsk(
+    connection: FakeConnection,
+    pendingAsk: PendingAskProjection,
+    awaitingAsk: boolean,
+  ): void {
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live", { awaitingAsk })] });
+    clickSession();
     connection.emit({
-      type: "dialog.request",
+      type: "session.snapshot",
       sessionId: "live",
-      dialog: {
-        id: "dialog-1",
-        method: "confirm",
-        title: "Continue?",
-        message: "Approve the operation?",
-        timeout: 30000,
-      },
+      state: projection("live", { pendingAsk, summary: summary("live", { title: "Session live", awaitingAsk }) }),
     });
+  }
 
-    const overlay = document.querySelector<HTMLElement>("#mobileDialogOverlay");
-    expect(overlay?.hidden).toBe(false);
-    expect(document.querySelector("#mobileDialogTitle")?.textContent).toBe("Continue?");
-    expect(document.querySelector("#mobileDialogBody")?.textContent).toContain("Approve the operation?");
-    expect(document.querySelector("#mobileDialogStatus")?.textContent).toContain("30s");
+  it("renders a confirm ask inline, locks the composer, and confirms", () => {
+    const { connection } = createHarness();
+    activateWithAsk(connection, { id: "dialog-1", method: "confirm", title: "Continue?", message: "Approve the operation?", timeout: 30000 }, true);
 
-    document.querySelector<HTMLButtonElement>("#mobileDialogSubmit")?.click();
+    const card = document.querySelector<HTMLElement>(".ask-card");
+    expect(card?.querySelector(".ask-card-title")?.textContent).toBe("Continue?");
+    expect(card?.querySelector(".ask-card-body")?.textContent).toContain("Approve the operation?");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(true);
+
+    document.querySelector<HTMLButtonElement>(".ask-card .ask-card-confirm")?.click();
 
     expect(connection.sent).toContainEqual({
       type: "dialog.respond",
@@ -960,22 +964,15 @@ describe("mountMobileApp", () => {
       dialogId: "dialog-1",
       response: { confirmed: true },
     });
-    expect(overlay?.hidden).toBe(true);
   });
 
-  it("renders select dialog requests and sends selected values", () => {
+  it("renders a select ask inline and sends the chosen option", () => {
     const { connection } = createHarness();
-    connection.emit({
-      type: "dialog.request",
-      sessionId: "live",
-      dialog: { id: "dialog-2", method: "select", title: "Pick target", options: ["alpha", "beta"] },
-    });
+    activateWithAsk(connection, { id: "dialog-2", method: "select", title: "Pick target", options: ["alpha", "beta"] }, true);
 
-    const select = document.querySelector<HTMLSelectElement>("#mobileDialogField select");
-    if (!select) throw new Error("dialog select missing");
-    select.value = "beta";
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    document.querySelector<HTMLFormElement>("#mobileDialogForm")?.requestSubmit();
+    [...document.querySelectorAll<HTMLButtonElement>(".ask-card-option")]
+      .find(button => button.textContent === "beta")
+      ?.click();
 
     expect(connection.sent).toContainEqual({
       type: "dialog.respond",
@@ -985,27 +982,15 @@ describe("mountMobileApp", () => {
     });
   });
 
-  it("renders editor dialog requests and sends edited values", () => {
+  it("renders an editor ask with prefill and sends the edited value", () => {
     const { connection } = createHarness();
-    connection.emit({
-      type: "dialog.request",
-      sessionId: "live",
-      dialog: {
-        id: "dialog-editor",
-        method: "editor",
-        title: "Enter custom review instructions",
-        prefill: "Check edge cases.",
-        promptStyle: true,
-      },
-    });
+    activateWithAsk(connection, { id: "dialog-editor", method: "editor", title: "Custom instructions", prefill: "Check edge cases.", promptStyle: true }, true);
 
-    const textarea = document.querySelector<HTMLTextAreaElement>("#mobileDialogField textarea");
-    if (!textarea) throw new Error("dialog editor missing");
-    expect(textarea.rows).toBe(6);
+    const textarea = document.querySelector<HTMLTextAreaElement>(".ask-card .ask-card-input");
+    if (!textarea) throw new Error("ask editor missing");
     expect(textarea.value).toBe("Check edge cases.");
     textarea.value = "Check edge cases and concurrency.";
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    document.querySelector<HTMLFormElement>("#mobileDialogForm")?.requestSubmit();
+    document.querySelector<HTMLButtonElement>(".ask-card .ask-card-submit")?.click();
 
     expect(connection.sent).toContainEqual({
       type: "dialog.respond",
@@ -1015,68 +1000,51 @@ describe("mountMobileApp", () => {
     });
   });
 
-  it("renders open_url dialog requests without sending extension responses", () => {
+  it("renders open_url asks as a safe link without locking the composer", () => {
     const { connection } = createHarness();
-    connection.emit({
-      type: "dialog.request",
+    activateWithAsk(connection, { id: "dialog-open", method: "open_url", title: "Open login URL", instructions: "Use this link to continue.", url: "https://auth.example.test/mobile" }, false);
+
+    const card = document.querySelector<HTMLElement>(".ask-card");
+    expect(card?.querySelector(".ask-card-body")?.textContent).toContain("Use this link to continue.");
+    expect(card?.querySelector<HTMLAnchorElement>("a.ask-card-option")?.href).toBe("https://auth.example.test/mobile");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(false);
+
+    card?.querySelector<HTMLButtonElement>(".ask-card-cancel")?.click();
+
+    expect(connection.sent).toContainEqual({
+      type: "dialog.respond",
       sessionId: "live",
-      dialog: {
-        id: "dialog-open",
-        method: "open_url",
-        title: "Open login URL",
-        instructions: "Use this link to continue.",
-        url: "https://auth.example.test/mobile",
-      },
+      dialogId: "dialog-open",
+      response: { cancelled: true },
     });
-
-    const overlay = document.querySelector<HTMLElement>("#mobileDialogOverlay");
-    expect(overlay?.hidden).toBe(false);
-    expect(document.querySelector("#mobileDialogTitle")?.textContent).toBe("Open login URL");
-    expect(document.querySelector("#mobileDialogBody")?.textContent).toContain("Use this link to continue.");
-    expect(document.querySelector<HTMLAnchorElement>("#mobileDialogField a")?.href).toBe("https://auth.example.test/mobile");
-    expect(document.querySelector<HTMLButtonElement>("#mobileDialogSubmit")?.hidden).toBe(true);
-
-    document.querySelector<HTMLButtonElement>("#mobileDialogCancel")?.click();
-
-    expect(overlay?.hidden).toBe(true);
-    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
   });
 
-  it("shows notify dialog requests as visible mobile notices", () => {
+  it("shows session notices for warning-level notifications", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     clickSession();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
 
-    connection.emit({
-      type: "dialog.request",
-      sessionId: "live",
-      dialog: {
-        id: "notify-1",
-        method: "notify",
-        message: "No uncommitted changes found",
-        notifyType: "warning",
-      },
-    });
+    connection.emit({ type: "session.notice", sessionId: "live", level: "warning", text: "warning: No uncommitted changes found" });
 
-    expect(document.querySelector<HTMLElement>("#mobileDialogOverlay")?.hidden).toBe(true);
     const notice = document.querySelector<HTMLElement>(".session-notice.notice-warning");
     expect(notice?.textContent).toContain("warning: No uncommitted changes found");
     expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
   });
 
-
-  it("applies extension editor text updates to the mobile prompt draft", () => {
+  it("preserves a typed editor answer across transcript rerenders", () => {
     const { connection } = createHarness();
-    connection.emit({
-      type: "dialog.request",
-      sessionId: "live",
-      dialog: { id: "dialog-3", method: "set_editor_text", text: "draft from extension" },
-    });
+    activateWithAsk(connection, { id: "dialog-editor", method: "editor", title: "Notes", prefill: "" }, true);
 
-    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.value).toBe("draft from extension");
-    expect(document.querySelector("#mobileLog")?.textContent).toBe("");
-    expect(connection.sent.some(message => message.type === "dialog.respond")).toBe(false);
+    const textarea = document.querySelector<HTMLTextAreaElement>(".ask-card .ask-card-input");
+    if (!textarea) throw new Error("ask editor missing");
+    textarea.value = "answer in progress";
+
+    // A notice for the same session triggers a transcript rerender while the ask is open.
+    connection.emit({ type: "session.notice", sessionId: "live", level: "info", text: "heads up" });
+
+    const after = document.querySelector<HTMLTextAreaElement>(".ask-card .ask-card-input");
+    expect(after?.value).toBe("answer in progress");
   });
 
   it("keeps the composer enabled while the active session is busy", () => {

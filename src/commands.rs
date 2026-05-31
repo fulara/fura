@@ -139,6 +139,28 @@ pub(crate) async fn handle_client_message(
                     }];
                 }
             };
+            // Drop the session ask state as soon as the user answers so the composer
+            // unlocks and the card clears even before the agent issues its next step.
+            let answered_id = dialog_id.clone();
+            let cleared_session_id = session_id.clone();
+            state
+                .events
+                .mutate_session_and_emit(state, &session_id, move |record| {
+                    let current_id = record
+                        .pending_ask
+                        .as_ref()
+                        .and_then(|pending| pending.get("id"))
+                        .and_then(Value::as_str);
+                    if current_id != Some(answered_id.as_str()) {
+                        return None;
+                    }
+                    record.pending_ask = None;
+                    Some(ServerMessage::SessionSnapshot {
+                        session_id: cleared_session_id,
+                        state: record.projection(),
+                    })
+                })
+                .await;
             command.insert("id".to_string(), Value::String(dialog_id));
             command.insert(
                 "type".to_string(),
@@ -1238,6 +1260,7 @@ pub(crate) fn opened_session_record(
         plan_mode: existing.and_then(|record| record.plan_mode.clone()),
         goal_mode: existing.and_then(|record| record.goal_mode.clone()),
         pending_plan_review: existing.and_then(|record| record.pending_plan_review.clone()),
+        pending_ask: None,
     }
 }
 
@@ -3364,6 +3387,7 @@ mod review_comment_tests {
             plan_mode: None,
             goal_mode: None,
             pending_plan_review: None,
+            pending_ask: None,
         }
     }
 

@@ -42,8 +42,6 @@ pub(crate) struct AppState {
     pub(crate) active_review_contexts: Arc<RwLock<HashMap<String, ActiveReviewContext>>>,
     pub(crate) active_conflict_contexts: Arc<RwLock<HashMap<String, ActiveConflictContext>>>,
     pub(crate) events: WsEventCoordinator,
-    /// Last websocket connection that interacted with a given session and should receive RPC UI dialogs for it.
-    pub(crate) session_dialog_owners: Arc<RwLock<HashMap<String, u64>>>,
     pub(crate) session_host_tools: Arc<RwLock<HashMap<String, Vec<Value>>>>,
     pub(crate) rpc_config: Arc<RpcConfig>,
     pub(crate) log_frames: bool,
@@ -1083,6 +1081,7 @@ pub(crate) async fn apply_get_state_update(
                             plan_mode: None,
                             goal_mode: None,
                             pending_plan_review: None,
+                            pending_ask: None,
                         }
                     });
 

@@ -126,6 +126,7 @@ export type SessionSummary = {
   category?: string | null;
   worktree?: SessionWorktreeSummary | null;
   goalMode?: GoalModeProjection | null;
+  awaitingAsk?: boolean;
 };
 
 export type PlanModeProjection = {
@@ -139,6 +140,21 @@ export type PendingPlanReviewProjection = {
   finalPlanFilePath: string;
   title?: string | null;
   content: string;
+};
+
+export type PendingAskProjection = {
+  id: string;
+  method: string;
+  title?: string | null;
+  message?: string | null;
+  options?: string[] | null;
+  placeholder?: string | null;
+  prefill?: string | null;
+  promptStyle?: boolean | null;
+  timeout?: number | null;
+  targetId?: string | null;
+  url?: string | null;
+  instructions?: string | null;
 };
 export type SessionProjection = {
   summary: SessionSummary;
@@ -155,6 +171,7 @@ export type SessionProjection = {
   pendingPlanReview?: PendingPlanReviewProjection | null;
   goalMode?: GoalModeProjection | null;
   todoPhases: TodoPhase[];
+  pendingAsk?: PendingAskProjection | null;
 };
 
 export type SessionProjectionDelta = {
@@ -173,6 +190,7 @@ export type SessionProjectionDelta = {
   pendingPlanReview?: PendingPlanReviewProjection | null;
   goalMode?: GoalModeProjection | null;
   todoPhases: TodoPhase[];
+  pendingAsk?: PendingAskProjection | null;
 };
 
 export type DiffDetailMode = "filePatch" | "statOnly";
@@ -643,7 +661,6 @@ export type ServerMessage =
   | { type: "session.snapshot"; sessionId: string; state: SessionProjection }
   | { type: "session.delta"; sessionId: string; state: SessionProjectionDelta }
   | { type: "session.exited"; sessionId: string; code?: number; signal?: string }
-  | { type: "dialog.request"; sessionId: string; dialog: unknown }
   | { type: "log.stderr"; sessionId: string; text: string }
   | { type: "session.notice"; sessionId: string; level: "info" | "warning" | "error"; text: string }
   | { type: "prompt.busy"; sessionId: string; text: string; images?: unknown[] | null }

@@ -425,6 +425,22 @@ for await (const line of rl) {
         write({ type: "agent_end", timestamp: now + 2 });
         break;
       }
+      if (promptText.toLowerCase().includes("mock ask")) {
+        messages.push(user);
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({
+          type: "extension_ui_request",
+          id: `mock-ask-${now}`,
+          method: "select",
+          title: "Pick a color",
+          options: ["Red", "Green", "Blue"],
+          timeout: 60000,
+        });
+        // No agent_end: the turn stays open until the user answers the ask.
+        break;
+      }
+
 
       const assistant = {
         id: `assistant-${now + 1}`,
@@ -437,6 +453,26 @@ for await (const line of rl) {
       write({ type: "agent_start", timestamp: now });
       write({ type: "message_end", timestamp: now + 1, message: assistant });
       write({ type: "agent_end", timestamp: now + 2 });
+      break;
+    }
+    case "extension_ui_response": {
+      const now = Date.now();
+      const answer = command.cancelled
+        ? "(cancelled)"
+        : typeof command.value === "string"
+          ? command.value
+          : command.confirmed === true
+            ? "confirmed"
+            : "declined";
+      const assistant = {
+        id: `assistant-ask-${now}`,
+        role: "assistant",
+        content: [{ type: "text", text: `Mock assistant recorded your answer: ${answer}.` }],
+        timestamp: now,
+      };
+      messages.push(assistant);
+      write({ type: "message_end", timestamp: now, message: assistant });
+      write({ type: "agent_end", timestamp: now + 1 });
       break;
     }
     case "abort": {
