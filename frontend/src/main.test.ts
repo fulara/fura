@@ -588,8 +588,49 @@ describe("desktop cog options", () => {
     expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.file.open", workspaceId: "ws-1", path: "src/main.ts" }));
   });
 
-  it("opens a review-commit diff file in Code through a single worktree open", async () => {
+  it("opens the clicked diff file in Code on the first try before the panel reports active", async () => {
     const { connection } = await createHarness();
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile, contextLines: request.contextLines ?? 3 },
+        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: " src/main.ts | 2 +-\n", truncated: false },
+      },
+    });
+    document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
+    connection.sent.length = 0;
+
+    const codeButton = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .find(button => button.textContent === "Code");
+    if (!codeButton) throw new Error("Code button missing");
+    codeButton.click();
+
+    // The Code panel has NOT been marked active yet (activatePanel races the reply).
+    expect(desktopMockActivePanelIds.has("code")).toBe(false);
+    connection.emit({
+      type: "code.workspace.ready",
+      workspace: { workspaceId: "ws-1", sessionId: "live", root: "/repo", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
+    });
+
+    // The explicit open must still be honored on the first try.
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.file.open", workspaceId: "ws-1", path: "src/main.ts" }));
+  });
+
+  it("opens a review-commit diff file in Code through a single worktree open", async () => {
+    // Mount the Code panel (as the real desktop layout does) so renderCodePanelIfNeeded
+    // actually runs — this exercises the review-worktree session-mismatch reset guard.
+    const { connection } = await createHarness({ mountCodePanel: true });
     const commitOid = "c".repeat(40);
 
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
@@ -665,10 +706,10 @@ describe("desktop cog options", () => {
     });
   }
 
-  // jsdom lacks caret APIs; stub one so a click resolves to a known column, then
-  // click the inline nav action. This exercises the real request path so the
-  // response can be correlated by requestId.
-  function triggerNavAction(label: string): void {
+  // jsdom lacks caret APIs; stub one so a right-click resolves to a known column.
+  // This drives the real contextmenu → popup → request path so a response can be
+  // correlated by requestId.
+  function rightClickCodeLine(): void {
     const content = document.querySelector<HTMLElement>("#testCodePanel .code-line-content");
     if (!content) throw new Error("code line content missing");
     const codeEl = content.querySelector("code");
@@ -679,8 +720,12 @@ describe("desktop cog options", () => {
       range.collapse(true);
       return range;
     };
-    content.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    const button = [...document.querySelectorAll<HTMLButtonElement>("#testCodePanel .code-nav-actions button")]
+    content.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 20, clientY: 20 }));
+  }
+
+  function triggerNavAction(label: string): void {
+    rightClickCodeLine();
+    const button = [...document.querySelectorAll<HTMLButtonElement>(".code-context-menu .code-context-action")]
       .find(candidate => candidate.textContent === label);
     if (!button) throw new Error(`${label} action missing`);
     button.click();
@@ -783,6 +828,107 @@ describe("desktop cog options", () => {
     const panel = document.querySelector("#testCodePanel .code-references");
     expect(panel?.textContent).toContain("References (2)");
     expect(document.querySelectorAll("#testCodePanel .code-references-group").length).toBe(2);
+  });
+
+  it("requests hover and renders it in the right-click popup", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    rightClickCodeLine();
+    const hoverSent = [...connection.sent].reverse().find(
+      (message): message is Extract<ClientMessage, { type: "code.hover" }> => message.type === "code.hover",
+    );
+    if (!hoverSent) throw new Error("code.hover request not sent");
+    expect(document.querySelector(".code-context-hover-muted")?.textContent).toContain("Loading");
+
+    connection.emit({
+      type: "code.hover",
+      workspaceId: "ws-1",
+      requestId: hoverSent.requestId,
+      path: "src/main.rs",
+      contents: "```rust\nfn target()\n```\nDocs.",
+    });
+    expect(document.querySelector(".code-context-hover")?.textContent).toContain("fn target()");
+
+    // A reply for a superseded request id is ignored.
+    connection.emit({
+      type: "code.hover",
+      workspaceId: "ws-1",
+      requestId: "stale-hover",
+      path: "src/main.rs",
+      contents: "stale info",
+    });
+    expect(document.querySelector(".code-context-hover")?.textContent).not.toContain("stale info");
+
+    // Escape dismisses the popup.
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(document.querySelector(".code-context-menu")).toBeNull();
+  });
+
+  it("resolves a loading hover popup on failure status but leaves rendered hover intact", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    // A still-loading popup is resolved to a placeholder by a failure status.
+    rightClickCodeLine();
+    connection.emit({ type: "code.status", workspaceId: "ws-1", status: "error", message: "boom" });
+    expect(document.querySelector(".code-context-hover-muted")?.textContent).toContain("unavailable");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+    // A rendered hover must NOT be clobbered by a later shared-workspace failure.
+    rightClickCodeLine();
+    const hoverSent = [...connection.sent].reverse().find(
+      (message): message is Extract<ClientMessage, { type: "code.hover" }> => message.type === "code.hover",
+    );
+    if (!hoverSent) throw new Error("code.hover request not sent");
+    connection.emit({ type: "code.hover", workspaceId: "ws-1", requestId: hoverSent.requestId, path: "src/main.rs", contents: "fn target()" });
+    expect(document.querySelector(".code-context-hover")?.textContent).toContain("fn target()");
+    connection.emit({ type: "code.status", workspaceId: "ws-1", status: "unavailable", message: "down" });
+    expect(document.querySelector(".code-context-hover")?.textContent).toContain("fn target()");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  });
+
+  it("resolves a loading hover popup when a code.error arrives", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    rightClickCodeLine();
+    expect(document.querySelector(".code-context-hover-muted")?.textContent).toContain("Loading");
+    connection.emit({ type: "code.error", workspaceId: "ws-1", path: "src/main.rs", message: "file vanished" });
+    expect(document.querySelector(".code-context-hover-muted")?.textContent).toContain("unavailable");
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  });
+
+  it("survives a programmatic scroll and a code.status re-render, dismissing only on an outside wheel", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    rightClickCodeLine();
+    // Re-query each time: a code-panel re-render rebuilds the lines container.
+    const codeLines = () => {
+      const el = document.querySelector("#testCodePanel .code-review-lines");
+      if (!el) throw new Error("code lines missing");
+      return el;
+    };
+
+    // A `scroll` event (e.g. the scroll-preservation restore fired by a
+    // code-panel re-render) must NOT dismiss the popup — only user wheel gestures do.
+    codeLines().dispatchEvent(new Event("scroll", { bubbles: true }));
+    expect(document.querySelector(".code-context-menu")).not.toBeNull();
+
+    // A code.status update re-renders the code panel; the popup must stay open.
+    connection.emit({ type: "code.status", workspaceId: "ws-1", status: "indexing" });
+    expect(document.querySelector(".code-context-menu")).not.toBeNull();
+
+    // A wheel gesture inside the hover pane must not dismiss it.
+    const hoverPane = document.querySelector(".code-context-hover");
+    if (!hoverPane) throw new Error("hover pane missing");
+    hoverPane.dispatchEvent(new Event("wheel", { bubbles: true }));
+    expect(document.querySelector(".code-context-menu")).not.toBeNull();
+
+    // A wheel gesture over the code lines invalidates the anchor → dismiss.
+    codeLines().dispatchEvent(new Event("wheel", { bubbles: true }));
+    expect(document.querySelector(".code-context-menu")).toBeNull();
   });
 
   it("ignores an uncorrelated definition response (stale or other client)", async () => {

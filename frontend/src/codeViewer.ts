@@ -25,9 +25,6 @@ export type CodeViewerState = {
   searchLoading: boolean;
   searchError: string | null;
   fileComments: CodeFileComment[];
-  // rust-analyzer navigation. `navSelection` carries an LSP position (0-based
-  // line, UTF-16 character) for the inline definition/references actions.
-  navSelection: { line: number; character: number } | null;
   analyzerStatus: CodeStatus | null;
   analyzerMessage: string | null;
   references: CodeReferencesState | null;
@@ -51,13 +48,17 @@ export type CodeViewerActions = {
   deleteComment(comment: CodeFileComment): void;
   previewComments(): void;
   flushComments(): void;
-  selectNavPosition(line: number, character: number): void;
-  clearNavSelection(): void;
+  openContextMenu(line: number, character: number, x: number, y: number): void;
   goToDefinition(line: number, character: number): void;
   findReferences(line: number, character: number): void;
   openReference(location: CodeLocation): void;
   closeReferences(): void;
 };
+
+// Per-container record of the last rendered file (workspace + path) so
+// renderCodeViewer preserves scroll only across re-renders of the same file in
+// the same viewer — never across workspace switches or other containers.
+const lastRenderedCodeFileKey = new WeakMap<HTMLElement, string>();
 
 export function parentCodePath(path: string): string | null {
   const normalized = normalizeCodePath(path);
@@ -79,6 +80,15 @@ export function renderCodeViewer(
   actions: CodeViewerActions,
 ): void {
   setRenderDocument(container.ownerDocument);
+  // Preserve the code scroll position across re-renders of the SAME file so an
+  // analyzer-status or references-panel update doesn't bounce the reader to the
+  // top (the lines container is rebuilt below). A file change — or no prior file
+  // — starts fresh; an explicit scroll-to-line still overrides via rAF.
+  const previousLines = container.querySelector<HTMLElement>(".code-review-lines");
+  const fileKey = state.file ? `${state.workspace?.workspaceId ?? ""}::${state.file.path}` : null;
+  const samePath = fileKey != null && lastRenderedCodeFileKey.get(container) === fileKey;
+  const preservedScrollTop = samePath && previousLines ? previousLines.scrollTop : null;
+
   container.replaceChildren();
 
   const root = mkEl("section");
@@ -96,6 +106,13 @@ export function renderCodeViewer(
   container.append(root);
 
   if (state.searchOpen) root.append(renderFileSearchDialog(state, actions));
+
+  if (preservedScrollTop != null) {
+    const nextLines = container.querySelector<HTMLElement>(".code-review-lines");
+    if (nextLines) nextLines.scrollTop = preservedScrollTop;
+  }
+  if (fileKey != null) lastRenderedCodeFileKey.set(container, fileKey);
+  else lastRenderedCodeFileKey.delete(container);
 }
 
 function renderCodeWorkspaceHeader(state: CodeViewerState, actions: CodeViewerActions): HTMLElement {
@@ -354,7 +371,7 @@ function renderCodeMain(state: CodeViewerState, actions: CodeViewerActions): HTM
   path.title = state.file.path;
   path.textContent = state.file.path;
   const meta = mkEl("span");
-  const navHint = state.workspace?.rustRoot ? " · click a symbol for definition / references" : "";
+  const navHint = state.workspace?.rustRoot ? " · right-click a symbol for definition / references" : "";
   meta.textContent = `${state.file.language || "text"} · ${formatCodeFileSize(state.file.size)} · read-only${navHint}`;
   title.append(path, meta);
 
@@ -435,17 +452,17 @@ function renderCodeLines(state: CodeViewerState, actions: CodeViewerActions): HT
       codeEl.textContent = renderText;
     }
     content.append(codeEl);
-    content.addEventListener("click", event => {
-      const position = navPositionFromClick(event, codeEl, index);
-      if (position) actions.selectNavPosition(position.line, position.character);
-    });
+    if (state.workspace?.rustRoot) {
+      content.addEventListener("contextmenu", event => {
+        const position = navPositionFromEvent(event, codeEl, index);
+        if (!position) return;
+        event.preventDefault();
+        actions.openContextMenu(position.line, position.character, event.clientX, event.clientY);
+      });
+    }
 
     line.append(commentBtn, gutter, content);
     lineWrap.append(line);
-
-    if (state.navSelection && state.navSelection.line === index) {
-      lineWrap.append(renderNavActions(state.navSelection, actions));
-    }
 
     if (state.pendingScrollLine === lineNumber) {
       lineWrap.classList.add("code-line-flash");
@@ -482,41 +499,6 @@ function renderCodeLines(state: CodeViewerState, actions: CodeViewerActions): HT
   }
 
   return container;
-}
-
-function renderNavActions(
-  selection: { line: number; character: number },
-  actions: CodeViewerActions,
-): HTMLElement {
-  const bar = mkEl("div");
-  bar.className = "code-nav-actions";
-  const label = mkEl("span");
-  label.className = "code-nav-actions-label";
-  label.textContent = `Line ${selection.line + 1}, col ${selection.character + 1}`;
-
-  const definition = mkEl("button");
-  definition.type = "button";
-  definition.textContent = "Go to definition";
-  definition.addEventListener("click", () =>
-    actions.goToDefinition(selection.line, selection.character),
-  );
-
-  const references = mkEl("button");
-  references.type = "button";
-  references.textContent = "Find references";
-  references.addEventListener("click", () =>
-    actions.findReferences(selection.line, selection.character),
-  );
-
-  const dismiss = mkEl("button");
-  dismiss.type = "button";
-  dismiss.className = "code-nav-actions-dismiss";
-  dismiss.textContent = "×";
-  dismiss.title = "Dismiss";
-  dismiss.addEventListener("click", actions.clearNavSelection);
-
-  bar.append(label, definition, references, dismiss);
-  return bar;
 }
 
 const ANALYZER_STATUS_TEXT: Partial<Record<CodeStatus, string>> = {
@@ -606,27 +588,101 @@ function renderReferencesPanel(state: CodeViewerState, actions: CodeViewerAction
   return panel;
 }
 
-function navPositionFromClick(
+export type CodeContextMenuHover = {
+  status: "loading" | "ready" | "empty" | "error";
+  contents: string | null;
+};
+
+export type CodeContextMenuViewState = {
+  line: number;
+  character: number;
+  hover: CodeContextMenuHover;
+};
+
+export type CodeContextMenuActions = {
+  goToDefinition(line: number, character: number): void;
+  findReferences(line: number, character: number): void;
+};
+
+/// Render the right-click navigation popup into `menu`. The popup is decoupled
+/// from `renderCodeViewer` so opening it (or updating its hover) never rebuilds
+/// the code lines, preserving scroll. main.ts owns the element, its position,
+/// and outside-click/Escape/scroll dismissal.
+export function renderCodeContextMenu(
+  menu: HTMLElement,
+  state: CodeContextMenuViewState,
+  actions: CodeContextMenuActions,
+  renderHoverMarkdown: (markdown: string) => HTMLElement,
+): void {
+  setRenderDocument(menu.ownerDocument);
+  menu.replaceChildren();
+
+  const hover = mkEl("div");
+  hover.className = "code-context-hover";
+  const { status, contents } = state.hover;
+  if (status === "ready" && contents) {
+    hover.append(renderHoverMarkdown(contents));
+  } else {
+    hover.classList.add("code-context-hover-muted");
+    hover.textContent =
+      status === "loading"
+        ? "Loading type info…"
+        : status === "error"
+          ? "Type info unavailable."
+          : "No type information.";
+  }
+  menu.append(hover);
+
+  const actionsRow = mkEl("div");
+  actionsRow.className = "code-context-actions";
+  const definition = mkEl("button");
+  definition.type = "button";
+  definition.className = "code-context-action";
+  definition.textContent = "Go to definition";
+  definition.addEventListener("click", () => actions.goToDefinition(state.line, state.character));
+  const references = mkEl("button");
+  references.type = "button";
+  references.className = "code-context-action";
+  references.textContent = "Find references";
+  references.addEventListener("click", () => actions.findReferences(state.line, state.character));
+  actionsRow.append(definition, references);
+  menu.append(actionsRow);
+}
+
+function navPositionFromEvent(
   event: MouseEvent,
   codeEl: HTMLElement,
   lineIndex: number,
 ): { line: number; character: number } | null {
   const doc = codeEl.ownerDocument;
-  const view = doc.defaultView;
-  // Ignore a click that completes a drag-to-copy on THIS line, but not when the
-  // user merely has text selected elsewhere in the app.
-  const selection = view?.getSelection();
-  if (
-    selection &&
-    !selection.isCollapsed &&
-    ((selection.anchorNode && codeEl.contains(selection.anchorNode)) ||
-      (selection.focusNode && codeEl.contains(selection.focusNode)))
-  ) {
+  // Don't hijack the native context menu when the user right-clicks an active
+  // text selection that touches this line, so select → right-click → Copy works.
+  const selection = doc.defaultView?.getSelection();
+  if (selection && !selection.isCollapsed && selectionTouchesElement(selection, codeEl)) {
     return null;
   }
   const caret = caretFromPoint(doc, event.clientX, event.clientY);
   if (!caret || !codeEl.contains(caret.node)) return null;
   return { line: lineIndex, character: utf16ColumnWithin(codeEl, caret.node, caret.offset) };
+}
+
+function selectionTouchesElement(selection: Selection, codeEl: HTMLElement): boolean {
+  // An endpoint inside this line, or — for a multi-line selection whose
+  // endpoints are in other lines — a range that spans across it. Either way the
+  // native menu (Copy) must stay reachable on the active selection.
+  if (
+    (selection.anchorNode && codeEl.contains(selection.anchorNode)) ||
+    (selection.focusNode && codeEl.contains(selection.focusNode))
+  ) {
+    return true;
+  }
+  for (let i = 0; i < selection.rangeCount; i += 1) {
+    const range = selection.getRangeAt(i);
+    if (typeof range.intersectsNode === "function" && range.intersectsNode(codeEl)) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function caretFromPoint(

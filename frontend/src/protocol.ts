@@ -743,6 +743,7 @@ export type ServerMessage =
   | { type: "code.definition"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
   | { type: "code.references"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
   | { type: "code.status"; workspaceId: string; status: CodeStatus; message?: string | null }
+  | { type: "code.hover"; workspaceId: string; requestId: string; path: string; contents?: string | null; range?: CodeRange | null }
   | { type: "conflict.snapshot"; repos: ConflictRepositorySummary[] }
   | { type: "conflict.file"; file: ConflictFileState }
   | { type: "conflict.magicWandPreview"; preview: ConflictMagicWandPreview }
@@ -822,6 +823,7 @@ export type ClientMessage =
   | { type: "code.file.search"; workspaceId: string; basePath: string; query: string; limit?: number }
   | { type: "code.definition"; workspaceId: string; path: string; line: number; character: number; requestId: string }
   | { type: "code.references"; workspaceId: string; path: string; line: number; character: number; requestId: string }
+  | { type: "code.hover"; workspaceId: string; path: string; line: number; character: number; requestId: string }
   | { type: "conflict.scan"; root: string }
   | { type: "conflict.file.open"; repoId: string; path: string }
   | { type: "conflict.file.previewMagicWand"; repoId: string; path: string; expectedVersion: string }

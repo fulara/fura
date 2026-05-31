@@ -121,7 +121,7 @@ import {
 } from "./askCard";
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { captureDiffFilterFocus, restoreDiffFilterFocus } from "./diffViewDom";
-import { messageText, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
+import { messageText, renderMarkdown, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import {
   buildTranscriptReviewPrompt,
   type TranscriptReviewComment,
@@ -139,7 +139,9 @@ import {
 } from "./planReview";
 import {
   parentCodePath,
+  renderCodeContextMenu,
   renderCodeViewer,
+  type CodeContextMenuViewState,
   type CodeReferencesState,
   type CodeViewerState,
 } from "./codeViewer";
@@ -1127,7 +1129,21 @@ let codeSearchResults: CodeTreeEntry[] = [];
 let codeSearchLoading = false;
 let codeSearchError: string | null = null;
 let codeSearchRequestTimer: number | null = null;
-let codeNavSelection: { line: number; character: number } | null = null;
+// Right-click navigation popup: an LSP position (0-based line, UTF-16 char), its
+// anchor point, the in-flight hover request id, and the hover result. Rendered
+// as a floating overlay decoupled from the code panel so it never rebuilds the
+// (scroll-bearing) lines container.
+type CodeContextMenuState = {
+  line: number;
+  character: number;
+  x: number;
+  y: number;
+  requestId: string;
+  hover: { status: "loading" | "ready" | "empty" | "error"; contents: string | null };
+};
+let codeContextMenu: CodeContextMenuState | null = null;
+let codeContextMenuEl: HTMLElement | null = null;
+let codeContextMenuListenersAttached = false;
 let codeAnalyzerStatus: CodeStatus | null = null;
 let codeAnalyzerMessage: string | null = null;
 let codeReferences: CodeReferencesState | null = null;
@@ -1137,6 +1153,7 @@ let codePendingScrollLine: number | null = null;
 // workspace) are ignored.
 let codeDefinitionRequestId: string | null = null;
 let codeReferencesRequestId: string | null = null;
+let codeHoverRequestId: string | null = null;
 let conflictRepos: ConflictRepositorySummary[] = [];
 let conflictRoot: string | null = null;
 let conflictSelectedRepoId: string | null = null;
@@ -2097,7 +2114,7 @@ function handleServerMessage(message: ServerMessage): void {
       codeError = null;
       // A new workspace (session switch or review-worktree open) must not inherit
       // the previous workspace's navigation/analyzer UI state.
-      codeNavSelection = null;
+      closeCodeContextMenu();
       codeReferences = null;
       codeAnalyzerStatus = null;
       codeAnalyzerMessage = null;
@@ -2106,17 +2123,26 @@ function handleServerMessage(message: ServerMessage): void {
       codeReferencesRequestId = null;
       if (codeSearchOpen && !codeSearchBasePath) codeSearchBasePath = message.workspace.root;
       markCodeViewDirty();
-      if (desktopDockview?.isPanelActive("code")) {
-        renderCodePanelIfNeeded(true);
-        const pending = pendingCodeOpenRequest;
-        if (pending) {
-          pendingCodeOpenRequest = null;
-          requestCodeTree(parentCodePath(pending.path) ?? "");
-          requestCodeFile(pending.path);
-        } else {
-          requestCodeTree("");
-        }
+      const pending = pendingCodeOpenRequest;
+      // Only consume the pending open when THIS ready is the workspace it asked
+      // for, so a stale reply for an earlier in-flight open cannot hijack it.
+      const pendingMatchesWorkspace =
+        pending != null &&
+        (pending.source === "reviewCommit"
+          ? pending.reviewWorktreeId != null &&
+            message.workspace.reviewWorktreeId === pending.reviewWorktreeId
+          : message.workspace.sessionId === pending.sessionId);
+      if (pending && pendingMatchesWorkspace) {
+        // Honor an explicit "Open in Code" request as soon as its workspace is
+        // ready, even before the panel finishes activating (activatePanel races
+        // the workspace.ready reply, which used to drop the first open).
+        pendingCodeOpenRequest = null;
+        requestCodeTree(parentCodePath(pending.path) ?? "");
+        requestCodeFile(pending.path);
+      } else if (!pending && desktopDockview?.isPanelActive("code")) {
+        requestCodeTree("");
       }
+      renderCodePanelIfNeeded(true);
       break;
     case "code.tree":
       if (codeWorkspace?.workspaceId === message.workspaceId) {
@@ -2240,6 +2266,9 @@ function handleServerMessage(message: ServerMessage): void {
           codeSearchLoading = false;
           codeSearchError = codeError;
         }
+        // A request-scoped error (unreadable/missing file, unknown workspace)
+        // means a pending hover will never arrive; resolve a still-loading popup.
+        resolvePendingHover("error");
         markCodeViewDirty();
         renderCodePanelIfNeeded(true);
       }
@@ -2262,8 +2291,29 @@ function handleServerMessage(message: ServerMessage): void {
       if (codeWorkspace?.workspaceId === message.workspaceId) {
         codeAnalyzerStatus = message.status;
         codeAnalyzerMessage = message.message ?? null;
+        // A failure status means an in-flight hover will never arrive; resolve a
+        // still-loading popup instead of spinning forever. resolvePendingHover is
+        // a no-op once the popup has already rendered hover content.
+        if (message.status === "error" || message.status === "unavailable" || message.status === "filesOnly") {
+          resolvePendingHover(message.status === "filesOnly" ? "empty" : "error");
+        }
         markCodeViewDirty();
         renderCodePanelIfNeeded(true);
+      }
+      break;
+    case "code.hover":
+      if (
+        codeWorkspace?.workspaceId === message.workspaceId &&
+        message.requestId === codeHoverRequestId &&
+        codeContextMenu
+      ) {
+        codeHoverRequestId = null;
+        const hoverContents = message.contents ?? null;
+        codeContextMenu = {
+          ...codeContextMenu,
+          hover: { status: hoverContents ? "ready" : "empty", contents: hoverContents },
+        };
+        renderCodeContextMenuOverlay();
       }
       break;
     case "plan.review":
@@ -4293,7 +4343,7 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeSearchResults = [];
   codeSearchLoading = false;
   codeSearchError = null;
-  codeNavSelection = null;
+  closeCodeContextMenu();
   codeAnalyzerStatus = null;
   codeAnalyzerMessage = null;
   codeReferences = null;
@@ -4326,7 +4376,6 @@ function activeCodeViewState(): CodeViewerState {
     searchLoading: codeSearchLoading,
     searchError: codeSearchError,
     fileComments: activeCodeComments,
-    navSelection: codeNavSelection,
     analyzerStatus: codeAnalyzerStatus,
     analyzerMessage: codeAnalyzerMessage,
     references: codeReferences,
@@ -4390,7 +4439,7 @@ function requestCodeTree(path: string): void {
 function requestCodeFile(path: string): void {
   if (!codeWorkspace) return;
   codeLoadingFile = true;
-  codeNavSelection = null;
+  closeCodeContextMenu();
   // Opening a (possibly different) file supersedes any in-flight navigation, so
   // a late reply for the previous file must not jump the panel or repopulate it.
   codeDefinitionRequestId = null;
@@ -4424,6 +4473,127 @@ function requestCodeReferences(line: number, character: number): void {
   markCodeViewDirty();
   renderCodePanelIfNeeded(true);
   send({ type: "code.references", workspaceId: codeWorkspace.workspaceId, path: codeFile.path, line, character, requestId });
+}
+
+function requestCodeHover(line: number, character: number): string {
+  const requestId = randomUuid();
+  codeHoverRequestId = requestId;
+  if (codeWorkspace && codeFile) {
+    send({ type: "code.hover", workspaceId: codeWorkspace.workspaceId, path: codeFile.path, line, character, requestId });
+  }
+  return requestId;
+}
+
+function openCodeContextMenu(line: number, character: number, x: number, y: number): void {
+  if (!codeWorkspace || !codeFile) return;
+  const requestId = requestCodeHover(line, character);
+  codeContextMenu = { line, character, x, y, requestId, hover: { status: "loading", contents: null } };
+  renderCodeContextMenuOverlay();
+}
+
+function closeCodeContextMenu(): void {
+  codeHoverRequestId = null;
+  if (!codeContextMenu && !codeContextMenuEl) return;
+  codeContextMenu = null;
+  detachCodeContextMenuListeners();
+  if (codeContextMenuEl) codeContextMenuEl.remove();
+  codeContextMenuEl = null;
+}
+
+// Resolve a still-loading right-click popup to a terminal hover state. A no-op
+// once hover has rendered (so a shared-workspace failure can't clobber an
+// already-shown result) or when no popup is open. The hover request id is left
+// intact so a still-correlated `code.hover` can later upgrade the display.
+function resolvePendingHover(status: "error" | "empty"): void {
+  if (!codeContextMenu || codeContextMenu.hover.status !== "loading") return;
+  codeContextMenu = { ...codeContextMenu, hover: { status, contents: null } };
+  renderCodeContextMenuOverlay();
+}
+
+function ensureCodeContextMenuEl(): HTMLElement {
+  if (codeContextMenuEl && codeContextMenuEl.isConnected) return codeContextMenuEl;
+  const el = document.createElement("div");
+  el.className = "code-context-menu";
+  // Keep right-clicks on the popup from opening a nested native menu.
+  el.addEventListener("contextmenu", event => event.preventDefault());
+  document.body.append(el);
+  codeContextMenuEl = el;
+  return el;
+}
+
+function renderCodeContextMenuOverlay(): void {
+  const menu = codeContextMenu;
+  if (!menu) {
+    closeCodeContextMenu();
+    return;
+  }
+  const el = ensureCodeContextMenuEl();
+  renderCodeContextMenu(
+    el,
+    { line: menu.line, character: menu.character, hover: menu.hover } satisfies CodeContextMenuViewState,
+    {
+      goToDefinition: (line, character) => {
+        requestCodeDefinition(line, character);
+        closeCodeContextMenu();
+      },
+      findReferences: (line, character) => {
+        requestCodeReferences(line, character);
+        closeCodeContextMenu();
+      },
+    },
+    renderMarkdown,
+  );
+  positionCodeContextMenu(el, menu.x, menu.y);
+  attachCodeContextMenuListeners();
+}
+
+function positionCodeContextMenu(el: HTMLElement, x: number, y: number): void {
+  // Anchor at the cursor, then clamp into the viewport once the size is known.
+  const view = el.ownerDocument.defaultView ?? window;
+  const margin = 8;
+  const rect = el.getBoundingClientRect();
+  const maxX = view.innerWidth - rect.width - margin;
+  const maxY = view.innerHeight - rect.height - margin;
+  const left = Math.max(margin, Math.min(x, Number.isFinite(maxX) ? maxX : x));
+  const top = Math.max(margin, Math.min(y, Number.isFinite(maxY) ? maxY : y));
+  el.style.left = `${left}px`;
+  el.style.top = `${top}px`;
+}
+
+function handleCodeContextMenuDismissPointer(event: MouseEvent): void {
+  if (codeContextMenuEl && event.target instanceof Node && codeContextMenuEl.contains(event.target)) return;
+  closeCodeContextMenu();
+}
+
+function handleCodeContextMenuKey(event: KeyboardEvent): void {
+  if (event.key === "Escape") closeCodeContextMenu();
+}
+
+function handleCodeContextMenuWheel(event: WheelEvent): void {
+  // Dismiss on a user wheel/trackpad gesture over the page (the cursor anchor is
+  // then stale), but not when scrolling the popup's own hover pane. We key off
+  // `wheel`, not `scroll`, so the programmatic scroll-position restore that runs
+  // on every code-panel re-render never dismisses the popup.
+  if (codeContextMenuEl && event.target instanceof Node && codeContextMenuEl.contains(event.target)) return;
+  closeCodeContextMenu();
+}
+
+function attachCodeContextMenuListeners(): void {
+  if (codeContextMenuListenersAttached) return;
+  codeContextMenuListenersAttached = true;
+  document.addEventListener("mousedown", handleCodeContextMenuDismissPointer, true);
+  document.addEventListener("keydown", handleCodeContextMenuKey, true);
+  document.addEventListener("wheel", handleCodeContextMenuWheel, true);
+  window.addEventListener("resize", closeCodeContextMenu, true);
+}
+
+function detachCodeContextMenuListeners(): void {
+  if (!codeContextMenuListenersAttached) return;
+  codeContextMenuListenersAttached = false;
+  document.removeEventListener("mousedown", handleCodeContextMenuDismissPointer, true);
+  document.removeEventListener("keydown", handleCodeContextMenuKey, true);
+  document.removeEventListener("wheel", handleCodeContextMenuWheel, true);
+  window.removeEventListener("resize", closeCodeContextMenu, true);
 }
 
 function handleCodeDefinition(locations: CodeLocation[]): void {
@@ -4715,7 +4885,12 @@ function renderToolsPanelIfNeeded(projection: SessionProjection | undefined, for
 function renderCodePanelIfNeeded(force = false): void {
   if (!desktopDockview?.panelMounted("code")) return;
   const sessionId = workspaceMode === "session" ? activeSessionId : null;
-  const sessionChanged = codeSessionId !== sessionId;
+  // A review-worktree code workspace is not session-bound (its codeSessionId is
+  // null by design), so a session mismatch must not reset it — doing so during a
+  // review "Open in Code" would wipe the workspace mid-open.
+  const viewingReviewWorktree =
+    codeWorkspace?.source === "reviewWorktree" || pendingCodeOpenRequest?.source === "reviewCommit";
+  const sessionChanged = !viewingReviewWorktree && codeSessionId !== sessionId;
   if (sessionChanged) resetCodeViewForSession(sessionId);
   if (!force && !codePanelDirty && !sessionChanged) return;
   const rendered = desktopDockview.withPanel("code", container => {
@@ -4763,16 +4938,7 @@ function renderCodePanelIfNeeded(force = false): void {
           flushCodeComments(activeSessionId, codeFile);
         }
       },
-      selectNavPosition: (line, character) => {
-        codeNavSelection = { line, character };
-        markCodeViewDirty();
-        renderCodePanelIfNeeded(true);
-      },
-      clearNavSelection: () => {
-        codeNavSelection = null;
-        markCodeViewDirty();
-        renderCodePanelIfNeeded(true);
-      },
+      openContextMenu: openCodeContextMenu,
       goToDefinition: requestCodeDefinition,
       findReferences: requestCodeReferences,
       openReference: openReferenceLocation,
@@ -6294,9 +6460,16 @@ function flushDiffAnnotations(
 
 function renderDiffsView(container: HTMLElement, projection: SessionProjection | undefined): void {
   setRenderDocument(container.ownerDocument);
+  const sameSessionRerender = lastDiffsRenderedSessionId === activeSessionId;
   lastDiffsRenderedSessionId = activeSessionId;
   lastDiffsRenderedProjectionPresent = Boolean(projection);
   diffPanelDirty = false;
+  // Preserve the file-list scroll across SAME-session re-renders (e.g. opening
+  // the right-click file menu rebuilds the sidebar) so the list does not jump to
+  // the top; a session switch resets to the top.
+  const preservedScroll = sameSessionRerender
+    ? (container.querySelector<HTMLElement>(".diffs-sidebar-scroll")?.scrollTop ?? 0)
+    : 0;
   container.replaceChildren();
 
   const root = mkEl("div");
@@ -6319,6 +6492,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     return;
   }
   renderSessionChangesView(activeSessionId, sidebarTop, sidebarScroll, main, container);
+  if (preservedScroll > 0) sidebarScroll.scrollTop = preservedScroll;
 }
 
 function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, sidebar: HTMLElement, main: HTMLElement, container: HTMLElement): void {

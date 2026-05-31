@@ -347,6 +347,13 @@ pub(crate) async fn handle_client_message(
             character,
             request_id,
         } => handle_code_references(state, workspace_id, path, line, character, request_id).await,
+        ClientMessage::CodeHover {
+            workspace_id,
+            path,
+            line,
+            character,
+            request_id,
+        } => handle_code_hover(state, workspace_id, path, line, character, request_id).await,
         ClientMessage::ConflictScan { root } => handle_conflict_scan(root).await,
         ClientMessage::ConflictFileOpen { repo_id, path } => {
             handle_conflict_file_open(repo_id, path).await

@@ -28,7 +28,7 @@ Implemented in commit `e3a446c Add read-only code viewer`:
 - Frontend module `frontend/src/codeViewer.ts` renders the Code panel, directory navigation, one active read-only file, syntax highlighting, and copy actions.
 - Protocol and viewer tests were added.
 
-`Cargo.toml` discovery gates lazy rust-analyzer startup. **Go-to-definition, find-references, and `code.status` are now implemented** (see the "Active slice" section below). Diagnostics, document symbols, and hover remain pending.
+`Cargo.toml` discovery gates lazy rust-analyzer startup. **Go-to-definition, find-references, hover, and `code.status` are now implemented** (see the "Active slice" section below). Diagnostics and document symbols remain pending.
 
 Observed verification for `e3a446c`:
 
@@ -286,7 +286,7 @@ Extend `src/protocol.rs` and `frontend/src/protocol.ts` with Fura-domain code br
 | { type: "code.file.open"; workspaceId: string; path: string }
 | { type: "code.file.close"; workspaceId: string; path: string }
 | { type: "code.symbols"; workspaceId: string; path: string }
-| { type: "code.hover"; workspaceId: string; path: string; line: number; character: number }
+| { type: "code.hover"; workspaceId: string; path: string; line: number; character: number; requestId: string }
 | { type: "code.definition"; workspaceId: string; path: string; line: number; character: number; requestId: string }
 | { type: "code.references"; workspaceId: string; path: string; line: number; character: number; requestId: string }
 | { type: "code.diagnostics"; workspaceId: string; path?: string }
@@ -299,11 +299,11 @@ Extend `src/protocol.rs` and `frontend/src/protocol.ts` with Fura-domain code br
 | { type: "code.tree"; workspaceId: string; path: string; entries: CodeTreeEntry[] }
 | { type: "code.file"; workspaceId: string; file: CodeFileContent }
 | { type: "code.symbols"; workspaceId: string; path: string; symbols: CodeSymbol[] }
-| { type: "code.hover"; workspaceId: string; path: string; range?: CodeRange; markdown?: string; text?: string }
+| { type: "code.hover"; workspaceId: string; requestId: string; path: string; contents?: string | null; range?: CodeRange | null }
 | { type: "code.definition"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
 | { type: "code.references"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
 | { type: "code.diagnostics"; workspaceId: string; diagnostics: CodeDiagnostic[] }
-| { type: "code.status"; workspaceId: string; status: "filesOnly" | "starting" | "indexing" | "ready" | "limited" | "unavailable" | "error"; message?: string }
+| { type: "code.status"; workspaceId: string; status: "filesOnly" | "starting" | "indexing" | "ready" | "unavailable" | "error"; message?: string }
 | { type: "code.error"; workspaceId?: string; path?: string; message: string }
 ```
 
@@ -379,41 +379,43 @@ Prepared in `e3a446c`:
 
 Still pending:
 
-- `rust-analyzer` process lifecycle.
-- LSP stdio transport and initialization.
-- analyzer status events beyond `filesOnly`.
-- diagnostics, symbols, hover, definition, cancellation, and analyzer idle shutdown.
+- diagnostics and document symbols.
+- request cancellation and analyzer idle shutdown.
 
-### Active slice: lazy go-to-definition + find-references — DONE
+(rust-analyzer process lifecycle, LSP stdio transport/init, analyzer status events, hover, go-to-definition, and find-references are implemented — see the "Active slice … DONE" section.)
 
-Prioritized slice on top of Milestone 2's lifecycle. Delivers the two navigation features and nothing else.
+### Active slice: lazy right-click navigation (go-to-definition + find-references + hover) — DONE
+
+Prioritized slice on top of Milestone 2's lifecycle. Delivers right-click navigation — go-to-definition, find-references, and a hover "what is this" popup — and nothing else.
 
 Shipped (as built):
 
 - The analyzer lives in `src/code_lsp.rs` (`Analyzer`: rust-analyzer child + `Content-Length` LSP transport + request-id correlation + `experimental/serverStatus`-driven readiness). It is stored in `CodeWorkspaceRegistry.analyzers` keyed by canonical `rust_root` and shared via `Arc` — not on `CodeWorkspace`, which derives `Clone`. `src/code.rs` orchestrates (lazy get-or-spawn, DTO projection, broadcast).
 - LSP wire shapes come from the `lsp-types` crate; `definition.linkSupport` is forced off so responses are `Location[]`. `file://` URIs are mapped to/from paths with a hand-written percent codec.
 - The analyzer binary is configurable via `--rust-analyzer-bin` / `FURA_RUST_ANALYZER_BIN` (default `rust-analyzer`).
-- Requests run in a background task; `code.status` and results are broadcast via the WS event coordinator. `ContentModified` (-32801) is retried with backoff so mid-index queries resolve instead of failing. Each `code.definition`/`code.references` carries a client-generated `requestId` echoed on the response, so a client ignores superseded or other-client replies; navigation status/errors are reported via `code.status`.
-- Verified by `src/code_lsp.rs` + `src/code.rs` tests (LSP framing, URI mapping, external classification, lazy gating, and a mock rust-analyzer driving the full def/refs lifecycle) plus `frontend` vitest coverage (UTF-16 column mapping, nav actions, references list, status strip, definition navigation).
+- Requests run in a background task; `code.status` and results are broadcast via the WS event coordinator. `ContentModified` (-32801) is retried with backoff so mid-index queries resolve instead of failing. Each `code.definition`/`code.references`/`code.hover` carries a client-generated `requestId` echoed on the response, so a client ignores superseded or other-client replies; navigation status/errors are reported via `code.status`.
+- Verified by `src/code_lsp.rs` + `src/code.rs` tests (LSP framing, URI mapping, external classification, lazy gating, hover-content flattening, and a mock rust-analyzer driving the full def/refs/hover lifecycle) plus `frontend` vitest coverage (UTF-16 column mapping, right-click context menu, hover popup, references list, status strip, definition navigation, scroll preservation).
 
 Backend:
 
 - `Analyzer` owned by the registry (keyed by canonical `rust_root`, shared via `Arc`), owning the rust-analyzer child, the LSP stdio transport, request-id correlation, and readiness state. Not on `CodeWorkspace`, which derives `Clone`.
 - Lazy start of the LSP session gated on all of: a discovered `rust_root` (re-checked from disk per request, not cached), an analysis request arriving, and the workspace being a Rust workspace. Never an LSP session on Fura startup, WebSocket connect, or session attach — the startup `--version` probe is a one-shot that does not start a session.
 - `textDocument/didOpen` from on-disk content for any file a query targets, plus `didChange` (bumped version) when that file's content changed since it was last pushed (the viewer is read-only, but a session worktree's files change as the agent edits).
-- `code.definition` → `textDocument/definition`; `code.references` → `textDocument/references` with `context.includeDeclaration: true`.
+- `code.definition` → `textDocument/definition`; `code.references` → `textDocument/references` with `context.includeDeclaration: true`; `code.hover` → `textDocument/hover` (flattened to a single markdown string, empty → no hover).
 - Project results into domain DTOs: map `file://` URIs back to workspace-relative paths; classify out-of-workspace targets as `external`. Never forward raw LSP locations.
 - Minimal `code.status`: `starting` | `indexing` | `ready` | `unavailable` | `error`. References can block until indexing completes, so the UI must show progress rather than hang.
 - Conservative analyzer config: proc-macros off, no automatic build-script/check execution, `checkOnSave` off.
 
 Frontend:
 
-- Map a click in the read-only viewer to an LSP position `{ line, character }` (LSP columns are UTF-16 code units — compute accordingly).
+- Map a **right-click** in the read-only viewer to an LSP position `{ line, character }` (LSP columns are UTF-16 code units — compute accordingly) and open a cursor-anchored context popup; left-click stays plain text selection. The popup is a floating overlay decoupled from the code-panel render, so opening it (or updating its hover) never rebuilds the scroll-bearing lines container.
+- The popup shows hover ("what is this") via `code.hover` — rust-analyzer markdown rendered with the shared markdown renderer — plus actions Go to definition / Find references. It is dismissed on outside-click, Escape, scroll, or after an action.
 - Go-to-definition: request `code.definition`; on a local result open the target file and scroll to the line (add scroll-to-line to the viewer); on `external` show a truthful, non-navigable label.
 - Find-references: request `code.references`; render locations as a results list grouped by file; clicking an entry jumps to that file+line.
-- Surface `code.status` so the panel shows "analysis starting / indexing / unavailable" instead of appearing frozen.
+- The viewer preserves scroll position across same-file re-renders (status/references updates) so navigation never bounces the reader to the top; an explicit scroll-to-line still overrides.
+- Surface `code.status` so the panel shows "analysis starting / indexing / unavailable" instead of appearing frozen; a failure status also resolves an open popup's pending hover.
 
-Out of this slice: diagnostics, document symbols/outline, hover, formatting, rename, code actions, semantic tokens. Milestone 3 (diagnostics, symbols) and the hover half of Milestone 4 stay deferred until this slice ships.
+Out of this slice: diagnostics, document symbols/outline, formatting, rename, code actions, semantic tokens, and mouse-hover (mouseover) tooltips. Milestone 3 (diagnostics, symbols) stays deferred until this slice ships.
 
 Acceptance:
 
@@ -439,12 +441,11 @@ Behavior:
 - cache symbols by file version/content hash,
 - stale symbols must be refreshed or rejected.
 
-### Milestone 4: hover — deferred (go-to-definition and find-references moved into the active slice above)
+### Milestone 4: hover — DONE (shipped in the right-click navigation popup above)
 
-Deliverables:
+Delivered:
 
-- `code.hover`,
-- hover renders rust-analyzer markdown/text truthfully.
+- `code.hover` → `textDocument/hover`, flattened to a single markdown string and rendered truthfully in the right-click popup ("what is this"); empty hover shows "No type information".
 
 External-target handling (shared with the active slice's definition/references):
 

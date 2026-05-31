@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatCodeFileSize, parentCodePath, renderCodeViewer, utf16ColumnWithin, type CodeViewerState } from "./codeViewer";
+import { formatCodeFileSize, parentCodePath, renderCodeContextMenu, renderCodeViewer, utf16ColumnWithin, type CodeViewerState } from "./codeViewer";
 import type { CodeLocation } from "./protocol";
 
 function baseState(overrides: Partial<CodeViewerState> = {}): CodeViewerState {
@@ -27,7 +27,6 @@ function baseState(overrides: Partial<CodeViewerState> = {}): CodeViewerState {
     searchLoading: false,
     searchError: null,
     fileComments: [],
-    navSelection: null,
     analyzerStatus: null,
     analyzerMessage: null,
     references: null,
@@ -53,8 +52,7 @@ function baseActions(overrides = {}) {
     deleteComment: vi.fn(),
     previewComments: vi.fn(),
     flushComments: vi.fn(),
-    selectNavPosition: vi.fn(),
-    clearNavSelection: vi.fn(),
+    openContextMenu: vi.fn(),
     goToDefinition: vi.fn(),
     findReferences: vi.fn(),
     openReference: vi.fn(),
@@ -245,10 +243,9 @@ describe("code viewer", () => {
     expect(utf16ColumnWithin(code, code.firstChild!, 3)).toBe(3);
   });
 
-  it("renders inline navigation actions for the selected position", () => {
+  it("opens the context menu on right-click over a code symbol", () => {
     const container = document.createElement("div");
     const actions = baseActions();
-
     renderCodeViewer(
       container,
       baseState({
@@ -262,18 +259,125 @@ describe("code viewer", () => {
           source: "session",
         },
         file: { path: "src/main.rs", language: "rust", text: "fn main() {}\n", size: 13, version: 1 },
-        navSelection: { line: 0, character: 3 },
       }),
       actions,
     );
 
-    const bar = container.querySelector(".code-nav-actions");
-    expect(bar).not.toBeNull();
-    const buttons = [...container.querySelectorAll<HTMLButtonElement>(".code-nav-actions button")];
-    buttons.find(button => button.textContent === "Go to definition")?.click();
-    expect(actions.goToDefinition).toHaveBeenCalledWith(0, 3);
-    buttons.find(button => button.textContent === "Find references")?.click();
-    expect(actions.findReferences).toHaveBeenCalledWith(0, 3);
+    const doc = container.ownerDocument as Document & { caretRangeFromPoint?: unknown };
+    const originalCaret = doc.caretRangeFromPoint;
+    doc.caretRangeFromPoint = () => {
+      const codeEl = container.querySelector(".code-line-content code")!;
+      const range = doc.createRange();
+      range.selectNodeContents(codeEl);
+      range.collapse(true);
+      return range;
+    };
+    try {
+      const content = container.querySelector<HTMLElement>(".code-line-content")!;
+      const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 60 });
+      content.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      expect(actions.openContextMenu).toHaveBeenCalledWith(0, 0, 40, 60);
+    } finally {
+      doc.caretRangeFromPoint = originalCaret as never;
+    }
+  });
+
+  it("leaves the native context menu alone without a Rust workspace", () => {
+    const container = document.createElement("div");
+    const actions = baseActions();
+    renderCodeViewer(
+      container,
+      baseState({
+        file: { path: "src/main.rs", language: "rust", text: "fn main() {}\n", size: 13, version: 1 },
+      }),
+      actions,
+    );
+    const content = container.querySelector<HTMLElement>(".code-line-content")!;
+    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 10, clientY: 10 });
+    content.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(false);
+    expect(actions.openContextMenu).not.toHaveBeenCalled();
+  });
+
+  it("leaves the native menu alone when right-clicking a code selection", () => {
+    const container = document.createElement("div");
+    const actions = baseActions();
+    renderCodeViewer(
+      container,
+      baseState({
+        workspace: {
+          workspaceId: "ws-1",
+          sessionId: "session-1",
+          root: "/repo",
+          rustRoot: "/repo",
+          status: "filesOnly",
+          statusMessage: "Files only.",
+          source: "session",
+        },
+        file: { path: "src/main.rs", language: "rust", text: "fn main() {}\n", size: 13, version: 1 },
+      }),
+      actions,
+    );
+
+    const codeEl = container.querySelector(".code-line-content code")!;
+    const view = container.ownerDocument.defaultView!;
+    const originalGetSelection = view.getSelection;
+    view.getSelection = () =>
+      ({ isCollapsed: false, anchorNode: codeEl.firstChild ?? codeEl, focusNode: codeEl.firstChild ?? codeEl }) as unknown as Selection;
+    try {
+      const content = container.querySelector<HTMLElement>(".code-line-content")!;
+      const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 40, clientY: 60 });
+      content.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(actions.openContextMenu).not.toHaveBeenCalled();
+    } finally {
+      view.getSelection = originalGetSelection;
+    }
+  });
+
+  it("leaves the native menu alone for a multi-line selection across the clicked line", () => {
+    const container = document.createElement("div");
+    const actions = baseActions();
+    renderCodeViewer(
+      container,
+      baseState({
+        workspace: {
+          workspaceId: "ws-1",
+          sessionId: "session-1",
+          root: "/repo",
+          rustRoot: "/repo",
+          status: "filesOnly",
+          statusMessage: "Files only.",
+          source: "session",
+        },
+        file: { path: "src/main.rs", language: "rust", text: "one\ntwo\nthree\n", size: 14, version: 1 },
+      }),
+      actions,
+    );
+
+    // Selection endpoints are in other lines; the middle line is only covered by
+    // the range, so the guard must rely on intersectsNode (not the endpoints).
+    const middle = container.querySelectorAll<HTMLElement>(".code-line-content code")[1]!;
+    const view = container.ownerDocument.defaultView!;
+    const originalGetSelection = view.getSelection;
+    view.getSelection = () =>
+      ({
+        isCollapsed: false,
+        anchorNode: null,
+        focusNode: null,
+        rangeCount: 1,
+        getRangeAt: () => ({ intersectsNode: (node: Node) => node === middle }),
+      }) as unknown as Selection;
+    try {
+      const content = middle.closest<HTMLElement>(".code-line-content")!;
+      const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 5, clientY: 5 });
+      content.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+      expect(actions.openContextMenu).not.toHaveBeenCalled();
+    } finally {
+      view.getSelection = originalGetSelection;
+    }
   });
 
   it("renders grouped references and routes selection and dismissal", () => {
@@ -324,5 +428,56 @@ describe("code viewer", () => {
     const ready = document.createElement("div");
     renderCodeViewer(ready, baseState({ file, analyzerStatus: "ready" }), baseActions());
     expect(ready.querySelector(".code-analyzer-status")).toBeNull();
+  });
+
+  it("renders the right-click popup hover and routes actions", () => {
+    const menu = document.createElement("div");
+    const goToDefinition = vi.fn();
+    const findReferences = vi.fn();
+    const renderHover = vi.fn((markdown: string) => {
+      const el = document.createElement("div");
+      el.className = "markdown-body";
+      el.textContent = markdown;
+      return el;
+    });
+
+    renderCodeContextMenu(
+      menu,
+      { line: 4, character: 2, hover: { status: "ready", contents: "fn target()" } },
+      { goToDefinition, findReferences },
+      renderHover,
+    );
+
+    expect(renderHover).toHaveBeenCalledWith("fn target()");
+    expect(menu.querySelector(".code-context-hover")?.textContent).toContain("fn target()");
+    const buttons = [...menu.querySelectorAll<HTMLButtonElement>(".code-context-action")];
+    buttons.find(button => button.textContent === "Go to definition")?.click();
+    expect(goToDefinition).toHaveBeenCalledWith(4, 2);
+    buttons.find(button => button.textContent === "Find references")?.click();
+    expect(findReferences).toHaveBeenCalledWith(4, 2);
+
+    renderCodeContextMenu(
+      menu,
+      { line: 4, character: 2, hover: { status: "loading", contents: null } },
+      { goToDefinition, findReferences },
+      renderHover,
+    );
+    expect(menu.querySelector(".code-context-hover-muted")?.textContent).toContain("Loading");
+  });
+
+  it("preserves scroll across same-file re-renders but resets on file change", () => {
+    const container = document.createElement("div");
+    const file = { path: "src/scroll.rs", language: "rust", text: "a\nb\nc\nd\n", size: 8, version: 1 };
+    renderCodeViewer(container, baseState({ file }), baseActions());
+    container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop = 120;
+
+    // Same file, a status-update re-render preserves the scroll position.
+    renderCodeViewer(container, baseState({ file, analyzerStatus: "indexing" }), baseActions());
+    expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(120);
+
+    // A different file starts at the top.
+    const other = { path: "src/other.rs", language: "rust", text: "x\ny\n", size: 4, version: 1 };
+    renderCodeViewer(container, baseState({ file: other }), baseActions());
+    expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(0);
   });
 });

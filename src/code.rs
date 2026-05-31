@@ -241,6 +241,7 @@ pub(crate) async fn handle_code_file_search(
 enum NavigationKind {
     Definition,
     References,
+    Hover,
 }
 
 pub(crate) async fn handle_code_definition(
@@ -279,6 +280,26 @@ pub(crate) async fn handle_code_references(
         character,
         request_id,
         NavigationKind::References,
+    )
+    .await
+}
+
+pub(crate) async fn handle_code_hover(
+    state: &AppState,
+    workspace_id: String,
+    path: String,
+    line: u32,
+    character: u32,
+    request_id: String,
+) -> Vec<ServerMessage> {
+    start_navigation(
+        state,
+        workspace_id,
+        path,
+        line,
+        character,
+        request_id,
+        NavigationKind::Hover,
     )
     .await
 }
@@ -388,28 +409,49 @@ async fn run_navigation_query(
     )
     .await;
 
-    let result = match kind {
-        NavigationKind::Definition => analyzer.definition(&abs_path, &text, position).await,
-        NavigationKind::References => analyzer.references(&abs_path, &text, position).await,
+    let result: anyhow::Result<ServerMessage> = match kind {
+        NavigationKind::Definition => {
+            analyzer
+                .definition(&abs_path, &text, position)
+                .await
+                .map(|locations| ServerMessage::CodeDefinition {
+                    workspace_id: workspace_id.clone(),
+                    request_id: request_id.clone(),
+                    path: request_path.clone(),
+                    locations: map_locations(&workspace.root, locations),
+                })
+        }
+        NavigationKind::References => {
+            analyzer
+                .references(&abs_path, &text, position)
+                .await
+                .map(|locations| ServerMessage::CodeReferences {
+                    workspace_id: workspace_id.clone(),
+                    request_id: request_id.clone(),
+                    path: request_path.clone(),
+                    locations: map_locations(&workspace.root, locations),
+                })
+        }
+        NavigationKind::Hover => analyzer
+            .hover(&abs_path, &text, position)
+            .await
+            .map(|hover| {
+                let (contents, range) = match hover {
+                    Some(info) => (Some(info.contents), info.range.map(code_range_from_lsp)),
+                    None => (None, None),
+                };
+                ServerMessage::CodeHover {
+                    workspace_id: workspace_id.clone(),
+                    request_id: request_id.clone(),
+                    path: request_path.clone(),
+                    contents,
+                    range,
+                }
+            }),
     };
 
     match result {
-        Ok(locations) => {
-            let locations = map_locations(&workspace.root, locations);
-            let result_message = match kind {
-                NavigationKind::Definition => ServerMessage::CodeDefinition {
-                    workspace_id: workspace_id.clone(),
-                    request_id,
-                    path: request_path,
-                    locations,
-                },
-                NavigationKind::References => ServerMessage::CodeReferences {
-                    workspace_id: workspace_id.clone(),
-                    request_id,
-                    path: request_path,
-                    locations,
-                },
-            };
+        Ok(result_message) => {
             state
                 .events
                 .emit_many(
@@ -1562,6 +1604,8 @@ while True:
             {"uri": "file://" + cwd + "/src/target.rs",
              "range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 7}}}
         ]})
+    elif method == "textDocument/hover":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"contents": {"kind": "markdown", "value": "```rust\nfn target()\n```\nDocs."}}})
     elif method == "shutdown":
         send({"jsonrpc": "2.0", "id": mid, "result": None})
     elif method == "exit":
@@ -1707,6 +1751,50 @@ while True:
                 assert!(paths.contains(&"src/target.rs"));
             }
             other => panic!("expected code.references, got {other:?}"),
+        }
+        fs::remove_dir_all(workspace).ok();
+        fs::remove_dir_all(mock_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hover_query_returns_markdown_via_mock_analyzer() {
+        if !python3_available() {
+            return;
+        }
+        let workspace = temp_workspace();
+        let mock_dir = temp_workspace();
+        let mock = write_mock_rust_analyzer(&mock_dir);
+        let mut state = crate::tests::test_state(64, None);
+        state.rust_analyzer_bin = Arc::new(mock.display().to_string());
+        let workspace_id = open_rust_workspace(&state, &workspace).await;
+
+        let mut rx = state.events.subscribe();
+        let immediate = handle_code_hover(
+            &state,
+            workspace_id,
+            "src/main.rs".to_string(),
+            0,
+            12,
+            "req-hover".to_string(),
+        )
+        .await;
+        assert!(immediate.is_empty(), "result is delivered asynchronously");
+
+        let message =
+            next_matching(&mut rx, |m| matches!(m, ServerMessage::CodeHover { .. })).await;
+        match message {
+            ServerMessage::CodeHover {
+                contents,
+                request_id,
+                ..
+            } => {
+                assert_eq!(request_id, "req-hover");
+                let contents = contents.expect("hover contents present");
+                assert!(contents.contains("fn target()"));
+                assert!(contents.contains("Docs."));
+            }
+            other => panic!("expected code.hover, got {other:?}"),
         }
         fs::remove_dir_all(workspace).ok();
         fs::remove_dir_all(mock_dir).ok();

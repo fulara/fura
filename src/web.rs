@@ -278,6 +278,7 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::CodeFileSearch { .. } => "code.file.search",
         ClientMessage::CodeDefinition { .. } => "code.definition",
         ClientMessage::CodeReferences { .. } => "code.references",
+        ClientMessage::CodeHover { .. } => "code.hover",
         ClientMessage::ConflictScan { .. } => "conflict.scan",
         ClientMessage::ConflictFileOpen { .. } => "conflict.file.open",
         ClientMessage::ConflictFilePreviewMagicWand { .. } => "conflict.file.previewMagicWand",
@@ -1157,6 +1158,7 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::CodeError { .. } => "code.error",
         ServerMessage::CodeDefinition { .. } => "code.definition",
         ServerMessage::CodeReferences { .. } => "code.references",
+        ServerMessage::CodeHover { .. } => "code.hover",
         ServerMessage::CodeStatus { .. } => "code.status",
         ServerMessage::ConflictSnapshot { .. } => "conflict.snapshot",
         ServerMessage::ConflictFile { .. } => "conflict.file",
@@ -1452,6 +1454,21 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             request_id = %request_id,
             path = %path,
             location_count = locations.len()
+        ),
+        ServerMessage::CodeHover {
+            workspace_id,
+            request_id,
+            path,
+            contents,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.hover",
+            workspace_id = %workspace_id,
+            request_id = %request_id,
+            path = %path,
+            has_contents = contents.is_some(),
+            bytes = contents.as_deref().unwrap_or("").len()
         ),
         ServerMessage::CodeStatus {
             workspace_id,

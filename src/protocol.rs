@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ClientConfig, CodeFileContent, CodeLocation, CodeStatus, CodeTreeEntry, CodeWorkspaceSummary,
-    ConflictAgentMode, ConflictAgentResult, ConflictAgentScope, ConflictFileState,
-    ConflictMagicWandPreview, ConflictRepositorySummary, PresetSummary, ProposedModelConfig,
+    ClientConfig, CodeFileContent, CodeLocation, CodeRange, CodeStatus, CodeTreeEntry,
+    CodeWorkspaceSummary, ConflictAgentMode, ConflictAgentResult, ConflictAgentScope,
+    ConflictFileState, ConflictMagicWandPreview, ConflictRepositorySummary, PresetSummary,
+    ProposedModelConfig,
     SessionMode, SessionProjection, SessionProjectionDelta, SessionSummary,
     ThinkingVisibilityPreference,
 };
@@ -884,6 +885,14 @@ pub(crate) enum ClientMessage {
         character: u32,
         request_id: String,
     },
+    #[serde(rename = "code.hover")]
+    CodeHover {
+        workspace_id: String,
+        path: String,
+        line: u32,
+        character: u32,
+        request_id: String,
+    },
     #[serde(rename = "conflict.scan")]
     ConflictScan { root: String },
     #[serde(rename = "conflict.file.open")]
@@ -1144,6 +1153,15 @@ pub(crate) enum ServerMessage {
         request_id: String,
         path: String,
         locations: Vec<CodeLocation>,
+    },
+    #[serde(rename = "code.hover")]
+    CodeHover {
+        workspace_id: String,
+        request_id: String,
+        path: String,
+        contents: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        range: Option<CodeRange>,
     },
     #[serde(rename = "code.status")]
     CodeStatus {

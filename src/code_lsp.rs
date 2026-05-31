@@ -23,11 +23,12 @@ use std::{
 use anyhow::{Context, anyhow};
 use lsp_types::{
     ClientCapabilities, DidChangeTextDocumentParams, DidOpenTextDocumentParams, GotoCapability,
-    GotoDefinitionParams, GotoDefinitionResponse, InitializeParams, Location, Position, Range,
-    ReferenceClientCapabilities, ReferenceContext, ReferenceParams, TextDocumentClientCapabilities,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier, WindowClientCapabilities,
-    WorkspaceFolder,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverClientCapabilities, HoverContents,
+    HoverParams, InitializeParams, LanguageString, Location, MarkedString, MarkupKind, Position,
+    Range, ReferenceClientCapabilities, ReferenceContext, ReferenceParams,
+    TextDocumentClientCapabilities, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, Uri, VersionedTextDocumentIdentifier,
+    WindowClientCapabilities, WorkspaceFolder,
 };
 use serde_json::{Value, json};
 use std::str::FromStr;
@@ -71,6 +72,13 @@ pub(crate) enum AnalyzerHealth {
 pub(crate) struct ResolvedLocation {
     pub(crate) path: PathBuf,
     pub(crate) range: Range,
+}
+
+/// rust-analyzer hover for a point: rendered markdown plus the symbol's range.
+#[derive(Debug, Clone)]
+pub(crate) struct HoverInfo {
+    pub(crate) contents: String,
+    pub(crate) range: Option<Range>,
 }
 
 /// What a request failed with. `Lsp { code: CONTENT_MODIFIED }` drives retries.
@@ -277,6 +285,26 @@ impl Analyzer {
             .into_iter()
             .filter_map(resolve_location)
             .collect())
+    }
+
+    /// Resolve hover (type signature + docs) for the symbol at `position`.
+    pub(crate) async fn hover(
+        &self,
+        path: &Path,
+        text: &str,
+        position: Position,
+    ) -> anyhow::Result<Option<HoverInfo>> {
+        self.ensure_open(path, text).await?;
+        let params = HoverParams {
+            text_document_position_params: self.text_position(path, position)?,
+            work_done_progress_params: Default::default(),
+        };
+        let value = self
+            .request_with_retry("textDocument/hover", serde_json::to_value(params)?)
+            .await
+            .map_err(|err| anyhow!(err.into_message()))?;
+        let response: Option<Hover> = serde_json::from_value(value)?;
+        Ok(response.and_then(hover_info_from_lsp))
     }
 
     /// Best-effort graceful shutdown: `shutdown` + `exit`, then force-kill.
@@ -666,6 +694,10 @@ fn client_capabilities() -> ClientCapabilities {
             references: Some(ReferenceClientCapabilities {
                 dynamic_registration: Some(false),
             }),
+            hover: Some(HoverClientCapabilities {
+                dynamic_registration: Some(false),
+                content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
+            }),
             ..Default::default()
         }),
         window: Some(WindowClientCapabilities {
@@ -714,6 +746,57 @@ fn resolve_location(location: Location) -> Option<ResolvedLocation> {
         path,
         range: location.range,
     })
+}
+
+/// Project a rust-analyzer `Hover` into bridge-domain `HoverInfo`, flattening
+/// its (possibly multi-part) contents into a single markdown string. Returns
+/// `None` when the rendered text is empty so the browser can show "no info".
+fn hover_info_from_lsp(hover: Hover) -> Option<HoverInfo> {
+    let contents = hover_contents_to_markdown(hover.contents);
+    if contents.trim().is_empty() {
+        return None;
+    }
+    Some(HoverInfo {
+        contents,
+        range: hover.range,
+    })
+}
+
+fn hover_contents_to_markdown(contents: HoverContents) -> String {
+    match contents {
+        HoverContents::Scalar(marked) => marked_string_to_markdown(marked),
+        HoverContents::Markup(markup) => match markup.kind {
+            MarkupKind::Markdown => markup.value,
+            MarkupKind::PlainText => fence_plaintext(&markup.value),
+        },
+        HoverContents::Array(items) => items
+            .into_iter()
+            .map(marked_string_to_markdown)
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+    }
+}
+
+fn marked_string_to_markdown(marked: MarkedString) -> String {
+    match marked {
+        MarkedString::String(text) => text,
+        MarkedString::LanguageString(LanguageString { language, value }) => {
+            format!("```{language}\n{value}\n```")
+        }
+    }
+}
+
+/// Wrap plain-text hover in a code fence so the browser's markdown renderer
+/// shows it verbatim instead of interpreting markdown punctuation or collapsing
+/// single newlines. The fence is sized longer than any backtick run in the text
+/// (CommonMark) so embedded backticks cannot break out.
+fn fence_plaintext(text: &str) -> String {
+    if text.trim().is_empty() {
+        return String::new();
+    }
+    let longest_run = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest_run.max(2) + 1);
+    format!("{fence}\n{text}\n{fence}")
 }
 
 fn resolve_uri(uri: &Uri) -> Option<PathBuf> {
@@ -800,6 +883,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lsp_types::MarkupContent;
 
     #[test]
     fn frames_message_with_content_length() {
@@ -941,5 +1025,79 @@ mod tests {
         assert!(version_identifies_rust_analyzer("RUST-ANALYZER 1.0"));
         assert!(!version_identifies_rust_analyzer("--version"));
         assert!(!version_identifies_rust_analyzer("some-other-lsp 2.0"));
+    }
+
+    #[test]
+    fn hover_markup_passes_through_markdown() {
+        let value = json!({
+            "contents": { "kind": "markdown", "value": "```rust\nfn foo()\n```\nDocs." }
+        });
+        let hover: Hover = serde_json::from_value(value).unwrap();
+        let info = hover_info_from_lsp(hover).expect("markup hover");
+        assert!(info.contents.contains("fn foo()"));
+        assert!(info.contents.contains("Docs."));
+    }
+
+    #[test]
+    fn hover_scalar_language_string_is_fenced() {
+        let markdown = marked_string_to_markdown(MarkedString::LanguageString(LanguageString {
+            language: "rust".to_string(),
+            value: "let x: u32".to_string(),
+        }));
+        assert_eq!(markdown, "```rust\nlet x: u32\n```");
+    }
+
+    #[test]
+    fn hover_array_joins_parts() {
+        let contents = HoverContents::Array(vec![
+            MarkedString::String("first".to_string()),
+            MarkedString::String("second".to_string()),
+        ]);
+        assert_eq!(hover_contents_to_markdown(contents), "first\n\nsecond");
+    }
+
+    #[test]
+    fn plaintext_hover_is_fenced_verbatim() {
+        let contents = HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::PlainText,
+            value: "x: u32\nnot *markdown*".to_string(),
+        });
+        let rendered = hover_contents_to_markdown(contents);
+        assert!(rendered.starts_with("```"));
+        assert!(rendered.contains("x: u32\nnot *markdown*"));
+    }
+
+    #[test]
+    fn empty_plaintext_hover_resolves_to_none() {
+        let hover = Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::PlainText,
+                value: "   \n".to_string(),
+            }),
+            range: None,
+        };
+        assert!(hover_info_from_lsp(hover).is_none());
+    }
+
+    #[test]
+    fn empty_hover_resolves_to_none() {
+        let hover = Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: "   \n".to_string(),
+            }),
+            range: None,
+        };
+        assert!(hover_info_from_lsp(hover).is_none());
+    }
+
+    #[test]
+    fn client_capabilities_request_markdown_hover() {
+        let value = serde_json::to_value(client_capabilities()).unwrap();
+        let formats = value
+            .pointer("/textDocument/hover/contentFormat")
+            .and_then(Value::as_array)
+            .expect("hover content format");
+        assert!(formats.iter().any(|f| f == "markdown"));
     }
 }
