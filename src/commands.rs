@@ -59,6 +59,13 @@ pub(crate) async fn handle_client_message(
             defaults,
         } => handle_preset_save(state, name, description, body, defaults).await,
         ClientMessage::PresetDelete { name } => handle_preset_delete(state, name).await,
+        ClientMessage::PresetsRefresh => {
+            info!(action = "presets.refresh");
+            let presets = presets_dir(state.config_path.as_deref())
+                .map(|dir| load_presets(&dir))
+                .unwrap_or_default();
+            vec![ServerMessage::PresetList { presets }]
+        }
         ClientMessage::SessionOpen { session_file } => open_session(state, session_file).await,
         ClientMessage::SessionList => {
             info!(action = "session.list");
@@ -1187,7 +1194,7 @@ pub(crate) async fn handle_preset_save(
     if let Err(error) = save_preset(&dir, &name, &description, &body, &defaults) {
         return vec![preset_error(error)];
     }
-    refresh_and_broadcast_presets(state).await;
+    broadcast_config(state).await;
     Vec::new()
 }
 
@@ -1201,7 +1208,7 @@ pub(crate) async fn handle_preset_delete(state: &AppState, name: String) -> Vec<
     if let Err(error) = delete_preset(&dir, &name) {
         return vec![preset_error(error)];
     }
-    refresh_and_broadcast_presets(state).await;
+    broadcast_config(state).await;
     Vec::new()
 }
 

@@ -4,8 +4,9 @@ use serde_json::Value;
 use crate::{
     ClientConfig, CodeFileContent, CodeLocation, CodeStatus, CodeTreeEntry, CodeWorkspaceSummary,
     ConflictAgentMode, ConflictAgentResult, ConflictAgentScope, ConflictFileState,
-    ConflictMagicWandPreview, ConflictRepositorySummary, ProposedModelConfig, SessionMode,
-    SessionProjection, SessionProjectionDelta, SessionSummary, ThinkingVisibilityPreference,
+    ConflictMagicWandPreview, ConflictRepositorySummary, PresetSummary, ProposedModelConfig,
+    SessionMode, SessionProjection, SessionProjectionDelta, SessionSummary,
+    ThinkingVisibilityPreference,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -688,6 +689,8 @@ pub(crate) enum ClientMessage {
     },
     #[serde(rename = "preset.delete")]
     PresetDelete { name: String },
+    #[serde(rename = "presets.refresh")]
+    PresetsRefresh,
     #[serde(rename = "session.attach")]
     SessionAttach { session_id: String },
     #[serde(rename = "session.open")]
@@ -995,6 +998,8 @@ pub(crate) enum ServerMessage {
     },
     #[serde(rename = "config.updated")]
     ConfigUpdated { config: ClientConfig },
+    #[serde(rename = "presets.list")]
+    PresetList { presets: Vec<PresetSummary> },
     #[serde(rename = "sessions.snapshot")]
     SessionsSnapshot { sessions: Vec<SessionSummary> },
     #[serde(rename = "session.snapshot")]

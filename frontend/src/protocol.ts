@@ -722,6 +722,7 @@ export type ConflictAgentResult = {
 export type ServerMessage =
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
   | { type: "config.updated"; config: ServerConfig }
+  | { type: "presets.list"; presets: PresetSummary[] }
   | { type: "sessions.snapshot"; sessions: SessionSummary[] }
   | { type: "session.snapshot"; sessionId: string; state: SessionProjection }
   | { type: "session.delta"; sessionId: string; state: SessionProjectionDelta }
@@ -784,6 +785,7 @@ export type ClientMessage =
   | { type: "config.modelCatalog.list"; requestId?: string }
   | { type: "preset.save"; name: string; description?: string; body: string; defaults?: Record<string, string> }
   | { type: "preset.delete"; name: string }
+  | { type: "presets.refresh" }
   | { type: "session.open"; sessionFile: string }
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }

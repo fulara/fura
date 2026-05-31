@@ -851,6 +851,7 @@ let presetRunValues: Record<string, string> = {};
 let presetEditorOriginalName: string | null = null;
 let presetEditorDefaults: Record<string, string> = {};
 let presetPending: { kind: "save" | "delete"; name: string } | null = null;
+let pendingPresetCommand: { editorText: string; sessionId: string } | null = null;
 let projections = new Map<string, SessionProjection>();
 const sessionChangesStates = new Map<string, SessionChangesSummaryState>();
 const sessionChangesPayloadKinds = new Map<string, DiffDetailMode>();
@@ -1722,6 +1723,7 @@ function handleServerMessage(message: ServerMessage): void {
       );
       syncProposedModelsUi();
       syncPresetsUi();
+      if (pendingPresetCommand) resolvePendingPresetCommand();
       reviewCommentsRequested.clear();
       reviewCommentsLoadInFlight.clear();
       reviewCommentsResyncNeeded.clear();
@@ -1754,6 +1756,10 @@ function handleServerMessage(message: ServerMessage): void {
         }
       }
       syncPresetsUi();
+      break;
+    case "presets.list":
+      if (serverConfig) serverConfig.presets = message.presets;
+      resolvePendingPresetCommand();
       break;
     case "sessions.snapshot":
       {
@@ -3349,16 +3355,26 @@ function openPresetEditor(preset: PresetSummary | null): void {
 }
 
 function handlePresetCommand(editorText: string, sessionId: string): void {
-  const presets = serverConfig?.presets ?? [];
-  const resolution = resolvePresetCommand(editorText, presets);
+  // Reload presets from disk on every invocation so externally-added files (or
+  // edits from another client) show up. Resolve once the refreshed list arrives
+  // via config.updated; fall back to the cached list when offline.
+  clearPromptEditor();
+  pendingPresetCommand = { editorText, sessionId };
+  if (!send({ type: "presets.refresh" })) resolvePendingPresetCommand();
+}
+
+function resolvePendingPresetCommand(): void {
+  const command = pendingPresetCommand;
+  if (!command) return;
+  pendingPresetCommand = null;
+  const resolution = resolvePresetCommand(command.editorText, serverConfig?.presets ?? []);
   switch (resolution.kind) {
     case "picker":
-      clearPromptEditor();
       openPresetsPicker();
       break;
     case "unknown": {
       const available = resolution.available.length > 0 ? resolution.available.join(", ") : "none";
-      appendSessionNotice(sessionId, {
+      appendSessionNotice(command.sessionId, {
         level: "warning",
         text: `Unknown preset "${resolution.name}". Available: ${available}.`,
       });
@@ -3366,11 +3382,9 @@ function handlePresetCommand(editorText: string, sessionId: string): void {
       break;
     }
     case "run":
-      clearPromptEditor();
-      runPreset(resolution.preset, {}, "send", sessionId);
+      runPreset(resolution.preset, {}, "send", command.sessionId);
       break;
     case "params":
-      clearPromptEditor();
       openPresetRun(resolution.preset, false);
       break;
   }

@@ -494,6 +494,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let presetRunTarget: PresetSummary | null = null;
   let presetRunFromPicker = false;
   let presetRunValues: Record<string, string> = {};
+  let pendingPresetCommand: { editorText: string; sessionId: string } | null = null;
   const sessionNotices = new Map<string, SessionNotice[]>();
 
 
@@ -1060,15 +1061,25 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   function handleMobilePresetCommand(editorText: string, sessionId: string): void {
-    const resolution = resolvePresetCommand(editorText, serverConfig?.presets ?? []);
+    // Reload presets from disk on every invocation; resolve once the refreshed
+    // list arrives via config.updated (fall back to the cache when offline).
+    clearPromptComposer();
+    pendingPresetCommand = { editorText, sessionId };
+    if (!send({ type: "presets.refresh" })) resolveMobilePendingPresetCommand();
+  }
+
+  function resolveMobilePendingPresetCommand(): void {
+    const command = pendingPresetCommand;
+    if (!command) return;
+    pendingPresetCommand = null;
+    const resolution = resolvePresetCommand(command.editorText, serverConfig?.presets ?? []);
     switch (resolution.kind) {
       case "picker":
-        clearPromptComposer();
         openMobilePresetsPicker();
         break;
       case "unknown": {
         const available = resolution.available.length > 0 ? resolution.available.join(", ") : "none";
-        appendSessionNotice(sessionId, {
+        appendSessionNotice(command.sessionId, {
           level: "warning",
           text: `Unknown preset "${resolution.name}". Available: ${available}.`,
         });
@@ -1076,11 +1087,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       }
       case "run":
-        clearPromptComposer();
-        runMobilePreset(resolution.preset, {}, "send", sessionId);
+        runMobilePreset(resolution.preset, {}, "send", command.sessionId);
         break;
       case "params":
-        clearPromptComposer();
         openMobilePresetRun(resolution.preset, false);
         break;
     }
@@ -1618,6 +1627,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         syncCreateCwdDefault();
         syncMobileProposedModelsUi();
         syncMobilePresets();
+        if (pendingPresetCommand) resolveMobilePendingPresetCommand();
         console.debug(`[fura-mobile] Connected to fura ${message.serverVersion}.`);
         break;
       case "config.updated":
@@ -1636,6 +1646,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           proposedModelSearch.value = "";
           proposedModelStatus.textContent = "Saved.";
         }
+        break;
+      case "presets.list":
+        if (serverConfig) serverConfig.presets = message.presets;
+        resolveMobilePendingPresetCommand();
         break;
       case "sessions.snapshot":
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));

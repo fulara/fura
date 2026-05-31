@@ -240,6 +240,7 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::ConfigModelCatalogList { .. } => "config.modelCatalog.list",
         ClientMessage::PresetSave { .. } => "preset.save",
         ClientMessage::PresetDelete { .. } => "preset.delete",
+        ClientMessage::PresetsRefresh => "presets.refresh",
         ClientMessage::SessionAttach { .. } => "session.attach",
         ClientMessage::SessionOpen { .. } => "session.open",
         ClientMessage::SessionDetach { .. } => "session.detach",
@@ -1127,6 +1128,7 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
     match message {
         ServerMessage::Hello { .. } => "hello",
         ServerMessage::ConfigUpdated { .. } => "config.updated",
+        ServerMessage::PresetList { .. } => "presets.list",
         ServerMessage::SessionsSnapshot { .. } => "sessions.snapshot",
         ServerMessage::SessionSnapshot { .. } => "session.snapshot",
         ServerMessage::SessionDelta { .. } => "session.delta",
@@ -1184,6 +1186,11 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
                 message_type = "config.updated"
             )
         }
+        ServerMessage::PresetList { presets } => info!(
+            direction = "bridge_to_client",
+            message_type = "presets.list",
+            preset_count = presets.len()
+        ),
         ServerMessage::SessionsSnapshot { sessions } => info!(
             direction = "bridge_to_client",
             message_type = "sessions.snapshot",
