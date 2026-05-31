@@ -593,6 +593,56 @@ describe("mountMobileApp", () => {
     expect(document.querySelectorAll("#mobileTranscript .thinking-block").length).toBe(0);
   });
 
+  it("keeps the review card in the mobile transcript when tools are hidden", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [
+          {
+            kind: "tool",
+            toolCallId: "task-review",
+            toolName: "task",
+            args: { agent: "reviewer" },
+            isActive: false,
+            isError: false,
+            result: { details: { results: [{ agent: "reviewer", output: "done" }] } },
+            renderHash: "task-review-hash",
+          },
+          {
+            kind: "review",
+            toolCallId: "task-review",
+            timestamp: null,
+            isActive: false,
+            verdicts: [{ overallCorrectness: "incorrect", explanation: "Auth bug.", confidence: 0.9 }],
+            findings: [{
+              title: "Validate token",
+              body: "Empty token authenticates.",
+              priority: "P0",
+              confidence: 0.9,
+              filePath: "src/auth.rs",
+              lineStart: 12,
+              lineEnd: 12,
+            }],
+            renderHash: "review-card-hash",
+          },
+        ],
+      }),
+    });
+
+    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(1);
+    expect(document.querySelectorAll("#mobileTranscript .review-card").length).toBe(1);
+
+    connection.emit({ type: "config.updated", config: { ...config, showTools: false } });
+
+    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(0);
+    expect(document.querySelectorAll("#mobileTranscript .review-card").length).toBe(1);
+    expect(document.querySelector("#mobileTranscript .review-finding-title")?.textContent).toBe("Validate token");
+  });
+
   it("forces an immediate reconnect when the disconnected status is clicked", () => {
     const { connection } = createHarness();
     connection.sent = [];

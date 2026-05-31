@@ -935,6 +935,56 @@ describe("desktop cog options", () => {
     expect(cards[1]?.classList.contains("tool-compact")).toBe(true);
   });
 
+  it("keeps the review card visible after the task card is hidden by Tools: off", async () => {
+    const { connection } = await createHarness();
+    const reviewTask = {
+      kind: "tool" as const,
+      toolCallId: "task-review",
+      toolName: "task",
+      args: { agent: "reviewer" },
+      isActive: false,
+      isError: false,
+      result: { details: { results: [{ agent: "reviewer", output: "done" }] } },
+      renderHash: "task-review-hash",
+    };
+    const reviewCard = {
+      kind: "review" as const,
+      toolCallId: "task-review",
+      timestamp: null,
+      isActive: false,
+      verdicts: [{ overallCorrectness: "incorrect" as const, explanation: "Auth bug.", confidence: 0.9 }],
+      findings: [{
+        title: "Validate token",
+        body: "Empty token authenticates.",
+        priority: "P0" as const,
+        confidence: 0.9,
+        filePath: "src/auth.rs",
+        lineStart: 12,
+        lineEnd: 12,
+      }],
+      renderHash: "review-card-hash",
+    };
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { transcript: [reviewTask, reviewCard] }),
+    });
+
+    const panel = "#testTranscriptPanel";
+    expect(document.querySelector(`${panel} .tool-card[data-tool-name="task"]`)).not.toBeNull();
+    expect(document.querySelector(`${panel} .review-card`)).not.toBeNull();
+    expect(document.querySelector(`${panel} .review-finding-title`)?.textContent).toBe("Validate token");
+
+    // Hiding tool bubbles must not hide the review deliverable.
+    document.querySelector<HTMLButtonElement>("#toolVisibilityToggle")?.click();
+    expect(connection.sent).toContainEqual({ type: "config.set", showTools: false });
+    expect(document.querySelector(`${panel} .tool-card[data-tool-name="task"]`)).toBeNull();
+    expect(document.querySelector(`${panel} .review-card`)).not.toBeNull();
+    expect(document.querySelector(`${panel} .review-finding-title`)?.textContent).toBe("Validate token");
+  });
+
   it("requests state refresh for desktop session deltas without a base projection", async () => {
     const { connection } = await createHarness();
     connection.sent.length = 0;

@@ -83,9 +83,39 @@ export type ToolCard = {
   renderHash?: string;
 };
 
+export type ReviewPriority = "P0" | "P1" | "P2" | "P3";
+
+export type ReviewFinding = {
+  title: string;
+  body: string;
+  priority: ReviewPriority;
+  confidence: number;
+  filePath: string;
+  lineStart: number;
+  lineEnd: number;
+  agent?: string | null;
+};
+
+export type ReviewVerdict = {
+  agent?: string | null;
+  overallCorrectness: "correct" | "incorrect";
+  explanation: string;
+  confidence: number;
+};
+
+export type ReviewCard = {
+  toolCallId: string;
+  timestamp?: number | null;
+  isActive: boolean;
+  verdicts: ReviewVerdict[];
+  findings: ReviewFinding[];
+  renderHash?: string;
+};
+
 export type TranscriptEntry =
   | ({ kind: "message" } & TranscriptMessage)
-  | ({ kind: "tool" } & ToolCard);
+  | ({ kind: "tool" } & ToolCard)
+  | ({ kind: "review" } & ReviewCard);
 
 export type SessionWorktreeSummary = {
   path: string;

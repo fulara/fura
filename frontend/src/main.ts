@@ -13,6 +13,7 @@ import {
   renderReadToolGroup,
   renderToolCard,
 } from "./toolCards";
+import { renderReviewCard, reviewCardRenderKey } from "./reviewCard";
 import {
   blobToBase64,
   createPendingMarker as createAttachmentMarker,
@@ -4420,6 +4421,16 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
           review: transcriptReviewOptions(projection.summary.sessionId, entry),
         }),
         render: () => renderMessage(entry, projection.summary.sessionId),
+      });
+      continue;
+    }
+    if (entry.kind === "review") {
+      // Review results are a deliverable, not process noise: always rendered,
+      // independent of the tool-bubble visibility toggle.
+      items.push({
+        key: reviewCardRenderKey(entry),
+        cacheable: true,
+        render: () => renderReviewCard(entry),
       });
       continue;
     }

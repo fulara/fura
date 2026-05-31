@@ -395,6 +395,101 @@ for await (const line of rl) {
         write({ type: "agent_end", timestamp: now + 4 });
         break;
       }
+      if (promptText.toLowerCase().includes("mock review")) {
+        const toolCallId = `mock-review-task-${now}`;
+        const taskArgs = { agent: "reviewer", tasks: [{ description: "Review the diff" }] };
+        const reviewDetails = {
+          projectAgentsDir: null,
+          totalDurationMs: 1800,
+          results: [{
+            index: 0,
+            id: "1-reviewer",
+            agent: "reviewer",
+            task: "Review the diff",
+            exitCode: 0,
+            output: "Reviewed src/auth.rs and src/buffer.rs.",
+            stderr: "",
+            truncated: false,
+            durationMs: 1800,
+            tokens: 4096,
+            extractedToolData: {
+              report_finding: [
+                {
+                  title: "Validate token before authenticating",
+                  body: "An empty token authenticates because the guard returns early.\n\n```suggestion\nif token.is_empty() { return Err(AuthError::Empty); }\n```",
+                  priority: "P0",
+                  confidence: 0.95,
+                  file_path: "src/auth.rs",
+                  line_start: 42,
+                  line_end: 44,
+                },
+                {
+                  title: "Bound the copy length",
+                  body: "`memcpy` can write past the buffer when the payload exceeds the cap.",
+                  priority: "P2",
+                  confidence: 0.6,
+                  file_path: "src/buffer.rs",
+                  line_start: 88,
+                  line_end: 90,
+                },
+              ],
+              yield: [{
+                data: {
+                  overall_correctness: "incorrect",
+                  explanation: "One blocking auth bypass plus a lower-severity buffer bound.",
+                  confidence: 0.9,
+                },
+              }],
+            },
+          }],
+        };
+        // Persist the same toolCall + toolResult that real OMP writes to the
+        // session log, so a post-agent get_messages refresh rebuilds the task
+        // card (and the derived review) instead of dropping it.
+        const toolCallAssistant = {
+          id: `assistant-tc-${now}`,
+          role: "assistant",
+          content: [{ type: "toolCall", id: toolCallId, name: "task", arguments: taskArgs, intent: "reviewing the diff" }],
+          timestamp: now + 1,
+        };
+        const toolResultMessage = {
+          id: `toolresult-${now}`,
+          role: "toolResult",
+          toolCallId,
+          toolName: "task",
+          content: [{ type: "text", text: "1 reviewer finished." }],
+          details: reviewDetails,
+          timestamp: now + 2,
+        };
+        const assistant = {
+          id: `assistant-review-${now}`,
+          role: "assistant",
+          content: [{ type: "text", text: "Mock review complete: one blocking issue found." }],
+          timestamp: now + 3,
+        };
+        messages.push(user, toolCallAssistant, toolResultMessage, assistant);
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({
+          type: "tool_execution_start",
+          timestamp: now + 1,
+          toolCallId,
+          toolName: "task",
+          args: taskArgs,
+          intent: "reviewing the diff",
+        });
+        write({
+          type: "tool_execution_end",
+          timestamp: now + 2,
+          toolCallId,
+          toolName: "task",
+          result: { content: [{ type: "text", text: "1 reviewer finished." }], details: reviewDetails },
+          isError: false,
+        });
+        write({ type: "message_end", timestamp: now + 3, message: assistant });
+        write({ type: "agent_end", timestamp: now + 4 });
+        break;
+      }
 
       if (promptText.toLowerCase().includes("mock broken mermaid")) {
         const assistant = {

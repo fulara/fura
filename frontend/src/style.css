@@ -3851,6 +3851,170 @@ h2 {
   font-size: 0.82rem;
 }
 
+/* Review result card — a first-class deliverable, always visible. */
+.review-card {
+  border: 1px solid #2a3040;
+  border-left: 3px solid #6d7cff;
+  border-radius: 0.85rem;
+  background: linear-gradient(180deg, rgba(16, 18, 30, 0.94), rgba(13, 15, 23, 0.9));
+  box-shadow: 0 1rem 2rem rgba(0, 0, 0, 0.14);
+  color: #c9d3e6;
+}
+
+.review-card.review-active {
+  border-left-color: #15b7ff;
+}
+
+.review-header {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.65rem 0.85rem;
+  border-bottom: 1px solid #252a35;
+  min-width: 0;
+}
+
+.review-header .event-timestamp {
+  margin-left: auto;
+}
+
+.review-status-icon {
+  color: #6d7cff;
+  flex: 0 0 auto;
+}
+
+.review-status-icon.is-running {
+  color: #15b7ff;
+}
+
+.review-label {
+  color: #b3bdf2;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.review-verdict-badge {
+  border: 1px solid #37405c;
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.review-verdict-badge.verdict-incorrect {
+  border-color: rgba(255, 125, 125, 0.4);
+  color: #ff7d7d;
+}
+
+.review-verdict-badge.verdict-correct {
+  border-color: rgba(98, 227, 154, 0.4);
+  color: #62e39a;
+}
+
+.review-verdict-badge.verdict-active {
+  border-color: rgba(21, 183, 255, 0.4);
+  color: #6db3ff;
+}
+
+.review-summary {
+  color: #9ba4b5;
+  font-size: 0.78rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.review-verdict {
+  padding: 0.4rem 0.85rem 0;
+  font-size: 0.85rem;
+  color: #c2ccdf;
+}
+
+.review-verdict-agent {
+  color: #8f9bb0;
+  font-weight: 600;
+  margin-right: 0.4rem;
+}
+
+.review-findings {
+  list-style: none;
+  margin: 0;
+  padding: 0.35rem 0 0.5rem;
+}
+
+.review-finding {
+  padding: 0.4rem 0.85rem;
+  border-top: 1px solid #1d212c;
+}
+
+.review-finding:first-child {
+  border-top: 0;
+}
+
+.review-finding-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.review-priority {
+  font-weight: 700;
+  font-size: 0.74rem;
+  border-radius: 0.35rem;
+  padding: 0.02rem 0.34rem;
+  border: 1px solid currentColor;
+  flex: 0 0 auto;
+}
+
+.review-priority.p0,
+.review-finding.priority-p0 .review-finding-title {
+  color: #ff6b6b;
+}
+
+.review-priority.p1,
+.review-finding.priority-p1 .review-finding-title {
+  color: #ffbf69;
+}
+
+.review-priority.p2 {
+  color: #6db3ff;
+}
+
+.review-priority.p3 {
+  color: #8f9bb0;
+}
+
+.review-finding-title {
+  font-weight: 600;
+  color: #e3e8f4;
+}
+
+.review-finding-loc {
+  color: #7c879b;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.76rem;
+}
+
+.review-finding-agent {
+  color: #8f9bb0;
+  font-size: 0.74rem;
+  margin-left: auto;
+}
+
+.review-finding-body {
+  margin-top: 0.3rem;
+  color: #b8c2d6;
+  font-size: 0.86rem;
+}
+
+.review-empty {
+  padding: 0.5rem 0.85rem 0.65rem;
+  color: #62e39a;
+  font-size: 0.85rem;
+}
+
 /* Smart pasted snippets */
 .snippet-chip {
   position: relative;

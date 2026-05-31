@@ -56,6 +56,7 @@ import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView }
 import { catalogContainsProposedModel, filterCatalogModels, formatCatalogModelLabel, formatProposedModelDetails, normalizeSelectedProposedModelId, proposedModelIdFromName, removeProposedModel, upsertProposedModel, validateProposedModels } from "./proposedModels";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import { isCompactReadCard, renderCurrentTodoCard, renderReadToolCard, renderReadToolGroup, renderToolCard } from "./toolCards";
+import { renderReviewCard, reviewCardRenderKey } from "./reviewCard";
 import { renderMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import {
   buildTranscriptReviewPrompt,
@@ -1990,6 +1991,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         const node = cachedNode?.ownerDocument === transcript.ownerDocument
           ? updateRenderedMessage(cachedNode, entry, renderOptions)
           : renderMessage(entry, renderOptions);
+        nextNodes.set(key, node);
+        desiredNodes.push(node);
+      } else if (entry.kind === "review") {
+        // Deliverable, not process noise: rendered regardless of showToolBubbles.
+        const key = reviewCardRenderKey(entry);
+        const cachedNode = transcriptRenderCache.nodes.get(key);
+        const node = cachedNode?.ownerDocument === transcript.ownerDocument
+          ? cachedNode
+          : renderReviewCard(entry);
         nextNodes.set(key, node);
         desiredNodes.push(node);
       } else if (showToolBubbles) {

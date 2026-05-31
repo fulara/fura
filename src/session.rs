@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 const MESSAGE_RENDER_HASH_VERSION: &str = "message-render-v1";
 const TOOL_CARD_RENDER_HASH_VERSION: &str = "tool-card-render-v1";
+const REVIEW_CARD_RENDER_HASH_VERSION: &str = "review-card-render-v1";
 
 struct Blake3Writer<'a>(&'a mut blake3::Hasher);
 
@@ -157,7 +158,7 @@ impl SessionRecord {
 
                 // Cards that precede all messages (insert_after_count == 0).
                 while ci < all_cards.len() && all_cards[ci].insert_after_count == 0 {
-                    t.push(TranscriptEntry::Tool(all_cards[ci].clone()));
+                    push_tool_entry(&mut t, all_cards[ci]);
                     ci += 1;
                 }
 
@@ -165,14 +166,14 @@ impl SessionRecord {
                 for (mi, msg) in self.messages.iter().enumerate() {
                     t.push(TranscriptEntry::Message(msg.clone()));
                     while ci < all_cards.len() && all_cards[ci].insert_after_count == mi + 1 {
-                        t.push(TranscriptEntry::Tool(all_cards[ci].clone()));
+                        push_tool_entry(&mut t, all_cards[ci]);
                         ci += 1;
                     }
                 }
 
                 // Any remaining cards (insert_after_count > messages.len()).
                 while ci < all_cards.len() {
-                    t.push(TranscriptEntry::Tool(all_cards[ci].clone()));
+                    push_tool_entry(&mut t, all_cards[ci]);
                     ci += 1;
                 }
 
@@ -437,6 +438,155 @@ fn latest_todo_phases_from_tool_cards(cards: &[ToolCard]) -> Option<Vec<TodoPhas
         .find_map(|card| todo_phases_from_tool_result_value(card.result.as_ref()))
 }
 
+/// Derive a consolidated [`ReviewCard`] from a reviewer `task` tool card, or
+/// `None` when the card is not a review (or carries no findings/verdict yet).
+///
+/// The reviewer subagents run inside the `task` tool; their `report_finding`
+/// and `yield` calls are surfaced on the parent card under
+/// `details.results[].extractedToolData` (final) or `details.progress[].extractedToolData`
+/// (live). Prefer the live `progress` snapshot while the task is active and the
+/// final per-agent `results` once it completes, mirroring the task-card renderer.
+pub(crate) fn review_card_from_tool(card: &ToolCard) -> Option<ReviewCard> {
+    if card.tool_name != "task" {
+        return None;
+    }
+    let source = card.partial_result.as_ref().or(card.result.as_ref())?;
+    let details = source.get("details")?;
+    let progress = details
+        .get("progress")
+        .and_then(Value::as_array)
+        .filter(|entries| !entries.is_empty());
+    let results = details
+        .get("results")
+        .and_then(Value::as_array)
+        .filter(|entries| !entries.is_empty());
+    // The sync task path keeps `results` empty until every reviewer finishes,
+    // so while the card is active the live `progress` snapshot is authoritative.
+    let entries = if card.is_active {
+        progress.or(results)?
+    } else {
+        results.or(progress)?
+    };
+
+    let mut findings: Vec<ReviewFinding> = Vec::new();
+    let mut verdicts: Vec<ReviewVerdict> = Vec::new();
+    for entry in entries {
+        let agent = entry
+            .get("agent")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let Some(extracted) = entry.get("extractedToolData") else {
+            continue;
+        };
+        if let Some(reported) = extracted.get("report_finding").and_then(Value::as_array) {
+            findings.extend(
+                reported
+                    .iter()
+                    .filter_map(|finding| parse_review_finding(finding, agent.as_deref())),
+            );
+        }
+        if let Some(yielded) = extracted.get("yield").and_then(Value::as_array) {
+            verdicts.extend(yielded.iter().filter_map(|item| {
+                parse_review_verdict(item.get("data").unwrap_or(item), agent.as_deref())
+            }));
+        }
+    }
+
+    if findings.is_empty() && verdicts.is_empty() {
+        return None;
+    }
+
+    findings.sort_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+            .then_with(|| a.line_start.cmp(&b.line_start))
+    });
+
+    let mut review = ReviewCard {
+        tool_call_id: card.tool_call_id.clone(),
+        timestamp: card.timestamp,
+        is_active: card.is_active,
+        verdicts,
+        findings,
+        render_hash: String::new(),
+    };
+    review.refresh_render_hash();
+    Some(review)
+}
+
+fn json_u32(value: Option<&Value>) -> Option<u32> {
+    // Accept only non-negative integers within u32 range. `as_u64` already
+    // rejects negatives, fractionals, and floats; reject out-of-range values
+    // instead of silently wrapping a bad line number into a plausible-looking one.
+    u32::try_from(value?.as_u64()?).ok()
+}
+
+fn parse_review_finding(value: &Value, agent: Option<&str>) -> Option<ReviewFinding> {
+    let priority = ReviewPriority::from_label(value.get("priority").and_then(Value::as_str)?)?;
+    let title = value
+        .get("title")
+        .and_then(Value::as_str)?
+        .trim()
+        .to_string();
+    let file_path = value.get("file_path").and_then(Value::as_str)?.to_string();
+    let line_start = json_u32(value.get("line_start"))?;
+    let line_end = json_u32(value.get("line_end")).unwrap_or(line_start);
+    if title.is_empty() || file_path.is_empty() {
+        return None;
+    }
+    Some(ReviewFinding {
+        title,
+        body: value
+            .get("body")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        priority,
+        confidence: value
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        file_path,
+        line_start,
+        line_end,
+        agent: agent.map(str::to_string),
+    })
+}
+
+fn parse_review_verdict(value: &Value, agent: Option<&str>) -> Option<ReviewVerdict> {
+    let overall_correctness = match value.get("overall_correctness").and_then(Value::as_str)? {
+        "correct" => ReviewCorrectness::Correct,
+        "incorrect" => ReviewCorrectness::Incorrect,
+        _ => return None,
+    };
+    Some(ReviewVerdict {
+        agent: agent.map(str::to_string),
+        overall_correctness,
+        explanation: value
+            .get("explanation")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        confidence: value
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+    })
+}
+
+/// Push a tool card into the transcript, immediately followed by its derived
+/// review artifact when the card is a reviewer `task`. Keeping the review entry
+/// adjacent to its source card is what lets the live tool-event deltas (which
+/// anchor `transcript_replace_from` on the task card's position) resend it.
+fn push_tool_entry(transcript: &mut Vec<TranscriptEntry>, card: &ToolCard) {
+    transcript.push(TranscriptEntry::Tool(card.clone()));
+    if let Some(review) = review_card_from_tool(card) {
+        transcript.push(TranscriptEntry::Review(review));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptMessage {
@@ -589,6 +739,96 @@ impl ToolCard {
     }
 }
 
+/// Severity of a code-review finding, mirroring OMP `report_finding` priorities.
+/// Declaration order is most-severe-first so derived `Ord` sorts P0 → P3.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub(crate) enum ReviewPriority {
+    P0,
+    P1,
+    P2,
+    P3,
+}
+
+impl ReviewPriority {
+    fn from_label(value: &str) -> Option<Self> {
+        match value {
+            "P0" => Some(Self::P0),
+            "P1" => Some(Self::P1),
+            "P2" => Some(Self::P2),
+            "P3" => Some(Self::P3),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ReviewCorrectness {
+    Correct,
+    Incorrect,
+}
+
+/// One inline review finding projected from a reviewer subagent's `report_finding`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewFinding {
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) priority: ReviewPriority,
+    pub(crate) confidence: f64,
+    pub(crate) file_path: String,
+    pub(crate) line_start: u32,
+    pub(crate) line_end: u32,
+    /// Reviewer subagent label, set when more than one reviewer ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<String>,
+}
+
+/// A reviewer subagent's overall verdict, projected from its `yield` payload.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewVerdict {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<String>,
+    pub(crate) overall_correctness: ReviewCorrectness,
+    pub(crate) explanation: String,
+    pub(crate) confidence: f64,
+}
+
+/// A consolidated code-review result derived from a reviewer `task` tool card.
+///
+/// Emitted as a first-class transcript artifact (not a tool card) so it stays
+/// visible regardless of the tool-bubble visibility toggle. The originating
+/// `task` card remains the single source of truth; this is a pure projection of
+/// its `report_finding` / `yield` extracted tool data.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ReviewCard {
+    /// Tool-call id of the originating reviewer `task` card (stable artifact identity).
+    pub(crate) tool_call_id: String,
+    pub(crate) timestamp: Option<Timestamp>,
+    /// True while the originating review task is still running.
+    pub(crate) is_active: bool,
+    pub(crate) verdicts: Vec<ReviewVerdict>,
+    pub(crate) findings: Vec<ReviewFinding>,
+    /// Deterministic fingerprint of fields that affect review-card DOM rendering.
+    pub(crate) render_hash: String,
+}
+
+impl ReviewCard {
+    pub(crate) fn refresh_render_hash(&mut self) {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(REVIEW_CARD_RENDER_HASH_VERSION.as_bytes());
+        hasher.update(b";");
+        hash_json_field(&mut hasher, "toolCallId", &self.tool_call_id);
+        hash_json_field(&mut hasher, "timestamp", &self.timestamp);
+        hash_json_field(&mut hasher, "isActive", &self.is_active);
+        hash_json_field(&mut hasher, "verdicts", &self.verdicts);
+        hash_json_field(&mut hasher, "findings", &self.findings);
+        self.render_hash = hasher.finalize().to_hex().to_string();
+    }
+}
+
 /// A single entry in the unified session transcript.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -597,6 +837,8 @@ pub(crate) enum TranscriptEntry {
     Message(TranscriptMessage),
     #[serde(rename = "tool")]
     Tool(ToolCard),
+    #[serde(rename = "review")]
+    Review(ReviewCard),
 }
 
 #[derive(Debug, Deserialize)]
@@ -725,5 +967,248 @@ mod tests {
         card.partial_result = Some(serde_json::json!({ "text": "done" }));
         card.refresh_render_hash();
         assert_ne!(card.render_hash, initial);
+    }
+
+    fn reviewer_task_card(result: Value, is_active: bool) -> ToolCard {
+        ToolCard::new(
+            "task-1".to_string(),
+            None,
+            "task".to_string(),
+            Some("review the diff".to_string()),
+            serde_json::json!({ "agent": "reviewer" }),
+            is_active,
+            false,
+            None,
+            Some(result),
+            1,
+        )
+    }
+
+    fn two_finding_review_result() -> Value {
+        serde_json::json!({
+            "details": {
+                "results": [{
+                    "agent": "reviewer",
+                    "extractedToolData": {
+                        "report_finding": [
+                            {
+                                "title": "Fix late buffer bound",
+                                "body": "Overflow when payload exceeds cap.",
+                                "priority": "P2",
+                                "confidence": 0.7,
+                                "file_path": "src/b.rs",
+                                "line_start": 12,
+                                "line_end": 14
+                            },
+                            {
+                                "title": "Auth bypass on empty token",
+                                "body": "Empty token authenticates.",
+                                "priority": "P0",
+                                "confidence": 0.95,
+                                "file_path": "src/a.rs",
+                                "line_start": 4,
+                                "line_end": 4
+                            }
+                        ],
+                        "yield": [{
+                            "data": {
+                                "overall_correctness": "incorrect",
+                                "explanation": "One blocking auth bug.",
+                                "confidence": 0.9
+                            }
+                        }]
+                    }
+                }]
+            }
+        })
+    }
+
+    #[test]
+    fn review_card_from_tool_extracts_sorted_findings_and_verdict() {
+        let card = reviewer_task_card(two_finding_review_result(), false);
+        let review = review_card_from_tool(&card).expect("reviewer task yields a review card");
+
+        assert_eq!(review.tool_call_id, "task-1");
+        assert!(!review.is_active);
+        // Sorted most-severe-first regardless of report order.
+        assert_eq!(review.findings.len(), 2);
+        assert_eq!(review.findings[0].priority, ReviewPriority::P0);
+        assert_eq!(review.findings[0].file_path, "src/a.rs");
+        assert_eq!(review.findings[0].line_start, 4);
+        assert_eq!(review.findings[1].priority, ReviewPriority::P2);
+        assert_eq!(review.findings[1].line_end, 14);
+        assert_eq!(review.verdicts.len(), 1);
+        assert_eq!(
+            review.verdicts[0].overall_correctness,
+            ReviewCorrectness::Incorrect
+        );
+        assert_eq!(review.verdicts[0].explanation, "One blocking auth bug.");
+    }
+
+    #[test]
+    fn review_card_from_tool_reads_live_progress_when_results_absent() {
+        let live = serde_json::json!({
+            "details": {
+                "results": [],
+                "progress": [{
+                    "agent": "reviewer",
+                    "status": "running",
+                    "extractedToolData": {
+                        "report_finding": [{
+                            "title": "Off-by-one in loop bound",
+                            "body": "Skips last element.",
+                            "priority": "P1",
+                            "confidence": 0.6,
+                            "file_path": "src/c.rs",
+                            "line_start": 9,
+                            "line_end": 9
+                        }]
+                    }
+                }]
+            }
+        });
+        let mut card = reviewer_task_card(serde_json::json!({}), true);
+        card.result = None;
+        card.partial_result = Some(live);
+
+        let review = review_card_from_tool(&card).expect("live progress yields a review card");
+        assert!(review.is_active);
+        assert_eq!(review.findings.len(), 1);
+        assert_eq!(review.findings[0].priority, ReviewPriority::P1);
+        assert!(review.verdicts.is_empty());
+    }
+
+    #[test]
+    fn review_card_from_tool_drops_findings_with_out_of_range_line() {
+        // A line number that overflows u32 must drop the finding rather than wrap
+        // to a plausible-looking line; the well-formed finding still survives.
+        let result = serde_json::json!({
+            "details": {
+                "results": [{
+                    "agent": "reviewer",
+                    "extractedToolData": {
+                        "report_finding": [
+                            {
+                                "title": "Bogus line",
+                                "body": "overflows",
+                                "priority": "P1",
+                                "confidence": 0.5,
+                                "file_path": "src/x.rs",
+                                "line_start": 4_294_967_300_u64,
+                                "line_end": 4_294_967_300_u64
+                            },
+                            {
+                                "title": "Real finding",
+                                "body": "ok",
+                                "priority": "P0",
+                                "confidence": 0.9,
+                                "file_path": "src/y.rs",
+                                "line_start": 10,
+                                "line_end": 12
+                            }
+                        ]
+                    }
+                }]
+            }
+        });
+        let review = review_card_from_tool(&reviewer_task_card(result, false))
+            .expect("the valid finding still yields a review card");
+        assert_eq!(review.findings.len(), 1);
+        assert_eq!(review.findings[0].title, "Real finding");
+        assert_eq!(review.findings[0].line_start, 10);
+    }
+
+    #[test]
+    fn review_card_from_tool_ignores_non_review_tools_and_empty_tasks() {
+        let bash = ToolCard::new(
+            "b1".to_string(),
+            None,
+            "bash".to_string(),
+            None,
+            serde_json::json!({}),
+            false,
+            false,
+            None,
+            Some(serde_json::json!({ "details": { "results": [] } })),
+            1,
+        );
+        assert!(review_card_from_tool(&bash).is_none());
+
+        let explore = reviewer_task_card(
+            serde_json::json!({
+                "details": { "results": [{ "agent": "explore", "output": "notes" }] }
+            }),
+            false,
+        );
+        assert!(review_card_from_tool(&explore).is_none());
+    }
+
+    #[test]
+    fn push_tool_entry_appends_review_only_for_reviewer_tasks() {
+        let mut transcript = Vec::new();
+        push_tool_entry(
+            &mut transcript,
+            &reviewer_task_card(two_finding_review_result(), false),
+        );
+        assert!(matches!(
+            transcript.as_slice(),
+            [TranscriptEntry::Tool(_), TranscriptEntry::Review(_)]
+        ));
+
+        let mut other = Vec::new();
+        let bash = ToolCard::new(
+            "b1".to_string(),
+            None,
+            "bash".to_string(),
+            None,
+            serde_json::json!({}),
+            false,
+            false,
+            None,
+            Some(serde_json::json!({ "content": [] })),
+            1,
+        );
+        push_tool_entry(&mut other, &bash);
+        assert!(matches!(other.as_slice(), [TranscriptEntry::Tool(_)]));
+    }
+
+    #[test]
+    fn delta_anchored_at_task_card_resends_adjacent_review_entry() {
+        // Mirrors the rpc.rs tool-event path: replace_from is the task card's
+        // transcript index, so the derived review entry that follows it is resent.
+        let tool = reviewer_task_card(two_finding_review_result(), false);
+        let review = review_card_from_tool(&tool).expect("review card");
+        let projection = SessionProjection {
+            summary: test_summary(1),
+            transcript: vec![
+                test_message("m1"),
+                TranscriptEntry::Tool(tool),
+                TranscriptEntry::Review(review),
+            ],
+            is_busy: false,
+            model: None,
+            thinking_level: None,
+            tokens_total: 0,
+            cost_usd: 0.0,
+            context_tokens: None,
+            context_window: None,
+            context_percent: None,
+            plan_mode: None,
+            goal_mode: None,
+            pending_plan_review: None,
+            pending_ask: None,
+            todo_phases: Vec::new(),
+        };
+
+        let delta = SessionProjectionDelta::from_projection_replace_tail(1, &projection);
+        assert_eq!(delta.transcript_append.len(), 2);
+        assert!(matches!(
+            delta.transcript_append[0],
+            TranscriptEntry::Tool(_)
+        ));
+        assert!(matches!(
+            delta.transcript_append[1],
+            TranscriptEntry::Review(_)
+        ));
     }
 }

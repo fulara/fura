@@ -208,7 +208,7 @@ fn first_transcript_text(entries: &[TranscriptEntry]) -> Option<&str> {
             ContentBlock::Text { text } => Some(text.as_str()),
             _ => None,
         }),
-        TranscriptEntry::Tool(_) => None,
+        TranscriptEntry::Tool(_) | TranscriptEntry::Review(_) => None,
     })
 }
 
