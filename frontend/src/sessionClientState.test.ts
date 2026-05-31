@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { SessionProjection, SessionSummary } from "./protocol";
+import type { SessionProjection, SessionSummary, TranscriptEntry } from "./protocol";
 import {
   activateSession,
   applySessionDelta,
   applySessionSnapshot,
   applySessionsSnapshot,
   mergeSessionSummary,
+  projectionAddsTranscriptEntries,
   sessionOpenOrAttachMessage,
 } from "./sessionClientState";
 
@@ -221,5 +222,70 @@ describe("sessionOpenOrAttachMessage", () => {
       kind: "available",
       status: "available",
     }))).toEqual({ type: "session.attach", sessionId: "saved" });
+  });
+});
+
+function messageEntry(id: string, overrides: Partial<Extract<TranscriptEntry, { kind: "message" }>> = {}): TranscriptEntry {
+  return { kind: "message", id, role: "assistant", blocks: [], isNew: true, ...overrides };
+}
+
+function toolEntry(toolCallId: string, overrides: Partial<Extract<TranscriptEntry, { kind: "tool" }>> = {}): TranscriptEntry {
+  return {
+    kind: "tool",
+    toolCallId,
+    toolName: "bash",
+    args: {},
+    isActive: true,
+    isError: false,
+    ...overrides,
+  };
+}
+
+describe("projectionAddsTranscriptEntries", () => {
+  it("flags a never-seen session whose first projection carries a live message", () => {
+    expect(projectionAddsTranscriptEntries(undefined, projection("a", { transcript: [messageEntry("m1", { isNew: true })] }))).toBe(true);
+  });
+
+  it("flags a never-seen session whose first projection has an in-flight tool card", () => {
+    expect(projectionAddsTranscriptEntries(undefined, projection("a", { transcript: [toolEntry("t1", { isActive: true })] }))).toBe(true);
+  });
+
+  it("does not flag a never-seen session hydrated with only historical entries", () => {
+    const transcript = [messageEntry("m1", { isNew: false }), toolEntry("t1", { isActive: false })];
+    expect(projectionAddsTranscriptEntries(undefined, projection("a", { transcript }))).toBe(false);
+  });
+
+  it("does not flag a never-seen session with an empty transcript", () => {
+    expect(projectionAddsTranscriptEntries(undefined, projection("a"))).toBe(false);
+  });
+
+  it("ignores metadata-only updates that keep the same transcript ids", () => {
+    const previous = projection("a", { transcript: [messageEntry("m1")], summary: summary("a", { status: "idle" }), tokensTotal: 10 });
+    const next = projection("a", { transcript: [messageEntry("m1")], summary: summary("a", { status: "busy" }), tokensTotal: 99 });
+    expect(projectionAddsTranscriptEntries(previous, next)).toBe(false);
+  });
+
+  it("ignores in-place tool-card progress that keeps the same tool id", () => {
+    const previous = projection("a", { transcript: [toolEntry("t1", { result: undefined })] });
+    const next = projection("a", { transcript: [toolEntry("t1", { isActive: false, result: { ok: true } })] });
+    expect(projectionAddsTranscriptEntries(previous, next)).toBe(false);
+  });
+
+  it("flags a newly appended message", () => {
+    const previous = projection("a", { transcript: [messageEntry("m1")] });
+    const next = projection("a", { transcript: [messageEntry("m1"), messageEntry("m2")] });
+    expect(projectionAddsTranscriptEntries(previous, next)).toBe(true);
+  });
+
+  it("flags a newly started tool card", () => {
+    const previous = projection("a", { transcript: [messageEntry("m1")] });
+    const next = projection("a", { transcript: [messageEntry("m1"), toolEntry("t1")] });
+    expect(projectionAddsTranscriptEntries(previous, next)).toBe(true);
+  });
+
+  it("does not flag a transcript that shrank after suppressed compaction", () => {
+    const previous = projection("a", { transcript: [messageEntry("m1"), messageEntry("m2")] });
+    const next = projection("a", { transcript: [messageEntry("m2")] });
+    expect(projectionAddsTranscriptEntries(previous, next)).toBe(false);
   });
 });

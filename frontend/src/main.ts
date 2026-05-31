@@ -45,7 +45,7 @@ import {
   sessionStatusLabel,
   visibleSessions as filterVisibleSessions,
 } from "./sessionList";
-import { applySessionDelta, applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, sessionOpenOrAttachMessage } from "./sessionClientState";
+import { applySessionDelta, applySessionSnapshot, applySessionsSnapshot, activateSession as activateSessionState, projectionAddsTranscriptEntries, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   comparisonKey,
   DEFAULT_SESSION_CHANGES_DETAIL_MODE,
@@ -1689,6 +1689,7 @@ function handleServerMessage(message: ServerMessage): void {
       render();
       break;
     case "session.snapshot": {
+      const previousSnapshotProjection = projections.get(message.sessionId);
       ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
       syncVisiblePlanReviewFromProjection(message.sessionId, message.state);
       syncPromptHistoryFromProjection(message.sessionId, message.state);
@@ -1718,12 +1719,15 @@ function handleServerMessage(message: ServerMessage): void {
           syncSessionModePanels();
         }
       } else {
-        unreadSessions.add(message.sessionId);
+        if (projectionAddsTranscriptEntries(previousSnapshotProjection, message.state)) {
+          unreadSessions.add(message.sessionId);
+        }
         renderSessions();
       }
       break;
     }
     case "session.delta": {
+      const previousDeltaProjection = projections.get(message.sessionId);
       const result = applySessionDelta(sessions, projections, message.sessionId, message.state);
       if (!result) {
         send({ type: "state.refresh", sessionId: message.sessionId });
@@ -1742,7 +1746,9 @@ function handleServerMessage(message: ServerMessage): void {
         syncSessionModePanels();
         render();
       } else {
-        unreadSessions.add(message.sessionId);
+        if (projection && projectionAddsTranscriptEntries(previousDeltaProjection, projection)) {
+          unreadSessions.add(message.sessionId);
+        }
         renderSessions();
       }
       break;

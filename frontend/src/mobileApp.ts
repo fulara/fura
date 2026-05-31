@@ -46,7 +46,7 @@ import type {
 } from "./protocol";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility } from "./uiPreferences";
 import { sessionCategories, visibleSessions } from "./sessionList";
-import { activateSession as activateSessionState, applySessionDelta, applySessionSnapshot, applySessionsSnapshot, sessionOpenOrAttachMessage } from "./sessionClientState";
+import { activateSession as activateSessionState, applySessionDelta, applySessionSnapshot, applySessionsSnapshot, projectionAddsTranscriptEntries, sessionOpenOrAttachMessage } from "./sessionClientState";
 import {
   deriveWorktreeCreateView,
   resolveSessionCreateMessage,
@@ -1425,6 +1425,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       case "session.snapshot": {
         rememberTrackedSessionId(message.sessionId);
         const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
+        const previousSnapshotProjection = projections.get(message.sessionId);
         ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
         syncVisiblePlanReviewFromProjection(message.sessionId, message.state);
         if (createdByPendingRequest || !activeSessionId || activeSessionId === message.sessionId) {
@@ -1432,13 +1433,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           if (createdByPendingRequest) finishCreateSession();
           render();
         } else {
-          unreadSessions.add(message.sessionId);
+          if (projectionAddsTranscriptEntries(previousSnapshotProjection, message.state)) {
+            unreadSessions.add(message.sessionId);
+          }
           renderSessions();
         }
         break;
       }
       case "session.delta": {
         rememberTrackedSessionId(message.sessionId);
+        const previousDeltaProjection = projections.get(message.sessionId);
         const result = applySessionDelta(sessions, projections, message.sessionId, message.state);
         if (!result) {
           send({ type: "state.refresh", sessionId: message.sessionId });
@@ -1451,7 +1455,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           activateSession(message.sessionId);
           render();
         } else {
-          unreadSessions.add(message.sessionId);
+          if (projection && projectionAddsTranscriptEntries(previousDeltaProjection, projection)) {
+            unreadSessions.add(message.sessionId);
+          }
           renderSessions();
         }
         break;

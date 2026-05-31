@@ -1,4 +1,4 @@
-import type { ClientMessage, SessionProjection, SessionProjectionDelta, SessionSummary } from "./protocol";
+import type { ClientMessage, SessionProjection, SessionProjectionDelta, SessionSummary, TranscriptEntry } from "./protocol";
 
 export type SessionsSnapshotUpdate = {
   sessions: SessionSummary[];
@@ -78,6 +78,43 @@ export function applySessionDelta(
     seq: delta.seq,
   };
   return applySessionSnapshot(sessions, projections, sessionId, projection);
+}
+
+function transcriptEntryKey(entry: TranscriptEntry): string {
+  return entry.kind === "message" ? `m:${entry.id}` : `${entry.kind === "review" ? "r" : "t"}:${entry.toolCallId}`;
+}
+
+function transcriptEntryIsLive(entry: TranscriptEntry): boolean {
+  // A message the bridge flagged as freshly arrived, or a tool/review card still in flight.
+  return entry.kind === "message" ? entry.isNew : entry.isActive;
+}
+
+/**
+ * Whether `next` should light the unread "new activity" dot relative to what this client last knew.
+ *
+ * With a `previous` baseline: true only when `next` introduces a transcript entry
+ * (message/tool/review) whose id `previous` did not already contain. Metadata-only updates — status
+ * flips, token/cost/context/goal ticks, pending-ask changes, and in-place tool-card progress (same
+ * id, new content) — return false. This kills the periodic no-new-message snapshots/deltas a live
+ * session emits while otherwise idle.
+ *
+ * Without a baseline (first projection this client has seen for the session): the transcript is the
+ * session's existing state, not necessarily new activity, so light only when it carries a live entry
+ * (an `isNew` message or an in-flight card). A pure metadata/historical first snapshot for a
+ * never-opened session must not light the dot.
+ */
+export function projectionAddsTranscriptEntries(
+  previous: SessionProjection | undefined,
+  next: SessionProjection,
+): boolean {
+  if (next.transcript.length === 0) return false;
+  if (!previous) return next.transcript.some(transcriptEntryIsLive);
+  const known = new Set<string>();
+  for (const entry of previous.transcript) known.add(transcriptEntryKey(entry));
+  for (const entry of next.transcript) {
+    if (!known.has(transcriptEntryKey(entry))) return true;
+  }
+  return false;
 }
 
 export function activateSession(unreadSessionIds: Set<string>, sessionId: string): string {
