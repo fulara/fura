@@ -3,7 +3,7 @@ use std::{
     fs,
     path::{Component, Path, PathBuf},
     sync::Arc,
-    time::UNIX_EPOCH,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use anyhow::{Context, anyhow, bail};
@@ -20,6 +20,11 @@ use crate::{AppState, CodeWorkspaceSource, ServerMessage};
 const MAX_CODE_FILE_BYTES: u64 = 1_000_000;
 const MAX_TREE_ENTRIES: usize = 500;
 const MAX_FILE_SEARCH_RESULTS: usize = 100;
+/// Warm-up budget for the first navigation query after a rust-analyzer spawn:
+/// it answers `null`/empty while loading the workspace, so empty results are
+/// retried until rust-analyzer returns its first real result or this elapses.
+const NAV_WARMUP_BUDGET: Duration = Duration::from_secs(60);
+const NAV_WARMUP_RETRY_DELAY: Duration = Duration::from_millis(400);
 
 const IGNORED_DIRS: &[&str] = &[
     ".git",
@@ -374,6 +379,18 @@ async fn start_navigation(
     Vec::new()
 }
 
+/// Whether a navigation result carries no usable target. Used to retry while
+/// rust-analyzer is still loading (it answers empty until the workspace is
+/// ready); a non-empty result also marks the analyzer ready.
+fn nav_result_is_empty(message: &ServerMessage) -> bool {
+    match message {
+        ServerMessage::CodeDefinition { locations, .. } => locations.is_empty(),
+        ServerMessage::CodeReferences { locations, .. } => locations.is_empty(),
+        ServerMessage::CodeHover { contents, .. } => contents.is_none(),
+        _ => false,
+    }
+}
+
 async fn run_navigation_query(
     state: AppState,
     workspace: CodeWorkspace,
@@ -401,17 +418,25 @@ async fn run_navigation_query(
         }
     };
 
-    emit_navigation_status(
-        &state,
-        &workspace_id,
-        status_from_health(analyzer.health()),
-        None,
-    )
-    .await;
-
-    let result: anyhow::Result<ServerMessage> = match kind {
-        NavigationKind::Definition => {
-            analyzer
+    // While the analyzer is still warming up, the first query can take as long as
+    // rust-analyzer needs to load the workspace, so report "indexing" (the
+    // targeted rust-analyzer never advances `health` past Starting). A ready
+    // analyzer answers immediately, so just project its current health.
+    let pre_status = if analyzer.is_ready() {
+        status_from_health(analyzer.health())
+    } else {
+        CodeStatus::Indexing
+    };
+    emit_navigation_status(&state, &workspace_id, pre_status, None).await;
+    // rust-analyzer answers a query with `null`/empty (not `ContentModified`)
+    // while the workspace is still loading, so a request racing the first load
+    // would surface a false "no definitions found". Retry empty results during a
+    // bounded warm-up until rust-analyzer returns its first real result
+    // (`mark_ready`); once ready, an empty result is genuine and returned at once.
+    let warmup_deadline = tokio::time::Instant::now() + NAV_WARMUP_BUDGET;
+    let result: anyhow::Result<ServerMessage> = loop {
+        let outcome: anyhow::Result<ServerMessage> = match kind {
+            NavigationKind::Definition => analyzer
                 .definition(&abs_path, &text, position)
                 .await
                 .map(|locations| ServerMessage::CodeDefinition {
@@ -419,10 +444,8 @@ async fn run_navigation_query(
                     request_id: request_id.clone(),
                     path: request_path.clone(),
                     locations: map_locations(&workspace.root, locations),
-                })
-        }
-        NavigationKind::References => {
-            analyzer
+                }),
+            NavigationKind::References => analyzer
                 .references(&abs_path, &text, position)
                 .await
                 .map(|locations| ServerMessage::CodeReferences {
@@ -430,24 +453,48 @@ async fn run_navigation_query(
                     request_id: request_id.clone(),
                     path: request_path.clone(),
                     locations: map_locations(&workspace.root, locations),
-                })
-        }
-        NavigationKind::Hover => analyzer
-            .hover(&abs_path, &text, position)
-            .await
-            .map(|hover| {
-                let (contents, range) = match hover {
-                    Some(info) => (Some(info.contents), info.range.map(code_range_from_lsp)),
-                    None => (None, None),
-                };
-                ServerMessage::CodeHover {
-                    workspace_id: workspace_id.clone(),
-                    request_id: request_id.clone(),
-                    path: request_path.clone(),
-                    contents,
-                    range,
+                }),
+            NavigationKind::Hover => {
+                analyzer
+                    .hover(&abs_path, &text, position)
+                    .await
+                    .map(|hover| {
+                        let (contents, range) = match hover {
+                            Some(info) => {
+                                (Some(info.contents), info.range.map(code_range_from_lsp))
+                            }
+                            None => (None, None),
+                        };
+                        ServerMessage::CodeHover {
+                            workspace_id: workspace_id.clone(),
+                            request_id: request_id.clone(),
+                            path: request_path.clone(),
+                            contents,
+                            range,
+                        }
+                    })
+            }
+        };
+        match outcome {
+            Ok(message) if nav_result_is_empty(&message) => {
+                if analyzer.is_ready() {
+                    break Ok(message);
                 }
-            }),
+                if tokio::time::Instant::now() + NAV_WARMUP_RETRY_DELAY >= warmup_deadline {
+                    // Warm-up budget exhausted: treat the analyzer as ready so a
+                    // later genuine-empty query (e.g. right-clicking whitespace)
+                    // returns at once instead of each paying the full warm-up.
+                    analyzer.mark_ready();
+                    break Ok(message);
+                }
+                tokio::time::sleep(NAV_WARMUP_RETRY_DELAY).await;
+            }
+            Ok(message) => {
+                analyzer.mark_ready();
+                break Ok(message);
+            }
+            Err(err) => break Err(err),
+        }
     };
 
     match result {
@@ -1584,6 +1631,7 @@ def send(message):
     sys.stdout.buffer.flush()
 
 cwd = os.getcwd()
+def_calls = 0
 while True:
     message = read_message()
     if message is None:
@@ -1592,11 +1640,18 @@ while True:
     mid = message.get("id")
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {}}})
+        send({"jsonrpc": "2.0", "method": "experimental/serverStatus", "params": {"health": "ok", "quiescent": True}})
     elif method == "textDocument/definition":
-        send({"jsonrpc": "2.0", "id": mid, "result": [
-            {"uri": "file://" + cwd + "/src/target.rs",
-             "range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 7}}}
-        ]})
+        def_calls += 1
+        if def_calls < 2:
+            # The first query races the (simulated) project load: rust-analyzer
+            # answers null while loading, exercising the warm-up retry.
+            send({"jsonrpc": "2.0", "id": mid, "result": None})
+        else:
+            send({"jsonrpc": "2.0", "id": mid, "result": [
+                {"uri": "file://" + cwd + "/src/target.rs",
+                 "range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 7}}}
+            ]})
     elif method == "textDocument/references":
         send({"jsonrpc": "2.0", "id": mid, "result": [
             {"uri": "file://" + cwd + "/src/main.rs",
@@ -1661,6 +1716,8 @@ while True:
     #[cfg(unix)]
     #[tokio::test]
     async fn definition_query_resolves_local_target_via_mock_analyzer() {
+        // The mock answers the first `definition` with null (simulating a still-
+        // loading workspace), so this also covers the warm-up empty-result retry.
         if !python3_available() {
             return;
         }

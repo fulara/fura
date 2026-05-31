@@ -5,8 +5,7 @@ use crate::{
     ClientConfig, CodeFileContent, CodeLocation, CodeRange, CodeStatus, CodeTreeEntry,
     CodeWorkspaceSummary, ConflictAgentMode, ConflictAgentResult, ConflictAgentScope,
     ConflictFileState, ConflictMagicWandPreview, ConflictRepositorySummary, PresetSummary,
-    ProposedModelConfig,
-    SessionMode, SessionProjection, SessionProjectionDelta, SessionSummary,
+    ProposedModelConfig, SessionMode, SessionProjection, SessionProjectionDelta, SessionSummary,
     ThinkingVisibilityPreference,
 };
 

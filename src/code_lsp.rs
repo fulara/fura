@@ -120,6 +120,7 @@ pub(crate) struct Analyzer {
     pending: PendingMap,
     health: watch::Receiver<AnalyzerHealth>,
     alive: Arc<AtomicBool>,
+    ready: AtomicBool,
     next_id: AtomicI64,
     open_files: Mutex<HashMap<PathBuf, OpenDoc>>,
     stop: Mutex<Option<oneshot::Sender<()>>>,
@@ -128,7 +129,9 @@ pub(crate) struct Analyzer {
 impl Analyzer {
     /// Spawn rust-analyzer for `root` and complete the `initialize` handshake.
     /// Returns once the server has acknowledged `initialize` (before indexing
-    /// finishes); the first query absorbs indexing via `ContentModified` retry.
+    /// finishes); a freshly spawned analyzer answers queries with `null` until
+    /// the workspace finishes loading, so callers retry empty results until the
+    /// first real one (see `is_ready`).
     pub(crate) async fn spawn(bin: &str, root: &Path) -> anyhow::Result<Arc<Analyzer>> {
         let mut command = Command::new(bin);
         command.current_dir(root);
@@ -219,6 +222,7 @@ impl Analyzer {
             pending,
             health: health_rx,
             alive,
+            ready: AtomicBool::new(false),
             next_id: AtomicI64::new(1),
             open_files: Mutex::new(HashMap::new()),
             stop: Mutex::new(Some(stop_tx)),
@@ -231,6 +235,19 @@ impl Analyzer {
     /// Current readiness snapshot.
     pub(crate) fn health(&self) -> AnalyzerHealth {
         *self.health.borrow()
+    }
+
+    /// Whether rust-analyzer has produced at least one real navigation result,
+    /// i.e. the workspace finished loading. Until then a query may briefly come
+    /// back empty — rust-analyzer answers `null` (not `ContentModified`) while
+    /// loading — so callers retry empty results during warm-up rather than
+    /// surfacing a false "no definitions found".
+    pub(crate) fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn mark_ready(&self) {
+        self.ready.store(true, Ordering::SeqCst);
     }
 
     /// Whether the child process is still running.
@@ -710,11 +727,15 @@ fn client_capabilities() -> ClientCapabilities {
 }
 
 fn initialization_options() -> Value {
-    // Keep rust-analyzer light: definitions/references come from its semantic
-    // index, not from flycheck, proc-macro expansion, or build scripts.
+    // Build scripts and proc-macro expansion are required for a correct crate
+    // graph and symbol resolution on real projects (derives, codegen, and
+    // build-script deps like libgit2-sys); without them go-to-definition /
+    // references / hover return empty on otherwise-valid symbols. Flycheck
+    // (`checkOnSave`) stays off — it only drives diagnostics the read-only
+    // browser does not surface.
     json!({
-        "cargo": { "buildScripts": { "enable": false } },
-        "procMacro": { "enable": false },
+        "cargo": { "buildScripts": { "enable": true } },
+        "procMacro": { "enable": true },
         "checkOnSave": false,
         "check": { "enable": false },
     })
@@ -1099,5 +1120,19 @@ mod tests {
             .and_then(Value::as_array)
             .expect("hover content format");
         assert!(formats.iter().any(|f| f == "markdown"));
+    }
+
+    #[test]
+    fn initialization_options_enable_build_scripts_and_proc_macros() {
+        // With these off, rust-analyzer fails to build a correct crate graph and
+        // returns empty go-to-definition/references/hover on valid symbols; only
+        // flycheck (checkOnSave) stays off since the browser surfaces no diagnostics.
+        let opts = initialization_options();
+        assert_eq!(
+            opts.pointer("/cargo/buildScripts/enable"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(opts.pointer("/procMacro/enable"), Some(&Value::Bool(true)));
+        assert_eq!(opts.pointer("/checkOnSave"), Some(&Value::Bool(false)));
     }
 }

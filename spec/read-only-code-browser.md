@@ -101,7 +101,7 @@ They cannot be the same process: OMP's RPC surface exposes no LSP command (the `
 
 The first analysis features shipped are **go-to-definition** (`textDocument/definition`) and **find-references / callsites** (`textDocument/references`). These are point queries with no asynchronous `publishDiagnostics` push, which makes them the cleanest way to validate the analyzer lifecycle on a narrow surface. The bridge keeps the analyzer's view of a queried file current with `didOpen`/`didChange` from on-disk content; the user never edits in the viewer.
 
-Diagnostics, document symbols, and hover are explicitly deferred behind this slice. They are not prerequisites for the two navigation features and add stateful plumbing (diagnostics push, version-keyed symbol caches) that is not needed yet.
+Diagnostics and document symbols are deferred behind this slice. They are not prerequisites for the two navigation features and add stateful plumbing (diagnostics push, version-keyed symbol caches) that is not needed yet. (Hover later joined this slice as the right-click popup's "what is this" — see below.)
 
 Definition and references do not require `rust-analyzer.checkOnSave`/flycheck; they come from rust-analyzer's own semantic index. Keep `checkOnSave` off to stay light.
 
@@ -198,14 +198,7 @@ Rust analysis limited: safe mode
 
 rust-analyzer assumes trusted code. Cargo metadata, build scripts, proc macros, project config, and toolchain config can cause code execution or executable overrides.
 
-Default mode should be conservative:
-
-- disable proc macros initially,
-- avoid automatic build-script/check execution where practical,
-- show limited-analysis status honestly,
-- add a separate explicit trusted-workspace mode only if needed later.
-
-Do not silently enable full trusted rust-analyzer behavior for arbitrary worktrees.
+The as-built stance (revised from the original "disable everything"): rust-analyzer runs with **build scripts and proc-macro expansion enabled**. With them off it cannot build a correct crate graph and returns empty go-to-definition / references / hover on valid symbols — the feature is useless without them. This means rust-analyzer executes build scripts and proc macros from the browsed workspace; that is accepted because the browsed roots are the operator's own session worktrees / cwd (already trusted — the agent runs arbitrary code there) and Fura is a local single-operator tool. Flycheck (`checkOnSave`) stays off (no diagnostics are surfaced) and analyzer status is reported honestly. Do not add remote/untrusted workspace browsing without revisiting this trust assumption.
 
 ## Backend design
 
@@ -390,10 +383,10 @@ Prioritized slice on top of Milestone 2's lifecycle. Delivers right-click naviga
 
 Shipped (as built):
 
-- The analyzer lives in `src/code_lsp.rs` (`Analyzer`: rust-analyzer child + `Content-Length` LSP transport + request-id correlation + `experimental/serverStatus`-driven readiness). It is stored in `CodeWorkspaceRegistry.analyzers` keyed by canonical `rust_root` and shared via `Arc` — not on `CodeWorkspace`, which derives `Clone`. `src/code.rs` orchestrates (lazy get-or-spawn, DTO projection, broadcast).
+- The analyzer lives in `src/code_lsp.rs` (`Analyzer`: rust-analyzer child + `Content-Length` LSP transport + request-id correlation). `experimental/serverStatus`, when the server emits it, only feeds a coarse health/status projection — query readiness does **not** depend on it (the targeted rust-analyzer emits no `serverStatus`); readiness is the warm-up retry below (`is_ready`/`mark_ready`). It is stored in `CodeWorkspaceRegistry.analyzers` keyed by canonical `rust_root` and shared via `Arc` — not on `CodeWorkspace`, which derives `Clone`. `src/code.rs` orchestrates (lazy get-or-spawn, DTO projection, broadcast).
 - LSP wire shapes come from the `lsp-types` crate; `definition.linkSupport` is forced off so responses are `Location[]`. `file://` URIs are mapped to/from paths with a hand-written percent codec.
 - The analyzer binary is configurable via `--rust-analyzer-bin` / `FURA_RUST_ANALYZER_BIN` (default `rust-analyzer`).
-- Requests run in a background task; `code.status` and results are broadcast via the WS event coordinator. `ContentModified` (-32801) is retried with backoff so mid-index queries resolve instead of failing. Each `code.definition`/`code.references`/`code.hover` carries a client-generated `requestId` echoed on the response, so a client ignores superseded or other-client replies; navigation status/errors are reported via `code.status`.
+- Requests run in a background task; `code.status` and results are broadcast via the WS event coordinator. `ContentModified` (-32801) is retried with backoff so mid-index queries resolve instead of failing. Additionally, rust-analyzer answers `null` (not `ContentModified`) while a freshly spawned workspace is still loading, so the first query retries empty results during a bounded warm-up (~60s) until the analyzer returns its first real result, rather than reporting a false "no definitions". Each `code.definition`/`code.references`/`code.hover` carries a client-generated `requestId` echoed on the response, so a client ignores superseded or other-client replies; navigation status/errors are reported via `code.status`.
 - Verified by `src/code_lsp.rs` + `src/code.rs` tests (LSP framing, URI mapping, external classification, lazy gating, hover-content flattening, and a mock rust-analyzer driving the full def/refs/hover lifecycle) plus `frontend` vitest coverage (UTF-16 column mapping, right-click context menu, hover popup, references list, status strip, definition navigation, scroll preservation).
 
 Backend:
@@ -404,16 +397,16 @@ Backend:
 - `code.definition` → `textDocument/definition`; `code.references` → `textDocument/references` with `context.includeDeclaration: true`; `code.hover` → `textDocument/hover` (flattened to a single markdown string, empty → no hover).
 - Project results into domain DTOs: map `file://` URIs back to workspace-relative paths; classify out-of-workspace targets as `external`. Never forward raw LSP locations.
 - Minimal `code.status`: `starting` | `indexing` | `ready` | `unavailable` | `error`. References can block until indexing completes, so the UI must show progress rather than hang.
-- Conservative analyzer config: proc-macros off, no automatic build-script/check execution, `checkOnSave` off.
+- As-built analyzer config: build scripts and proc-macro expansion **enabled** (required for symbol resolution; rust-analyzer executes them, accepted for trusted local worktrees), flycheck (`checkOnSave`) off.
 
 Frontend:
 
-- Map a **right-click** in the read-only viewer to an LSP position `{ line, character }` (LSP columns are UTF-16 code units — compute accordingly) and open a cursor-anchored context popup; left-click stays plain text selection. The popup is a floating overlay decoupled from the code-panel render, so opening it (or updating its hover) never rebuilds the scroll-bearing lines container.
-- The popup shows hover ("what is this") via `code.hover` — rust-analyzer markdown rendered with the shared markdown renderer — plus actions Go to definition / Find references. It is dismissed on outside-click, Escape, scroll, or after an action.
+- Map a **right-click** in the read-only viewer to an LSP position `{ line, character }` (LSP columns are UTF-16 code units — compute accordingly) and open a cursor-anchored context popup; left-click stays plain text selection, and right-clicking an active text selection defers to the browser's native menu (so Copy still works). The popup is a floating overlay decoupled from the code-panel render, so opening it (or updating its hover) never rebuilds the scroll-bearing lines container.
+- The popup shows hover ("what is this") via `code.hover` — rust-analyzer markdown rendered with the shared markdown renderer — plus actions Go to definition / Find references. It is dismissed on outside-click, Escape, a wheel gesture, window resize, or after an action — dismissal keys off `wheel`, not `scroll`, so the programmatic scroll-position restore (below) never closes it.
 - Go-to-definition: request `code.definition`; on a local result open the target file and scroll to the line (add scroll-to-line to the viewer); on `external` show a truthful, non-navigable label.
 - Find-references: request `code.references`; render locations as a results list grouped by file; clicking an entry jumps to that file+line.
 - The viewer preserves scroll position across same-file re-renders (status/references updates) so navigation never bounces the reader to the top; an explicit scroll-to-line still overrides.
-- Surface `code.status` so the panel shows "analysis starting / indexing / unavailable" instead of appearing frozen; a failure status also resolves an open popup's pending hover.
+- Surface `code.status` so the panel shows "analysis starting / indexing / unavailable" instead of appearing frozen; a failure `code.status` (or a `code.error` for the workspace) also resolves an open popup's still-loading hover so it never hangs.
 
 Out of this slice: diagnostics, document symbols/outline, formatting, rename, code actions, semantic tokens, and mouse-hover (mouseover) tooltips. Milestone 3 (diagnostics, symbols) stays deferred until this slice ships.
 
