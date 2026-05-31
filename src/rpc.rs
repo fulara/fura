@@ -1335,6 +1335,9 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     .remove(command_id);
             }
         }
+        if command == Some("compact") {
+            set_session_compacting(state, &current_session_id, false).await;
+        }
         if rpc_prompt_error_settles_turn(command, &message) {
             settle_prompt_error_and_broadcast(state, &current_session_id).await;
         }
@@ -1694,6 +1697,12 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     }
                 })
                 .await;
+        }
+        Some("compact") => {
+            set_session_compacting(state, &current_session_id, false).await;
+            if let Err(message) = refresh_rpc_state(state, &current_session_id).await {
+                warn!(session_id = %current_session_id, %message, "post-compaction state refresh failed");
+            }
         }
         Some("prompt") | Some("abort") => {}
         _ => {}

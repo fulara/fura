@@ -1308,6 +1308,7 @@ pub(crate) fn opened_session_record(
             .unwrap_or_default(),
         live_message_ids: HashSet::new(),
         streaming_message: None,
+        is_compacting: false,
         tool_cards: existing
             .map(|record| record.tool_cards.clone())
             .unwrap_or_default(),
@@ -1616,8 +1617,7 @@ pub(crate) async fn handle_slash_command(
             if !args.is_empty() {
                 command["customInstructions"] = Value::String(args.to_string());
             }
-            send_slash_rpc_command(state, session_id, command, "Requested session compaction.")
-                .await
+            begin_session_compaction(state, session_id, command).await
         }
         "handoff" => {
             let mut command = serde_json::json!({ "id": next_rpc_id(), "type": "handoff" });
@@ -2074,6 +2074,43 @@ pub(crate) async fn send_slash_rpc_command(
     match send_rpc_command(state, &session_id, command).await {
         Ok(()) => vec![notice(session_id, NoticeLevel::Info, ok_text)],
         Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
+/// Sets the session's transient compaction flag and pushes the updated snapshot to clients
+/// (active-session view) plus the session list, so the UI can show a clear "compacting" state.
+/// The flag is otherwise reconciled from `get_state.isCompacting`.
+pub(crate) async fn set_session_compacting(state: &AppState, session_id: &str, compacting: bool) {
+    let snapshot_sent = state
+        .events
+        .mutate_session_snapshot(state, session_id, |record| {
+            record.is_compacting = compacting;
+        })
+        .await;
+    if snapshot_sent {
+        broadcast_sessions_snapshot(state).await;
+    }
+}
+
+/// Marks the session as compacting for immediate UI feedback, then forwards the `compact`
+/// RPC command. The flag is cleared when OMP returns the `compact` response
+/// (`apply_rpc_response`) or rolled back here if the command cannot be sent.
+async fn begin_session_compaction(
+    state: &AppState,
+    session_id: String,
+    command: Value,
+) -> Vec<ServerMessage> {
+    set_session_compacting(state, &session_id, true).await;
+    match send_rpc_command(state, &session_id, command).await {
+        Ok(()) => vec![notice(
+            session_id,
+            NoticeLevel::Info,
+            "Compacting session context…",
+        )],
+        Err(message) => {
+            set_session_compacting(state, &session_id, false).await;
+            vec![notice(session_id, NoticeLevel::Error, message)]
+        }
     }
 }
 
@@ -3528,6 +3565,7 @@ mod review_comment_tests {
             messages: Vec::new(),
             live_message_ids: HashSet::new(),
             streaming_message: None,
+            is_compacting: false,
             tool_cards: Vec::new(),
             active_tool_calls: Vec::new(),
             todo_phases: Some(Vec::new()),

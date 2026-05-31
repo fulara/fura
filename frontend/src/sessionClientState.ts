@@ -63,6 +63,7 @@ export function applySessionDelta(
     summary: delta.summary,
     transcript: [...previous.transcript.slice(0, delta.transcriptReplaceFrom), ...delta.transcriptAppend],
     isBusy: delta.isBusy,
+    compacting: delta.compacting,
     model: delta.model,
     thinkingLevel: delta.thinkingLevel,
     tokensTotal: delta.tokensTotal,

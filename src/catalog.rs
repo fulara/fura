@@ -114,6 +114,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                         messages: session.messages.clone(),
                         live_message_ids: HashSet::new(),
                         streaming_message: None,
+                        is_compacting: false,
                         tool_cards: session.tool_cards.clone(),
                         active_tool_calls: Vec::new(),
                         todo_phases: None,

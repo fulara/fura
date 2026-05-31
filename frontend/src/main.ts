@@ -2982,7 +2982,8 @@ function sendPromptWithBusyHandling(options: {
 
 function renderBusyPromptChoice(): void {
   const draft = busyPromptDraft;
-  const shouldShow = Boolean(workspaceMode === "session" && draft && draft.sessionId === activeSessionId);
+  const compacting = Boolean(draft && projections.get(draft.sessionId)?.compacting);
+  const shouldShow = Boolean(workspaceMode === "session" && draft && draft.sessionId === activeSessionId && !compacting);
   const wasHidden = busyPromptOverlay.hidden;
 
   if (!draft || !shouldShow) {
@@ -3025,6 +3026,8 @@ function restoreBusyPromptDraft(): void {
 function sendBusyPromptDraft(behavior: "steer" | "followUp"): void {
   const draft = busyPromptDraft;
   if (!draft) return;
+  // Compaction skips any prompt OMP receives, so never send a steer/follow-up into a compacting session.
+  if (projections.get(draft.sessionId)?.compacting) return;
   sendPromptMessage(draft.sessionId, draft.text, draft.images, behavior);
   const onSend = draft.onSend;
   busyPromptDraft = null;
@@ -3829,13 +3832,14 @@ function renderActiveSession(): void {
   const summary = projection?.summary ?? activeSessionSummary();
   const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
   const awaitingAsk = Boolean(summary?.awaitingAsk);
+  const compacting = Boolean(projection?.compacting);
 
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
   deleteSessionButton.disabled = !activeSessionId;
   syncActiveCategoryEditor(projection);
-  promptInput.disabled = !activeSessionId || hasBusyDraft || awaitingAsk;
-  sendButton.disabled = !activeSessionId || hasBusyDraft || awaitingAsk;
+  promptInput.disabled = !activeSessionId || hasBusyDraft || awaitingAsk || compacting;
+  sendButton.disabled = !activeSessionId || hasBusyDraft || awaitingAsk || compacting;
 
   if (!activeSessionId || !summary) {
     sessionTitle.textContent = "No session selected";
@@ -3846,9 +3850,11 @@ function renderActiveSession(): void {
     const category = normalizedCategory(summary.category);
     const categoryPart = category ? ` · ${category}` : "";
     sessionMeta.textContent = `${sessionKindLabel(summary.kind)} · ${sessionStatusLabel(summary)}${categoryPart} · ${summary.cwd ?? "no dir"}`;
-    promptInput.placeholder = awaitingAsk
-      ? "Answer the agent's question above to continue…"
-      : "Send a prompt… (type / for commands)";
+    promptInput.placeholder = compacting
+      ? "Compacting context… please wait"
+      : awaitingAsk
+        ? "Answer the agent's question above to continue…"
+        : "Send a prompt… (type / for commands)";
   }
 
   renderStatusBar(projection);
@@ -7471,6 +7477,9 @@ function renderStatusBar(projection?: SessionProjection): void {
   const piSpan = statusPart("π", "status-pi");
   if (projection?.isBusy) piSpan.classList.add("is-running");
   parts.push(piSpan);
+  if (projection?.compacting) {
+    parts.push(statusPart("⟳ Compacting context…", "compacting"));
+  }
 
   if (!projection) {
     parts.push(statusPart("No session", "muted"));

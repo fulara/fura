@@ -1659,6 +1659,7 @@ mod tests {
             summary: test_summary(session_id, entries.len()),
             transcript: entries,
             is_busy: false,
+            compacting: false,
             model: None,
             thinking_level: None,
             tokens_total: 0,

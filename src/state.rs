@@ -1074,6 +1074,7 @@ pub(crate) async fn apply_get_state_update(
                             messages: Vec::new(),
                             live_message_ids: HashSet::new(),
                             streaming_message: None,
+                            is_compacting: false,
                             tool_cards: Vec::new(),
                             active_tool_calls: Vec::new(),
                             todo_phases: None,

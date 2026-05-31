@@ -2222,3 +2222,68 @@ describe("desktop cog options", () => {
     expect(document.querySelector<HTMLTextAreaElement>("#testConflictResolverPanel .conflict-result-editor")?.value).toBe("const merged = true;\n");
   });
 });
+
+describe("desktop compaction indicator", () => {
+  beforeEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+    connections = [];
+    vi.useRealTimers();
+  });
+
+  it("surfaces a compaction indicator and locks the composer while compacting", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { isBusy: true, compacting: true }),
+    });
+
+    expect(document.querySelector("#statusBar .status-part.compacting")?.textContent).toContain("Compacting");
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput");
+    expect(input?.disabled).toBe(true);
+    expect(input?.placeholder).toContain("Compacting");
+    expect(document.querySelector<HTMLButtonElement>("#sendButton")?.disabled).toBe(true);
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { isBusy: false, compacting: false }),
+    });
+
+    expect(document.querySelector("#statusBar .status-part.compacting")).toBeNull();
+    expect(document.querySelector<HTMLTextAreaElement>("#promptInput")?.disabled).toBe(false);
+  });
+
+  it("hides the busy-prompt choice and blocks steer/follow-up while compacting", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", { isBusy: true, summary: summary("busy", { status: "busy", title: "Busy" }) }),
+    });
+
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput");
+    const form = document.querySelector<HTMLFormElement>("#promptForm");
+    if (!input || !form) throw new Error("composer missing");
+    input.value = "steer this";
+    form.requestSubmit();
+    expect(document.querySelector<HTMLElement>("#busyPromptOverlay")?.hidden).toBe(false);
+
+    // Another client compacts the shared session.
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", { isBusy: true, compacting: true, summary: summary("busy", { status: "busy", title: "Busy" }) }),
+    });
+    expect(document.querySelector<HTMLElement>("#busyPromptOverlay")?.hidden).toBe(true);
+
+    connection.sent.length = 0;
+    document.querySelector<HTMLButtonElement>("#busyPromptFollowUp")?.click();
+    expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+  });
+});

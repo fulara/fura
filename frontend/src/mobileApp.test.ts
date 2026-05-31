@@ -1124,6 +1124,22 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Agent busy");
   });
 
+  it("shows a compaction indicator and locks the composer while compacting", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live", { status: "busy" })] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { isBusy: true, compacting: true, summary: summary("live", { status: "busy", title: "Live" }) }),
+    });
+
+    expect(document.querySelector("#mobileStatusBar .mobile-status-part.compacting")?.textContent).toContain("Compacting");
+    expect(document.querySelector("#mobileComposerStatus")?.textContent).toBe("Compacting context…");
+    expect(document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")?.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>("#mobileSendButton")?.disabled).toBe(true);
+  });
+
   it("captures busy prompt drafts from submit and sends follow-up on demand", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
@@ -1154,6 +1170,35 @@ describe("mountMobileApp", () => {
     });
     expect(document.querySelector<HTMLElement>("#mobileBusyPromptOverlay")?.hidden).toBe(true);
     expect(input.value).toBe("");
+  });
+
+  it("hides the busy-prompt overlay and blocks sends once the session starts compacting", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", { isBusy: true, summary: summary("busy", { status: "busy", title: "Busy session" }) }),
+    });
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
+    const form = document.querySelector<HTMLFormElement>("#mobilePromptForm");
+    if (!input || !form) throw new Error("prompt form missing");
+    input.value = "steer this";
+    form.requestSubmit();
+    expect(document.querySelector<HTMLElement>("#mobileBusyPromptOverlay")?.hidden).toBe(false);
+
+    // Another client compacts the shared session.
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", { isBusy: true, compacting: true, summary: summary("busy", { status: "busy", title: "Busy session" }) }),
+    });
+    expect(document.querySelector<HTMLElement>("#mobileBusyPromptOverlay")?.hidden).toBe(true);
+
+    connection.sent.length = 0;
+    document.querySelector<HTMLButtonElement>("#mobileBusyPromptFollowUp")?.click();
+    expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
   });
 
   it("renders session-scoped plan review while allowing questions and approval from refine mode", () => {

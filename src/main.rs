@@ -519,6 +519,7 @@ pub(crate) mod tests {
             messages: Vec::new(),
             live_message_ids: HashSet::new(),
             streaming_message: None,
+            is_compacting: false,
             tool_cards: Vec::new(),
             active_tool_calls: Vec::new(),
             todo_phases: None,
@@ -541,6 +542,33 @@ pub(crate) mod tests {
             pending_plan_review: None,
             pending_ask: None,
         }
+    }
+
+    #[test]
+    fn compacting_session_projects_busy_and_compacting() {
+        let mut record = test_record();
+        record.status = SessionStatus::Idle;
+        record.is_compacting = true;
+        assert_eq!(record.effective_status(), SessionStatus::Busy);
+        let projection = record.projection();
+        assert!(projection.compacting, "projection must flag compaction");
+        assert!(projection.is_busy, "a compacting session must read as busy");
+
+        record.is_compacting = false;
+        assert_eq!(record.effective_status(), SessionStatus::Idle);
+        assert!(!record.projection().compacting);
+    }
+
+    #[test]
+    fn compacting_never_overrides_a_terminal_status() {
+        let mut record = test_record();
+        record.status = SessionStatus::Exited;
+        record.is_compacting = true;
+        assert_eq!(record.effective_status(), SessionStatus::Exited);
+        assert!(
+            !record.projection().compacting,
+            "a terminal session must not forward a stale compacting flag that would lock the composer"
+        );
     }
 
     #[test]

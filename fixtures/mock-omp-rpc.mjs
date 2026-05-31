@@ -44,12 +44,21 @@ const models = [
 let currentModel = models[0];
 let currentThinkingLevel = undefined;
 const processSeed = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-let currentSessionId = `mock-session-${processSeed}`;
-let currentSessionFile = `${currentSessionId}.jsonl`;
+// Honor `--resume <file>` like real OMP so get_state returns the same session id the bridge
+// opened — otherwise the bridge remaps to a fresh id and the attached client desyncs.
+const resumeArgIndex = process.argv.indexOf("--resume");
+const resumeFile = resumeArgIndex >= 0 ? process.argv[resumeArgIndex + 1] : undefined;
+const resumedSessionId = resumeFile
+  ? resumeFile.match(/_([0-9a-fA-F-]{36})\.jsonl$/)?.[1]
+    ?? resumeFile.split("/").pop()?.replace(/\.jsonl$/, "")
+  : undefined;
+let currentSessionId = resumedSessionId ?? `mock-session-${processSeed}`;
+let currentSessionFile = resumeFile ?? `${currentSessionId}.jsonl`;
 let currentSessionName = "Mock RPC Session";
 let forkCount = 0;
 let planExecutionCount = 0;
 let planMode = null;
+let isCompacting = false;
 let goalMode = {
   enabled: true,
   mode: "active",
@@ -140,6 +149,7 @@ for await (const line of rl) {
         planMode,
         goalMode,
         todoPhases,
+        isCompacting,
       });
       break;
     }
@@ -568,6 +578,28 @@ for await (const line of rl) {
       messages.push(assistant);
       write({ type: "message_end", timestamp: now, message: assistant });
       write({ type: "agent_end", timestamp: now + 1 });
+      break;
+    }
+    case "compact": {
+      // Simulate a real compaction: report in-flight state, then settle after a short delay
+      // so the Fura compaction indicator is exercised end-to-end against the smoke fixture.
+      isCompacting = true;
+      const instructions = typeof command.customInstructions === "string" ? command.customInstructions : null;
+      setTimeout(() => {
+        isCompacting = false;
+        write({
+          id: command.id,
+          type: "response",
+          command: "compact",
+          success: true,
+          data: {
+            compacted: true,
+            customInstructions: instructions,
+            messagesBefore: messages.length,
+            messagesAfter: messages.length,
+          },
+        });
+      }, 1500);
       break;
     }
     case "abort": {

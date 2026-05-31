@@ -190,6 +190,7 @@ export type SessionProjection = {
   summary: SessionSummary;
   transcript: TranscriptEntry[];
   isBusy: boolean;
+  compacting?: boolean;
   model?: string | null;
   thinkingLevel?: string | null;
   tokensTotal: number;
@@ -210,6 +211,7 @@ export type SessionProjectionDelta = {
   transcriptReplaceFrom: number;
   transcriptAppend: TranscriptEntry[];
   isBusy: boolean;
+  compacting?: boolean;
   model?: string | null;
   thinkingLevel?: string | null;
   tokensTotal: number;

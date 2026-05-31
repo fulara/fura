@@ -47,6 +47,11 @@ pub(crate) struct SessionRecord {
     /// In-flight partial message from `message_update` deltas; included at the end of projection and cleared on `message_end`.
     #[serde(skip)]
     pub(crate) streaming_message: Option<TranscriptMessage>,
+    /// True while OMP reports an in-flight compaction for this session. Transient runtime
+    /// state synthesized from the `/compact` request and reconciled from `get_state.isCompacting`;
+    /// never persisted.
+    #[serde(skip)]
+    pub(crate) is_compacting: bool,
     /// Completed tool-execution cards projected from live events or historical tool results.
     #[serde(skip)]
     pub(crate) tool_cards: Vec<ToolCard>,
@@ -106,7 +111,7 @@ impl SessionRecord {
     pub(crate) fn effective_status(&self) -> SessionStatus {
         match self.status {
             SessionStatus::Exited | SessionStatus::Available | SessionStatus::Error => self.status,
-            _ if self.has_active_work() => SessionStatus::Busy,
+            _ if self.has_active_work() || self.is_compacting => SessionStatus::Busy,
             status => status,
         }
     }
@@ -187,6 +192,10 @@ impl SessionRecord {
                 self.effective_status(),
                 SessionStatus::Starting | SessionStatus::Busy
             ),
+            // Mask compaction on terminal records: a child that exits mid-compaction must not
+            // leave the client composer locked on a stale `compacting: true`. `is_compacting`
+            // is otherwise reconciled from `get_state.isCompacting`.
+            compacting: self.is_compacting && !self.is_terminal(),
             model: self.model.clone(),
             thinking_level: self.thinking_level.clone(),
             tokens_total: self.tokens_total,
@@ -271,6 +280,7 @@ pub(crate) struct SessionProjection {
     pub(crate) summary: SessionSummary,
     pub(crate) transcript: Vec<TranscriptEntry>,
     pub(crate) is_busy: bool,
+    pub(crate) compacting: bool,
     pub(crate) model: Option<String>,
     pub(crate) thinking_level: Option<String>,
     pub(crate) tokens_total: u64,
@@ -293,6 +303,7 @@ pub(crate) struct SessionProjectionDelta {
     pub(crate) transcript_replace_from: usize,
     pub(crate) transcript_append: Vec<TranscriptEntry>,
     pub(crate) is_busy: bool,
+    pub(crate) compacting: bool,
     pub(crate) model: Option<String>,
     pub(crate) thinking_level: Option<String>,
     pub(crate) tokens_total: u64,
@@ -319,6 +330,7 @@ impl SessionProjectionDelta {
             transcript_replace_from,
             transcript_append: projection.transcript[transcript_replace_from..].to_vec(),
             is_busy: projection.is_busy,
+            compacting: projection.compacting,
             model: projection.model.clone(),
             thinking_level: projection.thinking_level.clone(),
             tokens_total: projection.tokens_total,
@@ -904,6 +916,7 @@ mod tests {
                 test_message("new"),
             ],
             is_busy: true,
+            compacting: false,
             model: Some("mock/model".to_string()),
             thinking_level: Some("high".to_string()),
             tokens_total: 42,
@@ -1193,6 +1206,7 @@ mod tests {
                 TranscriptEntry::Review(review),
             ],
             is_busy: false,
+            compacting: false,
             model: None,
             thinking_level: None,
             tokens_total: 0,

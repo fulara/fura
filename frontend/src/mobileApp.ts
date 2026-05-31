@@ -1236,7 +1236,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
   function renderBusyPromptChoice(): void {
     const draft = busyPromptDraft;
-    const shouldShow = Boolean(draft && draft.sessionId === activeSessionId);
+    const compacting = Boolean(draft && projections.get(draft.sessionId)?.compacting);
+    const shouldShow = Boolean(draft && draft.sessionId === activeSessionId && !compacting);
     const wasHidden = busyPromptOverlay.hidden;
 
     if (!draft || !shouldShow) {
@@ -1277,6 +1278,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function sendBusyPromptDraft(behavior: PromptBehavior): void {
     const draft = busyPromptDraft;
     if (!draft) return;
+    // Compaction skips any prompt OMP receives, so never send a steer/follow-up into a compacting session.
+    if (projections.get(draft.sessionId)?.compacting) return;
     const accepted = send(createPromptSendMessage(draft.sessionId, draft.text, draft.images, behavior));
     if (!accepted) {
       busyPromptAttachmentNote.textContent = "Not connected to the Fura bridge.";
@@ -1375,7 +1378,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const projection = projections.get(activeSessionId);
     const summary = sessions.find(session => session.sessionId === activeSessionId);
     const isBusy = projection?.isBusy ?? summary?.status === "busy";
-    if (isBusy) {
+    if (projection?.compacting) {
+      composerStatus.textContent = "Compacting context…";
+    } else if (isBusy) {
       composerStatus.textContent = "Agent busy";
     } else if (pendingImages.length > 0) {
       composerStatus.textContent = `${pendingImages.length} image${pendingImages.length === 1 ? "" : "s"} attached`;
@@ -1391,6 +1396,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const pi = mobileStatusPart("π", "status-pi");
     if (projection?.isBusy ?? summary?.status === "busy") pi.classList.add("is-running");
     parts.push(pi);
+    if (projection?.compacting) {
+      parts.push(mobileStatusPart("⟳ Compacting context…", "compacting"));
+    }
 
     if (!projection && !summary) {
       parts.push(mobileStatusPart("No session", "muted"));
@@ -2183,15 +2191,20 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
     const isBusy = projection?.isBusy ?? summary.status === "busy";
     const awaitingAsk = Boolean(summary.awaitingAsk);
+    const compacting = Boolean(projection?.compacting);
     sessionTitle.textContent = summary.title || `Session ${shortId(summary.sessionId)}`;
     sessionMeta.hidden = true;
     sessionMeta.textContent = "";
     updateMobileStatusBar(projection, summary);
-    promptInput.disabled = !projection || awaitingAsk;
-    sendButton.disabled = !projection || awaitingAsk;
-    imageInput.disabled = !projection || awaitingAsk;
+    promptInput.disabled = !projection || awaitingAsk || compacting;
+    sendButton.disabled = !projection || awaitingAsk || compacting;
+    imageInput.disabled = !projection || awaitingAsk || compacting;
     renderMobileImagePreviews();
-    promptInput.placeholder = awaitingAsk ? "Answer the agent's question above…" : "Send a prompt…";
+    promptInput.placeholder = compacting
+      ? "Compacting context… please wait"
+      : awaitingAsk
+        ? "Answer the agent's question above…"
+        : "Send a prompt…";
     updateComposerStatus();
     renderTranscript(projection);
     renderBusyPromptChoice();

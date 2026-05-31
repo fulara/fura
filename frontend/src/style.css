@@ -1951,6 +1951,17 @@ h2 {
   color: #9fb0ff;
 }
 
+.status-part.compacting {
+  color: #ffb454;
+  font-weight: 600;
+  animation: compacting-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes compacting-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 
 .message {
   border: 1px solid #2a3040;

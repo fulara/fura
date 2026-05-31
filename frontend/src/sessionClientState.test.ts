@@ -112,6 +112,24 @@ describe("applySessionDelta", () => {
     expect(projections.get("a")).toBe(existing);
   });
 
+  it("carries the compacting flag from the delta onto the merged projection", () => {
+    const existing = projection("a", { compacting: false });
+    const result = applySessionDelta([summary("a")], new Map([["a", existing]]), "a", {
+      summary: summary("a", { status: "busy" }),
+      transcriptReplaceFrom: 0,
+      transcriptAppend: [],
+      isBusy: true,
+      compacting: true,
+      tokensTotal: 0,
+      costUsd: 0,
+      todoPhases: [],
+      baseSeq: 0,
+      seq: 1,
+    });
+
+    expect(result?.projections.get("a")?.compacting).toBe(true);
+  });
+
   it("replaces the transcript tail from the supplied replace-from index", () => {
     const existing = projection("a", {
       transcript: [

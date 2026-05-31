@@ -531,6 +531,17 @@ body {
   color: #9fb0ff;
 }
 
+.mobile-status-part.compacting {
+  color: #ffb454;
+  font-weight: 600;
+  animation: mobile-compacting-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes mobile-compacting-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 .mobile-image-previews {
   display: flex;
   flex-wrap: wrap;
