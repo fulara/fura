@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -52,6 +52,13 @@ pub(crate) async fn handle_client_message(
         ClientMessage::ConfigModelCatalogList { request_id } => {
             handle_model_catalog_list_command(state, request_id).await
         }
+        ClientMessage::PresetSave {
+            name,
+            description,
+            body,
+            defaults,
+        } => handle_preset_save(state, name, description, body, defaults).await,
+        ClientMessage::PresetDelete { name } => handle_preset_delete(state, name).await,
         ClientMessage::SessionOpen { session_file } => open_session(state, session_file).await,
         ClientMessage::SessionList => {
             info!(action = "session.list");
@@ -1152,6 +1159,49 @@ pub(crate) async fn set_client_config(
         }];
     }
     broadcast_config(state).await;
+    Vec::new()
+}
+
+fn preset_error(message: impl Into<String>) -> ServerMessage {
+    ServerMessage::Error {
+        request_id: None,
+        message: message.into(),
+    }
+}
+
+pub(crate) async fn handle_preset_save(
+    state: &AppState,
+    name: String,
+    description: Option<String>,
+    body: String,
+    defaults: Option<BTreeMap<String, String>>,
+) -> Vec<ServerMessage> {
+    let Some(dir) = presets_dir(state.config_path.as_deref()) else {
+        return vec![preset_error(
+            "Presets directory is unavailable (no Fura config path)",
+        )];
+    };
+    let description = description.unwrap_or_default();
+    let defaults = defaults.unwrap_or_default();
+    info!(action = "preset.save", name = %name, params = defaults.len());
+    if let Err(error) = save_preset(&dir, &name, &description, &body, &defaults) {
+        return vec![preset_error(error)];
+    }
+    refresh_and_broadcast_presets(state).await;
+    Vec::new()
+}
+
+pub(crate) async fn handle_preset_delete(state: &AppState, name: String) -> Vec<ServerMessage> {
+    let Some(dir) = presets_dir(state.config_path.as_deref()) else {
+        return vec![preset_error(
+            "Presets directory is unavailable (no Fura config path)",
+        )];
+    };
+    info!(action = "preset.delete", name = %name);
+    if let Err(error) = delete_preset(&dir, &name) {
+        return vec![preset_error(error)];
+    }
+    refresh_and_broadcast_presets(state).await;
     Vec::new()
 }
 

@@ -12,7 +12,7 @@ use tokio::fs as async_fs;
 use tracing::warn;
 use x509_parser::pem::Pem;
 
-use crate::{AppState, ServerMessage, SessionMode};
+use crate::{AppState, PresetSummary, ServerMessage, SessionMode, load_presets, presets_dir};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -255,6 +255,7 @@ pub(crate) struct ClientConfig {
     pub(crate) show_tools: bool,
     pub(crate) thinking_visibility: ThinkingVisibilityPreference,
     pub(crate) proposed_models: Vec<ProposedModelConfig>,
+    pub(crate) presets: Vec<PresetSummary>,
 }
 
 pub(crate) fn default_voice_language() -> String {
@@ -552,6 +553,7 @@ pub(crate) async fn client_config(state: &AppState) -> ClientConfig {
         show_tools: *state.show_tools.read().await,
         thinking_visibility: *state.thinking_visibility.read().await,
         proposed_models: state.proposed_models.read().await.clone(),
+        presets: state.presets.read().await.clone(),
     }
 }
 
@@ -561,6 +563,14 @@ pub(crate) async fn broadcast_config(state: &AppState) {
         .events
         .emit(state, ServerMessage::ConfigUpdated { config })
         .await;
+}
+
+pub(crate) async fn refresh_and_broadcast_presets(state: &AppState) {
+    if let Some(dir) = presets_dir(state.config_path.as_deref()) {
+        let presets = load_presets(&dir);
+        *state.presets.write().await = presets;
+    }
+    broadcast_config(state).await;
 }
 
 pub(crate) async fn save_fura_config(state: &AppState) -> anyhow::Result<()> {

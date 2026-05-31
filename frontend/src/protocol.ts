@@ -517,6 +517,13 @@ export type ProposedModelConfig = {
   thinkingLevel: ProposedThinkingLevel;
 };
 
+export type PresetSummary = {
+  name: string;
+  description: string;
+  body: string;
+  defaults: Record<string, string>;
+};
+
 
 export type ThinkingVisibilityMode = "auto" | "shown" | "hidden";
 
@@ -526,6 +533,7 @@ export type ServerConfig = {
   showTools: boolean;
   thinkingVisibility: ThinkingVisibilityMode;
   proposedModels: ProposedModelConfig[];
+  presets: PresetSummary[];
 };
 
 export type FrontendUiSnapshot = {
@@ -774,6 +782,8 @@ export type ClientMessage =
   | { type: "session.setCategory"; sessionId: string; category?: string }
   | { type: "config.set"; showTools?: boolean; thinkingVisibility?: ThinkingVisibilityMode; proposedModels?: ProposedModelConfig[] }
   | { type: "config.modelCatalog.list"; requestId?: string }
+  | { type: "preset.save"; name: string; description?: string; body: string; defaults?: Record<string, string> }
+  | { type: "preset.delete"; name: string }
   | { type: "session.open"; sessionFile: string }
   | { type: "session.attach"; sessionId: string }
   | { type: "session.detach"; sessionId: string }

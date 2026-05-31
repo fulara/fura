@@ -27,6 +27,7 @@ mod control;
 mod diff;
 mod event_debug;
 mod omp_rpc;
+mod presets;
 mod projection;
 mod protocol;
 mod review_comments;
@@ -46,6 +47,7 @@ use control::*;
 use diff::*;
 use event_debug::*;
 use omp_rpc::*;
+use presets::*;
 use projection::*;
 use protocol::*;
 use review_comments::*;
@@ -131,6 +133,9 @@ async fn main() -> anyhow::Result<()> {
     let show_tools = fura_config.show_tools;
     let thinking_visibility = fura_config.thinking_visibility;
     let proposed_models = fura_config.proposed_models.clone();
+    let presets = presets_dir(config_path.as_deref())
+        .map(|dir| load_presets(&dir))
+        .unwrap_or_default();
     let session_categories = fura_config
         .session_categories
         .into_iter()
@@ -167,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
         proposed_models: Arc::new(RwLock::new(proposed_models)),
+        presets: Arc::new(RwLock::new(presets)),
         model_catalog: Arc::new(RwLock::new(ModelCatalogState::default())),
         bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
         voice_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -944,6 +950,7 @@ pub(crate) mod tests {
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
             proposed_models: Arc::new(RwLock::new(Vec::new())),
+            presets: Arc::new(RwLock::new(Vec::new())),
             model_catalog: Arc::new(RwLock::new(ModelCatalogState::default())),
             bridge_controller: Arc::new(RwLock::new(BridgeControllerState::default())),
             voice_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -4428,6 +4435,7 @@ pub(crate) mod tests {
                 show_tools: true,
                 thinking_visibility: ThinkingVisibilityPreference::Auto,
                 proposed_models: Vec::new(),
+                presets: Vec::new(),
             },
         })
         .expect("hello should serialize");
@@ -4456,6 +4464,7 @@ pub(crate) mod tests {
                 model_name: None,
                 thinking_level: ProposedThinkingLevel::Default,
             }],
+            presets: Vec::new(),
         })
         .expect("config should serialize");
 

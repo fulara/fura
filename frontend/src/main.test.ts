@@ -50,6 +50,7 @@ const config: ServerConfig = {
   showTools: true,
   thinkingVisibility: "auto",
   proposedModels: [],
+  presets: [],
 };
 
 function summary(sessionId: string, overrides: Partial<SessionSummary> = {}): SessionSummary {

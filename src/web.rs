@@ -238,6 +238,8 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::SessionSetCategory { .. } => "session.setCategory",
         ClientMessage::ConfigSet { .. } => "config.set",
         ClientMessage::ConfigModelCatalogList { .. } => "config.modelCatalog.list",
+        ClientMessage::PresetSave { .. } => "preset.save",
+        ClientMessage::PresetDelete { .. } => "preset.delete",
         ClientMessage::SessionAttach { .. } => "session.attach",
         ClientMessage::SessionOpen { .. } => "session.open",
         ClientMessage::SessionDetach { .. } => "session.detach",

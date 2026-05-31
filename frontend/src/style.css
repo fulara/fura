@@ -4529,3 +4529,120 @@ h2 {
   color: #ffaaa6;
   background: rgba(255, 107, 107, 0.08);
 }
+
+.presets-dialog.modal-panel {
+  width: min(680px, 100%);
+}
+
+.presets-body {
+  display: grid;
+  gap: 0.6rem;
+  min-height: 280px;
+  overflow: auto;
+  padding: 0.75rem;
+}
+
+.presets-list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.presets-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+
+.presets-row-open {
+  flex: 1;
+  display: grid;
+  gap: 0.2rem;
+  text-align: left;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #252a35;
+  border-radius: 0.55rem;
+  background: #10131a;
+  color: inherit;
+}
+
+.presets-row-open:hover {
+  border-color: #6d7cff;
+}
+
+.presets-row-open span {
+  color: #9ba4b5;
+  font-size: 0.78rem;
+}
+
+.presets-row-edit {
+  align-self: center;
+}
+
+.presets-empty {
+  color: #9ba4b5;
+  font-size: 0.82rem;
+}
+
+.presets-fields {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.presets-field {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.presets-field > span {
+  color: #9ba4b5;
+  font-size: 0.78rem;
+}
+
+.presets-field input,
+.presets-field textarea {
+  width: 100%;
+}
+
+.presets-field textarea {
+  resize: vertical;
+  font-family: inherit;
+}
+
+.presets-preview-label,
+.presets-detected-label {
+  margin: 0.2rem 0 0;
+  color: #9ba4b5;
+  font-size: 0.78rem;
+}
+
+.presets-preview {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  border: 1px solid #252a35;
+  border-radius: 0.55rem;
+  background: #10131a;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 16rem;
+  overflow: auto;
+  font-size: 0.85rem;
+}
+
+.presets-detected {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.presets-primary {
+  border-color: #6d7cff;
+  background: #2b3360;
+}
+
+.presets-primary:hover:not(:disabled) {
+  background: #333c70;
+}
+
+.presets-danger {
+  margin-right: auto;
+  border-color: #6d3a3a;
+}

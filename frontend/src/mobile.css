@@ -775,3 +775,51 @@ body {
 .mobile-review-preview-actions {
   padding: 0 1rem 1rem;
 }
+
+.mobile-presets-list {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.mobile-presets-row {
+  display: grid;
+  gap: 0.2rem;
+  text-align: left;
+  padding: 0.6rem 0.7rem;
+}
+
+.mobile-presets-row span {
+  color: #9ba4b5;
+  font-size: 0.8rem;
+}
+
+.mobile-presets-fields {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.mobile-presets-field {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.mobile-presets-field > span {
+  color: #9ba4b5;
+  font-size: 0.8rem;
+}
+
+.mobile-presets-field input {
+  width: 100%;
+}
+
+.mobile-presets-preview {
+  margin: 0;
+  padding: 0.6rem 0.7rem;
+  border-radius: 0.6rem;
+  background: rgba(255, 255, 255, 0.04);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 13rem;
+  overflow: auto;
+  font-size: 0.85rem;
+}

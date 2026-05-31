@@ -679,6 +679,15 @@ pub(crate) enum ClientMessage {
     },
     #[serde(rename = "config.modelCatalog.list")]
     ConfigModelCatalogList { request_id: Option<String> },
+    #[serde(rename = "preset.save")]
+    PresetSave {
+        name: String,
+        description: Option<String>,
+        body: String,
+        defaults: Option<std::collections::BTreeMap<String, String>>,
+    },
+    #[serde(rename = "preset.delete")]
+    PresetDelete { name: String },
     #[serde(rename = "session.attach")]
     SessionAttach { session_id: String },
     #[serde(rename = "session.open")]

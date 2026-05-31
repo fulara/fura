@@ -15,8 +15,8 @@ use tracing::warn;
 use crate::{
     ActiveConflictContext, CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode,
     DiffFileSelector, DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot,
-    GoalModeProjection, PlanModeProjection, PreparedDiff, ProposedModelConfig, ServerMessage,
-    SessionKind, SessionMode, SessionProjectionDelta, SessionRecord, SessionStatus,
+    GoalModeProjection, PlanModeProjection, PreparedDiff, PresetSummary, ProposedModelConfig,
+    ServerMessage, SessionKind, SessionMode, SessionProjectionDelta, SessionRecord, SessionStatus,
     ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand,
     append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
 };
@@ -34,6 +34,7 @@ pub(crate) struct AppState {
     pub(crate) code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>,
     pub(crate) review_worktrees: Arc<RwLock<DiffReviewWorktreeRegistry>>,
     pub(crate) proposed_models: Arc<RwLock<Vec<ProposedModelConfig>>>,
+    pub(crate) presets: Arc<RwLock<Vec<PresetSummary>>>,
     pub(crate) model_catalog: Arc<RwLock<ModelCatalogState>>,
     pub(crate) bridge_controller: Arc<RwLock<BridgeControllerState>>,
     pub(crate) voice_sessions: Arc<RwLock<HashMap<String, VoiceSessionHandle>>>,

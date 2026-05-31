@@ -7,6 +7,12 @@ import {
 } from "./composerAttachments";
 import { createPromptSendMessage, type PromptBehavior } from "./composer";
 import { findSlashCommand } from "./slashCommands";
+import {
+  parsePresetParams,
+  requiredParamsFilled,
+  resolvePresetCommand,
+  substitutePresetParams,
+} from "./presets";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
 import { reconcileChildren, setRenderDocument } from "./dom";
@@ -36,6 +42,7 @@ import type {
   ModelSummary,
   PlanApprovalMode,
   ProposedModelConfig,
+  PresetSummary,
   ServerMessage,
   SessionProjection,
   SessionSummary,
@@ -275,6 +282,19 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           </div>
         </div>
       </section>
+      <section id="mobilePresetsOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-presets" role="dialog" aria-modal="true" aria-labelledby="mobilePresetsTitle">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Presets</p>
+              <h2 id="mobilePresetsTitle">Presets</h2>
+            </div>
+          </header>
+          <div id="mobilePresetsBody" class="mobile-dialog-body"></div>
+          <p id="mobilePresetsStatus" class="mobile-dialog-status" aria-live="polite"></p>
+          <div id="mobilePresetsActions" class="mobile-dialog-actions"></div>
+        </div>
+      </section>
       <section id="mobileDeleteSessionOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog mobile-delete-session" role="dialog" aria-modal="true" aria-labelledby="mobileDeleteSessionTitle" aria-describedby="mobileDeleteSessionMessage">
           <header class="mobile-dialog-header">
@@ -417,6 +437,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const busyPromptCancel = requireElement<HTMLButtonElement>(document, "mobileBusyPromptCancel");
   const busyPromptSteer = requireElement<HTMLButtonElement>(document, "mobileBusyPromptSteer");
   const busyPromptFollowUp = requireElement<HTMLButtonElement>(document, "mobileBusyPromptFollowUp");
+  const presetsOverlay = requireElement<HTMLElement>(document, "mobilePresetsOverlay");
+  const presetsTitle = requireElement<HTMLHeadingElement>(document, "mobilePresetsTitle");
+  const presetsBody = requireElement<HTMLDivElement>(document, "mobilePresetsBody");
+  const presetsStatus = requireElement<HTMLParagraphElement>(document, "mobilePresetsStatus");
+  const presetsActions = requireElement<HTMLDivElement>(document, "mobilePresetsActions");
   const reviewPreviewOverlay = requireElement<HTMLElement>(document, "mobileReviewPreviewOverlay");
   const reviewPreviewText = requireElement<HTMLTextAreaElement>(document, "mobileReviewPreviewText");
   const reviewPreviewStatus = requireElement<HTMLParagraphElement>(document, "mobileReviewPreviewStatus");
@@ -465,6 +490,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let controllerPromptDraft = "";
   let lastSessionMobileView: Exclude<MobileWorkspaceView, "controller"> = "transcript";
   let busyPromptDraft: BusyPromptDraft | null = null;
+  let presetsView: "picker" | "run" = "picker";
+  let presetRunTarget: PresetSummary | null = null;
+  let presetRunFromPicker = false;
+  let presetRunValues: Record<string, string> = {};
   const sessionNotices = new Map<string, SessionNotice[]>();
 
 
@@ -606,6 +635,18 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         return;
       }
       if (submitControlPromptText(text)) promptInput.value = "";
+      return;
+    }
+    if (activeSessionId && findSlashCommand(editorText)?.name === "presets") {
+      if (pendingImages.length > 0) {
+        appendSessionNotice(activeSessionId, {
+          level: "warning",
+          text: "Presets do not support image attachments. Remove the image before running a preset.",
+        });
+        renderActiveSession();
+        return;
+      }
+      handleMobilePresetCommand(editorText, activeSessionId);
       return;
     }
     if ((!text && pendingImages.length === 0) || !activeSessionId) return;
@@ -992,6 +1033,188 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     const notices = sessionNotices.get(sessionId) ?? [];
     notices.push(notice);
     sessionNotices.set(sessionId, notices);
+  }
+
+  function openMobilePresetsPicker(): void {
+    presetsView = "picker";
+    presetsOverlay.hidden = false;
+    renderMobilePresets();
+  }
+
+  function openMobilePresetRun(preset: PresetSummary, fromPicker: boolean): void {
+    presetRunTarget = preset;
+    presetRunFromPicker = fromPicker;
+    presetRunValues = {};
+    for (const param of parsePresetParams(preset.body)) {
+      presetRunValues[param] = Object.prototype.hasOwnProperty.call(preset.defaults, param)
+        ? preset.defaults[param]
+        : "";
+    }
+    presetsView = "run";
+    presetsOverlay.hidden = false;
+    renderMobilePresets();
+  }
+
+  function closeMobilePresets(): void {
+    presetsOverlay.hidden = true;
+  }
+
+  function handleMobilePresetCommand(editorText: string, sessionId: string): void {
+    const resolution = resolvePresetCommand(editorText, serverConfig?.presets ?? []);
+    switch (resolution.kind) {
+      case "picker":
+        clearPromptComposer();
+        openMobilePresetsPicker();
+        break;
+      case "unknown": {
+        const available = resolution.available.length > 0 ? resolution.available.join(", ") : "none";
+        appendSessionNotice(sessionId, {
+          level: "warning",
+          text: `Unknown preset "${resolution.name}". Available: ${available}.`,
+        });
+        renderActiveSession();
+        break;
+      }
+      case "run":
+        clearPromptComposer();
+        runMobilePreset(resolution.preset, {}, "send", sessionId);
+        break;
+      case "params":
+        clearPromptComposer();
+        openMobilePresetRun(resolution.preset, false);
+        break;
+    }
+  }
+
+  function runMobilePreset(
+    preset: PresetSummary,
+    values: Record<string, string>,
+    mode: "send" | "insert",
+    sessionId: string | null = activeSessionId,
+  ): void {
+    const text = substitutePresetParams(preset.body, values);
+    if (mode === "insert") {
+      closeMobilePresets();
+      promptInput.value = text;
+      promptInput.focus();
+      return;
+    }
+    if (!sessionId) {
+      presetsStatus.textContent = "No active session.";
+      return;
+    }
+    const accepted = sendPromptWithBusyHandling({ sessionId, text, editorText: text, images: [] });
+    if (accepted) closeMobilePresets();
+  }
+
+  function renderMobilePresets(): void {
+    presetsBody.replaceChildren();
+    presetsActions.replaceChildren();
+    presetsStatus.textContent = "";
+    if (presetsView === "run" && presetRunTarget) renderMobilePresetRun(presetRunTarget);
+    else renderMobilePresetsPicker();
+  }
+
+  function renderMobilePresetsPicker(): void {
+    presetsTitle.textContent = "Presets";
+    const presets = serverConfig?.presets ?? [];
+    if (presets.length === 0) {
+      const empty = document.createElement("p");
+      empty.className = "mobile-dialog-status";
+      empty.textContent = "No presets yet. Create one on desktop.";
+      presetsBody.append(empty);
+    } else {
+      const list = document.createElement("div");
+      list.className = "mobile-presets-list";
+      for (const preset of presets) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "mobile-presets-row";
+        const title = document.createElement("strong");
+        title.textContent = preset.name;
+        const desc = document.createElement("span");
+        desc.textContent = preset.description || "(no description)";
+        button.append(title, desc);
+        button.addEventListener("click", () => openMobilePresetRun(preset, true));
+        list.append(button);
+      }
+      presetsBody.append(list);
+    }
+    const close = document.createElement("button");
+    close.type = "button";
+    close.textContent = "Close";
+    close.addEventListener("click", closeMobilePresets);
+    presetsActions.append(close);
+  }
+
+  function renderMobilePresetRun(preset: PresetSummary): void {
+    presetsTitle.textContent = preset.name;
+    const params = parsePresetParams(preset.body);
+    const preview = document.createElement("pre");
+    preview.className = "mobile-presets-preview";
+    const sendButton = document.createElement("button");
+    sendButton.type = "button";
+    sendButton.textContent = "Send";
+    const insertButton = document.createElement("button");
+    insertButton.type = "button";
+    insertButton.textContent = "Insert";
+    const updateDerived = (): void => {
+      preview.textContent = substitutePresetParams(preset.body, presetRunValues);
+      const ready = requiredParamsFilled(params, preset.defaults, presetRunValues);
+      sendButton.disabled = !ready;
+      insertButton.disabled = !ready;
+    };
+    if (params.length > 0) {
+      const fields = document.createElement("div");
+      fields.className = "mobile-presets-fields";
+      for (const param of params) {
+        const field = document.createElement("label");
+        field.className = "mobile-presets-field";
+        const span = document.createElement("span");
+        const required = !Object.prototype.hasOwnProperty.call(preset.defaults, param);
+        span.textContent = required ? `${param} (required)` : param;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.autocomplete = "off";
+        input.spellcheck = false;
+        input.value = presetRunValues[param] ?? "";
+        input.addEventListener("input", () => {
+          presetRunValues[param] = input.value;
+          updateDerived();
+        });
+        field.append(span, input);
+        fields.append(field);
+      }
+      presetsBody.append(fields);
+    }
+    const previewLabel = document.createElement("p");
+    previewLabel.className = "mobile-dialog-status";
+    previewLabel.textContent = "Preview";
+    presetsBody.append(previewLabel, preview);
+    sendButton.addEventListener("click", () => runMobilePreset(preset, presetRunValues, "send"));
+    insertButton.addEventListener("click", () => runMobilePreset(preset, presetRunValues, "insert"));
+    const back = document.createElement("button");
+    back.type = "button";
+    back.textContent = presetRunFromPicker ? "Back" : "Cancel";
+    back.addEventListener("click", () => {
+      if (presetRunFromPicker) openMobilePresetsPicker();
+      else closeMobilePresets();
+    });
+    presetsActions.append(back, insertButton, sendButton);
+    updateDerived();
+  }
+
+  function syncMobilePresets(): void {
+    if (presetsOverlay.hidden) return;
+    if (presetsView === "run" && presetRunTarget) {
+      const latest = (serverConfig?.presets ?? []).find(p => p.name === presetRunTarget?.name);
+      if (latest) presetRunTarget = latest;
+      else {
+        presetsView = "picker";
+        presetRunTarget = null;
+      }
+    }
+    renderMobilePresets();
   }
 
   function renderSessionNoticeNodes(notices: SessionNotice[]): HTMLElement[] {
@@ -1394,6 +1617,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         );
         syncCreateCwdDefault();
         syncMobileProposedModelsUi();
+        syncMobilePresets();
         console.debug(`[fura-mobile] Connected to fura ${message.serverVersion}.`);
         break;
       case "config.updated":
@@ -1404,6 +1628,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         );
         syncCreateCwdDefault();
         syncMobileProposedModelsUi();
+        syncMobilePresets();
         if (proposedModelSavePending && JSON.stringify(message.config.proposedModels) === JSON.stringify(proposedModelSavePending)) {
           proposedModelSavePending = null;
           proposedModelName.value = "";

@@ -185,6 +185,7 @@ import type {
   PlanApprovalMode,
   ProposedModelConfig,
   ProposedThinkingLevel,
+  PresetSummary,
   ReviewComment,
   ServerConfig,
   ServerMessage,
@@ -198,6 +199,16 @@ import type {
   TranscriptEntry,
   TranscriptMessage,
 } from "./protocol";
+import {
+  buildPresetSaveMessage,
+  isValidPresetName,
+  parsePresetParams,
+  presetNameFromInput,
+  pruneDefaults,
+  requiredParamsFilled,
+  resolvePresetCommand,
+  substitutePresetParams,
+} from "./presets";
 
 type WorkspaceMode = "session" | "controller";
 
@@ -400,6 +411,23 @@ app.innerHTML = `
         <div class="modal-actions">
           <button id="proposedModelsDone" type="button">Done</button>
         </div>
+      </footer>
+    </section>
+  </div>
+
+  <div id="presetsOverlay" class="modal-overlay" hidden>
+    <section class="presets-dialog modal-panel" role="dialog" aria-modal="true" aria-labelledby="presetsTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="presetsTitle">Presets</h2>
+          <p id="presetsSubtitle">Run a saved prompt preset.</p>
+        </div>
+        <button id="presetsClose" class="modal-close" type="button" aria-label="Close presets">×</button>
+      </header>
+      <div id="presetsBody" class="presets-body"></div>
+      <footer class="modal-footer">
+        <span id="presetsStatus" class="modal-status" aria-live="polite" aria-atomic="true"></span>
+        <div id="presetsActions" class="modal-actions"></div>
       </footer>
     </section>
   </div>
@@ -645,6 +673,13 @@ const proposedModelThinkingSelect = requireElement<HTMLSelectElement>("proposedM
 const proposedModelSave = requireElement<HTMLButtonElement>("proposedModelSave");
 const proposedModelCancel = requireElement<HTMLButtonElement>("proposedModelCancel");
 const proposedModelStatus = requireElement<HTMLSpanElement>("proposedModelStatus");
+const presetsOverlay = requireElement<HTMLDivElement>("presetsOverlay");
+const presetsClose = requireElement<HTMLButtonElement>("presetsClose");
+const presetsTitle = requireElement<HTMLHeadingElement>("presetsTitle");
+const presetsSubtitle = requireElement<HTMLParagraphElement>("presetsSubtitle");
+const presetsBody = requireElement<HTMLDivElement>("presetsBody");
+const presetsStatus = requireElement<HTMLSpanElement>("presetsStatus");
+const presetsActions = requireElement<HTMLDivElement>("presetsActions");
 const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const deleteSessionButton = requireElement<HTMLButtonElement>("deleteSessionButton");
@@ -809,6 +844,13 @@ let proposedModelCatalogSelectedIndex = 0;
 let proposedModelFormOpen = false;
 let proposedModelSavePending = false;
 let proposedModelEditingId: string | null = null;
+let presetsView: "picker" | "run" | "editor" = "picker";
+let presetRunTarget: PresetSummary | null = null;
+let presetRunFromPicker = false;
+let presetRunValues: Record<string, string> = {};
+let presetEditorOriginalName: string | null = null;
+let presetEditorDefaults: Record<string, string> = {};
+let presetPending: { kind: "save" | "delete"; name: string } | null = null;
 let projections = new Map<string, SessionProjection>();
 const sessionChangesStates = new Map<string, SessionChangesSummaryState>();
 const sessionChangesPayloadKinds = new Map<string, DiffDetailMode>();
@@ -1184,6 +1226,10 @@ proposedModelSearchInput.addEventListener("input", () => {
   renderProposedModelCatalog();
 });
 proposedModelSave.addEventListener("click", saveProposedModelFromForm);
+presetsClose.addEventListener("click", closePresetsOverlay);
+presetsOverlay.addEventListener("mousedown", event => {
+  if (event.target === presetsOverlay) closePresetsOverlay();
+});
 document.addEventListener("click", event => {
   if (!workspaceOptionsOpen) return;
   const target = event.target;
@@ -1234,6 +1280,10 @@ window.addEventListener("keydown", event => {
   if (event.key === "Escape") {
     if (!proposedModelsOverlay.hidden) {
       closeProposedModelsDialog();
+      return;
+    }
+    if (!presetsOverlay.hidden) {
+      closePresetsOverlay();
       return;
     }
     if (workspaceOptionsOpen) {
@@ -1404,6 +1454,19 @@ promptForm.addEventListener("submit", event => {
 
   if (action.type === "ignore") return;
   hidePalette();
+
+  if (workspaceMode === "session" && knownSlashCommand?.name === "presets" && action.type === "sendPrompt") {
+    if (pendingImages.length > 0) {
+      appendSessionNotice(action.sessionId, {
+        level: "warning",
+        text: "Presets do not support image attachments. Remove the image before running a preset.",
+      });
+      render();
+      return;
+    }
+    handlePresetCommand(editorText, action.sessionId);
+    return;
+  }
 
   switch (action.type) {
     case "controller.rejectImages":
@@ -1658,6 +1721,7 @@ function handleServerMessage(message: ServerMessage): void {
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
       );
       syncProposedModelsUi();
+      syncPresetsUi();
       reviewCommentsRequested.clear();
       reviewCommentsLoadInFlight.clear();
       reviewCommentsResyncNeeded.clear();
@@ -1679,6 +1743,17 @@ function handleServerMessage(message: ServerMessage): void {
           proposedModelStatus.textContent = "Saved.";
         }
       }
+      if (presetPending) {
+        const pending = presetPending;
+        const present = (serverConfig?.presets ?? []).some(p => p.name === pending.name);
+        if (pending.kind === "save" ? present : !present) {
+          presetPending = null;
+          presetsView = "picker";
+          presetEditorOriginalName = null;
+          presetEditorDefaults = {};
+        }
+      }
+      syncPresetsUi();
       break;
     case "sessions.snapshot":
       {
@@ -2283,6 +2358,11 @@ function handleServerMessage(message: ServerMessage): void {
       if (proposedModelSavePending) {
         proposedModelSavePending = false;
         proposedModelStatus.textContent = message.message;
+        break;
+      }
+      if (presetPending) {
+        presetPending = null;
+        presetsStatus.textContent = message.message;
         break;
       }
       if (handleCwdPickerCreateError(message.requestId ?? null, message.message)) {
@@ -3228,6 +3308,370 @@ function saveProposedModels(models: ProposedModelConfig[]): void {
     proposedModelSavePending = false;
     proposedModelStatus.textContent = "Not connected to the Fura bridge.";
   }
+}
+
+function showPresetsOverlay(): void {
+  presetsOverlay.hidden = false;
+  setWorkspaceOptionsOpen(false);
+}
+
+function closePresetsOverlay(): void {
+  presetPending = null;
+  presetsOverlay.hidden = true;
+}
+
+function openPresetsPicker(): void {
+  presetsView = "picker";
+  showPresetsOverlay();
+  renderPresets();
+}
+
+function openPresetRun(preset: PresetSummary, fromPicker: boolean): void {
+  presetRunTarget = preset;
+  presetRunFromPicker = fromPicker;
+  presetRunValues = {};
+  for (const param of parsePresetParams(preset.body)) {
+    presetRunValues[param] = Object.prototype.hasOwnProperty.call(preset.defaults, param)
+      ? preset.defaults[param]
+      : "";
+  }
+  presetsView = "run";
+  showPresetsOverlay();
+  renderPresets();
+}
+
+function openPresetEditor(preset: PresetSummary | null): void {
+  presetEditorOriginalName = preset?.name ?? null;
+  presetEditorDefaults = preset ? { ...preset.defaults } : {};
+  presetsView = "editor";
+  showPresetsOverlay();
+  renderPresets();
+}
+
+function handlePresetCommand(editorText: string, sessionId: string): void {
+  const presets = serverConfig?.presets ?? [];
+  const resolution = resolvePresetCommand(editorText, presets);
+  switch (resolution.kind) {
+    case "picker":
+      clearPromptEditor();
+      openPresetsPicker();
+      break;
+    case "unknown": {
+      const available = resolution.available.length > 0 ? resolution.available.join(", ") : "none";
+      appendSessionNotice(sessionId, {
+        level: "warning",
+        text: `Unknown preset "${resolution.name}". Available: ${available}.`,
+      });
+      render();
+      break;
+    }
+    case "run":
+      clearPromptEditor();
+      runPreset(resolution.preset, {}, "send", sessionId);
+      break;
+    case "params":
+      clearPromptEditor();
+      openPresetRun(resolution.preset, false);
+      break;
+  }
+}
+
+function runPreset(
+  preset: PresetSummary,
+  values: Record<string, string>,
+  mode: "send" | "insert",
+  sessionId: string | null = activeSessionId,
+): void {
+  const text = substitutePresetParams(preset.body, values);
+  if (mode === "insert") {
+    closePresetsOverlay();
+    promptInput.value = text;
+    promptInput.focus();
+    updatePalette();
+    return;
+  }
+  if (!sessionId) {
+    presetsStatus.textContent = "No active session.";
+    return;
+  }
+  const accepted = sendPromptWithBusyHandling({ sessionId, text, editorText: text, images: [] });
+  if (accepted) closePresetsOverlay();
+}
+
+function renderPresets(): void {
+  presetsBody.replaceChildren();
+  presetsActions.replaceChildren();
+  if (presetsView === "picker") renderPresetsPicker();
+  else if (presetsView === "run") renderPresetRun();
+  else renderPresetEditor();
+}
+
+function renderPresetsPicker(): void {
+  presetsTitle.textContent = "Presets";
+  presetsSubtitle.textContent = "Run a saved prompt preset.";
+  presetsStatus.textContent = "";
+  const presets = serverConfig?.presets ?? [];
+  const list = document.createElement("div");
+  list.className = "presets-list";
+  if (presets.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "presets-empty";
+    empty.textContent = "No presets yet. Create one to get started.";
+    list.append(empty);
+  } else {
+    for (const preset of presets) {
+      const row = document.createElement("div");
+      row.className = "presets-row";
+      const open = document.createElement("button");
+      open.type = "button";
+      open.className = "presets-row-open";
+      const title = document.createElement("strong");
+      title.textContent = preset.name;
+      const desc = document.createElement("span");
+      desc.textContent = preset.description || "(no description)";
+      open.append(title, desc);
+      open.addEventListener("click", () => openPresetRun(preset, true));
+      const edit = document.createElement("button");
+      edit.type = "button";
+      edit.className = "presets-row-edit";
+      edit.textContent = "Edit";
+      edit.addEventListener("click", () => openPresetEditor(preset));
+      row.append(open, edit);
+      list.append(row);
+    }
+  }
+  presetsBody.append(list);
+
+  const newButton = document.createElement("button");
+  newButton.type = "button";
+  newButton.className = "presets-primary";
+  newButton.textContent = "New preset";
+  newButton.addEventListener("click", () => openPresetEditor(null));
+  const close = document.createElement("button");
+  close.type = "button";
+  close.textContent = "Close";
+  close.addEventListener("click", closePresetsOverlay);
+  presetsActions.append(newButton, close);
+}
+
+function renderPresetRun(): void {
+  const preset = presetRunTarget;
+  if (!preset) {
+    openPresetsPicker();
+    return;
+  }
+  presetsTitle.textContent = preset.name;
+  presetsSubtitle.textContent = preset.description || "Fill in any parameters, then send.";
+  presetsStatus.textContent = "";
+  const params = parsePresetParams(preset.body);
+
+  const preview = document.createElement("pre");
+  preview.className = "presets-preview";
+  const sendButton = document.createElement("button");
+  sendButton.type = "button";
+  sendButton.className = "presets-primary";
+  sendButton.textContent = "Send";
+  const insertButton = document.createElement("button");
+  insertButton.type = "button";
+  insertButton.textContent = "Insert into composer";
+
+  const updateDerived = (): void => {
+    preview.textContent = substitutePresetParams(preset.body, presetRunValues);
+    const ready = requiredParamsFilled(params, preset.defaults, presetRunValues);
+    sendButton.disabled = !ready;
+    insertButton.disabled = !ready;
+  };
+
+  if (params.length > 0) {
+    const fields = document.createElement("div");
+    fields.className = "presets-fields";
+    for (const param of params) {
+      const field = document.createElement("label");
+      field.className = "presets-field";
+      const span = document.createElement("span");
+      const required = !Object.prototype.hasOwnProperty.call(preset.defaults, param);
+      span.textContent = required ? `${param} (required)` : param;
+      const input = document.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.value = presetRunValues[param] ?? "";
+      input.addEventListener("input", () => {
+        presetRunValues[param] = input.value;
+        updateDerived();
+      });
+      field.append(span, input);
+      fields.append(field);
+    }
+    presetsBody.append(fields);
+  }
+
+  const previewLabel = document.createElement("p");
+  previewLabel.className = "presets-preview-label";
+  previewLabel.textContent = "Preview";
+  presetsBody.append(previewLabel, preview);
+
+  sendButton.addEventListener("click", () => runPreset(preset, presetRunValues, "send"));
+  insertButton.addEventListener("click", () => runPreset(preset, presetRunValues, "insert"));
+  if (presetRunFromPicker) {
+    const back = document.createElement("button");
+    back.type = "button";
+    back.textContent = "Back";
+    back.addEventListener("click", openPresetsPicker);
+    presetsActions.append(back);
+  }
+  presetsActions.append(insertButton, sendButton);
+
+  updateDerived();
+  const firstInput = presetsBody.querySelector<HTMLInputElement>(".presets-field input");
+  if (firstInput) window.setTimeout(() => firstInput.focus(), 0);
+}
+
+function renderPresetEditor(): void {
+  const editing = presetEditorOriginalName;
+  const existing = editing ? (serverConfig?.presets ?? []).find(p => p.name === editing) : null;
+  presetsTitle.textContent = editing ? `Edit preset: ${editing}` : "New preset";
+  presetsSubtitle.textContent = "Use {param} placeholders for fields you fill at send time.";
+  presetsStatus.textContent = "";
+
+  const nameField = presetLabeledInput("Name", existing?.name ?? "");
+  nameField.input.placeholder = "update-skill";
+  if (editing) nameField.input.disabled = true;
+  const descField = presetLabeledInput("Description (optional)", existing?.description ?? "");
+  descField.input.placeholder = "What this preset does";
+
+  const bodyLabel = document.createElement("label");
+  bodyLabel.className = "presets-field";
+  const bodySpan = document.createElement("span");
+  bodySpan.textContent = "Prompt body";
+  const bodyInput = document.createElement("textarea");
+  bodyInput.rows = 8;
+  bodyInput.spellcheck = false;
+  bodyInput.value = existing?.body ?? "";
+  bodyLabel.append(bodySpan, bodyInput);
+
+  const paramsSection = document.createElement("div");
+  paramsSection.className = "presets-detected";
+  const renderDetected = (): void => {
+    paramsSection.replaceChildren();
+    const params = parsePresetParams(bodyInput.value);
+    const heading = document.createElement("p");
+    heading.className = "presets-detected-label";
+    heading.textContent =
+      params.length === 0 ? "No parameters detected." : "Parameters (optional defaults):";
+    paramsSection.append(heading);
+    for (const param of params) {
+      const field = document.createElement("label");
+      field.className = "presets-field presets-default-field";
+      const span = document.createElement("span");
+      span.textContent = param;
+      const input = document.createElement("input");
+      input.type = "text";
+      input.autocomplete = "off";
+      input.spellcheck = false;
+      input.placeholder = "default (optional)";
+      input.value = presetEditorDefaults[param] ?? "";
+      input.addEventListener("input", () => {
+        presetEditorDefaults[param] = input.value;
+      });
+      field.append(span, input);
+      paramsSection.append(field);
+    }
+  };
+  bodyInput.addEventListener("input", renderDetected);
+  renderDetected();
+
+  presetsBody.append(nameField.label, descField.label, bodyLabel, paramsSection);
+
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "presets-primary";
+  save.textContent = "Save";
+  save.addEventListener("click", () =>
+    savePresetFromEditor(nameField.input.value, descField.input.value, bodyInput.value),
+  );
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", openPresetsPicker);
+  if (editing) {
+    const del = document.createElement("button");
+    del.type = "button";
+    del.className = "presets-danger";
+    del.textContent = "Delete";
+    del.addEventListener("click", () => deletePreset(editing));
+    presetsActions.append(del);
+  }
+  presetsActions.append(cancel, save);
+}
+
+function presetLabeledInput(
+  labelText: string,
+  value: string,
+): { label: HTMLLabelElement; input: HTMLInputElement } {
+  const label = document.createElement("label");
+  label.className = "presets-field";
+  const span = document.createElement("span");
+  span.textContent = labelText;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.value = value;
+  label.append(span, input);
+  return { label, input };
+}
+
+function savePresetFromEditor(rawName: string, description: string, body: string): void {
+  if (presetPending) return;
+  const editing = presetEditorOriginalName;
+  const name = editing ?? presetNameFromInput(rawName);
+  if (!name) {
+    presetsStatus.textContent = "Name is required.";
+    return;
+  }
+  if (!isValidPresetName(name)) {
+    presetsStatus.textContent = "Name must be lowercase letters, digits, '-' or '_'.";
+    return;
+  }
+  if (!body.trim()) {
+    presetsStatus.textContent = "Prompt body is required.";
+    return;
+  }
+  if (!editing && (serverConfig?.presets ?? []).some(p => p.name === name)) {
+    presetsStatus.textContent = `A preset named "${name}" already exists.`;
+    return;
+  }
+  const defaults = pruneDefaults(parsePresetParams(body), presetEditorDefaults);
+  presetPending = { kind: "save", name };
+  presetsStatus.textContent = "Saving…";
+  if (!send(buildPresetSaveMessage(name, description, body, defaults))) {
+    presetPending = null;
+    presetsStatus.textContent = "Not connected to the Fura bridge.";
+  }
+}
+
+function deletePreset(name: string): void {
+  if (presetPending) return;
+  presetPending = { kind: "delete", name };
+  presetsStatus.textContent = "Deleting…";
+  if (!send({ type: "preset.delete", name })) {
+    presetPending = null;
+    presetsStatus.textContent = "Not connected to the Fura bridge.";
+  }
+}
+
+function syncPresetsUi(): void {
+  if (presetsOverlay.hidden) return;
+  if (presetsView === "run" && presetRunTarget) {
+    const latest = (serverConfig?.presets ?? []).find(p => p.name === presetRunTarget?.name);
+    if (latest) presetRunTarget = latest;
+    else {
+      presetsView = "picker";
+      presetRunTarget = null;
+    }
+  }
+  renderPresets();
 }
 
 function setWorkspaceOptionsOpen(open: boolean): void {
