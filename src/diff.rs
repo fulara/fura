@@ -844,19 +844,52 @@ async fn start_compare_generation_job(
     .await;
 }
 
+/// `createdAt` of a candidate's base snapshot, or `""` when it has none.
+/// Used to pick the newest snapshot as the default diff base.
+fn candidate_snapshot_created_at(candidate: &SessionRepoCandidate) -> &str {
+    candidate
+        .session_start_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.created_at.as_str())
+        .unwrap_or("")
+}
+
 fn select_session_repo(
     candidates: &[SessionRepoCandidate],
     selected_repo_id: Option<&str>,
+    preferred_repo_roots: &[String],
 ) -> Option<SessionRepoCandidate> {
     if let Some(repo_id) = selected_repo_id {
         if let Some(candidate) = candidates.iter().find(|candidate| candidate.id == repo_id) {
             return Some(candidate.clone());
         }
     }
-    candidates
-        .iter()
-        .find(|candidate| {
-            candidate.source != SessionRepoSource::Snapshot && candidate.has_session_start_snapshot
+    // Newest snapshot by wall-clock `createdAt`, optionally restricted to the session's active
+    // (cwd/worktree) repos.
+    let newest_snapshot = |active_only: bool| {
+        candidates
+            .iter()
+            .filter(|candidate| candidate.source == SessionRepoSource::Snapshot)
+            .filter(|candidate| {
+                !active_only
+                    || preferred_repo_roots
+                        .iter()
+                        .any(|root| root == &candidate.repo_root)
+            })
+            .max_by(|a, b| candidate_snapshot_created_at(a).cmp(candidate_snapshot_created_at(b)))
+    };
+    // Default diff base = newest snapshot, regardless of OMP `kind`. Prefer one in the active
+    // repo so a newer snapshot in some *other* repo never silently switches which repository the
+    // Diffs view shows; only then fall back to newest-overall and the prior path/first behavior.
+    // A fresh session has just the auto session-start snapshot, so it wins; a re-baseline (a
+    // newer snapshot, e.g. pinned at a branch tip) wins without anyone deleting the stale base.
+    newest_snapshot(true)
+        .or_else(|| newest_snapshot(false))
+        .or_else(|| {
+            candidates.iter().find(|candidate| {
+                candidate.source != SessionRepoSource::Snapshot
+                    && candidate.has_session_start_snapshot
+            })
         })
         .or_else(|| {
             candidates
@@ -875,7 +908,7 @@ fn select_session_repo(
 async fn session_repo_candidates(
     state: &AppState,
     session_id: &str,
-) -> anyhow::Result<Vec<SessionRepoCandidate>> {
+) -> anyhow::Result<(Vec<SessionRepoCandidate>, Vec<String>)> {
     let (cwd, worktree, session_file) = {
         let sessions = state.sessions.read().await;
         let session = sessions
@@ -911,9 +944,17 @@ async fn session_repo_candidates(
     for snapshot in snapshots.iter() {
         add_snapshot_candidate(&mut candidates, snapshot);
     }
+    // Active repo roots (cwd/worktree) captured before shadowed path candidates are hidden, so
+    // the default selection can prefer a snapshot in the session's own repo over a newer one in
+    // an unrelated repo.
+    let preferred_repo_roots: Vec<String> = candidates
+        .iter()
+        .filter(|candidate| candidate.source != SessionRepoSource::Snapshot)
+        .map(|candidate| candidate.repo_root.clone())
+        .collect();
     hide_path_candidates_shadowed_by_snapshot_candidates(&mut candidates);
 
-    Ok(candidates)
+    Ok((candidates, preferred_repo_roots))
 }
 
 fn add_path_candidate(
@@ -926,7 +967,7 @@ fn add_path_candidate(
         return;
     };
     let repo_root = root.display().to_string();
-    let snapshot = latest_session_start_snapshot_for_repo(snapshots, &root);
+    let snapshot = latest_snapshot_for_repo(snapshots, &root);
     upsert_candidate(candidates, repo_root, source, snapshot);
 }
 
@@ -1026,15 +1067,16 @@ pub(crate) fn snapshot_candidate_id(entry_id: &str) -> String {
     format!("snapshot:{entry_id}")
 }
 
-fn latest_session_start_snapshot_for_repo(
+/// The newest snapshot (by wall-clock `createdAt`) recorded for `repo_root`, regardless of its
+/// OMP `kind`. This is the session's default diff base; see `select_session_repo`.
+fn latest_snapshot_for_repo(
     snapshots: &[SessionDiffSnapshot],
     repo_root: &Path,
 ) -> Option<SessionDiffSnapshotSummary> {
     snapshots
         .iter()
-        .filter(|snapshot| snapshot.kind == "session-start")
         .filter(|snapshot| snapshot_repo_matches(&snapshot.repo_root, repo_root))
-        .last()
+        .max_by(|a, b| a.created_at.cmp(&b.created_at))
         .map(SessionDiffSnapshot::summary)
 }
 
@@ -1215,7 +1257,7 @@ async fn prepare_session_changes_diff(
     request: DiffRequestIdentity,
     context_lines: Option<u32>,
 ) -> anyhow::Result<(Vec<SessionRepoCandidate>, String, PreparedDiff)> {
-    let candidates = session_repo_candidates(state, &session_id).await?;
+    let (candidates, preferred_repo_roots) = session_repo_candidates(state, &session_id).await?;
     if candidates.is_empty() {
         let _ = state
             .events
@@ -1237,8 +1279,12 @@ async fn prepare_session_changes_diff(
             .await;
         bail!("missing repository for session changes");
     }
-    let selected = select_session_repo(&candidates, selected_repo_id.as_deref())
-        .ok_or_else(|| anyhow!("Selected repository is not available for this session."))?;
+    let selected = select_session_repo(
+        &candidates,
+        selected_repo_id.as_deref(),
+        &preferred_repo_roots,
+    )
+    .ok_or_else(|| anyhow!("Selected repository is not available for this session."))?;
     let repo_root_text = selected.repo_root.clone();
     let Some(snapshot) = selected.session_start_snapshot.clone() else {
         let _ = state.events.emit(state, ServerMessage::SessionChangesSummary {
@@ -2509,6 +2555,54 @@ async fn worktree_dirty(path: &Path) -> anyhow::Result<bool> {
     Ok(!status.trim().is_empty())
 }
 
+/// Run `git rebase <branch>` in the repository containing `cwd`, with no agent involvement.
+///
+/// Refuses up front — without touching the repository — when `cwd` is not a Git repository,
+/// the working tree is dirty, or `branch` does not resolve. If the rebase fails for any reason
+/// (conflicts included), the in-progress rebase is aborted so the repository is left on its
+/// original HEAD. Returns the resolved repository root on success.
+pub(crate) async fn rebase_session_repo(cwd: &str, branch: &str) -> anyhow::Result<PathBuf> {
+    let repo_root = discover_repo_root(cwd)?;
+    if worktree_dirty(&repo_root).await? {
+        bail!("working tree has uncommitted changes — commit or stash before rebasing");
+    }
+    resolve_ref_to_oid(&repo_root, branch)
+        .await
+        .with_context(|| format!("cannot resolve branch or ref '{branch}'"))?;
+    if let Err(error) = git_stdout(&repo_root, &["rebase", branch], MAX_GIT_OUTPUT_BYTES).await {
+        // Restore the original HEAD. `--abort` can legitimately fail when no rebase actually
+        // started (the original error already describes a clean no-op), so only escalate when a
+        // rebase is genuinely left in progress — otherwise the user gets a false recovery alarm.
+        let _ = git_stdout(&repo_root, &["rebase", "--abort"], MAX_GIT_OUTPUT_BYTES).await;
+        if rebase_in_progress(&repo_root).await {
+            return Err(error.context(
+                "could not abort the failed rebase; the repository is still mid-rebase and needs manual recovery with `git rebase --abort`",
+            ));
+        }
+        return Err(error);
+    }
+    Ok(repo_root)
+}
+
+/// Whether `repo_root` is currently mid-rebase (interactive/merge or apply-based), resolved via
+/// `git rev-parse --git-path` so linked worktrees and custom git dirs are handled correctly.
+async fn rebase_in_progress(repo_root: &Path) -> bool {
+    for state in ["rebase-merge", "rebase-apply"] {
+        if let Ok(path) = git_stdout(
+            repo_root,
+            &["rev-parse", "--git-path", state],
+            MAX_GIT_OUTPUT_BYTES,
+        )
+        .await
+        {
+            if repo_root.join(path.trim()).exists() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 async fn git_stdout(repo_root: &Path, args: &[&str], limit: usize) -> anyhow::Result<String> {
     let (output, truncated) = git_stdout_limited(repo_root, args, limit).await?;
     if truncated {
@@ -3229,7 +3323,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_changes_does_not_use_latest_manual_snapshot() {
+    async fn session_changes_uses_latest_snapshot_as_base() {
         let (_temp, repo, base, head) = test_repo();
         let session_start_ref = "refs/omp/diff-snapshots/session-start-only";
         let manual_ref = "refs/omp/diff-snapshots/manual-later";
@@ -3263,14 +3357,16 @@ mod tests {
                 "createdAt": "2026-05-04T00:01:00.000Z",
                 "headCommit": head,
                 "kind": "manual",
-                "label": "manual",
+                "label": "rebase onto upstream",
                 "ref": manual_ref,
                 "repoRoot": repo,
                 "tree": head_tree
             },
             "id": "manual-entry"
         });
-        fs::write(&session_file, format!("{}\n{}\n", session_start, manual)).expect("session file");
+        // The newer manual snapshot is written *first* to prove selection sorts by `createdAt`,
+        // not by append order.
+        fs::write(&session_file, format!("{}\n{}\n", manual, session_start)).expect("session file");
 
         let app_state = crate::tests::test_state(8, None);
         app_state.sessions.write().await.insert(
@@ -3282,27 +3378,28 @@ mod tests {
             panic!("expected session changes state: {:?}", response);
         };
         let SessionChangesSummaryState::Ready {
-            comparison, repos, ..
+            comparison,
+            selected_repo_id,
+            ..
         } = state
         else {
             panic!("expected ready state: {:?}", state);
         };
-        assert!(
-            matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == session_start_ref)
-        );
-        assert!(repos.iter().any(|repo| {
-            repo.id == snapshot_candidate_id("manual-entry")
-                && repo.source == SessionRepoSource::Snapshot
-                && repo.label.contains("manual snapshot · manual")
-        }));
+        // Default base = newest snapshot (manual), regardless of OMP `kind`.
+        assert_eq!(selected_repo_id.as_str(), "snapshot:manual-entry");
+        assert!(matches!(
+            &comparison.base,
+            DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == manual_ref
+        ));
 
+        // Explicitly selecting the older session-start snapshot still overrides the default.
         let mut events = app_state.events.subscribe();
         let responses = handle_session_changes_request(
             &app_state,
             "test-client".into(),
             test_diff_id(),
             "manual".into(),
-            Some(snapshot_candidate_id("manual-entry")),
+            Some(snapshot_candidate_id("session-start-entry")),
             DiffDetailMode::StatOnly,
             None,
             None,
@@ -3313,12 +3410,18 @@ mod tests {
             responses.is_empty(),
             "unexpected direct responses: {responses:?}"
         );
-        let selected_response = events.recv().await.expect("manual snapshot response");
+        let selected_response = events
+            .recv()
+            .await
+            .expect("session-start snapshot response");
         let ServerMessage::SessionChangesSummary {
             state: selected_state,
         } = &selected_response
         else {
-            panic!("expected manual snapshot state: {:?}", selected_response);
+            panic!(
+                "expected session-start snapshot state: {:?}",
+                selected_response
+            );
         };
         let SessionChangesSummaryState::Ready {
             comparison,
@@ -3327,14 +3430,232 @@ mod tests {
         } = selected_state
         else {
             panic!(
-                "expected selected manual snapshot state: {:?}",
+                "expected selected session-start state: {:?}",
                 selected_state
             );
         };
-        assert_eq!(selected_repo_id.as_str(), "snapshot:manual-entry");
-        assert!(
-            matches!(&comparison.base, DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == manual_ref)
+        assert_eq!(selected_repo_id.as_str(), "snapshot:session-start-entry");
+        assert!(matches!(
+            &comparison.base,
+            DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == session_start_ref
+        ));
+    }
+
+    #[tokio::test]
+    async fn session_changes_prefers_active_repo_over_newer_snapshot_elsewhere() {
+        let (_temp_a, repo_a, base_a, _head_a) = test_repo();
+        let (_temp_b, repo_b, base_b, _head_b) = test_repo();
+        let active_ref = "refs/omp/diff-snapshots/active-start";
+        let other_ref = "refs/omp/diff-snapshots/other-newer";
+        git(&repo_a, &["update-ref", active_ref, &base_a]);
+        git(&repo_b, &["update-ref", other_ref, &base_b]);
+        let a_tree = git_output(&repo_a, &["rev-parse", &format!("{base_a}^{{tree}}")]);
+        let b_tree = git_output(&repo_b, &["rev-parse", &format!("{base_b}^{{tree}}")]);
+
+        let active = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": base_a,
+                "createdAt": "2026-05-04T00:00:00.000Z",
+                "headCommit": base_a,
+                "kind": "session-start",
+                "label": "session-start",
+                "ref": active_ref,
+                "repoRoot": repo_a,
+                "tree": a_tree
+            },
+            "id": "active-entry"
+        });
+        let other = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": base_b,
+                "createdAt": "2026-05-04T00:05:00.000Z",
+                "headCommit": base_b,
+                "kind": "manual",
+                "label": "other repo",
+                "ref": other_ref,
+                "repoRoot": repo_b,
+                "tree": b_tree
+            },
+            "id": "other-entry"
+        });
+        // The other repo's snapshot is newer and written last; the active (cwd) repo's older
+        // snapshot must still win so Session Changes never silently jumps to a different repo.
+        let session_dir = TempDir::new().expect("session dir");
+        let session_file = session_dir.path().join("multi-repo.jsonl");
+        fs::write(&session_file, format!("{}\n{}\n", active, other)).expect("session file");
+
+        let state = crate::tests::test_state(8, None);
+        state.sessions.write().await.insert(
+            "multi".into(),
+            diff_test_record("multi", &repo_a, &session_file),
         );
+
+        let response = session_changes_response(&state, "multi").await;
+        let ServerMessage::SessionChangesSummary { state } = &response else {
+            panic!("expected session changes state: {:?}", response);
+        };
+        let SessionChangesSummaryState::Ready {
+            comparison,
+            selected_repo_id,
+            ..
+        } = state
+        else {
+            panic!("expected ready state: {:?}", state);
+        };
+        assert_eq!(selected_repo_id.as_str(), "snapshot:active-entry");
+        assert!(matches!(
+            &comparison.base,
+            DiffEndpoint::SessionStartSnapshot { snapshot } if snapshot.ref_name == active_ref
+        ));
+    }
+
+    #[tokio::test]
+    async fn rebase_session_repo_clean_rebase_moves_head() {
+        let (_temp, repo, base, _head) = test_repo();
+        git(&repo, &["checkout", "-b", "upstream", &base]);
+        write_file(&repo, "UPSTREAM.md", "upstream\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "upstream change"]);
+        git(&repo, &["checkout", "main"]);
+        let before = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let repo_root = rebase_session_repo(repo.to_str().unwrap(), "upstream")
+            .await
+            .expect("clean rebase succeeds");
+
+        assert_eq!(repo_root, repo.canonicalize().unwrap());
+        assert_ne!(before, git_output(&repo, &["rev-parse", "HEAD"]));
+        assert!(repo.join("UPSTREAM.md").exists());
+    }
+
+    #[tokio::test]
+    async fn rebase_session_repo_aborts_on_conflict() {
+        let (_temp, repo, base, _head) = test_repo();
+        git(&repo, &["checkout", "-b", "upstream", &base]);
+        write_file(&repo, "src/lib.rs", "pub fn value() -> i32 { 99 }\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "conflicting upstream"]);
+        git(&repo, &["checkout", "main"]);
+        let before = git_output(&repo, &["rev-parse", "HEAD"]);
+
+        let error = rebase_session_repo(repo.to_str().unwrap(), "upstream")
+            .await
+            .expect_err("conflicting rebase fails");
+        assert!(!error.to_string().is_empty());
+        // Aborted: HEAD restored and no rebase left in progress.
+        assert_eq!(before, git_output(&repo, &["rev-parse", "HEAD"]));
+        assert!(!repo.join(".git/rebase-merge").exists());
+        assert!(!repo.join(".git/rebase-apply").exists());
+    }
+
+    #[tokio::test]
+    async fn rebase_session_repo_refuses_dirty_and_unknown_inputs() {
+        let (_temp, repo, _base, _head) = test_repo();
+        write_file(&repo, "src/lib.rs", "uncommitted edit\n");
+        let dirty = rebase_session_repo(repo.to_str().unwrap(), "main")
+            .await
+            .expect_err("dirty tree refused");
+        assert!(dirty.to_string().contains("uncommitted"));
+
+        git(&repo, &["checkout", "--", "."]);
+        let missing = rebase_session_repo(repo.to_str().unwrap(), "no-such-branch")
+            .await
+            .expect_err("missing branch refused");
+        assert!(missing.to_string().contains("no-such-branch"));
+
+        let temp = TempDir::new().expect("temp dir");
+        let plain = temp.path().join("plain");
+        fs::create_dir_all(&plain).expect("plain dir");
+        let not_repo = rebase_session_repo(plain.to_str().unwrap(), "main")
+            .await
+            .expect_err("non-repo refused");
+        assert!(!not_repo.to_string().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebase_slash_command_rebaselines_via_snapshot() {
+        let (_temp, repo, base, _head) = test_repo();
+        git(&repo, &["checkout", "-b", "upstream", &base]);
+        write_file(&repo, "UPSTREAM.md", "upstream\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "upstream change"]);
+        git(&repo, &["checkout", "main"]);
+
+        // Keep the session file out of the repo so the rebase sees a clean working tree.
+        let session_dir = TempDir::new().expect("session dir");
+        let session_file = session_dir.path().join("rebase-session.jsonl");
+        fs::write(&session_file, "").expect("session file");
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), diff_test_record("s1", &repo, &session_file));
+        let mut commands = crate::tests::register_test_transport(&state, "s1", "s1", 4).await;
+
+        let responses =
+            crate::commands::handle_rebase_slash_command(&state, "s1".into(), "upstream").await;
+        assert!(
+            responses.iter().any(|message| matches!(
+                message,
+                ServerMessage::SessionNotice { level, .. } if matches!(level, NoticeLevel::Info)
+            )),
+            "expected success notice: {responses:?}"
+        );
+
+        let command = commands.recv().await.expect("snapshot rpc command");
+        assert_eq!(
+            command.get("type").and_then(Value::as_str),
+            Some("repo_diff_snapshot")
+        );
+        assert_eq!(command.get("ref").and_then(Value::as_str), Some("upstream"));
+        assert_eq!(
+            command.get("label").and_then(Value::as_str),
+            Some("rebase onto upstream")
+        );
+        assert!(repo.join("UPSTREAM.md").exists());
+    }
+
+    #[tokio::test]
+    async fn rebase_slash_command_refuses_when_busy() {
+        let (_temp, repo, _base, _head) = test_repo();
+        let session_file = repo.join("busy-session.jsonl");
+        fs::write(&session_file, "").expect("session file");
+        let state = crate::tests::test_state(8, None);
+        let mut record = diff_test_record("s1", &repo, &session_file);
+        record.status = SessionStatus::Busy;
+        state.sessions.write().await.insert("s1".into(), record);
+
+        let responses =
+            crate::commands::handle_rebase_slash_command(&state, "s1".into(), "main").await;
+        assert!(responses.iter().any(|message| matches!(
+            message,
+            ServerMessage::SessionNotice { level, .. } if matches!(level, NoticeLevel::Error)
+        )));
+    }
+
+    #[tokio::test]
+    async fn rebase_slash_command_rejects_empty_or_extra_args() {
+        let state = crate::tests::test_state(8, None);
+        // The usage guard runs before any session lookup, so no record is needed.
+        for args in ["", "main extra", "main --onto other"] {
+            let responses =
+                crate::commands::handle_rebase_slash_command(&state, "s1".into(), args).await;
+            assert!(
+                responses.iter().any(|message| matches!(
+                    message,
+                    ServerMessage::SessionNotice { level, text, .. }
+                        if matches!(level, NoticeLevel::Error) && text.contains("Usage")
+                )),
+                "expected usage error for args {args:?}: {responses:?}"
+            );
+        }
     }
 
     #[tokio::test]

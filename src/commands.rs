@@ -1509,7 +1509,7 @@ pub(crate) async fn handle_slash_command(
         "help" | "commands" => vec![notice(
             session_id,
             NoticeLevel::Info,
-            "Supported commands: /help, /new, /abort, /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /fork, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
+            "Supported commands: /help, /new, /abort, /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /fork, /rebase <branch>, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
         )],
         "new" => {
             let (cwd, args) = {
@@ -1589,6 +1589,7 @@ pub(crate) async fn handle_slash_command(
         "model" | "models" => handle_model_slash_command(state, session_id, args).await,
         "thinking" => handle_thinking_slash_command(state, session_id, args).await,
         "fork" => handle_fork_slash_command(state, session_id).await,
+        "rebase" => handle_rebase_slash_command(state, session_id, args).await,
         "session" | "status" | "usage" => {
             send_slash_rpc_command(
                 state,
@@ -1716,6 +1717,87 @@ pub(crate) async fn handle_fork_slash_command(
     match send_rpc_command(state, &session_id, fork_command(next_rpc_id())).await {
         Ok(()) => Vec::new(),
         Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+    }
+}
+
+pub(crate) async fn handle_rebase_slash_command(
+    state: &AppState,
+    session_id: String,
+    args: &str,
+) -> Vec<ServerMessage> {
+    let mut tokens = args.split_whitespace();
+    let branch = tokens.next().unwrap_or("");
+    // A destructive command must not silently drop extra arguments (e.g. `/rebase main --onto x`
+    // would otherwise rewrite history onto `main` and ignore the rest).
+    if branch.is_empty() || tokens.next().is_some() {
+        return vec![notice(
+            session_id,
+            NoticeLevel::Error,
+            "Usage: /rebase <branch> (exactly one branch or ref, no extra arguments)",
+        )];
+    }
+    let cwd = {
+        let sessions = state.sessions.read().await;
+        let Some(record) = sessions.get(&session_id) else {
+            return vec![unknown_session_error(session_id)];
+        };
+        // Busy guard, not a lock: we check status once and run the rebase on the live cwd
+        // without quiescing the OMP child. A prompt arriving on another client mid-rebase could
+        // edit the worktree, and an abort would then discard those edits. This residual race is
+        // accepted (single-operator local tool; sub-second window; conflict required) rather than
+        // adding a cross-cutting rebase-in-progress dispatch lock. Revisit if /rebase grows.
+        if matches!(
+            record.effective_status(),
+            SessionStatus::Busy | SessionStatus::Starting
+        ) {
+            return vec![notice(
+                session_id,
+                NoticeLevel::Error,
+                "Session is busy — wait for the agent to finish before rebasing.",
+            )];
+        }
+        match record.cwd.clone() {
+            Some(cwd) => cwd,
+            None => {
+                return vec![notice(
+                    session_id,
+                    NoticeLevel::Error,
+                    "Session has no working directory to rebase.",
+                )];
+            }
+        }
+    };
+    let repo_root = match crate::diff::rebase_session_repo(&cwd, branch).await {
+        Ok(repo_root) => repo_root,
+        Err(error) => {
+            return vec![notice(
+                session_id,
+                NoticeLevel::Error,
+                format!("Rebase onto '{branch}' failed: {error}"),
+            )];
+        }
+    };
+    // Re-baseline: a snapshot pinned at the branch tip becomes the newest snapshot, so the
+    // Diffs view measures the rebased work against `<branch>` without anyone re-selecting a base.
+    let snapshot_command = repo_diff_snapshot_command(
+        next_rpc_id(),
+        format!("rebase onto {branch}"),
+        Some(repo_root.display().to_string()),
+        Some(branch.to_string()),
+    );
+    match send_rpc_command(state, &session_id, snapshot_command).await {
+        Ok(()) => vec![notice(
+            session_id,
+            NoticeLevel::Info,
+            // The rebase is done (HEAD moved); the snapshot is fire-and-forget over RPC, so we
+            // only claim it was *requested*, not that the base is already in place.
+            format!("Rebased onto '{branch}'. Requested a new diff base snapshot at '{branch}'."),
+        )],
+        Err(error) => vec![notice(
+            session_id,
+            NoticeLevel::Warning,
+            format!("Rebased onto '{branch}', but creating the diff snapshot failed: {error}"),
+        )],
     }
 }
 
