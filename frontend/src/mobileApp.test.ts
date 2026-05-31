@@ -122,6 +122,7 @@ function projection(sessionId: string, overrides: Partial<SessionProjection> = {
     tokensTotal: 0,
     costUsd: 0,
     todoPhases: [],
+    seq: 0,
     ...overrides,
   };
 }
@@ -310,6 +311,8 @@ describe("mountMobileApp", () => {
       state: {
         summary: summary("live", { title: "Live", messageCount: 2 }),
         transcriptReplaceFrom: 1,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [{
           kind: "message",
           id: "delta-message",
@@ -372,6 +375,8 @@ describe("mountMobileApp", () => {
       state: {
         summary: summary("live"),
         transcriptReplaceFrom: 0,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [{
           kind: "tool",
           toolCallId: "tool-changing",
@@ -422,6 +427,8 @@ describe("mountMobileApp", () => {
       state: {
         summary: summary("live"),
         transcriptReplaceFrom: 0,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [{
           ...legacyTool,
           isActive: false,
@@ -486,6 +493,8 @@ describe("mountMobileApp", () => {
       state: {
         summary: summary("live"),
         transcriptReplaceFrom: 1,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [],
         isBusy: false,
         tokensTotal: 0,
@@ -506,6 +515,8 @@ describe("mountMobileApp", () => {
       state: {
         summary: summary("live"),
         transcriptReplaceFrom: 1,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [],
         isBusy: false,
         tokensTotal: 0,

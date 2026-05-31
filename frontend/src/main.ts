@@ -1528,6 +1528,13 @@ function connect(token: string): void {
     onOpen: () => {
       hideAuthGate();
       send({ type: "session.list" });
+      // On (re)connect, re-fetch a fresh snapshot for every session we still
+      // hold a projection for. The socket only loses messages across a drop, and
+      // `session.list` refreshes summaries but not transcripts — so a stale
+      // projection (and its broadcast `seq`) must be resynced explicitly.
+      for (const sessionId of projections.keys()) {
+        send({ type: "state.refresh", sessionId });
+      }
     },
     onClose: () => {
       if (cwdPickerCreatePending && cwdPickerPendingRequestId) {

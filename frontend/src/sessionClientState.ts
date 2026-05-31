@@ -51,7 +51,14 @@ export function applySessionDelta(
   delta: SessionProjectionDelta,
 ): SessionSnapshotUpdate | null {
   const previous = projections.get(sessionId);
-  if (!previous || previous.transcript.length < delta.transcriptReplaceFrom) return null;
+  // Gap detection: the delta must apply directly on top of the projection we
+  // hold. `baseSeq` is the server's broadcast sequence the delta extends; if it
+  // does not match our stored `seq` we have missed (or reordered) a broadcast —
+  // from a disconnect, broadcast-channel lag, or per-connection conflation — and
+  // must resync from a fresh snapshot rather than splice onto a stale base.
+  // The transcript-length check stays as a defensive backstop.
+  if (!previous || previous.seq !== delta.baseSeq) return null;
+  if (previous.transcript.length < delta.transcriptReplaceFrom) return null;
   const projection: SessionProjection = {
     summary: delta.summary,
     transcript: [...previous.transcript.slice(0, delta.transcriptReplaceFrom), ...delta.transcriptAppend],
@@ -68,6 +75,7 @@ export function applySessionDelta(
     goalMode: delta.goalMode,
     todoPhases: delta.todoPhases,
     pendingAsk: delta.pendingAsk,
+    seq: delta.seq,
   };
   return applySessionSnapshot(sessions, projections, sessionId, projection);
 }

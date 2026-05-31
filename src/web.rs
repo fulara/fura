@@ -1603,6 +1603,7 @@ mod tests {
             pending_plan_review: None,
             pending_ask: None,
             todo_phases: Vec::new(),
+            seq: 0,
         }
     }
 

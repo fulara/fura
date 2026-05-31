@@ -16,6 +16,7 @@ const emptyProjection = {
   tokensTotal: 0,
   costUsd: 0,
   todoPhases: [],
+  seq: 0,
 } satisfies SessionProjection;
 
 describe("protocol type fixtures", () => {
@@ -42,6 +43,8 @@ describe("protocol type fixtures", () => {
         tokensTotal: 0,
         costUsd: 0,
         todoPhases: [],
+        baseSeq: 0,
+        seq: 1,
       },
     } satisfies ServerMessage;
 

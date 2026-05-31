@@ -30,6 +30,7 @@ function projection(sessionId: string, overrides: Partial<SessionProjection> = {
     tokensTotal: 0,
     costUsd: 0,
     todoPhases: [],
+    seq: 0,
     ...overrides,
   };
 }
@@ -100,6 +101,8 @@ describe("applySessionDelta", () => {
       tokensTotal: 12,
       costUsd: 0.01,
       todoPhases: [],
+      baseSeq: 0,
+      seq: 1,
     });
 
     expect(result?.projections.get("a")?.transcript.map(entry => entry.kind === "message" ? entry.id : entry.toolCallId)).toEqual(["m1", "m2"]);
@@ -123,6 +126,8 @@ describe("applySessionDelta", () => {
       tokensTotal: 0,
       costUsd: 0,
       todoPhases: [],
+      baseSeq: 0,
+      seq: 1,
     });
 
     expect(result?.projections.get("a")?.transcript).toHaveLength(2);
@@ -144,7 +149,48 @@ describe("applySessionDelta", () => {
       tokensTotal: 0,
       costUsd: 0,
       todoPhases: [],
+      baseSeq: 0,
+      seq: 1,
     })).toBeNull();
+  });
+
+  it("returns null when the delta baseSeq does not match the stored seq", () => {
+    // The stored projection is at seq 0 but the delta extends seq 1 — a broadcast
+    // was missed (disconnect/lag/conflation), so we must resync, not splice.
+    const existing = projection("a", {
+      transcript: [{ kind: "message", id: "m1", role: "assistant", blocks: [{ kind: "text", text: "old" }], timestamp: null, isNew: false, renderHash: "m1-old" }],
+      seq: 0,
+    });
+    expect(applySessionDelta([summary("a")], new Map([["a", existing]]), "a", {
+      summary: summary("a", { messageCount: 1 }),
+      transcriptReplaceFrom: 1,
+      transcriptAppend: [{ kind: "message", id: "m2", role: "assistant", blocks: [{ kind: "text", text: "new" }], timestamp: null, isNew: true, renderHash: "m2-new" }],
+      isBusy: false,
+      tokensTotal: 0,
+      costUsd: 0,
+      todoPhases: [],
+      baseSeq: 1,
+      seq: 2,
+    })).toBeNull();
+  });
+
+  it("advances the stored seq to the delta seq when applied", () => {
+    const existing = projection("a", {
+      transcript: [{ kind: "message", id: "m1", role: "assistant", blocks: [{ kind: "text", text: "old" }], timestamp: null, isNew: false, renderHash: "m1-old" }],
+      seq: 5,
+    });
+    const result = applySessionDelta([summary("a")], new Map([["a", existing]]), "a", {
+      summary: summary("a", { messageCount: 1 }),
+      transcriptReplaceFrom: 1,
+      transcriptAppend: [{ kind: "message", id: "m2", role: "assistant", blocks: [{ kind: "text", text: "new" }], timestamp: null, isNew: true, renderHash: "m2-new" }],
+      isBusy: false,
+      tokensTotal: 0,
+      costUsd: 0,
+      todoPhases: [],
+      baseSeq: 5,
+      seq: 6,
+    });
+    expect(result?.projections.get("a")?.seq).toBe(6);
   });
 });
 

@@ -79,6 +79,7 @@ function projection(sessionId: string, overrides: Partial<SessionProjection> = {
     tokensTotal: 0,
     costUsd: 0,
     todoPhases: [],
+    seq: 0,
     ...overrides,
   };
 }
@@ -776,6 +777,8 @@ describe("desktop cog options", () => {
       state: {
         summary: summary("live", { messageCount: 2 }),
         transcriptReplaceFrom: 1,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [appended],
         isBusy: false,
         tokensTotal: 0,
@@ -830,6 +833,8 @@ describe("desktop cog options", () => {
       state: {
         summary: summary("live"),
         transcriptReplaceFrom: 0,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [{
           kind: "tool",
           toolCallId: "tool-changing",
@@ -880,6 +885,8 @@ describe("desktop cog options", () => {
       state: {
         summary: summary("live"),
         transcriptReplaceFrom: 0,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [{
           ...legacyTool,
           isActive: false,
@@ -995,6 +1002,8 @@ describe("desktop cog options", () => {
       state: {
         summary: summary("missing", { messageCount: 1 }),
         transcriptReplaceFrom: 0,
+        baseSeq: 0,
+        seq: 1,
         transcriptAppend: [{
           kind: "message",
           id: "assistant-1",
@@ -1012,6 +1021,19 @@ describe("desktop cog options", () => {
     });
 
     expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "missing" });
+  });
+
+  it("re-requests a fresh snapshot for tracked sessions after reconnect", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    connection.sent.length = 0;
+    // Simulate a WebSocket reconnect: the coordinator re-fires onOpen.
+    connection.options.onOpen?.();
+
+    expect(connection.sent).toContainEqual({ type: "session.list" });
+    expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "live" });
   });
 
   it("renders aggregate patch by default and drills down without refetching all files", async () => {

@@ -1860,6 +1860,58 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn session_broadcast_seq_chains_across_delta_and_snapshot() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+
+        assert!(
+            state
+                .events
+                .mutate_session_delta(&state, "s1", |record| {
+                    push_message_delta(record, "m1", "first", 0)
+                })
+                .await
+        );
+        // Flush the coalesced delta and emit the boundary snapshot.
+        assert!(
+            state
+                .events
+                .emit_current_session_snapshot(&state, "s1")
+                .await
+        );
+
+        let delta_seq = match events.recv().await.expect("coalesced delta") {
+            ServerMessage::SessionDelta { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(
+                    state.base_seq, 0,
+                    "first broadcast applies on the empty base"
+                );
+                assert_eq!(state.seq, 1, "first broadcast advances seq to 1");
+                state.seq
+            }
+            other => panic!("unexpected first event: {other:?}"),
+        };
+
+        match events.recv().await.expect("boundary snapshot") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(
+                    state.seq,
+                    delta_seq + 1,
+                    "each broadcast advances the per-session seq by one"
+                );
+            }
+            other => panic!("unexpected second event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn session_event_coordinator_flushes_pending_delta_before_sessions_snapshot() {
         let state = test_state(8, None);
         state

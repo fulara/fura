@@ -199,6 +199,7 @@ impl SessionRecord {
             goal_mode: self.goal_mode.clone(),
             todo_phases: self.effective_todo_phases(),
             pending_ask: self.projected_pending_ask(),
+            seq: 0,
         }
     }
 }
@@ -282,6 +283,7 @@ pub(crate) struct SessionProjection {
     pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) pending_ask: Option<Value>,
+    pub(crate) seq: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -303,6 +305,8 @@ pub(crate) struct SessionProjectionDelta {
     pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) pending_ask: Option<Value>,
+    pub(crate) base_seq: u64,
+    pub(crate) seq: u64,
 }
 
 impl SessionProjectionDelta {
@@ -327,6 +331,8 @@ impl SessionProjectionDelta {
             goal_mode: projection.goal_mode.clone(),
             todo_phases: projection.todo_phases.clone(),
             pending_ask: projection.pending_ask.clone(),
+            base_seq: 0,
+            seq: 0,
         }
     }
 }
@@ -910,6 +916,7 @@ mod tests {
             pending_plan_review: None,
             pending_ask: None,
             todo_phases: Vec::new(),
+            seq: 0,
         };
 
         let delta = SessionProjectionDelta::from_projection_replace_tail(1, &projection);
@@ -1198,6 +1205,7 @@ mod tests {
             pending_plan_review: None,
             pending_ask: None,
             todo_phases: Vec::new(),
+            seq: 0,
         };
 
         let delta = SessionProjectionDelta::from_projection_replace_tail(1, &projection);

@@ -202,6 +202,7 @@ export type SessionProjection = {
   goalMode?: GoalModeProjection | null;
   todoPhases: TodoPhase[];
   pendingAsk?: PendingAskProjection | null;
+  seq: number;
 };
 
 export type SessionProjectionDelta = {
@@ -221,6 +222,8 @@ export type SessionProjectionDelta = {
   goalMode?: GoalModeProjection | null;
   todoPhases: TodoPhase[];
   pendingAsk?: PendingAskProjection | null;
+  baseSeq: number;
+  seq: number;
 };
 
 export type DiffDetailMode = "filePatch" | "statOnly";

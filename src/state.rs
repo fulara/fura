@@ -62,6 +62,7 @@ pub(crate) struct WsEventCoordinator {
     sender: broadcast::Sender<ServerMessage>,
     gate: Arc<Mutex<()>>,
     pending_deltas: Arc<Mutex<PendingSessionDeltas>>,
+    session_seqs: Arc<std::sync::Mutex<HashMap<String, u64>>>,
 }
 
 const SESSION_DELTA_THROTTLE_WINDOW: Duration = Duration::from_millis(250);
@@ -84,6 +85,7 @@ impl WsEventCoordinator {
             sender,
             gate: Arc::new(Mutex::new(())),
             pending_deltas: Arc::new(Mutex::new(PendingSessionDeltas::default())),
+            session_seqs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -149,10 +151,16 @@ impl WsEventCoordinator {
     }
 
     fn send_all(&self, messages: impl IntoIterator<Item = ServerMessage>) {
-        for message in messages {
+        let mut seqs = self
+            .session_seqs
+            .lock()
+            .expect("session seq map should not be poisoned");
+        for mut message in messages {
+            stamp_session_seq(&mut seqs, &mut message);
             let _ = self.sender.send(message);
         }
     }
+
     pub(crate) async fn mutate_session_snapshot<F>(
         &self,
         state: &AppState,
@@ -384,6 +392,29 @@ impl PendingSessionDeltas {
         self.flush_scheduled = true;
         self.flush_generation = self.flush_generation.wrapping_add(1);
         Some(self.flush_generation)
+    }
+}
+
+/// Stamp the per-session broadcast sequence onto an outgoing snapshot/delta so
+/// clients can detect dropped/missed messages (disconnect, broadcast lag,
+/// conflation) and request a fresh snapshot. A snapshot carries the absolute
+/// `seq`; a delta carries the `base_seq` it must apply on top of plus the new
+/// `seq`. Every broadcast advances the counter by one, so a client whose stored
+/// seq does not equal a delta's `base_seq` knows it has a gap.
+fn stamp_session_seq(seqs: &mut HashMap<String, u64>, message: &mut ServerMessage) {
+    match message {
+        ServerMessage::SessionSnapshot { session_id, state } => {
+            let seq = seqs.entry(session_id.clone()).or_insert(0);
+            *seq += 1;
+            state.seq = *seq;
+        }
+        ServerMessage::SessionDelta { session_id, state } => {
+            let seq = seqs.entry(session_id.clone()).or_insert(0);
+            state.base_seq = *seq;
+            *seq += 1;
+            state.seq = *seq;
+        }
+        _ => {}
     }
 }
 
