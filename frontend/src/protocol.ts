@@ -566,7 +566,13 @@ export type ControlStatusProjection = {
   message?: string | null;
 };
 
-export type CodeStatus = "filesOnly";
+export type CodeStatus =
+  | "filesOnly"
+  | "starting"
+  | "indexing"
+  | "ready"
+  | "unavailable"
+  | "error";
 export type CodeWorkspaceSource = "session" | "reviewWorktree";
 
 export type CodeWorkspaceSummary = {
@@ -593,6 +599,24 @@ export type CodeFileContent = {
   text: string;
   size: number;
   version: number;
+};
+
+export type CodePosition = {
+  line: number;
+  character: number;
+};
+
+export type CodeRange = {
+  start: CodePosition;
+  end: CodePosition;
+};
+
+export type CodeLocation = {
+  kind: "local" | "external";
+  path?: string | null;
+  uri?: string | null;
+  label?: string | null;
+  range: CodeRange;
 };
 
 export type ConflictOperation = "merge" | "rebase" | "cherryPick" | "revert";
@@ -707,6 +731,9 @@ export type ServerMessage =
   | { type: "code.file"; workspaceId: string; file: CodeFileContent }
   | { type: "code.file.searchResults"; workspaceId: string; basePath: string; query: string; entries: CodeTreeEntry[] }
   | { type: "code.error"; workspaceId?: string | null; path?: string | null; message: string }
+  | { type: "code.definition"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
+  | { type: "code.references"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
+  | { type: "code.status"; workspaceId: string; status: CodeStatus; message?: string | null }
   | { type: "conflict.snapshot"; repos: ConflictRepositorySummary[] }
   | { type: "conflict.file"; file: ConflictFileState }
   | { type: "conflict.magicWandPreview"; preview: ConflictMagicWandPreview }
@@ -781,6 +808,8 @@ export type ClientMessage =
   | { type: "code.file.open"; workspaceId: string; path: string }
   | { type: "code.file.close"; workspaceId: string; path: string }
   | { type: "code.file.search"; workspaceId: string; basePath: string; query: string; limit?: number }
+  | { type: "code.definition"; workspaceId: string; path: string; line: number; character: number; requestId: string }
+  | { type: "code.references"; workspaceId: string; path: string; line: number; character: number; requestId: string }
   | { type: "conflict.scan"; root: string }
   | { type: "conflict.file.open"; repoId: string; path: string }
   | { type: "conflict.file.previewMagicWand"; repoId: string; path: string; expectedVersion: string }

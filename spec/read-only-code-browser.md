@@ -1,4 +1,4 @@
-# Read-only Code Browser with rust-analyzer
+# Fura Read-only Code Browser
 
 ## Goal
 
@@ -28,7 +28,7 @@ Implemented in commit `e3a446c Add read-only code viewer`:
 - Frontend module `frontend/src/codeViewer.ts` renders the Code panel, directory navigation, one active read-only file, syntax highlighting, and copy actions.
 - Protocol and viewer tests were added.
 
-Current status is intentionally `filesOnly`. `Cargo.toml` discovery exists so future rust-analyzer startup can be gated correctly, but rust-analyzer lifecycle, diagnostics, symbols, hover, and definition are still pending.
+`Cargo.toml` discovery gates lazy rust-analyzer startup. **Go-to-definition, find-references, and `code.status` are now implemented** (see the "Active slice" section below). Diagnostics, document symbols, and hover remain pending.
 
 Observed verification for `e3a446c`:
 
@@ -39,6 +39,15 @@ cargo test                         # 90 passed
 npm --prefix frontend test          # 28 files, 199 tests passed
 npm --prefix frontend run build      # passed; existing Mermaid chunk-size warning remains
 ```
+
+### Status update: Open in Code (diff → Code) is implemented and fixed
+
+"Open in Code" from the diff view already exists (listed under Milestone 5 below). Two fixes landed since:
+
+- Working-tree path: the requested file was dropped because `resetCodeViewForSession` cleared the pending open before `code.workspace.ready`. The pending request is now assigned after the reset, so the clicked file actually opens.
+- Review-commit path: simplified to a single opener. `openCodeRequest` only prepares the review worktree (checkout if cached, else ensure) and the `diff.reviewWorktree.state` handler is the sole place that sends `code.workspace.openRoot`. This removes a duplicate open and routes the cached-worktree case through a checkout to the correct ref.
+
+Both are covered by regression tests in `frontend/src/main.test.ts`.
 
 
 ## Core decisions
@@ -78,6 +87,23 @@ Browser <-> raw LSP <-> rust-analyzer
 ```
 
 The frontend should not own LSP capability negotiation, document sync, cancellation, request routing, URI mapping, or rust-analyzer-specific quirks.
+
+### Panel rust-analyzer is separate from the agent's LSP
+
+There are two distinct rust-analyzer instances and they are not shared:
+
+1. The OMP agent's rust-analyzer lives inside the OMP child process and serves the model (the `lsp` tool, diagnostics-on-write). It is toggled by the OMP `--no-lsp` flag.
+2. The Code panel's rust-analyzer is spawned and owned by the Fura bridge and serves the human reviewing code.
+
+They cannot be the same process: OMP's RPC surface exposes no LSP command (the `lsp` tool is only invokable by the model, not over RPC), so the bridge cannot drive the agent's analyzer for the Code panel. The Code panel runs its own rust-analyzer per workspace root, consistent with "OMP is the source of truth for agent execution; Fura projects state." Enabling the agent's LSP has no effect on the Code panel and vice versa.
+
+### Deliver go-to-definition and find-references first
+
+The first analysis features shipped are **go-to-definition** (`textDocument/definition`) and **find-references / callsites** (`textDocument/references`). These are point queries with no asynchronous `publishDiagnostics` push, which makes them the cleanest way to validate the analyzer lifecycle on a narrow surface. The bridge keeps the analyzer's view of a queried file current with `didOpen`/`didChange` from on-disk content; the user never edits in the viewer.
+
+Diagnostics, document symbols, and hover are explicitly deferred behind this slice. They are not prerequisites for the two navigation features and add stateful plumbing (diagnostics push, version-keyed symbol caches) that is not needed yet.
+
+Definition and references do not require `rust-analyzer.checkOnSave`/flycheck; they come from rust-analyzer's own semantic index. Keep `checkOnSave` off to stay light.
 
 ### Desktop-only v1
 
@@ -122,7 +148,7 @@ For the initial product scope, do not implement:
 
 - file editing,
 - saving,
-- LSP `didChange`,
+- interactive text editing,
 - completion,
 - rename,
 - code actions,
@@ -144,7 +170,7 @@ rust-analyzer should start lazily only when all of these are true:
 - the workspace is detected as a Rust workspace,
 - a feature that needs analysis is requested or enabled: diagnostics, document symbols, hover, or go-to-definition.
 
-Do not start rust-analyzer on Fura startup, WebSocket connect, session creation, or ordinary session attach.
+Do not start a rust-analyzer **LSP session** on Fura startup, WebSocket connect, session creation, or ordinary session attach. (A one-shot `rust-analyzer --version` availability probe does run at startup — it prints and exits without starting an LSP session or indexing — and aborts startup unless `--skip-rls-unavailable` is set.)
 
 ### Rust workspace detection
 
@@ -261,7 +287,8 @@ Extend `src/protocol.rs` and `frontend/src/protocol.ts` with Fura-domain code br
 | { type: "code.file.close"; workspaceId: string; path: string }
 | { type: "code.symbols"; workspaceId: string; path: string }
 | { type: "code.hover"; workspaceId: string; path: string; line: number; character: number }
-| { type: "code.definition"; workspaceId: string; path: string; line: number; character: number }
+| { type: "code.definition"; workspaceId: string; path: string; line: number; character: number; requestId: string }
+| { type: "code.references"; workspaceId: string; path: string; line: number; character: number; requestId: string }
 | { type: "code.diagnostics"; workspaceId: string; path?: string }
 ```
 
@@ -273,7 +300,8 @@ Extend `src/protocol.rs` and `frontend/src/protocol.ts` with Fura-domain code br
 | { type: "code.file"; workspaceId: string; file: CodeFileContent }
 | { type: "code.symbols"; workspaceId: string; path: string; symbols: CodeSymbol[] }
 | { type: "code.hover"; workspaceId: string; path: string; range?: CodeRange; markdown?: string; text?: string }
-| { type: "code.definition"; workspaceId: string; path: string; locations: CodeLocation[] }
+| { type: "code.definition"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
+| { type: "code.references"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
 | { type: "code.diagnostics"; workspaceId: string; diagnostics: CodeDiagnostic[] }
 | { type: "code.status"; workspaceId: string; status: "filesOnly" | "starting" | "indexing" | "ready" | "limited" | "unavailable" | "error"; message?: string }
 | { type: "code.error"; workspaceId?: string; path?: string; message: string }
@@ -319,7 +347,7 @@ Implemented notes:
 - `code.workspace.open`, `code.tree.list`, `code.file.open`, and `code.file.close` are wired through `ClientMessage`, `commands.rs`, and backend handlers.
 - `code.workspace.ready`, `code.tree`, `code.file`, and `code.error` are emitted as domain DTOs, not raw filesystem or LSP payloads.
 - The Code panel is added to Dockview with `renderer: "always"`, adjacent to Transcript.
-- Viewer renders one active file and avoids editor semantics: no mutation, save, cursor protocol, or `didChange`.
+- Viewer renders one active file and avoids editor semantics: no user mutation, save, or cursor protocol. (The bridge does send `didOpen`/`didChange` to keep the analyzer synced with on-disk content; the viewer itself stays read-only.)
 
 ### Milestone 2: rust-analyzer lifecycle and status — partially prepared, not implemented
 
@@ -356,6 +384,44 @@ Still pending:
 - analyzer status events beyond `filesOnly`.
 - diagnostics, symbols, hover, definition, cancellation, and analyzer idle shutdown.
 
+### Active slice: lazy go-to-definition + find-references — DONE
+
+Prioritized slice on top of Milestone 2's lifecycle. Delivers the two navigation features and nothing else.
+
+Shipped (as built):
+
+- The analyzer lives in `src/code_lsp.rs` (`Analyzer`: rust-analyzer child + `Content-Length` LSP transport + request-id correlation + `experimental/serverStatus`-driven readiness). It is stored in `CodeWorkspaceRegistry.analyzers` keyed by canonical `rust_root` and shared via `Arc` — not on `CodeWorkspace`, which derives `Clone`. `src/code.rs` orchestrates (lazy get-or-spawn, DTO projection, broadcast).
+- LSP wire shapes come from the `lsp-types` crate; `definition.linkSupport` is forced off so responses are `Location[]`. `file://` URIs are mapped to/from paths with a hand-written percent codec.
+- The analyzer binary is configurable via `--rust-analyzer-bin` / `FURA_RUST_ANALYZER_BIN` (default `rust-analyzer`).
+- Requests run in a background task; `code.status` and results are broadcast via the WS event coordinator. `ContentModified` (-32801) is retried with backoff so mid-index queries resolve instead of failing. Each `code.definition`/`code.references` carries a client-generated `requestId` echoed on the response, so a client ignores superseded or other-client replies; navigation status/errors are reported via `code.status`.
+- Verified by `src/code_lsp.rs` + `src/code.rs` tests (LSP framing, URI mapping, external classification, lazy gating, and a mock rust-analyzer driving the full def/refs lifecycle) plus `frontend` vitest coverage (UTF-16 column mapping, nav actions, references list, status strip, definition navigation).
+
+Backend:
+
+- `Analyzer` owned by the registry (keyed by canonical `rust_root`, shared via `Arc`), owning the rust-analyzer child, the LSP stdio transport, request-id correlation, and readiness state. Not on `CodeWorkspace`, which derives `Clone`.
+- Lazy start of the LSP session gated on all of: a discovered `rust_root` (re-checked from disk per request, not cached), an analysis request arriving, and the workspace being a Rust workspace. Never an LSP session on Fura startup, WebSocket connect, or session attach — the startup `--version` probe is a one-shot that does not start a session.
+- `textDocument/didOpen` from on-disk content for any file a query targets, plus `didChange` (bumped version) when that file's content changed since it was last pushed (the viewer is read-only, but a session worktree's files change as the agent edits).
+- `code.definition` → `textDocument/definition`; `code.references` → `textDocument/references` with `context.includeDeclaration: true`.
+- Project results into domain DTOs: map `file://` URIs back to workspace-relative paths; classify out-of-workspace targets as `external`. Never forward raw LSP locations.
+- Minimal `code.status`: `starting` | `indexing` | `ready` | `unavailable` | `error`. References can block until indexing completes, so the UI must show progress rather than hang.
+- Conservative analyzer config: proc-macros off, no automatic build-script/check execution, `checkOnSave` off.
+
+Frontend:
+
+- Map a click in the read-only viewer to an LSP position `{ line, character }` (LSP columns are UTF-16 code units — compute accordingly).
+- Go-to-definition: request `code.definition`; on a local result open the target file and scroll to the line (add scroll-to-line to the viewer); on `external` show a truthful, non-navigable label.
+- Find-references: request `code.references`; render locations as a results list grouped by file; clicking an entry jumps to that file+line.
+- Surface `code.status` so the panel shows "analysis starting / indexing / unavailable" instead of appearing frozen.
+
+Out of this slice: diagnostics, document symbols/outline, hover, formatting, rename, code actions, semantic tokens. Milestone 3 (diagnostics, symbols) and the hover half of Milestone 4 stay deferred until this slice ships.
+
+Acceptance:
+
+- Opening a non-Rust workspace never starts rust-analyzer; files-only browsing still works.
+- Definition on a local symbol opens the right file at the right line.
+- References returns the call sites across the workspace and each entry navigates correctly.
+- Missing `rust-analyzer` binary or analyzer crash yields a truthful `code.status: "error"`, not a hang.
+
 ### Milestone 3: diagnostics and document symbols
 
 Deliverables:
@@ -373,28 +439,26 @@ Behavior:
 - cache symbols by file version/content hash,
 - stale symbols must be refreshed or rejected.
 
-### Milestone 4: hover and go-to-definition
+### Milestone 4: hover — deferred (go-to-definition and find-references moved into the active slice above)
 
 Deliverables:
 
 - `code.hover`,
-- `code.definition`,
-- local go-to-definition opens the target file,
-- external definitions are classified honestly.
+- hover renders rust-analyzer markdown/text truthfully.
 
-External definition handling:
+External-target handling (shared with the active slice's definition/references):
 
 ```ts
 { kind: "external"; uri: string; label: string }
 ```
 
-Do not expand v1 into browsing the full Cargo registry unless explicitly chosen later.
+Out-of-workspace definition/reference targets are classified as external and shown as non-navigable labels. Do not expand v1 into browsing the full Cargo registry unless explicitly chosen later.
 
 ### Milestone 5: product integration polish
 
 Deliverables:
 
-- “Open in Code” from diff file paths,
+- “Open in Code” from diff file paths — DONE (working-tree + review-commit paths; see status update above),
 - “Open in Code” from relevant tool/read outputs,
 - file-change invalidation,
 - analyzer idle shutdown,

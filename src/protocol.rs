@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ClientConfig, CodeFileContent, CodeTreeEntry, CodeWorkspaceSummary, ConflictAgentMode,
-    ConflictAgentResult, ConflictAgentScope, ConflictFileState, ConflictMagicWandPreview,
-    ConflictRepositorySummary, ProposedModelConfig, SessionMode, SessionProjection,
-    SessionProjectionDelta, SessionSummary, ThinkingVisibilityPreference,
+    ClientConfig, CodeFileContent, CodeLocation, CodeStatus, CodeTreeEntry, CodeWorkspaceSummary,
+    ConflictAgentMode, ConflictAgentResult, ConflictAgentScope, ConflictFileState,
+    ConflictMagicWandPreview, ConflictRepositorySummary, ProposedModelConfig, SessionMode,
+    SessionProjection, SessionProjectionDelta, SessionSummary, ThinkingVisibilityPreference,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -856,6 +856,22 @@ pub(crate) enum ClientMessage {
         query: String,
         limit: Option<usize>,
     },
+    #[serde(rename = "code.definition")]
+    CodeDefinition {
+        workspace_id: String,
+        path: String,
+        line: u32,
+        character: u32,
+        request_id: String,
+    },
+    #[serde(rename = "code.references")]
+    CodeReferences {
+        workspace_id: String,
+        path: String,
+        line: u32,
+        character: u32,
+        request_id: String,
+    },
     #[serde(rename = "conflict.scan")]
     ConflictScan { root: String },
     #[serde(rename = "conflict.file.open")]
@@ -1100,6 +1116,27 @@ pub(crate) enum ServerMessage {
         workspace_id: Option<String>,
         path: Option<String>,
         message: String,
+    },
+    #[serde(rename = "code.definition")]
+    CodeDefinition {
+        workspace_id: String,
+        request_id: String,
+        path: String,
+        locations: Vec<CodeLocation>,
+    },
+    #[serde(rename = "code.references")]
+    CodeReferences {
+        workspace_id: String,
+        request_id: String,
+        path: String,
+        locations: Vec<CodeLocation>,
+    },
+    #[serde(rename = "code.status")]
+    CodeStatus {
+        workspace_id: String,
+        status: CodeStatus,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
     },
     #[serde(rename = "conflict.snapshot")]
     ConflictSnapshot {

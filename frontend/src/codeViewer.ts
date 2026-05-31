@@ -1,7 +1,12 @@
 import hljs from "highlight.js/lib/common";
 import { setRenderDocument, mkEl, copyTextToClipboard } from "./dom";
 import type { CodeFileComment } from "./codeComments";
-import type { CodeFileContent, CodeWorkspaceSummary } from "./protocol";
+import type { CodeFileContent, CodeLocation, CodeStatus, CodeWorkspaceSummary } from "./protocol";
+
+export type CodeReferencesState = {
+  path: string;
+  locations: CodeLocation[];
+};
 
 export type CodeViewerState = {
   activeSessionId: string | null;
@@ -20,6 +25,14 @@ export type CodeViewerState = {
   searchLoading: boolean;
   searchError: string | null;
   fileComments: CodeFileComment[];
+  // rust-analyzer navigation. `navSelection` carries an LSP position (0-based
+  // line, UTF-16 character) for the inline definition/references actions.
+  navSelection: { line: number; character: number } | null;
+  analyzerStatus: CodeStatus | null;
+  analyzerMessage: string | null;
+  references: CodeReferencesState | null;
+  // 1-based line to scroll to and flash after a navigation jump.
+  pendingScrollLine: number | null;
 };
 
 export type CodeViewerActions = {
@@ -38,6 +51,12 @@ export type CodeViewerActions = {
   deleteComment(comment: CodeFileComment): void;
   previewComments(): void;
   flushComments(): void;
+  selectNavPosition(line: number, character: number): void;
+  clearNavSelection(): void;
+  goToDefinition(line: number, character: number): void;
+  findReferences(line: number, character: number): void;
+  openReference(location: CodeLocation): void;
+  closeReferences(): void;
 };
 
 export function parentCodePath(path: string): string | null {
@@ -335,7 +354,8 @@ function renderCodeMain(state: CodeViewerState, actions: CodeViewerActions): HTM
   path.title = state.file.path;
   path.textContent = state.file.path;
   const meta = mkEl("span");
-  meta.textContent = `${state.file.language || "text"} · ${formatCodeFileSize(state.file.size)} · read-only`;
+  const navHint = state.workspace?.rustRoot ? " · click a symbol for definition / references" : "";
+  meta.textContent = `${state.file.language || "text"} · ${formatCodeFileSize(state.file.size)} · read-only${navHint}`;
   title.append(path, meta);
 
   const actionsBar = mkEl("div");
@@ -367,8 +387,13 @@ function renderCodeMain(state: CodeViewerState, actions: CodeViewerActions): HTM
   header.append(title, actionsBar);
   view.append(header);
 
+  const status = renderAnalyzerStatus(state);
+  if (status) view.append(status);
+
   const lines = renderCodeLines(state, actions);
   view.append(lines);
+
+  if (state.references) view.append(renderReferencesPanel(state, actions));
   return view;
 }
 
@@ -410,9 +435,22 @@ function renderCodeLines(state: CodeViewerState, actions: CodeViewerActions): HT
       codeEl.textContent = renderText;
     }
     content.append(codeEl);
+    content.addEventListener("click", event => {
+      const position = navPositionFromClick(event, codeEl, index);
+      if (position) actions.selectNavPosition(position.line, position.character);
+    });
 
     line.append(commentBtn, gutter, content);
     lineWrap.append(line);
+
+    if (state.navSelection && state.navSelection.line === index) {
+      lineWrap.append(renderNavActions(state.navSelection, actions));
+    }
+
+    if (state.pendingScrollLine === lineNumber) {
+      lineWrap.classList.add("code-line-flash");
+      scheduleScrollIntoView(lineWrap);
+    }
 
     if (lineComments.length > 0) {
       const thread = mkEl("div");
@@ -444,6 +482,192 @@ function renderCodeLines(state: CodeViewerState, actions: CodeViewerActions): HT
   }
 
   return container;
+}
+
+function renderNavActions(
+  selection: { line: number; character: number },
+  actions: CodeViewerActions,
+): HTMLElement {
+  const bar = mkEl("div");
+  bar.className = "code-nav-actions";
+  const label = mkEl("span");
+  label.className = "code-nav-actions-label";
+  label.textContent = `Line ${selection.line + 1}, col ${selection.character + 1}`;
+
+  const definition = mkEl("button");
+  definition.type = "button";
+  definition.textContent = "Go to definition";
+  definition.addEventListener("click", () =>
+    actions.goToDefinition(selection.line, selection.character),
+  );
+
+  const references = mkEl("button");
+  references.type = "button";
+  references.textContent = "Find references";
+  references.addEventListener("click", () =>
+    actions.findReferences(selection.line, selection.character),
+  );
+
+  const dismiss = mkEl("button");
+  dismiss.type = "button";
+  dismiss.className = "code-nav-actions-dismiss";
+  dismiss.textContent = "×";
+  dismiss.title = "Dismiss";
+  dismiss.addEventListener("click", actions.clearNavSelection);
+
+  bar.append(label, definition, references, dismiss);
+  return bar;
+}
+
+const ANALYZER_STATUS_TEXT: Partial<Record<CodeStatus, string>> = {
+  starting: "rust-analyzer is starting…",
+  indexing: "rust-analyzer is indexing the workspace…",
+  unavailable: "rust-analyzer is unavailable",
+  error: "rust-analyzer error",
+};
+
+function renderAnalyzerStatus(state: CodeViewerState): HTMLElement | null {
+  const status = state.analyzerStatus;
+  if (!status || status === "ready") return null;
+  if (status === "filesOnly") {
+    if (!state.analyzerMessage) return null;
+    const info = mkEl("div");
+    info.className = "code-analyzer-status code-analyzer-status-info";
+    info.textContent = state.analyzerMessage;
+    return info;
+  }
+  const base = ANALYZER_STATUS_TEXT[status];
+  if (!base) return null;
+  const strip = mkEl("div");
+  const severity = status === "unavailable" || status === "error" ? "error" : "busy";
+  strip.className = `code-analyzer-status code-analyzer-status-${severity}`;
+  strip.textContent = state.analyzerMessage ? `${base}: ${state.analyzerMessage}` : base;
+  return strip;
+}
+
+function renderReferencesPanel(state: CodeViewerState, actions: CodeViewerActions): HTMLElement {
+  const references = state.references;
+  const panel = mkEl("section");
+  panel.className = "code-references";
+
+  const header = mkEl("header");
+  header.className = "code-references-header";
+  const title = mkEl("strong");
+  const count = references ? references.locations.length : 0;
+  title.textContent = `References (${count})`;
+  const close = mkEl("button");
+  close.type = "button";
+  close.textContent = "Close";
+  close.addEventListener("click", actions.closeReferences);
+  header.append(title, close);
+  panel.append(header);
+
+  if (!references || references.locations.length === 0) {
+    panel.append(renderSearchEmpty("No references found."));
+    return panel;
+  }
+
+  // Group locations by their containing file, preserving first-seen order.
+  const groups = new Map<string, CodeLocation[]>();
+  for (const location of references.locations) {
+    const key = location.path ?? location.label ?? location.uri ?? "external";
+    const bucket = groups.get(key);
+    if (bucket) bucket.push(location);
+    else groups.set(key, [location]);
+  }
+
+  for (const [key, locations] of groups) {
+    const group = mkEl("div");
+    group.className = "code-references-group";
+    const groupTitle = mkEl("code");
+    groupTitle.className = "code-references-path";
+    groupTitle.textContent = key;
+    group.append(groupTitle);
+
+    for (const location of locations) {
+      const lineNumber = location.range.start.line + 1;
+      if (location.kind === "local" && location.path) {
+        const entry = mkEl("button");
+        entry.type = "button";
+        entry.className = "code-references-entry";
+        entry.textContent = `Line ${lineNumber}`;
+        entry.addEventListener("click", () => actions.openReference(location));
+        group.append(entry);
+      } else {
+        const entry = mkEl("span");
+        entry.className = "code-references-entry code-references-external";
+        entry.textContent = `Line ${lineNumber} (external)`;
+        group.append(entry);
+      }
+    }
+    panel.append(group);
+  }
+
+  return panel;
+}
+
+function navPositionFromClick(
+  event: MouseEvent,
+  codeEl: HTMLElement,
+  lineIndex: number,
+): { line: number; character: number } | null {
+  const doc = codeEl.ownerDocument;
+  const view = doc.defaultView;
+  // Ignore a click that completes a drag-to-copy on THIS line, but not when the
+  // user merely has text selected elsewhere in the app.
+  const selection = view?.getSelection();
+  if (
+    selection &&
+    !selection.isCollapsed &&
+    ((selection.anchorNode && codeEl.contains(selection.anchorNode)) ||
+      (selection.focusNode && codeEl.contains(selection.focusNode)))
+  ) {
+    return null;
+  }
+  const caret = caretFromPoint(doc, event.clientX, event.clientY);
+  if (!caret || !codeEl.contains(caret.node)) return null;
+  return { line: lineIndex, character: utf16ColumnWithin(codeEl, caret.node, caret.offset) };
+}
+
+function caretFromPoint(
+  doc: Document,
+  x: number,
+  y: number,
+): { node: Node; offset: number } | null {
+  const candidate = doc as Document & {
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  if (typeof candidate.caretPositionFromPoint === "function") {
+    const position = candidate.caretPositionFromPoint(x, y);
+    return position ? { node: position.offsetNode, offset: position.offset } : null;
+  }
+  if (typeof candidate.caretRangeFromPoint === "function") {
+    const range = candidate.caretRangeFromPoint(x, y);
+    return range ? { node: range.startContainer, offset: range.startOffset } : null;
+  }
+  return null;
+}
+
+/// Compute the UTF-16 column (LSP `character`) of a caret within a line's
+/// `<code>` element. DOM text offsets are already UTF-16 code units, so the
+/// length of the text preceding the caret is exactly the column.
+export function utf16ColumnWithin(codeEl: HTMLElement, node: Node, offset: number): number {
+  const range = codeEl.ownerDocument.createRange();
+  range.selectNodeContents(codeEl);
+  try {
+    range.setEnd(node, offset);
+  } catch {
+    return 0;
+  }
+  return range.toString().length;
+}
+
+function scheduleScrollIntoView(element: HTMLElement): void {
+  const view = element.ownerDocument.defaultView;
+  const run = () => element.scrollIntoView({ block: "center" });
+  if (view && typeof view.requestAnimationFrame === "function") view.requestAnimationFrame(run);
+  else run();
 }
 
 function renderCodeCommentItem(comment: CodeFileComment, actions: CodeViewerActions): HTMLElement {

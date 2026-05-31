@@ -273,6 +273,8 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::CodeFileOpen { .. } => "code.file.open",
         ClientMessage::CodeFileClose { .. } => "code.file.close",
         ClientMessage::CodeFileSearch { .. } => "code.file.search",
+        ClientMessage::CodeDefinition { .. } => "code.definition",
+        ClientMessage::CodeReferences { .. } => "code.references",
         ClientMessage::ConflictScan { .. } => "conflict.scan",
         ClientMessage::ConflictFileOpen { .. } => "conflict.file.open",
         ClientMessage::ConflictFilePreviewMagicWand { .. } => "conflict.file.previewMagicWand",
@@ -1149,6 +1151,9 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::CodeFile { .. } => "code.file",
         ServerMessage::CodeFileSearchResults { .. } => "code.file.searchResults",
         ServerMessage::CodeError { .. } => "code.error",
+        ServerMessage::CodeDefinition { .. } => "code.definition",
+        ServerMessage::CodeReferences { .. } => "code.references",
+        ServerMessage::CodeStatus { .. } => "code.status",
         ServerMessage::ConflictSnapshot { .. } => "conflict.snapshot",
         ServerMessage::ConflictFile { .. } => "conflict.file",
         ServerMessage::ConflictMagicWandPreview { .. } => "conflict.magicWandPreview",
@@ -1412,6 +1417,43 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             workspace_id = ?workspace_id,
             path = ?path,
             bytes = message.len()
+        ),
+        ServerMessage::CodeDefinition {
+            workspace_id,
+            request_id,
+            path,
+            locations,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.definition",
+            workspace_id = %workspace_id,
+            request_id = %request_id,
+            path = %path,
+            location_count = locations.len()
+        ),
+        ServerMessage::CodeReferences {
+            workspace_id,
+            request_id,
+            path,
+            locations,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.references",
+            workspace_id = %workspace_id,
+            request_id = %request_id,
+            path = %path,
+            location_count = locations.len()
+        ),
+        ServerMessage::CodeStatus {
+            workspace_id,
+            status,
+            message,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "code.status",
+            workspace_id = %workspace_id,
+            status = ?status,
+            bytes = message.as_deref().unwrap_or("").len()
         ),
         ServerMessage::ConflictSnapshot { repos } => info!(
             direction = "bridge_to_client",

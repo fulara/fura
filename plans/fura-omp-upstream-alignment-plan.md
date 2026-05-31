@@ -12,7 +12,7 @@ The likely older feature note is `/home/aleksander/repos/oh-my-pi/docs/gui-rpc-b
 Existing Fura planning notes also relevant:
 
 - `plans-done/FURA_FRONTEND_CONTROL_AGENT_PLAN.md`
-- `plans/read-only-code-browser-rust-analyzer-plan.md`
+- `spec/read-only-code-browser.md`
 - `plans/image-output-and-diagram-tools-plan.md`
 - `plans/fura-mobile-auth-plan.md`
 
@@ -206,7 +206,7 @@ Potential future use: browser/bridge-owned code navigation, conflict resolution,
 
 Current Fura code browser is read-only and intentionally not an IDE. Next useful alignment:
 
-- add on-demand Rust analyzer lifecycle/status from `plans/read-only-code-browser-rust-analyzer-plan.md`;
+- add on-demand Rust analyzer lifecycle/status from `spec/read-only-code-browser.md`;
 - keep analysis inside Fura bridge unless OMP exposes a stable LSP/RPC surface;
 - do not add editing until conflict/session semantics are robust.
 

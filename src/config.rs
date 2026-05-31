@@ -81,6 +81,15 @@ pub(crate) struct Args {
     /// Root directory containing OMP session JSONL files.
     #[arg(long, env = "FURA_SESSION_ROOT")]
     pub(crate) session_root: Option<PathBuf>,
+
+    /// Binary used to launch rust-analyzer for the read-only Code browser.
+    #[arg(long, env = "FURA_RUST_ANALYZER_BIN", default_value = "rust-analyzer")]
+    pub(crate) rust_analyzer_bin: String,
+
+    /// Start Fura even when the rust-analyzer availability check fails at
+    /// startup. Code-panel navigation will report errors until it is installed.
+    #[arg(long, env = "FURA_SKIP_RLS_UNAVAILABLE", default_value_t = false)]
+    pub(crate) skip_rls_unavailable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

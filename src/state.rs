@@ -44,6 +44,11 @@ pub(crate) struct AppState {
     pub(crate) events: WsEventCoordinator,
     pub(crate) session_host_tools: Arc<RwLock<HashMap<String, Vec<Value>>>>,
     pub(crate) rpc_config: Arc<RpcConfig>,
+    pub(crate) rust_analyzer_bin: Arc<String>,
+    /// Per-rust-root gate that serializes lazy rust-analyzer cold-start spawns so
+    /// concurrent navigation requests for the same root do not each launch a
+    /// child, while spawns for different roots still proceed in parallel.
+    pub(crate) analyzer_spawn_locks: Arc<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
     pub(crate) log_frames: bool,
     pub(crate) bridge_debug_file: Option<PathBuf>,
     pub(crate) event_debug_file: Option<PathBuf>,

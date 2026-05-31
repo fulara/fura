@@ -140,6 +140,7 @@ import {
 import {
   parentCodePath,
   renderCodeViewer,
+  type CodeReferencesState,
   type CodeViewerState,
 } from "./codeViewer";
 import {
@@ -156,6 +157,8 @@ import {
 import type {
   ClientMessage,
   CodeFileContent,
+  CodeLocation,
+  CodeStatus,
   CodeTreeEntry,
   CodeWorkspaceSummary,
   ControlCandidate,
@@ -1081,6 +1084,16 @@ let codeSearchResults: CodeTreeEntry[] = [];
 let codeSearchLoading = false;
 let codeSearchError: string | null = null;
 let codeSearchRequestTimer: number | null = null;
+let codeNavSelection: { line: number; character: number } | null = null;
+let codeAnalyzerStatus: CodeStatus | null = null;
+let codeAnalyzerMessage: string | null = null;
+let codeReferences: CodeReferencesState | null = null;
+let codePendingScrollLine: number | null = null;
+// Newest in-flight navigation request id per kind. Responses with a stale id
+// (an earlier/superseded query, or another client's query on a shared
+// workspace) are ignored.
+let codeDefinitionRequestId: string | null = null;
+let codeReferencesRequestId: string | null = null;
 let conflictRepos: ConflictRepositorySummary[] = [];
 let conflictRoot: string | null = null;
 let conflictSelectedRepoId: string | null = null;
@@ -2001,6 +2014,15 @@ function handleServerMessage(message: ServerMessage): void {
       codeTreeEntries = [];
       codeFile = null;
       codeError = null;
+      // A new workspace (session switch or review-worktree open) must not inherit
+      // the previous workspace's navigation/analyzer UI state.
+      codeNavSelection = null;
+      codeReferences = null;
+      codeAnalyzerStatus = null;
+      codeAnalyzerMessage = null;
+      codePendingScrollLine = null;
+      codeDefinitionRequestId = null;
+      codeReferencesRequestId = null;
       if (codeSearchOpen && !codeSearchBasePath) codeSearchBasePath = message.workspace.root;
       markCodeViewDirty();
       if (desktopDockview?.isPanelActive("code")) {
@@ -2137,6 +2159,28 @@ function handleServerMessage(message: ServerMessage): void {
           codeSearchLoading = false;
           codeSearchError = codeError;
         }
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      }
+      break;
+    case "code.definition":
+      if (codeWorkspace?.workspaceId === message.workspaceId && message.requestId === codeDefinitionRequestId) {
+        codeDefinitionRequestId = null;
+        handleCodeDefinition(message.locations);
+      }
+      break;
+    case "code.references":
+      if (codeWorkspace?.workspaceId === message.workspaceId && message.requestId === codeReferencesRequestId) {
+        codeReferencesRequestId = null;
+        codeReferences = { path: message.path, locations: message.locations };
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      }
+      break;
+    case "code.status":
+      if (codeWorkspace?.workspaceId === message.workspaceId) {
+        codeAnalyzerStatus = message.status;
+        codeAnalyzerMessage = message.message ?? null;
         markCodeViewDirty();
         renderCodePanelIfNeeded(true);
       }
@@ -3791,6 +3835,13 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeSearchResults = [];
   codeSearchLoading = false;
   codeSearchError = null;
+  codeNavSelection = null;
+  codeAnalyzerStatus = null;
+  codeAnalyzerMessage = null;
+  codeReferences = null;
+  codePendingScrollLine = null;
+  codeDefinitionRequestId = null;
+  codeReferencesRequestId = null;
   clearPendingCodeSearchRequest();
   markCodeViewDirty();
 }
@@ -3817,6 +3868,11 @@ function activeCodeViewState(): CodeViewerState {
     searchLoading: codeSearchLoading,
     searchError: codeSearchError,
     fileComments: activeCodeComments,
+    navSelection: codeNavSelection,
+    analyzerStatus: codeAnalyzerStatus,
+    analyzerMessage: codeAnalyzerMessage,
+    references: codeReferences,
+    pendingScrollLine: codePendingScrollLine,
   };
 }
 
@@ -3876,10 +3932,67 @@ function requestCodeTree(path: string): void {
 function requestCodeFile(path: string): void {
   if (!codeWorkspace) return;
   codeLoadingFile = true;
+  codeNavSelection = null;
+  // Opening a (possibly different) file supersedes any in-flight navigation, so
+  // a late reply for the previous file must not jump the panel or repopulate it.
+  codeDefinitionRequestId = null;
+  codeReferencesRequestId = null;
   codeError = null;
   markCodeViewDirty();
   renderCodePanelIfNeeded(true);
   send({ type: "code.file.open", workspaceId: codeWorkspace.workspaceId, path });
+}
+
+function requestCodeDefinition(line: number, character: number): void {
+  if (!codeWorkspace || !codeFile) return;
+  codeAnalyzerStatus = "starting";
+  codeAnalyzerMessage = null;
+  // A fresh attempt clears any prior navigation error (e.g. "No definition found").
+  codeError = null;
+  const requestId = randomUuid();
+  codeDefinitionRequestId = requestId;
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  send({ type: "code.definition", workspaceId: codeWorkspace.workspaceId, path: codeFile.path, line, character, requestId });
+}
+
+function requestCodeReferences(line: number, character: number): void {
+  if (!codeWorkspace || !codeFile) return;
+  codeAnalyzerStatus = "starting";
+  codeAnalyzerMessage = null;
+  codeError = null;
+  const requestId = randomUuid();
+  codeReferencesRequestId = requestId;
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  send({ type: "code.references", workspaceId: codeWorkspace.workspaceId, path: codeFile.path, line, character, requestId });
+}
+
+function handleCodeDefinition(locations: CodeLocation[]): void {
+  const local = locations.find(location => location.kind === "local" && location.path);
+  if (local) {
+    openReferenceLocation(local);
+    return;
+  }
+  codeError = locations.length === 0 ? "No definition found." : "Definition is outside this workspace.";
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+}
+
+function openReferenceLocation(location: CodeLocation): void {
+  if (location.kind !== "local" || !location.path) return;
+  codePendingScrollLine = location.range.start.line + 1;
+  if (codeFile && codeFile.path === location.path) {
+    markCodeViewDirty();
+    renderCodePanelIfNeeded(true);
+  } else {
+    // requestCodeFile first sets loadingFile=true, which guards the one-shot
+    // scroll from being consumed by the intermediate tree render. Request the
+    // target's parent tree explicitly so the sidebar follows even when an
+    // earlier tree load is still in flight.
+    requestCodeFile(location.path);
+    requestCodeTree(parentCodePath(location.path) ?? "");
+  }
 }
 
 function openCodeSearch(): void {
@@ -4035,12 +4148,12 @@ function openPathInCode(path: string): void {
 }
 
 function openCodeRequest(request: CodeOpenRequest): void {
-  pendingCodeOpenRequest = request;
   codeError = null;
   markCodeViewDirty();
   desktopDockview?.activatePanel("code");
   if (request.source === "sessionWorktree") {
     if (codeSessionId !== request.sessionId) resetCodeViewForSession(request.sessionId);
+    pendingCodeOpenRequest = request;
     if (codeWorkspace && codeSessionId === request.sessionId) {
       pendingCodeOpenRequest = null;
       requestCodeTree(parentCodePath(request.path) ?? "");
@@ -4052,16 +4165,15 @@ function openCodeRequest(request: CodeOpenRequest): void {
     return;
   }
 
+  // Prepare the review worktree at the requested ref; the diff.reviewWorktree.state
+  // handler is the single place that opens the code workspace once it is ready.
+  pendingCodeOpenRequest = request;
   const worktree = diffReviewWorktrees.get(request.repoRoot) ?? null;
-  if (!worktree) {
+  if (worktree) {
+    send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: request.target });
+  } else {
     send({ type: "diff.reviewWorktree.ensure", sourceRepoRoot: request.repoRoot, target: request.target });
-    return;
   }
-  send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: request.target });
-  codeSessionId = null;
-  codeWorkspace = null;
-  codeLoadingWorkspace = true;
-  send({ type: "code.workspace.openRoot", root: worktree.path, source: "reviewWorktree", reviewWorktreeId: worktree.id });
   renderCodePanelIfNeeded(true);
 }
 
@@ -4193,10 +4305,30 @@ function renderCodePanelIfNeeded(force = false): void {
           flushCodeComments(activeSessionId, codeFile);
         }
       },
+      selectNavPosition: (line, character) => {
+        codeNavSelection = { line, character };
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      },
+      clearNavSelection: () => {
+        codeNavSelection = null;
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      },
+      goToDefinition: requestCodeDefinition,
+      findReferences: requestCodeReferences,
+      openReference: openReferenceLocation,
+      closeReferences: () => {
+        codeReferences = null;
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      },
     });
   });
   if (!rendered) return;
   codePanelDirty = false;
+  // The scroll-to-line flash is one-shot: consume it once the target file is rendered.
+  if (codeFile && !codeLoadingFile) codePendingScrollLine = null;
 }
 
 function renderConflictPanelIfNeeded(force = false): void {

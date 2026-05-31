@@ -319,6 +319,20 @@ pub(crate) async fn handle_client_message(
             query,
             limit,
         } => handle_code_file_search(state, workspace_id, base_path, query, limit).await,
+        ClientMessage::CodeDefinition {
+            workspace_id,
+            path,
+            line,
+            character,
+            request_id,
+        } => handle_code_definition(state, workspace_id, path, line, character, request_id).await,
+        ClientMessage::CodeReferences {
+            workspace_id,
+            path,
+            line,
+            character,
+            request_id,
+        } => handle_code_references(state, workspace_id, path, line, character, request_id).await,
         ClientMessage::ConflictScan { root } => handle_conflict_scan(root).await,
         ClientMessage::ConflictFileOpen { repo_id, path } => {
             handle_conflict_file_open(repo_id, path).await

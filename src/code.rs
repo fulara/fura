@@ -9,10 +9,12 @@ use std::{
 use anyhow::{Context, anyhow, bail};
 use git2::Repository;
 use ignore::WalkBuilder;
+use lsp_types::{Position, Range as LspRange};
 use serde::Serialize;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::code_lsp::{Analyzer, AnalyzerHealth, ResolvedLocation};
 use crate::{AppState, CodeWorkspaceSource, ServerMessage};
 
 const MAX_CODE_FILE_BYTES: u64 = 1_000_000;
@@ -33,6 +35,7 @@ const IGNORED_DIRS: &[&str] = &[
 pub(crate) struct CodeWorkspaceRegistry {
     by_id: HashMap<String, CodeWorkspace>,
     by_key: HashMap<String, String>,
+    analyzers: HashMap<PathBuf, Arc<Analyzer>>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,10 +61,15 @@ pub(crate) struct CodeWorkspaceSummary {
     pub(crate) review_worktree_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum CodeStatus {
     FilesOnly,
+    Starting,
+    Indexing,
+    Ready,
+    Unavailable,
+    Error,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -88,6 +96,43 @@ pub(crate) struct CodeFileContent {
     pub(crate) text: String,
     pub(crate) size: u64,
     pub(crate) version: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodePosition {
+    pub(crate) line: u32,
+    pub(crate) character: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodeRange {
+    pub(crate) start: CodePosition,
+    pub(crate) end: CodePosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CodeLocationKind {
+    Local,
+    External,
+}
+
+/// A resolved navigation target. `Local` targets carry a workspace-relative
+/// path the browser can open; `External` targets (dependencies, stdlib) carry
+/// only a label and URI and are not navigable in the read-only browser.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CodeLocation {
+    pub(crate) kind: CodeLocationKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) label: Option<String>,
+    pub(crate) range: CodeRange,
 }
 
 pub(crate) async fn handle_code_workspace_open(
@@ -189,6 +234,318 @@ pub(crate) async fn handle_code_file_search(
             path: Some(base_path),
             message,
         }],
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NavigationKind {
+    Definition,
+    References,
+}
+
+pub(crate) async fn handle_code_definition(
+    state: &AppState,
+    workspace_id: String,
+    path: String,
+    line: u32,
+    character: u32,
+    request_id: String,
+) -> Vec<ServerMessage> {
+    start_navigation(
+        state,
+        workspace_id,
+        path,
+        line,
+        character,
+        request_id,
+        NavigationKind::Definition,
+    )
+    .await
+}
+
+pub(crate) async fn handle_code_references(
+    state: &AppState,
+    workspace_id: String,
+    path: String,
+    line: u32,
+    character: u32,
+    request_id: String,
+) -> Vec<ServerMessage> {
+    start_navigation(
+        state,
+        workspace_id,
+        path,
+        line,
+        character,
+        request_id,
+        NavigationKind::References,
+    )
+    .await
+}
+
+/// Validate the request synchronously, then run the (possibly slow) analyzer
+/// query in the background, broadcasting `code.status` + the result. The result
+/// carries `request_id` so a client ignores stale or other-client responses.
+async fn start_navigation(
+    state: &AppState,
+    workspace_id: String,
+    path: String,
+    line: u32,
+    character: u32,
+    request_id: String,
+    kind: NavigationKind,
+) -> Vec<ServerMessage> {
+    let workspace = match workspace_by_id(&state.code_workspaces, &workspace_id).await {
+        Ok(workspace) => workspace,
+        Err(message) => {
+            return vec![ServerMessage::CodeError {
+                workspace_id: Some(workspace_id),
+                path: Some(path),
+                message,
+            }];
+        }
+    };
+    // Re-discover the Rust root from disk each time: a cached workspace's
+    // rust_root can go stale if a Cargo.toml is added/removed during the session
+    // (e.g. an agent scaffolding a crate), and it gates navigation availability.
+    let Some(rust_root) = discover_rust_root(&workspace.root) else {
+        return vec![ServerMessage::CodeStatus {
+            workspace_id,
+            status: CodeStatus::FilesOnly,
+            message: Some(
+                "Rust navigation is unavailable: no Cargo.toml was found for this workspace."
+                    .to_string(),
+            ),
+        }];
+    };
+    let abs_path = match resolve_workspace_path(&workspace.root, &path) {
+        Ok(abs_path) => abs_path,
+        Err(err) => {
+            return vec![ServerMessage::CodeError {
+                workspace_id: Some(workspace_id),
+                path: Some(path),
+                message: err.to_string(),
+            }];
+        }
+    };
+    // Read the queried file synchronously so request-scoped failures (binary,
+    // non-UTF-8, too large, missing) are reported directly to the requester
+    // rather than broadcast as shared analyzer status. read_code_file enforces
+    // the same size/binary/UTF-8 guards as the file viewer.
+    let text = match read_code_file(&workspace.root, &path) {
+        Ok(file) => file.text,
+        Err(err) => {
+            return vec![ServerMessage::CodeError {
+                workspace_id: Some(workspace_id),
+                path: Some(path),
+                message: err.to_string(),
+            }];
+        }
+    };
+    let position = Position { line, character };
+    let state = state.clone();
+    tokio::spawn(async move {
+        run_navigation_query(
+            state, workspace, rust_root, path, abs_path, text, position, request_id, kind,
+        )
+        .await;
+    });
+    Vec::new()
+}
+
+async fn run_navigation_query(
+    state: AppState,
+    workspace: CodeWorkspace,
+    rust_root: PathBuf,
+    request_path: String,
+    abs_path: PathBuf,
+    text: String,
+    position: Position,
+    request_id: String,
+    kind: NavigationKind,
+) {
+    let workspace_id = workspace.workspace_id.clone();
+
+    let analyzer = match ensure_analyzer(&state, &rust_root).await {
+        Ok(analyzer) => analyzer,
+        Err(err) => {
+            emit_navigation_status(
+                &state,
+                &workspace_id,
+                CodeStatus::Unavailable,
+                Some(format!("rust-analyzer is unavailable: {err}")),
+            )
+            .await;
+            return;
+        }
+    };
+
+    emit_navigation_status(
+        &state,
+        &workspace_id,
+        status_from_health(analyzer.health()),
+        None,
+    )
+    .await;
+
+    let result = match kind {
+        NavigationKind::Definition => analyzer.definition(&abs_path, &text, position).await,
+        NavigationKind::References => analyzer.references(&abs_path, &text, position).await,
+    };
+
+    match result {
+        Ok(locations) => {
+            let locations = map_locations(&workspace.root, locations);
+            let result_message = match kind {
+                NavigationKind::Definition => ServerMessage::CodeDefinition {
+                    workspace_id: workspace_id.clone(),
+                    request_id,
+                    path: request_path,
+                    locations,
+                },
+                NavigationKind::References => ServerMessage::CodeReferences {
+                    workspace_id: workspace_id.clone(),
+                    request_id,
+                    path: request_path,
+                    locations,
+                },
+            };
+            state
+                .events
+                .emit_many(
+                    &state,
+                    vec![
+                        ServerMessage::CodeStatus {
+                            workspace_id,
+                            status: CodeStatus::Ready,
+                            message: None,
+                        },
+                        result_message,
+                    ],
+                )
+                .await;
+        }
+        Err(err) => {
+            if !analyzer.is_alive() {
+                drop_analyzer(&state, &rust_root).await;
+            }
+            emit_navigation_status(
+                &state,
+                &workspace_id,
+                CodeStatus::Error,
+                Some(err.to_string()),
+            )
+            .await;
+        }
+    }
+}
+
+/// Broadcast a per-workspace analyzer status. Status is intentionally not
+/// request-correlated: it reflects the shared analyzer's state for the root.
+async fn emit_navigation_status(
+    state: &AppState,
+    workspace_id: &str,
+    status: CodeStatus,
+    message: Option<String>,
+) {
+    state
+        .events
+        .emit(
+            state,
+            ServerMessage::CodeStatus {
+                workspace_id: workspace_id.to_string(),
+                status,
+                message,
+            },
+        )
+        .await;
+}
+
+/// Get the analyzer for `root`, spawning it lazily if needed. Cold-start spawns
+/// are serialized per root via `analyzer_spawn_locks` so concurrent misses do
+/// not each launch a child, while different roots still spawn in parallel; the
+/// registry lock is never held across the spawn await.
+async fn ensure_analyzer(state: &AppState, root: &Path) -> anyhow::Result<Arc<Analyzer>> {
+    if let Some(analyzer) = state.code_workspaces.read().await.alive_analyzer(root) {
+        return Ok(analyzer);
+    }
+    let gate = {
+        let mut locks = state.analyzer_spawn_locks.lock().await;
+        locks
+            .entry(root.to_path_buf())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    let _spawn_guard = gate.lock().await;
+    // Re-check under the gate: another task may have spawned while we waited.
+    if let Some(analyzer) = state.code_workspaces.read().await.alive_analyzer(root) {
+        return Ok(analyzer);
+    }
+    let analyzer = Analyzer::spawn(state.rust_analyzer_bin.as_str(), root).await?;
+    state
+        .code_workspaces
+        .write()
+        .await
+        .analyzers
+        .insert(root.to_path_buf(), analyzer.clone());
+    Ok(analyzer)
+}
+
+async fn drop_analyzer(state: &AppState, root: &Path) {
+    let removed = state.code_workspaces.write().await.analyzers.remove(root);
+    if let Some(analyzer) = removed {
+        tokio::spawn(async move { analyzer.shutdown().await });
+    }
+}
+
+fn status_from_health(health: AnalyzerHealth) -> CodeStatus {
+    match health {
+        AnalyzerHealth::Starting => CodeStatus::Starting,
+        AnalyzerHealth::Indexing => CodeStatus::Indexing,
+        AnalyzerHealth::Ready => CodeStatus::Ready,
+        AnalyzerHealth::Error => CodeStatus::Error,
+    }
+}
+
+fn map_locations(root: &Path, locations: Vec<ResolvedLocation>) -> Vec<CodeLocation> {
+    locations
+        .into_iter()
+        .map(|location| {
+            let range = code_range_from_lsp(location.range);
+            let canonical = location.path.canonicalize().unwrap_or(location.path);
+            match canonical.strip_prefix(root) {
+                Ok(relative) => CodeLocation {
+                    kind: CodeLocationKind::Local,
+                    path: Some(path_to_protocol(relative)),
+                    uri: None,
+                    label: None,
+                    range,
+                },
+                Err(_) => {
+                    let display = canonical.display().to_string();
+                    CodeLocation {
+                        kind: CodeLocationKind::External,
+                        path: None,
+                        uri: Some(format!("file://{display}")),
+                        label: Some(display),
+                        range,
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
+fn code_range_from_lsp(range: LspRange) -> CodeRange {
+    CodeRange {
+        start: CodePosition {
+            line: range.start.line,
+            character: range.start.character,
+        },
+        end: CodePosition {
+            line: range.end.line,
+            character: range.end.character,
+        },
     }
 }
 
@@ -308,6 +665,13 @@ impl CodeWorkspaceRegistry {
         self.by_id.insert(workspace_id, workspace.clone());
         workspace
     }
+
+    fn alive_analyzer(&self, root: &Path) -> Option<Arc<Analyzer>> {
+        self.analyzers
+            .get(root)
+            .filter(|analyzer| analyzer.is_alive())
+            .cloned()
+    }
 }
 
 fn workspace_key(
@@ -328,7 +692,7 @@ fn workspace_key(
 impl CodeWorkspace {
     fn summary(&self) -> CodeWorkspaceSummary {
         let status_message = match self.rust_root {
-            Some(_) => "Files only. Rust analysis starts in a later milestone.",
+            Some(_) => "Files only. Go to definition and find references load on demand.",
             None => "Files only. Cargo.toml was not found.",
         };
         CodeWorkspaceSummary {
@@ -949,5 +1313,402 @@ mod tests {
 
         assert_eq!(discover_rust_root(&root), Some(root.clone()));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn map_locations_classifies_local_and_external_targets() {
+        let root = temp_workspace();
+        fs::create_dir_all(root.join("src")).expect("src created");
+        fs::write(root.join("src/lib.rs"), "pub fn f() {}\n").expect("file written");
+        let local = ResolvedLocation {
+            path: root.join("src/lib.rs"),
+            range: LspRange {
+                start: Position {
+                    line: 2,
+                    character: 4,
+                },
+                end: Position {
+                    line: 2,
+                    character: 9,
+                },
+            },
+        };
+        let external = ResolvedLocation {
+            path: PathBuf::from("/nonexistent-external-dep/src/x.rs"),
+            range: LspRange {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 1,
+                },
+            },
+        };
+
+        let mapped = map_locations(&root, vec![local, external]);
+
+        assert_eq!(mapped.len(), 2);
+        assert_eq!(mapped[0].kind, CodeLocationKind::Local);
+        assert_eq!(mapped[0].path.as_deref(), Some("src/lib.rs"));
+        assert_eq!(mapped[0].range.start.line, 2);
+        assert_eq!(mapped[0].range.start.character, 4);
+        assert_eq!(mapped[1].kind, CodeLocationKind::External);
+        assert!(mapped[1].path.is_none());
+        assert!(mapped[1].label.as_deref().unwrap().contains("x.rs"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn definition_without_rust_root_reports_files_only_and_never_spawns() {
+        let mut state = crate::tests::test_state(8, None);
+        // A bogus binary would error loudly if a spawn were attempted.
+        state.rust_analyzer_bin = Arc::new("/nonexistent/rust-analyzer-xyz".to_string());
+        let root = temp_workspace();
+        fs::write(root.join("main.rs"), "fn main() {}\n").expect("file written");
+
+        let summary = open_workspace_for_root(
+            &state,
+            &root.display().to_string(),
+            CodeWorkspaceSource::Session,
+            None,
+            None,
+        )
+        .await
+        .expect("workspace opened");
+        assert!(summary.rust_root.is_none());
+
+        let messages = handle_code_definition(
+            &state,
+            summary.workspace_id,
+            "main.rs".to_string(),
+            0,
+            3,
+            "req-1".to_string(),
+        )
+        .await;
+
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            ServerMessage::CodeStatus { status, .. } => {
+                assert_eq!(*status, CodeStatus::FilesOnly)
+            }
+            other => panic!("expected code.status, got {other:?}"),
+        }
+        assert!(state.code_workspaces.read().await.analyzers.is_empty());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn definition_rediscovers_rust_root_after_cargo_appears() {
+        let mut state = crate::tests::test_state(8, None);
+        state.rust_analyzer_bin = Arc::new("/nonexistent/rust-analyzer-xyz".to_string());
+        let root = temp_workspace();
+        fs::write(root.join("main.rs"), "fn main() {}\n").expect("file written");
+        let summary = open_workspace_for_root(
+            &state,
+            &root.display().to_string(),
+            CodeWorkspaceSource::Session,
+            None,
+            None,
+        )
+        .await
+        .expect("workspace opened");
+        assert!(summary.rust_root.is_none());
+
+        // No manifest yet: navigation reports files-only.
+        let before = handle_code_definition(
+            &state,
+            summary.workspace_id.clone(),
+            "main.rs".to_string(),
+            0,
+            3,
+            "r1".to_string(),
+        )
+        .await;
+        assert!(matches!(
+            before.as_slice(),
+            [ServerMessage::CodeStatus {
+                status: CodeStatus::FilesOnly,
+                ..
+            }]
+        ));
+
+        // A Cargo.toml appears mid-session; the cached workspace must not freeze
+        // the gate — navigation now proceeds (async, returning no direct reply).
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest written");
+        let after = handle_code_definition(
+            &state,
+            summary.workspace_id,
+            "main.rs".to_string(),
+            0,
+            3,
+            "r2".to_string(),
+        )
+        .await;
+        assert!(
+            after.is_empty(),
+            "navigation should proceed once a Cargo.toml exists, got {after:?}"
+        );
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test]
+    async fn definition_rejects_binary_file_with_request_scoped_error() {
+        let mut state = crate::tests::test_state(8, None);
+        state.rust_analyzer_bin = Arc::new("/nonexistent/rust-analyzer-xyz".to_string());
+        let root = temp_workspace();
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("manifest written");
+        fs::write(root.join("data.bin"), [0_u8, 1, 2, 3]).expect("binary written");
+        let summary = open_workspace_for_root(
+            &state,
+            &root.display().to_string(),
+            CodeWorkspaceSource::Session,
+            None,
+            None,
+        )
+        .await
+        .expect("workspace opened");
+        assert!(summary.rust_root.is_some());
+
+        // A bad target file is a request error, not shared analyzer status, and
+        // must not spawn the analyzer.
+        let messages = handle_code_definition(
+            &state,
+            summary.workspace_id,
+            "data.bin".to_string(),
+            0,
+            0,
+            "r1".to_string(),
+        )
+        .await;
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            ServerMessage::CodeError { path, message, .. } => {
+                assert_eq!(path.as_deref(), Some("data.bin"));
+                assert!(message.contains("binary"));
+            }
+            other => panic!("expected code.error, got {other:?}"),
+        }
+        assert!(state.code_workspaces.read().await.analyzers.is_empty());
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[cfg(unix)]
+    fn python3_available() -> bool {
+        [
+            "/usr/bin/python3",
+            "/opt/homebrew/bin/python3",
+            "/usr/local/bin/python3",
+        ]
+        .iter()
+        .any(|candidate| Path::new(candidate).exists())
+    }
+
+    #[cfg(unix)]
+    fn write_mock_rust_analyzer(dir: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = r#"#!/usr/bin/env python3
+import sys, json, os
+
+def read_message():
+    headers = {}
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            return None
+        line = line.strip()
+        if line == b"":
+            break
+        if b":" in line:
+            key, value = line.split(b":", 1)
+            headers[key.strip().lower()] = value.strip()
+    length = int(headers.get(b"content-length", b"0"))
+    return json.loads(sys.stdin.buffer.read(length))
+
+def send(message):
+    data = json.dumps(message).encode("utf-8")
+    sys.stdout.buffer.write(b"Content-Length: %d\r\n\r\n" % len(data))
+    sys.stdout.buffer.write(data)
+    sys.stdout.buffer.flush()
+
+cwd = os.getcwd()
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    mid = message.get("id")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": mid, "result": {"capabilities": {}}})
+    elif method == "textDocument/definition":
+        send({"jsonrpc": "2.0", "id": mid, "result": [
+            {"uri": "file://" + cwd + "/src/target.rs",
+             "range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 7}}}
+        ]})
+    elif method == "textDocument/references":
+        send({"jsonrpc": "2.0", "id": mid, "result": [
+            {"uri": "file://" + cwd + "/src/main.rs",
+             "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 3}}},
+            {"uri": "file://" + cwd + "/src/target.rs",
+             "range": {"start": {"line": 1, "character": 2}, "end": {"line": 1, "character": 7}}}
+        ]})
+    elif method == "shutdown":
+        send({"jsonrpc": "2.0", "id": mid, "result": None})
+    elif method == "exit":
+        break
+"#;
+        let path = dir.join("mock-rust-analyzer");
+        fs::write(&path, script).expect("mock written");
+        let mut perms = fs::metadata(&path).expect("mock metadata").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).expect("mock made executable");
+        path
+    }
+
+    #[cfg(unix)]
+    async fn next_matching(
+        rx: &mut tokio::sync::broadcast::Receiver<ServerMessage>,
+        predicate: impl Fn(&ServerMessage) -> bool,
+    ) -> ServerMessage {
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(20), rx.recv())
+                .await
+                .expect("analyzer did not respond in time")
+                .expect("event channel closed");
+            if predicate(&message) {
+                return message;
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    async fn open_rust_workspace(state: &AppState, workspace: &Path) -> String {
+        fs::write(
+            workspace.join("Cargo.toml"),
+            "[package]\nname = \"demo\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .expect("manifest written");
+        fs::create_dir_all(workspace.join("src")).expect("src created");
+        fs::write(workspace.join("src/main.rs"), "fn main() { target(); }\n")
+            .expect("main written");
+        fs::write(workspace.join("src/target.rs"), "pub fn target() {}\n").expect("target written");
+        open_workspace_for_root(
+            state,
+            &workspace.display().to_string(),
+            CodeWorkspaceSource::Session,
+            None,
+            None,
+        )
+        .await
+        .expect("workspace opened")
+        .workspace_id
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn definition_query_resolves_local_target_via_mock_analyzer() {
+        if !python3_available() {
+            return;
+        }
+        let workspace = temp_workspace();
+        let mock_dir = temp_workspace();
+        let mock = write_mock_rust_analyzer(&mock_dir);
+        let mut state = crate::tests::test_state(64, None);
+        state.rust_analyzer_bin = Arc::new(mock.display().to_string());
+        let workspace_id = open_rust_workspace(&state, &workspace).await;
+
+        let mut rx = state.events.subscribe();
+        let immediate = handle_code_definition(
+            &state,
+            workspace_id,
+            "src/main.rs".to_string(),
+            0,
+            12,
+            "req-def".to_string(),
+        )
+        .await;
+        assert!(immediate.is_empty(), "result is delivered asynchronously");
+
+        let message = next_matching(&mut rx, |m| {
+            matches!(m, ServerMessage::CodeDefinition { .. })
+        })
+        .await;
+        match message {
+            ServerMessage::CodeDefinition {
+                locations,
+                request_id,
+                ..
+            } => {
+                assert_eq!(request_id, "req-def");
+                assert_eq!(locations.len(), 1);
+                assert_eq!(locations[0].kind, CodeLocationKind::Local);
+                assert_eq!(locations[0].path.as_deref(), Some("src/target.rs"));
+                assert_eq!(locations[0].range.start.line, 1);
+                assert_eq!(locations[0].range.start.character, 2);
+            }
+            other => panic!("expected code.definition, got {other:?}"),
+        }
+        assert_eq!(state.code_workspaces.read().await.analyzers.len(), 1);
+        fs::remove_dir_all(workspace).ok();
+        fs::remove_dir_all(mock_dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn references_query_returns_all_local_locations_via_mock_analyzer() {
+        if !python3_available() {
+            return;
+        }
+        let workspace = temp_workspace();
+        let mock_dir = temp_workspace();
+        let mock = write_mock_rust_analyzer(&mock_dir);
+        let mut state = crate::tests::test_state(64, None);
+        state.rust_analyzer_bin = Arc::new(mock.display().to_string());
+        let workspace_id = open_rust_workspace(&state, &workspace).await;
+
+        let mut rx = state.events.subscribe();
+        handle_code_references(
+            &state,
+            workspace_id,
+            "src/main.rs".to_string(),
+            0,
+            12,
+            "req-refs".to_string(),
+        )
+        .await;
+
+        let message = next_matching(&mut rx, |m| {
+            matches!(m, ServerMessage::CodeReferences { .. })
+        })
+        .await;
+        match message {
+            ServerMessage::CodeReferences { locations, .. } => {
+                assert_eq!(locations.len(), 2);
+                assert!(
+                    locations
+                        .iter()
+                        .all(|location| location.kind == CodeLocationKind::Local)
+                );
+                let paths: Vec<_> = locations
+                    .iter()
+                    .filter_map(|location| location.path.as_deref())
+                    .collect();
+                assert!(paths.contains(&"src/main.rs"));
+                assert!(paths.contains(&"src/target.rs"));
+            }
+            other => panic!("expected code.references, got {other:?}"),
+        }
+        fs::remove_dir_all(workspace).ok();
+        fs::remove_dir_all(mock_dir).ok();
     }
 }

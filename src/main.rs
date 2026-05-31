@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 mod catalog;
 mod code;
+mod code_lsp;
 mod commands;
 mod config;
 mod conflict;
@@ -149,6 +150,13 @@ async fn main() -> anyhow::Result<()> {
     initialize_database(&review_comment_db_path).map_err(anyhow::Error::msg)?;
     let (events, _) = broadcast::channel(512);
     let session_runtime = SessionRuntimeState::new(session_categories, session_modes);
+
+    // Hard availability check: `rust-analyzer --version` prints and exits (no LSP
+    // session, no indexing), so this respects lazy startup while failing fast
+    // when the Code panel's navigation could not work. `--skip-rls-unavailable`
+    // downgrades the failure to a warning.
+    let probe = code_lsp::probe_availability(&args.rust_analyzer_bin).await;
+    enforce_rust_analyzer_availability(&args.rust_analyzer_bin, probe, args.skip_rls_unavailable)?;
     let shared_state = AppState {
         token: Arc::new(token),
         auth_sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -172,6 +180,8 @@ async fn main() -> anyhow::Result<()> {
             program: args.rpc_program,
             args: rpc_args,
         }),
+        rust_analyzer_bin: Arc::new(args.rust_analyzer_bin),
+        analyzer_spawn_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         log_frames: args.log_frames,
         bridge_debug_file: args.bridge_debug_file,
         event_debug_file: args.event_debug_file,
@@ -325,6 +335,43 @@ fn query_view_param(query: Option<&str>) -> Option<&str> {
 
 async fn wait_for_shutdown(mut shutdown_rx: watch::Receiver<bool>) {
     let _ = shutdown_rx.changed().await;
+}
+
+/// Decide whether to proceed given a rust-analyzer availability probe result.
+/// `Ok` logs the version; `Err` aborts startup unless `skip` is set, in which
+/// case it degrades to a warning. Kept separate from `main` so the gating is
+/// unit-testable without spawning a process.
+fn enforce_rust_analyzer_availability(
+    bin: &str,
+    probe: Result<String, String>,
+    skip: bool,
+) -> anyhow::Result<()> {
+    match probe {
+        Ok(version) => {
+            info!(
+                action = "code.analyzer.probe",
+                bin = %bin,
+                available = true,
+                version = %version,
+                "rust-analyzer is available for the Code panel"
+            );
+            Ok(())
+        }
+        Err(error) if skip => {
+            warn!(
+                action = "code.analyzer.probe",
+                bin = %bin,
+                available = false,
+                %error,
+                "rust-analyzer is unavailable; continuing because --skip-rls-unavailable was set. Code panel navigation will report errors."
+            );
+            Ok(())
+        }
+        Err(error) => anyhow::bail!(
+            "rust-analyzer is unavailable ({bin}): {error}. \
+             Install it (e.g. `rustup component add rust-analyzer`) or pass --skip-rls-unavailable to start without code navigation."
+        ),
+    }
 }
 
 fn start_session_catalog_watcher(state: AppState) {
@@ -844,6 +891,43 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn rust_analyzer_check_proceeds_when_available() {
+        assert!(
+            enforce_rust_analyzer_availability(
+                "rust-analyzer",
+                Ok("rust-analyzer 1.0".to_string()),
+                false
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rust_analyzer_check_aborts_when_unavailable() {
+        let error = enforce_rust_analyzer_availability(
+            "rust-analyzer",
+            Err("unknown binary".to_string()),
+            false,
+        )
+        .expect_err("startup must abort when rust-analyzer is unavailable");
+        let message = error.to_string();
+        assert!(message.contains("rust-analyzer is unavailable"));
+        assert!(message.contains("--skip-rls-unavailable"));
+    }
+
+    #[test]
+    fn rust_analyzer_check_skips_when_flagged() {
+        assert!(
+            enforce_rust_analyzer_availability(
+                "rust-analyzer",
+                Err("unknown binary".to_string()),
+                true
+            )
+            .is_ok()
+        );
+    }
+
     pub(crate) fn test_state(
         channel_capacity: usize,
         bridge_debug_file: Option<PathBuf>,
@@ -873,6 +957,8 @@ pub(crate) mod tests {
                 program: "omp".into(),
                 args: Vec::new(),
             }),
+            rust_analyzer_bin: Arc::new("rust-analyzer".to_string()),
+            analyzer_spawn_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             log_frames: false,
             bridge_debug_file,
             event_debug_file: None,

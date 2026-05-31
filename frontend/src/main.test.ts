@@ -160,6 +160,9 @@ function simpleDiffRows(patch: string): DiffRow[] {
 let connections: FakeConnection[] = [];
 let fakeConnectionAutoOpen = true;
 let desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
+// The Code panel is opt-in per harness so its rendering does not perturb tests
+// that only assert on sent messages.
+let desktopMockMountCodePanel = false;
 
 function installMocks(): void {
   vi.doMock("./connection", () => ({
@@ -179,6 +182,8 @@ function installMocks(): void {
       goalPanel.id = "testGoalPanel";
       const conflictResolverPanel = document.createElement("div");
       conflictResolverPanel.id = "testConflictResolverPanel";
+      const codePanel = document.createElement("div");
+      codePanel.id = "testCodePanel";
       document.body.append(diffPanel, transcriptPanel, goalPanel, conflictResolverPanel);
       const panels: Record<string, HTMLElement> = {
         diffs: diffPanel,
@@ -186,6 +191,10 @@ function installMocks(): void {
         goal: goalPanel,
         conflictResolver: conflictResolverPanel,
       };
+      if (desktopMockMountCodePanel) {
+        document.body.append(codePanel);
+        panels.code = codePanel;
+      }
       return {
         panelMounted: (id: string) => Boolean(panels[id]),
         panelContains: (id: string, element: Element) => Boolean(panels[id]?.contains(element)),
@@ -206,11 +215,12 @@ function installMocks(): void {
   }));
 }
 
-async function createHarness(options: { preserveLocalStorage?: boolean } = {}) {
+async function createHarness(options: { preserveLocalStorage?: boolean; mountCodePanel?: boolean } = {}) {
   vi.resetModules();
   vi.restoreAllMocks();
   connections = [];
   desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
+  desktopMockMountCodePanel = options.mountCodePanel ?? false;
   fakeConnectionAutoOpen = true;
   document.body.innerHTML = `<div id="app"></div>`;
   if (!options.preserveLocalStorage) window.localStorage.clear();
@@ -231,6 +241,7 @@ async function createPendingHarness() {
   vi.restoreAllMocks();
   connections = [];
   desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
+  desktopMockMountCodePanel = false;
   fakeConnectionAutoOpen = false;
   document.body.innerHTML = `<div id="app"></div>`;
   window.localStorage.clear();
@@ -534,6 +545,292 @@ describe("desktop cog options", () => {
         thinkingLevel: "default",
       }],
     });
+  });
+
+  it("opens the clicked diff file in Code after the workspace loads", async () => {
+    const { connection } = await createHarness();
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: request.currentCommitOid, selectedFile: request.selectedFile, contextLines: request.contextLines ?? 3 },
+        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: " src/main.ts | 2 +-\n", truncated: false },
+      },
+    });
+    document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
+    connection.sent.length = 0;
+
+    const codeButton = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .find(button => button.textContent === "Code");
+    if (!codeButton) throw new Error("Code button missing");
+    codeButton.click();
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.workspace.open", sessionId: "live" }));
+
+    // Simulate the Code panel becoming active after activatePanel("code") in the real shell.
+    desktopMockActivePanelIds.add("code");
+    connection.emit({
+      type: "code.workspace.ready",
+      workspace: { workspaceId: "ws-1", sessionId: "live", root: "/repo", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
+    });
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.file.open", workspaceId: "ws-1", path: "src/main.ts" }));
+  });
+
+  it("opens a review-commit diff file in Code through a single worktree open", async () => {
+    const { connection } = await createHarness();
+    const commitOid = "c".repeat(40);
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
+    const baseState = sessionChangesState("live");
+    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...baseState,
+        targetClientId: request.clientId,
+        diffId: request.diffId,
+        request: { scope: "sessionChanges", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: commitOid, selectedFile: request.selectedFile, contextLines: request.contextLines ?? 3 },
+        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: " src/main.ts | 2 +-\n", truncated: false },
+        review: { commits: [{ oid: commitOid, shortOid: "cccccccc", subject: "Add logging", message: "Add logging", committedAt: "now", parentOids: [], isMerge: false }], currentCommitOid: commitOid, currentCommitIndex: 0, previousCommitOid: null },
+      },
+    });
+
+    // Seed the review worktree cache for /repo, as a prior diff.reviewWorktree.state would.
+    connection.emit({
+      type: "diff.reviewWorktree.state",
+      worktree: { id: "wt-1", sourceRepoRoot: "/repo", path: "/wt", checkedOutOid: commitOid, dirty: false, status: "ready", statusMessage: "ready" },
+    });
+
+    document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
+    connection.sent.length = 0;
+
+    const codeButton = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+      .find(button => button.textContent === "Code");
+    if (!codeButton) throw new Error("Code button missing");
+    codeButton.click();
+
+    // The simplified flow only prepares the worktree; it must not open the workspace directly.
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.reviewWorktree.checkout", worktreeId: "wt-1" }));
+    expect(connection.sent.some(message => message.type === "code.workspace.openRoot")).toBe(false);
+
+    // The checkout response is the single trigger that opens the workspace exactly once.
+    desktopMockActivePanelIds.add("code");
+    connection.emit({
+      type: "diff.reviewWorktree.state",
+      worktree: { id: "wt-1", sourceRepoRoot: "/repo", path: "/wt", checkedOutOid: commitOid, dirty: false, status: "ready", statusMessage: "ready" },
+    });
+
+    const openRootMessages = connection.sent.filter(message => message.type === "code.workspace.openRoot");
+    expect(openRootMessages).toHaveLength(1);
+    expect(openRootMessages[0]).toEqual(expect.objectContaining({ root: "/wt", source: "reviewWorktree", reviewWorktreeId: "wt-1" }));
+
+    connection.emit({
+      type: "code.workspace.ready",
+      workspace: { workspaceId: "ws-rev", root: "/wt", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "reviewWorktree", reviewWorktreeId: "wt-1" },
+    });
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.file.open", workspaceId: "ws-rev", path: "src/main.ts" }));
+  });
+
+  async function openCodeFileForNavigation(connection: FakeConnection): Promise<void> {
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    desktopMockActivePanelIds.add("code");
+    connection.emit({
+      type: "code.workspace.ready",
+      workspace: { workspaceId: "ws-1", sessionId: "live", root: "/repo", rustRoot: "/repo", status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
+    });
+    // Plain language keeps the line a single text node so the caret stub is simple.
+    connection.emit({
+      type: "code.file",
+      workspaceId: "ws-1",
+      file: { path: "src/main.rs", language: "", text: "fn main() { target(); }\n", size: 24, version: 1 },
+    });
+  }
+
+  // jsdom lacks caret APIs; stub one so a click resolves to a known column, then
+  // click the inline nav action. This exercises the real request path so the
+  // response can be correlated by requestId.
+  function triggerNavAction(label: string): void {
+    const content = document.querySelector<HTMLElement>("#testCodePanel .code-line-content");
+    if (!content) throw new Error("code line content missing");
+    const codeEl = content.querySelector("code");
+    if (!codeEl) throw new Error("code element missing");
+    (document as Document & { caretRangeFromPoint?: (x: number, y: number) => Range }).caretRangeFromPoint = () => {
+      const range = document.createRange();
+      range.setStart(codeEl.firstChild ?? codeEl, 3);
+      range.collapse(true);
+      return range;
+    };
+    content.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    const button = [...document.querySelectorAll<HTMLButtonElement>("#testCodePanel .code-nav-actions button")]
+      .find(candidate => candidate.textContent === label);
+    if (!button) throw new Error(`${label} action missing`);
+    button.click();
+  }
+
+  function sentRequestId(connection: FakeConnection, type: "code.definition" | "code.references"): string {
+    const sent = [...connection.sent].reverse().find(
+      (message): message is Extract<ClientMessage, { type: "code.definition" | "code.references" }> =>
+        message.type === type,
+    );
+    if (!sent) throw new Error(`${type} request not sent`);
+    return sent.requestId;
+  }
+
+  it("jumps to a local definition target for the issuing client's request", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    triggerNavAction("Go to definition");
+    const requestId = sentRequestId(connection, "code.definition");
+    connection.sent.length = 0;
+
+    connection.emit({
+      type: "code.definition",
+      workspaceId: "ws-1",
+      requestId,
+      path: "src/main.rs",
+      locations: [{ kind: "local", path: "src/target.rs", range: { start: { line: 4, character: 2 }, end: { line: 4, character: 9 } } }],
+    });
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.file.open", workspaceId: "ws-1", path: "src/target.rs" }));
+    // The sidebar tree must follow the jump even if a tree load is in flight.
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.tree.list", workspaceId: "ws-1", path: "src" }));
+  });
+
+  it("clears a prior navigation error when a new navigation runs", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    triggerNavAction("Go to definition");
+    const firstId = sentRequestId(connection, "code.definition");
+    connection.emit({
+      type: "code.definition",
+      workspaceId: "ws-1",
+      requestId: firstId,
+      path: "src/main.rs",
+      locations: [{ kind: "external", uri: "file:///dep/lib.rs", label: "/dep/lib.rs", range: { start: { line: 1, character: 0 }, end: { line: 1, character: 4 } } }],
+    });
+    expect(document.querySelector("#testCodePanel .code-error")?.textContent).toContain("outside this workspace");
+
+    triggerNavAction("Go to definition");
+    const secondId = sentRequestId(connection, "code.definition");
+    connection.emit({
+      type: "code.definition",
+      workspaceId: "ws-1",
+      requestId: secondId,
+      path: "src/main.rs",
+      locations: [{ kind: "local", path: "src/target.rs", range: { start: { line: 4, character: 2 }, end: { line: 4, character: 9 } } }],
+    });
+    expect(document.querySelector("#testCodePanel .code-error")).toBeNull();
+  });
+
+  it("does not navigate when the definition resolves outside the workspace", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    triggerNavAction("Go to definition");
+    const requestId = sentRequestId(connection, "code.definition");
+    connection.sent.length = 0;
+
+    connection.emit({
+      type: "code.definition",
+      workspaceId: "ws-1",
+      requestId,
+      path: "src/main.rs",
+      locations: [{ kind: "external", uri: "file:///dep/lib.rs", label: "/dep/lib.rs", range: { start: { line: 1, character: 0 }, end: { line: 1, character: 4 } } }],
+    });
+
+    expect(connection.sent.some(message => message.type === "code.file.open")).toBe(false);
+  });
+
+  it("renders find-references results grouped by file", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    triggerNavAction("Find references");
+    const requestId = sentRequestId(connection, "code.references");
+
+    connection.emit({
+      type: "code.references",
+      workspaceId: "ws-1",
+      requestId,
+      path: "src/main.rs",
+      locations: [
+        { kind: "local", path: "src/main.rs", range: { start: { line: 0, character: 12 }, end: { line: 0, character: 18 } } },
+        { kind: "local", path: "src/target.rs", range: { start: { line: 4, character: 2 }, end: { line: 4, character: 8 } } },
+      ],
+    });
+
+    const panel = document.querySelector("#testCodePanel .code-references");
+    expect(panel?.textContent).toContain("References (2)");
+    expect(document.querySelectorAll("#testCodePanel .code-references-group").length).toBe(2);
+  });
+
+  it("ignores an uncorrelated definition response (stale or other client)", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+    connection.sent.length = 0;
+
+    // No matching request was issued by this client, so the reply is dropped.
+    connection.emit({
+      type: "code.definition",
+      workspaceId: "ws-1",
+      requestId: "someone-elses-request",
+      path: "src/main.rs",
+      locations: [{ kind: "local", path: "src/target.rs", range: { start: { line: 4, character: 2 }, end: { line: 4, character: 9 } } }],
+    });
+
+    expect(connection.sent.some(message => message.type === "code.file.open")).toBe(false);
+  });
+
+  it("drops a navigation reply after the user opens a different file", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+
+    triggerNavAction("Go to definition");
+    const requestId = sentRequestId(connection, "code.definition");
+
+    // The user opens a different file before the reply arrives, which must
+    // invalidate the in-flight navigation request.
+    connection.emit({
+      type: "code.tree",
+      workspaceId: "ws-1",
+      path: "src",
+      entries: [{ name: "lib.rs", path: "src/lib.rs", kind: "file", size: 10 }],
+    });
+    const entry = [...document.querySelectorAll<HTMLButtonElement>("#testCodePanel .code-tree-entry-file")]
+      .find(candidate => candidate.textContent?.includes("lib.rs"));
+    if (!entry) throw new Error("tree entry missing");
+    entry.click();
+    connection.sent.length = 0;
+
+    connection.emit({
+      type: "code.definition",
+      workspaceId: "ws-1",
+      requestId,
+      path: "src/main.rs",
+      locations: [{ kind: "local", path: "src/target.rs", range: { start: { line: 4, character: 2 }, end: { line: 4, character: 9 } } }],
+    });
+
+    expect(connection.sent.some(message => message.type === "code.file.open" && message.path === "src/target.rs")).toBe(false);
   });
 
   it("opens a diff snapshot form with a timestamp-prefilled label", async () => {
