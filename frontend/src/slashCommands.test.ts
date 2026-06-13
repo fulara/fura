@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPaletteCommands, findSlashCommand, SLASH_COMMANDS } from "./slashCommands";
+import { buildCommandsPopupSections, findSlashCommand, SLASH_COMMANDS } from "./slashCommands";
 
 describe("slash command registry", () => {
   it("does not advertise /goal in Fura", () => {
@@ -8,25 +8,34 @@ describe("slash command registry", () => {
   });
 });
 
-describe("buildPaletteCommands", () => {
-  it("merges curated supported commands with non-builtin live extras, excludes builtins and tui-only", () => {
-    const live = [
-      { name: "tools", aliases: [], subcommands: [], source: "builtin", description: "Show tools" },
-      { name: "skill:develop-fura", aliases: [], subcommands: [], source: "skill", description: "Run skill" },
-      { name: "review", aliases: [], subcommands: [], source: "mcp_prompt", description: "MCP review" },
-    ];
-    const names = buildPaletteCommands(live).map(cmd => cmd.name);
-    expect(names).toContain("help"); // Fura-native curated command
-    expect(names).toContain("skill:develop-fura"); // non-builtin live extra
-    expect(names).toContain("review"); // mcp_prompt live extra
-    expect(names.filter(name => name === "tools")).toHaveLength(1); // builtin not duplicated
-    expect(names).not.toContain("settings"); // tui-only stays excluded
+describe("buildCommandsPopupSections", () => {
+  const live = [
+    { name: "skill:develop-fura", aliases: [], subcommands: [], source: "skill", description: "Develop Fura" },
+    { name: "deploy", aliases: [], subcommands: [], source: "file", description: "Deploy" },
+    { name: "tools", aliases: [], subcommands: [], source: "builtin", description: "Tools" },
+  ];
+
+  it("groups curated commands, live skills, and other live commands", () => {
+    const sections = buildCommandsPopupSections(live);
+    expect(sections.map(section => section.title)).toEqual(["Commands", "Skills", "Other commands"]);
+
+    const skills = sections.find(section => section.title === "Skills");
+    expect(skills?.rows.some(row => row.insertText === "/skill:develop-fura ")).toBe(true);
+
+    const other = sections.find(section => section.title === "Other commands");
+    expect(other?.rows.some(row => row.label === "/deploy")).toBe(true);
+    expect(other?.rows.some(row => row.label === "/tools")).toBe(false); // builtin excluded
+
+    const commands = sections.find(section => section.title === "Commands");
+    expect(commands?.rows.some(row => row.label.startsWith("/plan"))).toBe(true);
+    expect(commands?.rows.some(row => row.label === "/help")).toBe(false);
+    expect(commands?.rows.some(row => row.label === "/commands")).toBe(false);
   });
 
-  it("falls back to curated supported commands when no live commands are available", () => {
-    const pool = buildPaletteCommands([]);
-    expect(pool.length).toBeGreaterThan(0);
-    expect(pool.every(cmd => cmd.support === "supported")).toBe(true);
-    expect(pool.some(cmd => cmd.name === "help")).toBe(true);
+  it("returns only the Commands section when no live commands are available", () => {
+    const sections = buildCommandsPopupSections([]);
+    expect(sections).toHaveLength(1);
+    expect(sections[0].title).toBe("Commands");
+    expect(sections[0].rows.length).toBeGreaterThan(0);
   });
 });

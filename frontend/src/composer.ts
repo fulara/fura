@@ -18,6 +18,7 @@ export type PromptSubmitAction =
   | { type: "openCwdPicker" }
   | { type: "openForkPicker" }
   | { type: "openHandoffPicker" }
+  | { type: "openCommandsPopup"; sessionId: string }
   | { type: "sendPrompt"; sessionId: string };
 
 export type PromptSubmitDecisionInput = {
@@ -43,6 +44,9 @@ export function resolvePromptSubmitAction(input: PromptSubmitDecisionInput): Pro
   if (input.slashCommandName === "new") return { type: "openCwdPicker" };
   if (input.slashCommandName === "fork") return { type: "openForkPicker" };
   if (input.slashCommandName === "handoff") return { type: "openHandoffPicker" };
+  if (input.slashCommandName === "commands" || input.slashCommandName === "help") {
+    return { type: "openCommandsPopup", sessionId: input.activeSessionId };
+  }
   return { type: "sendPrompt", sessionId: input.activeSessionId };
 }
 

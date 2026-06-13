@@ -3274,6 +3274,14 @@ h2 {
   color: #ffaaa6;
 }
 
+.commands-popup-section-title {
+  padding: 0.5rem 0.5rem 0.25rem;
+  color: #9ba4b5;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 /* CWD picker */
 
 .cwd-picker.modal-panel {

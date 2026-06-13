@@ -1,7 +1,7 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
-import { buildPaletteCommands, findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
+import { buildCommandsPopupSections, findSlashCommand, fuzzyMatchCommands, SUPPORTED_SLASH_COMMANDS, type CommandPopupSection, type SlashCommandSpec } from "./slashCommands";
 import { formatContextUsage, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
@@ -382,6 +382,20 @@ app.innerHTML = `
     </section>
   </div>
 
+  <div id="commandsPopupOverlay" class="modal-overlay" hidden>
+    <section class="commands-popup modal-panel" role="dialog" aria-modal="true" aria-labelledby="commandsPopupTitle">
+      <header class="modal-header">
+        <div>
+          <h2 id="commandsPopupTitle">Commands</h2>
+          <p>Slash commands available in this session. Click to insert.</p>
+        </div>
+        <button id="commandsPopupClose" class="modal-close" type="button" aria-label="Close commands">×</button>
+      </header>
+      <input id="commandsPopupSearch" class="model-picker-search" autocomplete="off" spellcheck="false" placeholder="Filter commands and skills" />
+      <div id="commandsPopupList" class="model-picker-list" role="listbox" tabindex="0"></div>
+    </section>
+  </div>
+
   <div id="proposedModelsOverlay" class="modal-overlay" hidden>
     <section class="proposed-model-dialog modal-panel" role="dialog" aria-modal="true" aria-labelledby="proposedModelsTitle">
       <header class="modal-header">
@@ -707,6 +721,10 @@ const modelPickerList = requireElement<HTMLDivElement>("modelPickerList");
 const modelPickerStatus = requireElement<HTMLSpanElement>("modelPickerStatus");
 const modelPickerCancel = requireElement<HTMLButtonElement>("modelPickerCancel");
 const modelPickerSelect = requireElement<HTMLButtonElement>("modelPickerSelect");
+const commandsPopupOverlay = requireElement<HTMLDivElement>("commandsPopupOverlay");
+const commandsPopupClose = requireElement<HTMLButtonElement>("commandsPopupClose");
+const commandsPopupSearch = requireElement<HTMLInputElement>("commandsPopupSearch");
+const commandsPopupList = requireElement<HTMLDivElement>("commandsPopupList");
 const cwdPickerOverlay = requireElement<HTMLDivElement>("cwdPickerOverlay");
 const cwdPickerClose = requireElement<HTMLButtonElement>("cwdPickerClose");
 const cwdPickerTitle = requireElement<HTMLHeadingElement>("cwdPickerTitle");
@@ -1060,6 +1078,7 @@ const transcriptReviewActiveMessages = new Map<string, string>();
 const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
 const PROMPT_HISTORY_LIMIT = 100;
 let modelPickerSessionId: string | null = null;
+let commandsPopupSessionId: string | null = null;
 let modelPickerModels: ModelSummary[] = [];
 let modelPickerSelectedIndex = 0;
 let modelPickerLoading = false;
@@ -1296,6 +1315,10 @@ window.addEventListener("keydown", event => {
     return;
   }
   if (event.key === "Escape") {
+    if (!commandsPopupOverlay.hidden) {
+      closeCommandsPopup();
+      return;
+    }
     if (!proposedModelsOverlay.hidden) {
       closeProposedModelsDialog();
       return;
@@ -1352,6 +1375,11 @@ modelPickerSearch.addEventListener("input", () => {
 });
 modelPickerSearch.addEventListener("keydown", handleModelPickerKeydown);
 modelPickerList.addEventListener("keydown", handleModelPickerKeydown);
+commandsPopupClose.addEventListener("click", closeCommandsPopup);
+commandsPopupOverlay.addEventListener("mousedown", event => {
+  if (event.target === commandsPopupOverlay) closeCommandsPopup();
+});
+commandsPopupSearch.addEventListener("input", renderCommandsPopup);
 cwdPickerClose.addEventListener("click", closeCwdPicker);
 cwdPickerCancel.addEventListener("click", closeCwdPicker);
 cwdPickerCreate.addEventListener("click", submitCwdPicker);
@@ -1498,6 +1526,10 @@ promptForm.addEventListener("submit", event => {
     }
     case "openModelPicker":
       openModelPicker(action.sessionId);
+      clearPromptEditor();
+      return;
+    case "openCommandsPopup":
+      openCommandsPopup(action.sessionId);
       clearPromptEditor();
       return;
     case "openCwdPicker":
@@ -8124,6 +8156,65 @@ function renderModelPicker(): void {
   }
 }
 
+function openCommandsPopup(sessionId: string): void {
+  commandsPopupSessionId = sessionId;
+  commandsPopupSearch.value = "";
+  commandsPopupOverlay.hidden = false;
+  renderCommandsPopup();
+  window.setTimeout(() => commandsPopupSearch.focus(), 0);
+}
+
+function closeCommandsPopup(): void {
+  commandsPopupOverlay.hidden = true;
+  commandsPopupSessionId = null;
+  promptInput.focus();
+}
+
+function insertCommandFromPopup(insertText: string): void {
+  resetPromptHistoryNavigation();
+  promptInput.value = insertText;
+  closeCommandsPopup();
+}
+
+function renderCommandsPopup(): void {
+  const live = commandsPopupSessionId ? projections.get(commandsPopupSessionId)?.availableCommands ?? [] : [];
+  const query = commandsPopupSearch.value.trim().toLowerCase();
+  const sections: CommandPopupSection[] = buildCommandsPopupSections(live);
+  commandsPopupList.replaceChildren();
+  let anyRows = false;
+  for (const section of sections) {
+    const rows = query
+      ? section.rows.filter(r => r.label.toLowerCase().includes(query) || r.description.toLowerCase().includes(query))
+      : section.rows;
+    if (rows.length === 0) continue;
+    anyRows = true;
+    const header = document.createElement("div");
+    header.className = "commands-popup-section-title";
+    header.textContent = section.title;
+    commandsPopupList.append(header);
+    for (const row of rows) {
+      const el = document.createElement("button");
+      el.type = "button";
+      el.className = "model-picker-row";
+      const title = document.createElement("span");
+      title.className = "model-picker-row-title";
+      title.textContent = row.label;
+      const details = document.createElement("span");
+      details.className = "model-picker-row-details";
+      details.textContent = row.description;
+      el.append(title, details);
+      el.addEventListener("click", () => insertCommandFromPopup(row.insertText));
+      commandsPopupList.append(el);
+    }
+  }
+  if (!anyRows) {
+    const empty = document.createElement("div");
+    empty.className = "model-picker-empty";
+    empty.textContent = "No matching commands.";
+    commandsPopupList.append(empty);
+  }
+}
+
 
 // --- Command palette ---
 
@@ -8138,8 +8229,7 @@ function updatePalette(): void {
     return;
   }
   const query = text.slice(1);
-  const activeProjection = activeSessionId ? projections.get(activeSessionId) : undefined;
-  const matches = fuzzyMatchCommands(query, buildPaletteCommands(activeProjection?.availableCommands ?? []));
+  const matches = fuzzyMatchCommands(query, SUPPORTED_SLASH_COMMANDS);
   if (matches.length === 0) {
     hidePalette();
     return;

@@ -55,6 +55,8 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   { name: "force", description: "TUI force tool choice", support: "tui-only" },
 ];
 
+export const SUPPORTED_SLASH_COMMANDS: SlashCommandSpec[] = SLASH_COMMANDS.filter(cmd => cmd.support === "supported");
+
 export function findSlashCommand(input: string): SlashCommandSpec | undefined {
   const match = input.match(/^\/([^\s:]+)/);
   if (!match) return undefined;
@@ -96,26 +98,41 @@ export function fuzzyMatchCommands(
   return scored.map(s => s.cmd);
 }
 
-function availableCommandToSpec(cmd: RpcAvailableSlashCommand): SlashCommandSpec {
-  return {
-    name: cmd.name,
-    description: cmd.description ?? "",
-    usage: cmd.input?.hint ?? undefined,
-    support: "supported",
-    aliases: cmd.aliases,
-  };
-}
+export type CommandPopupRow = { label: string; description: string; insertText: string };
+export type CommandPopupSection = { title: string; rows: CommandPopupRow[] };
 
-/**
- * Palette pool: Fura's curated supported commands plus the dynamic, non-builtin
- * commands OMP advertises live (skills, MCP prompts, file/custom commands) that the
- * static list cannot know. OMP builtins stay represented by the curated static entries.
- */
-export function buildPaletteCommands(live: readonly RpcAvailableSlashCommand[]): SlashCommandSpec[] {
-  const staticSupported = SLASH_COMMANDS.filter(cmd => cmd.support === "supported");
-  const knownNames = new Set(SLASH_COMMANDS.flatMap(cmd => [cmd.name, ...(cmd.aliases ?? [])]));
-  const extras = live
-    .filter(cmd => cmd.source !== "builtin" && !knownNames.has(cmd.name))
-    .map(availableCommandToSpec);
-  return [...staticSupported, ...extras];
+const POPUP_OTHER_SOURCES = new Set(["file", "custom", "mcp_prompt", "extension"]);
+
+/** Groups the commands popup: curated supported commands, then live OMP skills, then other
+ *  live project commands. `help`/`commands` are omitted (self-referential). Empty groups are dropped. */
+export function buildCommandsPopupSections(live: readonly RpcAvailableSlashCommand[]): CommandPopupSection[] {
+  const curated = SLASH_COMMANDS.filter(
+    cmd => cmd.support === "supported" && cmd.name !== "help" && cmd.name !== "commands",
+  );
+  const curatedNames = new Set(SLASH_COMMANDS.flatMap(cmd => [cmd.name, ...(cmd.aliases ?? [])]));
+  const sections: CommandPopupSection[] = [
+    {
+      title: "Commands",
+      rows: curated.map(cmd => ({
+        label: `/${cmd.name}${cmd.usage ? ` ${cmd.usage}` : ""}`,
+        description: cmd.description,
+        insertText: `/${cmd.name} `,
+      })),
+    },
+  ];
+  const skills = live.filter(cmd => cmd.source === "skill");
+  if (skills.length > 0) {
+    sections.push({
+      title: "Skills",
+      rows: skills.map(cmd => ({ label: `/${cmd.name}`, description: cmd.description ?? "", insertText: `/${cmd.name} ` })),
+    });
+  }
+  const other = live.filter(cmd => POPUP_OTHER_SOURCES.has(cmd.source) && !curatedNames.has(cmd.name));
+  if (other.length > 0) {
+    sections.push({
+      title: "Other commands",
+      rows: other.map(cmd => ({ label: `/${cmd.name}`, description: cmd.description ?? "", insertText: `/${cmd.name} ` })),
+    });
+  }
+  return sections;
 }

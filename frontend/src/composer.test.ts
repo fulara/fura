@@ -64,6 +64,8 @@ describe("resolvePromptSubmitAction", () => {
     expect(resolvePromptSubmitAction({ ...base, slashCommandName: "new" })).toEqual({ type: "openCwdPicker" });
     expect(resolvePromptSubmitAction({ ...base, slashCommandName: "fork" })).toEqual({ type: "openForkPicker" });
     expect(resolvePromptSubmitAction({ ...base, slashCommandName: "handoff" })).toEqual({ type: "openHandoffPicker" });
+    expect(resolvePromptSubmitAction({ ...base, slashCommandName: "commands" })).toEqual({ type: "openCommandsPopup", sessionId: "session-1" });
+    expect(resolvePromptSubmitAction({ ...base, slashCommandName: "help" })).toEqual({ type: "openCommandsPopup", sessionId: "session-1" });
   });
 
   it("sends normal prompts and unknown slash commands", () => {

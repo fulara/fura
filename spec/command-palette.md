@@ -1,9 +1,11 @@
-# Dynamic command palette & server-side slash execution
+# Command palette & server-side slash execution
 
-Status: implemented. Covers the desktop command palette fed by OMP's advertised
-slash commands, plus rendering of OMP server-side slash output (`command_output`).
-Subagent-subscription visibility is intentionally **out of scope** here (deferred;
-Fura's inline task-card progress already covers live subagent progress).
+Status: implemented. The inline `/` typeahead lists only Fura's curated **supported**
+commands; a dedicated **Commands popup** (opened by `/commands` or `/help`) browses the full
+set — curated commands, live OMP **skills**, and other live project commands — with
+descriptions and click-to-insert. Also covers rendering of OMP server-side slash output
+(`command_output`). Subagent-subscription visibility is intentionally out of scope here
+(deferred; see `spec/subagent-visibility.md`).
 
 ## OMP contract consumed
 
@@ -53,27 +55,52 @@ OMP (`--mode rpc-ui`) advertises and runs slash commands:
   `plugins`, `reload-plugins`, `force`. (Sending these to OMP would forward them to the model
   as literal text, since OMP only auto-runs `handle` builtins.)
 
-## Desktop palette (frontend)
+## Desktop palette + commands popup (frontend)
 
-- `frontend/src/slashCommands.ts`:
-  - `SLASH_COMMANDS` is Fura's curated static list (Fura-native + builtins, with a
-    `support: supported | tui-only` flag kept in sync with the backend reclassification).
-  - `buildPaletteCommands(live)` = curated **supported** static commands **plus** the live
-    **non-builtin** advertised commands (`skill` / `mcp_prompt` / `file` / `custom` / `extension`)
-    not already in the static list. Builtins stay represented by the curated entries (so the
-    palette is stable and avoids suggesting interactive-only commands).
-  - `fuzzyMatchCommands(query, pool = SLASH_COMMANDS)` takes the pool.
-- `frontend/src/main.ts::updatePalette` feeds the pool from the active session's
-  `projection.availableCommands` (falls back to the static supported list when absent).
-- `command_output` renders through the existing session-notice pipeline
-  (`.message-command-notice`); no dedicated UI.
-- **Mobile**: no palette/command-output UI (no new mobile features). Mobile still consumes
-  the shared `protocol.ts` types and `slashCommands.ts` (`fuzzyMatchCommands` is backward
-  compatible).
+Two distinct surfaces:
+
+- **Inline `/` typeahead** (`frontend/src/main.ts::updatePalette`): fuzzy-matches against
+  `SUPPORTED_SLASH_COMMANDS` only (`SLASH_COMMANDS.filter(support === "supported")`). It does
+  **not** include live OMP commands — no `skill:` / MCP / file clutter while typing.
+- **Commands popup** (`#commandsPopupOverlay`, a `modal-overlay`/`modal-panel` modal cloned
+  from the model picker): opened when the composer submits `/commands` or `/help`. The submit
+  is intercepted in `frontend/src/composer.ts::resolvePromptSubmitAction`
+  (`slashCommandName ∈ {commands, help}` → `{ type: "openCommandsPopup", sessionId }`) and
+  routed in the `promptForm` submit `switch` to `openCommandsPopup`. The backend `/help`/
+  `/commands` notice arm is left intact for non-UI callers but is never reached from Fura's UI.
+
+`frontend/src/slashCommands.ts`:
+- `SLASH_COMMANDS` — Fura's curated static list (Fura-native + builtins) with a
+  `support: supported | tui-only` flag kept in sync with the backend reclassification.
+- `SUPPORTED_SLASH_COMMANDS` — the precomputed `support === "supported"` subset (inline pool).
+- `buildCommandsPopupSections(live)` — pure, returns the popup's grouped sections (no DOM):
+  - **Commands** — curated supported commands, minus `help`/`commands` (self-referential).
+  - **Skills** — live `availableCommands` with `source === "skill"` (omitted when empty).
+  - **Other commands** — live `source ∈ file | custom | mcp_prompt | extension` not already
+    curated (omitted when empty).
+  Each row carries `{ label, description, insertText: "/<name> " }`.
+- `fuzzyMatchCommands(query, pool = SLASH_COMMANDS)` still takes the pool (inline passes
+  `SUPPORTED_SLASH_COMMANDS`).
+
+`renderCommandsPopup` reads the active session's `projection.availableCommands` (snapshotted at
+open and re-read on each search keystroke; no live-delta subscription), renders grouped rows
+reusing the `model-picker-*` row classes plus `.commands-popup-section-title`, filters by the
+search box, and on row click inserts `insertText` into the composer and closes (Escape and the
+backdrop also close). **Skills are run, not just listed**: clicking a skill inserts
+`/skill:<name> ` and submitting forwards it to OMP, whose `prompt` handler matches `/skill:`
+(`tryRunRpcSkillCommand`) and re-injects that skill via `promptCustomMessage`. Typing
+`/skill:<name>` directly does the same.
+
+`command_output` renders through the existing session-notice pipeline (`.message-command-notice`);
+no dedicated UI.
+
+**Mobile**: no palette/popup/command-output UI. Mobile still consumes the shared `protocol.ts`
+types and `slashCommands.ts`.
 
 ## Invariants
 
-- Fura never invents commands: the palette is OMP's advertised set plus Fura-native entries.
+- Fura never invents commands: the inline pool is Fura's curated supported list; the popup's
+  Skills/Other sections come straight from OMP's advertised `availableCommands`.
 - `available_commands` is a pure projection of OMP state; deltas carry it
   (`applySessionDelta` copies it) so it survives transcript updates.
 - The `support` flag in `SLASH_COMMANDS` must track the backend denylist: a command marked
