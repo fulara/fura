@@ -76,6 +76,7 @@ export function applySessionDelta(
     goalMode: delta.goalMode,
     todoPhases: delta.todoPhases,
     pendingAsk: delta.pendingAsk,
+    availableCommands: delta.availableCommands,
     seq: delta.seq,
   };
   return applySessionSnapshot(sessions, projections, sessionId, projection);

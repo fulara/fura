@@ -1340,6 +1340,7 @@ pub(crate) fn opened_session_record(
         goal_mode: existing.and_then(|record| record.goal_mode.clone()),
         pending_plan_review: existing.and_then(|record| record.pending_plan_review.clone()),
         pending_ask: None,
+        available_commands: Vec::new(),
     }
 }
 
@@ -1684,10 +1685,14 @@ pub(crate) async fn handle_slash_command(
             }
             send_slash_rpc_command(state, session_id, command, "Requested HTML export.").await
         }
-        "settings" | "fast" | "browser" | "copy" | "dump" | "share" | "hotkeys" | "tools"
-        | "extensions" | "agents" | "branch" | "tree" | "login" | "logout" | "mcp" | "ssh"
-        | "resume" | "btw" | "background" | "bg" | "debug" | "memory" | "move" | "exit"
-        | "quit" | "marketplace" | "plugins" | "reload-plugins" | "force" => vec![notice(
+        // Genuinely TUI-only / interactive commands (no server-side `handle` in OMP): a notice.
+        // `handle`-bearing builtins (tools, context, jobs, stats, changelog, fast, browser, dump,
+        // share, …) intentionally fall through below to OMP, which runs them server-side in the
+        // prompt handler and streams the result back as a `command_output` frame.
+        "settings" | "copy" | "hotkeys" | "extensions" | "agents" | "branch" | "tree" | "login"
+        | "logout" | "mcp" | "ssh" | "resume" | "btw" | "background" | "bg" | "debug"
+        | "memory" | "move" | "exit" | "quit" | "marketplace" | "plugins" | "reload-plugins"
+        | "force" => vec![notice(
             session_id,
             NoticeLevel::Warning,
             format!(
@@ -3586,6 +3591,7 @@ mod review_comment_tests {
             goal_mode: None,
             pending_plan_review: None,
             pending_ask: None,
+            available_commands: Vec::new(),
         }
     }
 

@@ -1119,6 +1119,7 @@ pub(crate) async fn apply_get_state_update(
                             goal_mode: None,
                             pending_plan_review: None,
                             pending_ask: None,
+                            available_commands: Vec::new(),
                         }
                     });
 

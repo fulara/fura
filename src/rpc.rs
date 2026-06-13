@@ -39,7 +39,13 @@ const RECENT_RPC_STDERR_LINE_BYTES: usize = 4096;
 pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Result<(), String> {
     send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await?;
     send_rpc_command(state, session_id, get_messages_command(next_rpc_id())).await?;
-    send_rpc_command(state, session_id, get_session_stats_command(next_rpc_id())).await
+    send_rpc_command(state, session_id, get_session_stats_command(next_rpc_id())).await?;
+    send_rpc_command(
+        state,
+        session_id,
+        get_available_commands_command(next_rpc_id()),
+    )
+    .await
 }
 
 async fn is_model_catalog_transport(state: &AppState, session_id: &str) -> bool {
@@ -615,6 +621,10 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             | OmpRpcFrame::HostUriRequest { .. }
             | OmpRpcFrame::HostUriCancel { .. }
             | OmpRpcFrame::HostUriResult { .. }
+            | OmpRpcFrame::AvailableCommandsUpdate { .. }
+            | OmpRpcFrame::CommandOutput { .. }
+            | OmpRpcFrame::SessionInfoUpdate { .. }
+            | OmpRpcFrame::ConfigUpdate { .. }
             | OmpRpcFrame::Unknown => {}
         }
         return;
@@ -846,7 +856,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         let mut card = record.active_tool_calls.remove(pos);
                         card.is_active = false;
                         card.is_error = is_async_error;
-                        let todo_phases = if card.tool_name == "todo_write" && !card.is_error {
+                        let todo_phases = if is_todo_tool(&card.tool_name) && !card.is_error {
                             todo_phases_from_tool_result_value(partial_result.as_ref())
                         } else {
                             None
@@ -895,7 +905,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     {
                         if is_background_running {
                             let is_todo_write =
-                                record.active_tool_calls[pos].tool_name == "todo_write";
+                                is_todo_tool(&record.active_tool_calls[pos].tool_name);
                             if is_todo_write {
                                 if let Some(todo_phases) =
                                     todo_phases_from_tool_result_value(result.as_ref())
@@ -913,7 +923,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             let mut card = record.active_tool_calls.remove(pos);
                             card.is_active = false;
                             card.is_error = is_error;
-                            if card.tool_name == "todo_write" && !card.is_error {
+                            if is_todo_tool(&card.tool_name) && !card.is_error {
                                 if let Some(todo_phases) =
                                     todo_phases_from_tool_result_value(result.as_ref())
                                 {
@@ -951,6 +961,32 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     record.goal_mode = goal_mode;
                 })
                 .await;
+        }
+        OmpRpcFrame::AvailableCommandsUpdate { commands } => {
+            state
+                .events
+                .mutate_session_snapshot(state, &target_session_id, |record| {
+                    record.available_commands = commands;
+                })
+                .await;
+        }
+        OmpRpcFrame::CommandOutput { text } => {
+            if !text.trim().is_empty() {
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        notice(target_session_id.clone(), NoticeLevel::Info, text),
+                    )
+                    .await;
+            }
+        }
+        OmpRpcFrame::SessionInfoUpdate { .. } | OmpRpcFrame::ConfigUpdate { .. } => {
+            // Server-side slash commands (run by OMP in the prompt handler) can change
+            // title/model/thinking; re-fetch authoritative state so the projection stays current.
+            if let Err(message) = refresh_rpc_state(state, &target_session_id).await {
+                warn!(session_id = %target_session_id, %message, "post server-side-slash refresh failed");
+            }
         }
         OmpRpcFrame::Response(response) => {
             let _ = response.is_error();
@@ -1444,6 +1480,17 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     )
                     .await;
             }
+        }
+        Some("get_available_commands") => {
+            let commands = rpc_response_data_as::<OmpAvailableCommandsResponse>(frame)
+                .map(|data| data.commands)
+                .unwrap_or_default();
+            state
+                .events
+                .mutate_session_snapshot(state, &current_session_id, |record| {
+                    record.available_commands = commands;
+                })
+                .await;
         }
         Some("approve_plan_mode") => {
             let pending_name = state

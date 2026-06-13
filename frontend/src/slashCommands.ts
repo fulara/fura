@@ -1,3 +1,5 @@
+import type { RpcAvailableSlashCommand } from "./protocol";
+
 export type SlashCommandSupport = "supported" | "tui-only";
 
 export type SlashCommandSpec = {
@@ -24,13 +26,13 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
 
   { name: "settings", description: "TUI settings panel", support: "tui-only" },
   { name: "plan", description: "Toggle plan mode or start planning with a prompt", usage: "[prompt]", support: "supported" },
-  { name: "fast", description: "TUI fast-mode toggle", support: "tui-only" },
-  { name: "browser", description: "TUI browser mode selector", support: "tui-only" },
+  { name: "fast", description: "Toggle priority service tier", support: "supported" },
+  { name: "browser", description: "Toggle browser headless/visible mode", support: "supported" },
   { name: "copy", description: "TUI clipboard helper", support: "tui-only" },
-  { name: "dump", description: "TUI transcript copy", support: "tui-only" },
-  { name: "share", description: "TUI gist share flow", support: "tui-only" },
+  { name: "dump", description: "Copy session transcript", support: "supported" },
+  { name: "share", description: "Share session via an encrypted link", support: "supported" },
   { name: "hotkeys", description: "TUI hotkey help", support: "tui-only" },
-  { name: "tools", description: "TUI tools view", support: "tui-only" },
+  { name: "tools", description: "Show tools visible to the agent", support: "supported" },
   { name: "extensions", description: "TUI extension dashboard", support: "tui-only", aliases: ["status"] },
   { name: "agents", description: "TUI agent dashboard", support: "tui-only" },
   { name: "branch", description: "TUI branch picker", support: "tui-only" },
@@ -76,9 +78,12 @@ function fuzzyScore(query: string, text: string): number | null {
   return qi === q.length ? firstMatchPos : null;
 }
 
-export function fuzzyMatchCommands(query: string): SlashCommandSpec[] {
+export function fuzzyMatchCommands(
+  query: string,
+  pool: readonly SlashCommandSpec[] = SLASH_COMMANDS,
+): SlashCommandSpec[] {
   const scored: { cmd: SlashCommandSpec; score: number }[] = [];
-  for (const cmd of SLASH_COMMANDS) {
+  for (const cmd of pool) {
     const candidates = [cmd.name, ...(cmd.aliases ?? [])];
     let best: number | null = null;
     for (const c of candidates) {
@@ -89,4 +94,28 @@ export function fuzzyMatchCommands(query: string): SlashCommandSpec[] {
   }
   scored.sort((a, b) => a.score - b.score);
   return scored.map(s => s.cmd);
+}
+
+function availableCommandToSpec(cmd: RpcAvailableSlashCommand): SlashCommandSpec {
+  return {
+    name: cmd.name,
+    description: cmd.description ?? "",
+    usage: cmd.input?.hint ?? undefined,
+    support: "supported",
+    aliases: cmd.aliases,
+  };
+}
+
+/**
+ * Palette pool: Fura's curated supported commands plus the dynamic, non-builtin
+ * commands OMP advertises live (skills, MCP prompts, file/custom commands) that the
+ * static list cannot know. OMP builtins stay represented by the curated static entries.
+ */
+export function buildPaletteCommands(live: readonly RpcAvailableSlashCommand[]): SlashCommandSpec[] {
+  const staticSupported = SLASH_COMMANDS.filter(cmd => cmd.support === "supported");
+  const knownNames = new Set(SLASH_COMMANDS.flatMap(cmd => [cmd.name, ...(cmd.aliases ?? [])]));
+  const extras = live
+    .filter(cmd => cmd.source !== "builtin" && !knownNames.has(cmd.name))
+    .map(availableCommandToSpec);
+  return [...staticSupported, ...extras];
 }

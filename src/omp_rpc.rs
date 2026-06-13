@@ -129,6 +129,24 @@ pub(crate) enum OmpRpcFrame {
         is_error: Option<bool>,
         error: Option<String>,
     },
+    #[serde(rename = "available_commands_update")]
+    AvailableCommandsUpdate {
+        commands: Vec<RpcAvailableSlashCommand>,
+    },
+    #[serde(rename = "command_output")]
+    CommandOutput { text: String },
+    #[serde(rename = "session_info_update")]
+    SessionInfoUpdate {
+        title: Option<String>,
+        #[serde(rename = "sessionId")]
+        session_id: Option<String>,
+    },
+    #[serde(rename = "config_update")]
+    ConfigUpdate {
+        model: Option<Value>,
+        #[serde(rename = "thinkingLevel")]
+        thinking_level: Option<String>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -315,6 +333,39 @@ pub(crate) struct OmpAvailableModelsResponse {
     pub(crate) models: Vec<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RpcAvailableSlashCommandInput {
+    pub(crate) hint: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RpcAvailableSlashSubcommand {
+    pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) usage: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RpcAvailableSlashCommand {
+    pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) aliases: Vec<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) input: Option<RpcAvailableSlashCommandInput>,
+    #[serde(default)]
+    pub(crate) subcommands: Vec<RpcAvailableSlashSubcommand>,
+    pub(crate) source: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OmpAvailableCommandsResponse {
+    pub(crate) commands: Vec<RpcAvailableSlashCommand>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all_fields = "camelCase")]
 pub(crate) enum OmpRpcCommand {
@@ -409,6 +460,8 @@ pub(crate) enum OmpRpcCommand {
         #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
         ref_name: Option<String>,
     },
+    #[serde(rename = "get_available_commands")]
+    GetAvailableCommands { id: String },
 }
 
 impl OmpRpcCommand {
@@ -423,6 +476,10 @@ impl OmpRpcCommand {
 
 pub(crate) fn get_state_command(id: String) -> Value {
     OmpRpcCommand::GetState { id }.into_value()
+}
+
+pub(crate) fn get_available_commands_command(id: String) -> Value {
+    OmpRpcCommand::GetAvailableCommands { id }.into_value()
 }
 
 pub(crate) fn get_messages_command(id: String) -> Value {

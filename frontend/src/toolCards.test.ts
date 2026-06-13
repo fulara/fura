@@ -61,6 +61,16 @@ describe("renderToolCard", () => {
     expect(node.querySelector(".tool-status-icon")?.textContent).toBe("⠋");
   });
 
+  it("routes the renamed `todo` tool and historical `todo_write` to the todo card", () => {
+    for (const toolName of ["todo", "todo_write"]) {
+      const node = renderToolCard(tool({
+        toolName,
+        result: { details: { phases: [{ name: "Phase", tasks: [{ content: "Do it", status: "completed" }] }] } },
+      }));
+      expect(node.className).toContain("todo-write-card");
+    }
+  });
+
   it("renders generate_image details images", () => {
     const node = renderToolCard(tool({
       toolName: "generate_image",

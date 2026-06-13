@@ -186,6 +186,20 @@ export type PendingAskProjection = {
   url?: string | null;
   instructions?: string | null;
 };
+export type RpcAvailableSlashSubcommand = {
+  name: string;
+  description?: string | null;
+  usage?: string | null;
+};
+export type RpcAvailableSlashCommand = {
+  name: string;
+  aliases: string[];
+  description?: string | null;
+  input?: { hint?: string | null } | null;
+  subcommands: RpcAvailableSlashSubcommand[];
+  /** Origin: "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file". */
+  source: string;
+};
 export type SessionProjection = {
   summary: SessionSummary;
   transcript: TranscriptEntry[];
@@ -203,6 +217,9 @@ export type SessionProjection = {
   goalMode?: GoalModeProjection | null;
   todoPhases: TodoPhase[];
   pendingAsk?: PendingAskProjection | null;
+  /** Dynamic slash-command palette from OMP. Always present on the wire; optional here so
+   *  test fixtures and any pre-field projection stay valid. Consumers default to `[]`. */
+  availableCommands?: RpcAvailableSlashCommand[];
   seq: number;
 };
 
@@ -224,6 +241,7 @@ export type SessionProjectionDelta = {
   goalMode?: GoalModeProjection | null;
   todoPhases: TodoPhase[];
   pendingAsk?: PendingAskProjection | null;
+  availableCommands?: RpcAvailableSlashCommand[];
   baseSeq: number;
   seq: number;
 };

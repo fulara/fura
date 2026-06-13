@@ -1,7 +1,7 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
-import { findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
+import { buildPaletteCommands, findSlashCommand, fuzzyMatchCommands, type SlashCommandSpec } from "./slashCommands";
 import { formatContextUsage, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
@@ -8138,7 +8138,8 @@ function updatePalette(): void {
     return;
   }
   const query = text.slice(1);
-  const matches = fuzzyMatchCommands(query).filter(cmd => cmd.support === "supported");
+  const activeProjection = activeSessionId ? projections.get(activeSessionId) : undefined;
+  const matches = fuzzyMatchCommands(query, buildPaletteCommands(activeProjection?.availableCommands ?? []));
   if (matches.length === 0) {
     hidePalette();
     return;

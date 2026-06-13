@@ -14,7 +14,7 @@ import type {
 } from "./protocol";
 
 export function renderToolCard(card: ToolCard): HTMLElement {
-  if (card.toolName === "todo_write") return renderTodoWriteCard(card);
+  if (card.toolName === "todo" || card.toolName === "todo_write") return renderTodoWriteCard(card);
   if (card.toolName === "task") return renderTaskCard(card);
   if (card.toolName === "read") return renderReadToolCard(card);
   if (card.toolName === "grep") return renderGrepToolCard(card);

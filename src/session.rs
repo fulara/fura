@@ -1,4 +1,4 @@
-use crate::Timestamp;
+use crate::{RpcAvailableSlashCommand, Timestamp};
 use std::{
     collections::HashSet,
     io::{self, Write},
@@ -81,6 +81,9 @@ pub(crate) struct SessionRecord {
     /// or `None` when the session is not waiting on one. Carried verbatim so the
     /// frontend reuses its single dialog parser.
     pub(crate) pending_ask: Option<Value>,
+    /// Available slash commands advertised by OMP (`get_available_commands` /
+    /// `available_commands_update`). Drives the dynamic command palette. Empty until loaded.
+    pub(crate) available_commands: Vec<RpcAvailableSlashCommand>,
 }
 
 impl SessionRecord {
@@ -208,6 +211,7 @@ impl SessionRecord {
             goal_mode: self.goal_mode.clone(),
             todo_phases: self.effective_todo_phases(),
             pending_ask: self.projected_pending_ask(),
+            available_commands: self.available_commands.clone(),
             seq: 0,
         }
     }
@@ -293,6 +297,7 @@ pub(crate) struct SessionProjection {
     pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) pending_ask: Option<Value>,
+    pub(crate) available_commands: Vec<RpcAvailableSlashCommand>,
     pub(crate) seq: u64,
 }
 
@@ -316,6 +321,7 @@ pub(crate) struct SessionProjectionDelta {
     pub(crate) goal_mode: Option<GoalModeProjection>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) pending_ask: Option<Value>,
+    pub(crate) available_commands: Vec<RpcAvailableSlashCommand>,
     pub(crate) base_seq: u64,
     pub(crate) seq: u64,
 }
@@ -343,6 +349,7 @@ impl SessionProjectionDelta {
             goal_mode: projection.goal_mode.clone(),
             todo_phases: projection.todo_phases.clone(),
             pending_ask: projection.pending_ask.clone(),
+            available_commands: projection.available_commands.clone(),
             base_seq: 0,
             seq: 0,
         }
@@ -441,6 +448,12 @@ pub(crate) fn parse_todo_phases_value(
     serde_json::from_value(value.clone())
 }
 
+/// True for OMP's todo tool under either the current name (`todo`) or the pre-rename
+/// historical name (`todo_write`), which still appears in older persisted session logs.
+pub(crate) fn is_todo_tool(name: &str) -> bool {
+    matches!(name, "todo" | "todo_write")
+}
+
 pub(crate) fn todo_phases_from_tool_result_value(
     value: Option<&Value>,
 ) -> Option<Vec<TodoPhaseProjection>> {
@@ -452,7 +465,7 @@ fn latest_todo_phases_from_tool_cards(cards: &[ToolCard]) -> Option<Vec<TodoPhas
     cards
         .iter()
         .rev()
-        .filter(|card| card.tool_name == "todo_write" && !card.is_error)
+        .filter(|card| is_todo_tool(&card.tool_name) && !card.is_error)
         .find_map(|card| todo_phases_from_tool_result_value(card.result.as_ref()))
 }
 
@@ -929,6 +942,7 @@ mod tests {
             pending_plan_review: None,
             pending_ask: None,
             todo_phases: Vec::new(),
+            available_commands: Vec::new(),
             seq: 0,
         };
 
@@ -1219,6 +1233,7 @@ mod tests {
             pending_plan_review: None,
             pending_ask: None,
             todo_phases: Vec::new(),
+            available_commands: Vec::new(),
             seq: 0,
         };
 

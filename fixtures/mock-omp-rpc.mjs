@@ -103,6 +103,14 @@ const diffSnapshots = [
     headCommit: mockSnapshotHeadCommit,
   },
 ];
+
+const availableCommands = [
+  { name: "help", aliases: [], description: "Show Fura command help", subcommands: [], source: "builtin" },
+  { name: "model", aliases: ["models"], description: "Select model", input: { hint: "[provider/model]" }, subcommands: [], source: "builtin" },
+  { name: "tools", aliases: [], description: "Show tools visible to the agent", subcommands: [], source: "builtin" },
+  { name: "skill:develop-fura", aliases: [], description: "Run the develop-fura skill", subcommands: [], source: "skill" },
+  { name: "review", aliases: [], description: "MCP review prompt", subcommands: [], source: "mcp_prompt" },
+];
 function write(frame) {
   stdout.write(`${JSON.stringify(frame)}\n`);
 }
@@ -124,6 +132,7 @@ function error(command, message) {
 }
 
 write({ type: "ready" });
+write({ type: "available_commands_update", commands: availableCommands });
 stderr.write("mock rpc child ready\n");
 
 const rl = readline.createInterface({ input: stdin, crlfDelay: Infinity });
@@ -233,6 +242,10 @@ for await (const line of rl) {
       success(command, { models });
       break;
     }
+    case "get_available_commands": {
+      success(command, { commands: availableCommands });
+      break;
+    }
     case "set_model": {
       const nextModel = models.find(model => model.provider === command.provider && model.id === command.modelId);
       if (!nextModel) {
@@ -288,6 +301,13 @@ for await (const line of rl) {
       break;
     }
     case "prompt": {
+      const slashMessage = String(command.message ?? "");
+      if (slashMessage.startsWith("/")) {
+        // Server-side slash execution: echo a command_output frame, no model turn.
+        success(command);
+        write({ type: "command_output", text: `Mock command output for ${slashMessage.trim()}` });
+        break;
+      }
       if (String(command.message ?? "").includes("Fura Controller")) {
         const now = Date.now();
         success(command);

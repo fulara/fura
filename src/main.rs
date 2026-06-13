@@ -541,6 +541,7 @@ pub(crate) mod tests {
             goal_mode: None,
             pending_plan_review: None,
             pending_ask: None,
+            available_commands: Vec::new(),
         }
     }
 
@@ -4206,6 +4207,53 @@ pub(crate) mod tests {
         assert_eq!(
             projection.todo_phases[0].tasks[1].notes,
             vec!["Use mock RPC".to_string()]
+        );
+    }
+
+    #[test]
+    fn projects_current_todos_from_renamed_todo_card() {
+        // Upstream renamed the `todo_write` tool to `todo`; the both-names fix must still
+        // project current todos from the renamed tool-result card.
+        let raw_messages = vec![
+            serde_json::json!({
+                "id": "a1",
+                "role": "assistant",
+                "content": [{
+                    "type": "toolCall",
+                    "id": "todo-call",
+                    "name": "todo",
+                    "arguments": { "ops": [{ "op": "done", "task": "Check UI" }] }
+                }]
+            }),
+            serde_json::json!({
+                "id": "tr1",
+                "role": "toolResult",
+                "toolCallId": "todo-call",
+                "toolName": "todo",
+                "content": [{ "type": "text", "text": "Remaining items: none." }],
+                "details": {
+                    "phases": [{
+                        "name": "Investigation",
+                        "tasks": [
+                            { "content": "Check UI", "status": "completed" }
+                        ]
+                    }],
+                    "storage": "session"
+                },
+                "isError": false
+            }),
+        ];
+
+        let (_messages, tool_cards) = project_omp_transcript(&raw_messages);
+        let mut record = test_record();
+        record.tool_cards = tool_cards;
+        let projection = record.projection();
+
+        assert_eq!(projection.todo_phases.len(), 1);
+        assert_eq!(projection.todo_phases[0].name, "Investigation");
+        assert_eq!(
+            projection.todo_phases[0].tasks[0].status,
+            TodoStatusProjection::Completed
         );
     }
 

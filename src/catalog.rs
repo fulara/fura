@@ -136,6 +136,7 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                         goal_mode: session.goal_mode,
                         pending_plan_review: None,
                         pending_ask: None,
+                        available_commands: Vec::new(),
                     },
                 );
             }
