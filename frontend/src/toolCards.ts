@@ -132,6 +132,15 @@ function stringArg(args: Record<string, unknown>, key: string): string | undefin
   return typeof value === "string" && value.trim() ? value : undefined;
 }
 
+function pathScopeArg(args: Record<string, unknown>): string | undefined {
+  const legacyPath = stringArg(args, "path");
+  if (legacyPath) return legacyPath;
+  const paths = args.paths;
+  if (typeof paths === "string" && paths.trim()) return paths;
+  if (Array.isArray(paths)) return paths.find((value): value is string => typeof value === "string" && value.trim().length > 0);
+  return undefined;
+}
+
 function renderGrepToolCard(card: ToolCard): HTMLElement {
   const wrapper = mkEl("section");
   wrapper.className = `tool-card grep-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${card.isError ? "" : "tool-compact"}`;
@@ -181,10 +190,10 @@ function grepMetaSummary(card: ToolCard): string {
   if (matchCount !== undefined) parts.push(formatCount("match", matchCount));
   if (fileCount !== undefined) parts.push(formatCount("file", fileCount));
 
-  const scope = stringDetail(details, "scopePath") ?? stringArg(card.args, "path");
+  const scope = stringDetail(details, "scopePath") ?? pathScopeArg(card.args);
   if (scope) parts.push(`in ${shortPath(scope)}`);
   if (booleanDetail(details, "truncated")) parts.push("truncated");
-  if (stringArg(card.args, "i") === "true" || card.args.i === true) parts.push("case:insensitive");
+  if (card.args.case === false || stringArg(card.args, "i") === "true" || card.args.i === true) parts.push("case:insensitive");
 
   return parts.join(" · ");
 }

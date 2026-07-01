@@ -60,6 +60,13 @@ if (( ${#native_addons[@]} == 0 )); then
   exit 1
 fi
 
+if ! (cd "${OMP_REPO}/packages/coding-agent" && PATH="$(dirname -- "${BUN_BIN}"):${PATH}" "${BUN_BIN}" src/cli.ts --version >/dev/null); then
+  echo "OMP CLI/native preflight failed. Rebuild the native addon for this checkout." >&2
+  echo "Run: env RUSTUP_TOOLCHAIN=nightly-2026-04-29 bun run build:native" >&2
+  echo "from: ${OMP_REPO}" >&2
+  exit 1
+fi
+
 resolved_remote_ip=""
 if command -v python >/dev/null 2>&1; then
   resolved_remote_ip=$(python - "${FURA_REMOTE_HOST}" <<'PY' || true

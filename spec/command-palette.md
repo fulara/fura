@@ -49,11 +49,11 @@ OMP (`--mode rpc-ui`) advertises and runs slash commands:
 - **`handle`-bearing builtins Fura has no native UI for** (`tools`, `context`, `jobs`, `stats`,
   `changelog`, `fast`, `browser`, `dump`, `share`) fall through to OMP, which runs them
   server-side and returns `command_output`. They were removed from the TUI-only denylist.
-- **`handleTui`-only / interactive** commands still return a notice (no server-side handle):
-  `settings`, `copy`, `hotkeys`, `extensions`, `agents`, `branch`, `tree`, `login`, `logout`,
-  `mcp`, `ssh`, `resume`, `btw`, `background`, `debug`, `memory`, `move`, `exit`, `marketplace`,
-  `plugins`, `reload-plugins`, `force`. (Sending these to OMP would forward them to the model
-  as literal text, since OMP only auto-runs `handle` builtins.)
+- **Interactive commands without safe Fura projection state** still return a notice. Most are
+  `handleTui`-only: `settings`, `copy`, `hotkeys`, `extensions`, `agents`, `branch`, `tree`,
+  `login`, `logout`, `mcp`, `ssh`, `resume`, `btw`, `background`, `debug`, `memory`, `exit`,
+  `marketplace`, `plugins`, `reload-plugins`, `force`. `/move` has an OMP server-side `handle`
+  in v16.2, but Fura keeps it blocked until OMP RPC exposes authoritative cwd after the move.
 
 ## Desktop palette + commands popup (frontend)
 

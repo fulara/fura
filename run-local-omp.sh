@@ -49,6 +49,13 @@ if [[ -n "${required_bun}" ]]; then
   fi
 fi
 
+if ! (cd "${OMP_REPO}/packages/coding-agent" && PATH="$(dirname -- "${BUN_BIN}"):${PATH}" "${BUN_BIN}" src/cli.ts --version >/dev/null); then
+  echo "OMP CLI/native preflight failed. Rebuild the native addon for this checkout." >&2
+  echo "Run: env RUSTUP_TOOLCHAIN=nightly-2026-04-29 bun run build:native" >&2
+  echo "from: ${OMP_REPO}" >&2
+  exit 1
+fi
+
 export FURA_TOKEN
 export FURA_BRIDGE_DEBUG_FILE
 export FURA_EVENT_DEBUG_FILE

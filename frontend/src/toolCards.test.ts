@@ -178,6 +178,20 @@ describe("grep cards", () => {
     expect(node.querySelector(".tool-args-summary")?.textContent).toContain("0 matches");
     expect(node.querySelector(".grep-tool-summary")?.textContent).toBe("No matches found");
   });
+
+  it("summarizes upstream grep paths and case sensitivity args", () => {
+    const node = renderToolCard(tool({
+      toolName: "grep",
+      args: { pattern: "needle", paths: ["src"], case: false },
+      result: { text: "src/main.ts:1:needle", details: { matchCount: 1, fileCount: 1 } },
+    }));
+
+    const summary = node.querySelector(".tool-args-summary")?.textContent ?? "";
+    expect(summary).toContain("1 match");
+    expect(summary).toContain("1 file");
+    expect(summary).toContain("in src");
+    expect(summary).toContain("case:insensitive");
+  });
 });
 
 describe("tool helpers", () => {
