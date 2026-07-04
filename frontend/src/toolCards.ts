@@ -214,7 +214,7 @@ function grepCollapsedSummary(card: ToolCard): string {
   if (matchCount === 0 || resultText.trim() === "No matches found") return "No matches found";
   if (matchCount !== undefined) return `${formatCount("match", matchCount)} collapsed`;
 
-  const lineCount = resultText.split("\n").filter(line => line.trim()).length;
+  const lineCount = countNonEmptyLines(resultText);
   if (lineCount > 0) return `${formatCount("line", lineCount)} collapsed`;
   return "";
 }
@@ -242,19 +242,27 @@ function formatCount(noun: string, count: number): string {
   return `${count} ${count === 1 ? noun : plural}`;
 }
 
+function countNonEmptyLines(text: string): number {
+  return text.split("\n").filter(line => line.trim()).length;
+}
+
 function appendToolResultBody(wrapper: HTMLElement, resultText: string, open = false): void {
   if (!resultText) return;
-  const lineCount = resultText.split("\n").filter(line => line.trim()).length;
+  // Count on the truncated text so huge outputs don't allocate a full line
+  // array just for the summary; the "+" marks that more lines exist.
+  const truncated = truncate(resultText, 8000);
+  const lineCount = countNonEmptyLines(truncated);
+  const suffix = truncated.length < resultText.length ? "+" : "";
   const body = mkEl("details");
   body.className = "tool-result-details";
   body.open = open;
   const summary = mkEl("summary");
   summary.className = "tool-result-summary";
-  summary.textContent = `└─ ${formatCount("line", lineCount)}`;
+  summary.textContent = `└─ ${lineCount}${suffix} ${lineCount === 1 && !suffix ? "line" : "lines"}`;
   body.append(summary);
   const pre = mkEl("pre");
   pre.className = "tool-result-text";
-  pre.textContent = truncate(resultText, 8000);
+  pre.textContent = truncated;
   body.append(pre);
   wrapper.append(body);
 }
