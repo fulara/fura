@@ -75,9 +75,7 @@ fn build_omp_rpc_args(no_default_rpc_args: bool, extra_args: Vec<String>) -> Vec
         default_omp_rpc_args()
     };
     rpc_args.extend(extra_args);
-    if !no_default_rpc_args {
-        ensure_fura_textile_prompt_hint(&mut rpc_args);
-    }
+    ensure_fura_textile_prompt_hint(&mut rpc_args);
     rpc_args
 }
 
@@ -577,10 +575,24 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn build_omp_rpc_args_respects_no_default_rpc_args() {
-        let extra_args = vec!["--mode".to_string(), "rpc".to_string()];
-
-        assert_eq!(build_omp_rpc_args(true, extra_args.clone()), extra_args);
+    fn build_omp_rpc_args_keeps_fura_prompt_hint_with_custom_rpc_args() {
+        assert_eq!(
+            build_omp_rpc_args(
+                true,
+                vec![
+                    "custom-entrypoint.ts".to_string(),
+                    "--mode".to_string(),
+                    "rpc-ui".to_string(),
+                ],
+            ),
+            vec![
+                "custom-entrypoint.ts".to_string(),
+                "--mode".to_string(),
+                "rpc-ui".to_string(),
+                APPEND_SYSTEM_PROMPT_ARG.to_string(),
+                FURA_TEXTILE_SYSTEM_PROMPT_HINT.to_string(),
+            ]
+        );
     }
 
     fn text_message(id: &str, text: &str) -> TranscriptMessage {

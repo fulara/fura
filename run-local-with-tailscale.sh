@@ -90,6 +90,11 @@ export FURA_BRIDGE_DEBUG_FILE
 export FURA_EVENT_DEBUG_FILE
 export PATH="$(dirname -- "${BUN_BIN}"):${PATH}"
 
+textile_redmine_args=()
+if [[ -n "${FURA_TEXTILE_REDMINE_ROOT_URL:-}" ]]; then
+  textile_redmine_args=(--textile-redmine-root-url "${FURA_TEXTILE_REDMINE_ROOT_URL}")
+fi
+
 cd "${FURA_DIR}"
 
 if [[ "${FURA_SKIP_FRONTEND_BUILD:-0}" != "1" ]]; then
@@ -122,6 +127,7 @@ exec cargo run --bin fura -- \
   --static-dir "${FURA_DIR}/frontend/dist" \
   --bridge-debug-file "${FURA_BRIDGE_DEBUG_FILE}" \
   --event-debug-file "${FURA_EVENT_DEBUG_FILE}" \
+  "${textile_redmine_args[@]}" \
   --rpc-program "${BUN_BIN}" \
   --no-default-rpc-args \
   --rpc-arg "${OMP_REPO}/packages/coding-agent/src/cli.ts" \
