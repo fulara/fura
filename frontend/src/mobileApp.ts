@@ -460,6 +460,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const transcriptReviewComments = new Map<string, TranscriptReviewComment[]>();
   let serverConfig: ServerConfig | null = null;
   let showToolBubbles = true;
+  let showEditDiffs = true;
   let thinkingVisibilityMode: ThinkingVisibilityMode = "auto";
   let optionsMenuOpen = false;
   let proposedModelCatalogModels: ModelSummary[] = [];
@@ -535,12 +536,12 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   toolVisibilityToggle.addEventListener("click", () => {
     const nextShowTools = !showToolBubbles;
     if (!send({ type: "config.set", showTools: nextShowTools })) return;
-    applyVisibilityPreferences(nextShowTools, thinkingVisibilityMode);
+    applyVisibilityPreferences(nextShowTools, showEditDiffs, thinkingVisibilityMode);
   });
   thinkingVisibilityToggle.addEventListener("click", () => {
     const nextMode = nextThinkingVisibilityMode(thinkingVisibilityMode);
     if (!send({ type: "config.set", thinkingVisibility: nextMode })) return;
-    applyVisibilityPreferences(showToolBubbles, nextMode);
+    applyVisibilityPreferences(showToolBubbles, showEditDiffs, nextMode);
   });
   modelTemplatesOpen.addEventListener("click", () => openMobileProposedModelsDialog());
   proposedModelsClose.addEventListener("click", () => closeMobileProposedModelsDialog());
@@ -894,15 +895,18 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
   function applyVisibilityPreferences(
     showTools: boolean,
+    showEditDiffsNext: boolean,
     thinkingMode: ThinkingVisibilityMode,
 ): void {
     const toolsChanged = showToolBubbles !== showTools;
+    const editDiffsChanged = showEditDiffs !== showEditDiffsNext;
     const thinkingChanged = thinkingVisibilityMode !== thinkingMode;
     showToolBubbles = showTools;
+    showEditDiffs = showEditDiffsNext;
     thinkingVisibilityMode = thinkingMode;
     syncToolVisibilityToggle();
     syncThinkingVisibilityToggle();
-    if (toolsChanged || thinkingChanged) renderActiveSession();
+    if (toolsChanged || editDiffsChanged || thinkingChanged) renderActiveSession();
   }
 
   function send(message: ClientMessage): boolean {
@@ -1632,6 +1636,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         const helloTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
         applyVisibilityPreferences(
           parseToolVisibility(message.config.showTools),
+          parseToolVisibility(message.config.showEditDiffs),
           parseThinkingVisibilityMode(message.config.thinkingVisibility),
         );
         syncCreateCwdDefault();
@@ -1646,6 +1651,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         const updatedTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
         applyVisibilityPreferences(
           parseToolVisibility(message.config.showTools),
+          parseToolVisibility(message.config.showEditDiffs),
           parseThinkingVisibilityMode(message.config.thinkingVisibility),
         );
         if (updatedTextileConfigChanged) renderActiveSession();
@@ -2279,11 +2285,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           nextNodes.set(key, node);
           desiredNodes.push(node);
         } else {
-          const key = `tool:${mobileToolCardRenderKey(entry)}`;
+          const key = `tool:${showEditDiffs ? "d1" : "d0"}:${mobileToolCardRenderKey(entry)}`;
           const cachedNode = transcriptRenderCache.nodes.get(key);
           const node = cachedNode?.ownerDocument === transcript.ownerDocument
             ? cachedNode
-            : renderToolCard(entry);
+            : renderToolCard(entry, { showEditDiffs });
           nextNodes.set(key, node);
           desiredNodes.push(node);
         }

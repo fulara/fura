@@ -58,6 +58,7 @@ pub(crate) struct AppState {
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) voice_language: Arc<RwLock<String>>,
     pub(crate) show_tools: Arc<RwLock<bool>>,
+    pub(crate) show_edit_diffs: Arc<RwLock<bool>>,
     pub(crate) thinking_visibility: Arc<RwLock<ThinkingVisibilityPreference>>,
     pub(crate) textile_redmine_root_url: Arc<RwLock<Option<String>>>,
     pub(crate) allowed_origins: Option<Arc<Vec<String>>>,

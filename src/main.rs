@@ -170,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
     let default_cwd = default_cwd_from_config(&fura_config, &startup_cwd);
     let voice_language = fura_config.voice_language.clone();
     let show_tools = fura_config.show_tools;
+    let show_edit_diffs = fura_config.show_edit_diffs;
     let thinking_visibility = fura_config.thinking_visibility;
     let proposed_models = fura_config.proposed_models.clone();
     let textile_redmine_root_url = args
@@ -236,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
         config_path,
         voice_language: Arc::new(RwLock::new(voice_language)),
         show_tools: Arc::new(RwLock::new(show_tools)),
+        show_edit_diffs: Arc::new(RwLock::new(show_edit_diffs)),
         thinking_visibility: Arc::new(RwLock::new(thinking_visibility)),
         textile_redmine_root_url: Arc::new(RwLock::new(textile_redmine_root_url)),
         allowed_origins: None,
@@ -1096,6 +1098,7 @@ pub(crate) mod tests {
             config_path: None,
             voice_language: Arc::new(RwLock::new(default_voice_language())),
             show_tools: Arc::new(RwLock::new(default_show_tools())),
+            show_edit_diffs: Arc::new(RwLock::new(default_show_edit_diffs())),
             thinking_visibility: Arc::new(RwLock::new(default_thinking_visibility())),
             textile_redmine_root_url: Arc::new(RwLock::new(None)),
             allowed_origins: None,
@@ -4502,6 +4505,7 @@ pub(crate) mod tests {
                 last_cwd: Some(last_cwd.to_string_lossy().into_owned()),
                 voice_language: default_voice_language(),
                 show_tools: default_show_tools(),
+                show_edit_diffs: default_show_edit_diffs(),
                 thinking_visibility: default_thinking_visibility(),
                 session_categories: HashMap::new(),
                 session_modes: HashMap::new(),
@@ -4529,6 +4533,7 @@ pub(crate) mod tests {
                 last_cwd: Some(root.join("missing").to_string_lossy().into_owned()),
                 voice_language: default_voice_language(),
                 show_tools: default_show_tools(),
+                show_edit_diffs: default_show_edit_diffs(),
                 thinking_visibility: default_thinking_visibility(),
                 session_categories: HashMap::new(),
                 session_modes: HashMap::new(),
@@ -4578,6 +4583,7 @@ pub(crate) mod tests {
         let responses = set_client_config(
             &state,
             Some(false),
+            Some(false),
             Some(ThinkingVisibilityPreference::Hidden),
             None,
         )
@@ -4588,6 +4594,7 @@ pub(crate) mod tests {
             "config.set should not emit direct responses"
         );
         assert_eq!(*state.show_tools.read().await, false);
+        assert_eq!(*state.show_edit_diffs.read().await, false);
         assert_eq!(
             *state.thinking_visibility.read().await,
             ThinkingVisibilityPreference::Hidden
@@ -4595,6 +4602,7 @@ pub(crate) mod tests {
         match events.recv().await.expect("config update event") {
             ServerMessage::ConfigUpdated { config } => {
                 assert!(!config.show_tools);
+                assert!(!config.show_edit_diffs);
                 assert_eq!(
                     config.thinking_visibility,
                     ThinkingVisibilityPreference::Hidden
@@ -4608,14 +4616,14 @@ pub(crate) mod tests {
     async fn config_set_rejects_empty_payload() {
         let state = test_state(8, None);
 
-        let responses = set_client_config(&state, None, None, None).await;
+        let responses = set_client_config(&state, None, None, None, None).await;
 
         assert_eq!(responses.len(), 1);
         match &responses[0] {
             ServerMessage::Error { message, .. } => {
                 assert_eq!(
                     message,
-                    "config.set requires showTools, thinkingVisibility, or proposedModels"
+                    "config.set requires showTools, showEditDiffs, thinkingVisibility, or proposedModels"
                 );
             }
             other => panic!("unexpected response: {other:?}"),
@@ -4631,6 +4639,7 @@ pub(crate) mod tests {
                 default_cwd: "/workspace".to_string(),
                 voice_language: "pl-PL".to_string(),
                 show_tools: true,
+                show_edit_diffs: true,
                 thinking_visibility: ThinkingVisibilityPreference::Auto,
                 proposed_models: Vec::new(),
                 presets: Vec::new(),
@@ -4645,6 +4654,7 @@ pub(crate) mod tests {
         assert_eq!(json["config"]["defaultCwd"], "/workspace");
         assert_eq!(json["config"]["voiceLanguage"], "pl-PL");
         assert_eq!(json["config"]["showTools"], true);
+        assert_eq!(json["config"]["showEditDiffs"], true);
         assert_eq!(json["config"]["thinkingVisibility"], "auto");
         assert_eq!(
             json["config"]["textileRedmineRootUrl"],
@@ -4658,6 +4668,7 @@ pub(crate) mod tests {
             default_cwd: "/workspace".to_string(),
             voice_language: "en".to_string(),
             show_tools: true,
+            show_edit_diffs: true,
             thinking_visibility: ThinkingVisibilityPreference::Auto,
             proposed_models: vec![ProposedModelConfig {
                 id: "fast-review".to_string(),

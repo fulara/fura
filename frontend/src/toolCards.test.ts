@@ -194,6 +194,101 @@ describe("grep cards", () => {
   });
 });
 
+describe("edit tool cards", () => {
+  const diff = [
+    "--- a/src/main.rs",
+    "+++ b/src/main.rs",
+    "@@ -1,2 +1,2 @@",
+    "-let x = 1;",
+    "+let x = 2;",
+    " let y = 3;",
+  ].join("\n");
+
+  it("renders an inline diff preview with add/del line classes and stats", () => {
+    const node = renderToolCard(tool({
+      toolName: "edit",
+      args: { path: "/repo/src/main.rs" },
+      result: { text: "edited", details: { diff, path: "/repo/src/main.rs" } },
+    }));
+
+    expect(node.className).toContain("edit-tool-card");
+    expect(node.querySelector(".tool-name")?.textContent).toBe("Edit");
+    expect(node.querySelector(".edit-diff-stats")?.textContent).toBe("+1 -1");
+    expect(node.querySelector(".diff-line-add")?.textContent).toBe("+let x = 2;");
+    expect(node.querySelector(".diff-line-del")?.textContent).toBe("-let x = 1;");
+    expect(node.querySelector(".diff-line-hunk")?.textContent).toBe("@@ -1,2 +1,2 @@");
+  });
+
+  it("hides the diff preview when showEditDiffs is false", () => {
+    const node = renderToolCard(tool({
+      toolName: "edit",
+      args: { path: "/repo/src/main.rs" },
+      result: { text: "edited", details: { diff } },
+    }), { showEditDiffs: false });
+
+    expect(node.querySelector(".edit-diff-preview")).toBeNull();
+    expect(node.className).toContain("tool-compact");
+  });
+
+  it("summarizes multi-file edits and renders errors with the result body", () => {
+    const multi = renderToolCard(tool({
+      toolName: "edit",
+      result: { details: { diff, perFileResults: [{ path: "a.rs", diff }, { path: "b.rs", diff }] } },
+    }));
+    expect(multi.querySelector(".tool-args-summary")?.textContent).toBe("2 files");
+
+    const error = renderToolCard(tool({
+      toolName: "edit",
+      isError: true,
+      args: { path: "a.rs" },
+      result: { text: "hashline mismatch" },
+    }));
+    expect(error.querySelector(".edit-diff-preview")).toBeNull();
+    expect(error.querySelector(".tool-result-text")?.textContent).toBe("hashline mismatch");
+    expect(error.querySelector<HTMLDetailsElement>(".tool-result-details")?.open).toBe(true);
+  });
+
+  it("caps very long diffs with a more-lines marker", () => {
+    const longDiff = ["@@ -1 +1 @@", ...Array.from({ length: 200 }, (_, i) => `+line ${i}`)].join("\n");
+    const node = renderToolCard(tool({
+      toolName: "edit",
+      args: { path: "big.rs" },
+      result: { details: { diff: longDiff } },
+    }));
+
+    expect(node.querySelectorAll(".diff-line").length).toBe(120);
+    expect(node.querySelector(".edit-diff-more")?.textContent).toContain("81 lines more");
+  });
+});
+
+describe("collapsed tool result bodies", () => {
+  it("collapses generic tool output behind a line-count summary", () => {
+    const node = renderToolCard(tool({
+      toolName: "bash",
+      args: { command: "ls" },
+      result: { text: "a\nb\nc" },
+    }));
+
+    const details = node.querySelector<HTMLDetailsElement>(".tool-result-details");
+    expect(details?.open).toBe(false);
+    expect(details?.querySelector(".tool-result-summary")?.textContent).toBe("└─ 3 lines");
+    expect(details?.querySelector(".tool-result-text")?.textContent).toBe("a\nb\nc");
+  });
+
+  it("expands output for active and errored tools", () => {
+    const active = renderToolCard(tool({ isActive: true, result: { text: "running" } }));
+    expect(active.querySelector<HTMLDetailsElement>(".tool-result-details")?.open).toBe(true);
+
+    const error = renderToolCard(tool({ isError: true, result: { text: "boom" } }));
+    expect(error.querySelector<HTMLDetailsElement>(".tool-result-details")?.open).toBe(true);
+  });
+
+  it("offers a copy button for tool output", () => {
+    const node = renderToolCard(tool({ result: { text: "payload" } }));
+    expect(node.querySelector(".tool-copy")?.textContent).toBe("Copy");
+  });
+});
+
 describe("tool helpers", () => {
   it("extracts text from structured tool result content", () => {
     expect(toolResultText({ content: [{ text: "a" }, { text: "b" }, { other: true }] })).toBe("a\nb");

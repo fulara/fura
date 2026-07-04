@@ -239,57 +239,51 @@ app.innerHTML = `
   <main class="shell">
     <aside class="sidebar">
       <section class="brand">
-        <div>
-          <h1>Fura</h1>
-          <p>Browser bridge for Oh My Pi sessions</p>
-        </div>
+        <h1>Fura</h1>
         <span id="connectionStatus" class="status disconnected">disconnected</span>
       </section>
 
       <section class="sidebar-actions">
         <button id="createSessionButton" type="button">New</button>
-      </section>
-
-      <section class="category-filter-card" aria-label="Session category filter">
-        <label for="sessionCategoryFilter">Category</label>
-        <select id="sessionCategoryFilter">
+        <select id="sessionCategoryFilter" aria-label="Session category filter">
           <option value="">All sessions</option>
         </select>
       </section>
-
-
 
       <nav id="sessionsList" class="sessions" aria-label="Sessions"></nav>
     </aside>
 
     <section class="workspace">
       <header class="workspace-header">
-        <div>
+        <div class="workspace-title">
           <h2 id="sessionTitle">No session selected</h2>
           <p id="sessionMeta">Create or attach to a session to begin.</p>
         </div>
         <div class="workspace-actions">
           <!-- Ask Fura is intentionally a desktop-only workspace affordance for now; future mobile UI should omit it unless the product direction changes. -->
           <button id="askFuraButton" class="ask-fura-toggle" type="button" aria-pressed="false">Ask Fura</button>
-          <div class="workspace-options">
-            <button id="workspaceOptionsToggle" class="workspace-options-toggle" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="workspaceOptionsMenu" title="Display options">⚙</button>
-            <div id="workspaceOptionsMenu" class="workspace-options-menu" role="menu" hidden>
-              <button id="toolVisibilityToggle" class="workspace-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
-              <button id="thinkingVisibilityToggle" class="workspace-option-item" type="button" role="menuitem">Thinking: auto</button>
-              <button id="proposedModelsOpen" class="workspace-option-item" type="button" role="menuitem">Model templates</button>
-            </div>
-          </div>
           <button id="abortButton" type="button">Abort</button>
           <button id="stopButton" type="button">Stop</button>
-          <div class="category-editor">
-            <label for="activeCategoryInput">Category</label>
-            <div class="category-combobox">
-              <input id="activeCategoryInput" autocomplete="off" spellcheck="false" maxlength="80" placeholder="category" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="activeCategorySuggestions" />
-              <div id="activeCategorySuggestions" class="category-suggestions" role="listbox" hidden></div>
+          <div class="workspace-options">
+            <button id="workspaceOptionsToggle" class="workspace-options-toggle" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="workspaceOptionsMenu" title="Session options">⚙</button>
+            <div id="workspaceOptionsMenu" class="workspace-options-menu" role="menu" hidden>
+              <button id="toolVisibilityToggle" class="workspace-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
+              <button id="editDiffVisibilityToggle" class="workspace-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Edit diffs: on</button>
+              <button id="thinkingVisibilityToggle" class="workspace-option-item" type="button" role="menuitem">Thinking: auto</button>
+              <button id="proposedModelsOpen" class="workspace-option-item" type="button" role="menuitem">Model templates</button>
+              <div class="workspace-menu-divider" role="separator"></div>
+              <div class="category-editor">
+                <label for="activeCategoryInput">Category</label>
+                <div class="category-combobox">
+                  <input id="activeCategoryInput" autocomplete="off" spellcheck="false" maxlength="80" placeholder="category" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="activeCategorySuggestions" />
+                  <div id="activeCategorySuggestions" class="category-suggestions" role="listbox" hidden></div>
+                </div>
+                <button id="activeCategorySave" type="button">Save</button>
+              </div>
+              <div class="workspace-menu-divider" role="separator"></div>
+              <button id="deleteSessionButton" class="workspace-option-item danger-action" type="button" role="menuitem">Delete session</button>
             </div>
-            <button id="activeCategorySave" type="button">Save</button>
           </div>
-          <button id="deleteSessionButton" class="danger-action" type="button">Delete session</button>
         </div>
       </header>
 
@@ -675,6 +669,7 @@ const statusBar = requireElement<HTMLDivElement>("statusBar");
 const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
 const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
+const editDiffVisibilityToggle = requireElement<HTMLButtonElement>("editDiffVisibilityToggle");
 const thinkingVisibilityToggle = requireElement<HTMLButtonElement>("thinkingVisibilityToggle");
 const proposedModelsOpen = requireElement<HTMLButtonElement>("proposedModelsOpen");
 const proposedModelsOverlay = requireElement<HTMLDivElement>("proposedModelsOverlay");
@@ -1107,10 +1102,12 @@ const initialToken = consumeBootstrapToken(
   url => window.history.replaceState(null, "", url),
 );
 let showToolBubbles = true;
+let showEditDiffs = true;
 let thinkingVisibilityMode: ThinkingVisibilityMode = "auto";
 let skipThinkingOpenRestoreOnce = false;
 let workspaceOptionsOpen = false;
 syncToolVisibilityToggle();
+syncEditDiffVisibilityToggle();
 syncThinkingVisibilityToggle();
 syncWorkspaceOptionsMenu();
 for (const level of PROPOSED_THINKING_LEVELS) {
@@ -1244,12 +1241,17 @@ workspaceOptionsMenu.addEventListener("click", event => event.stopPropagation())
 toolVisibilityToggle.addEventListener("click", () => {
   const nextShowTools = !showToolBubbles;
   if (!send({ type: "config.set", showTools: nextShowTools })) return;
-  applyVisibilityPreferences(nextShowTools, thinkingVisibilityMode);
+  applyVisibilityPreferences(nextShowTools, showEditDiffs, thinkingVisibilityMode);
+});
+editDiffVisibilityToggle.addEventListener("click", () => {
+  const nextShowEditDiffs = !showEditDiffs;
+  if (!send({ type: "config.set", showEditDiffs: nextShowEditDiffs })) return;
+  applyVisibilityPreferences(showToolBubbles, nextShowEditDiffs, thinkingVisibilityMode);
 });
 thinkingVisibilityToggle.addEventListener("click", () => {
   const nextMode = nextThinkingVisibilityMode(thinkingVisibilityMode);
   if (!send({ type: "config.set", thinkingVisibility: nextMode })) return;
-  applyVisibilityPreferences(showToolBubbles, nextMode);
+  applyVisibilityPreferences(showToolBubbles, showEditDiffs, nextMode);
 });
 proposedModelsOpen.addEventListener("click", openProposedModelsDialog);
 proposedModelAdd.addEventListener("click", () => openProposedModelForm());
@@ -1770,6 +1772,7 @@ function handleServerMessage(message: ServerMessage): void {
       const helloTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
       applyVisibilityPreferences(
         parseToolVisibility(message.config.showTools),
+        parseToolVisibility(message.config.showEditDiffs),
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
       );
       syncProposedModelsUi();
@@ -1791,6 +1794,7 @@ function handleServerMessage(message: ServerMessage): void {
       const updatedTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
       applyVisibilityPreferences(
         parseToolVisibility(message.config.showTools),
+        parseToolVisibility(message.config.showEditDiffs),
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
       );
       if (updatedTextileConfigChanged) {
@@ -3205,6 +3209,14 @@ function syncToolVisibilityToggle(): void {
   toolVisibilityToggle.title = showToolBubbles ? "Hide tool bubbles in the transcript" : "Show tool bubbles in the transcript";
 }
 
+function syncEditDiffVisibilityToggle(): void {
+  editDiffVisibilityToggle.textContent = showEditDiffs ? "Edit diffs: on" : "Edit diffs: off";
+  editDiffVisibilityToggle.setAttribute("aria-checked", String(showEditDiffs));
+  editDiffVisibilityToggle.title = showEditDiffs
+    ? "Hide inline diff previews on edit tool cards"
+    : "Show inline diff previews on edit tool cards";
+}
+
 function syncThinkingVisibilityToggle(): void {
   const labels: Record<ThinkingVisibilityMode, string> = {
     auto: "Thinking: auto",
@@ -3791,21 +3803,28 @@ function setWorkspaceOptionsOpen(open: boolean): void {
 
 function applyVisibilityPreferences(
   showTools: boolean,
+  showEditDiffsNext: boolean,
   thinkingMode: ThinkingVisibilityMode,
 ): void {
   const toolsChanged = showToolBubbles !== showTools;
+  const editDiffsChanged = showEditDiffs !== showEditDiffsNext;
   const thinkingChanged = thinkingVisibilityMode !== thinkingMode;
   showToolBubbles = showTools;
+  showEditDiffs = showEditDiffsNext;
   thinkingVisibilityMode = thinkingMode;
   syncToolVisibilityToggle();
+  syncEditDiffVisibilityToggle();
   syncThinkingVisibilityToggle();
   if (thinkingChanged) {
     skipThinkingOpenRestoreOnce = true;
     markTranscriptViewDirty({ resetCache: true });
-  } else if (toolsChanged) {
+  } else if (toolsChanged || editDiffsChanged) {
+    // Edit diff visibility is part of the tool-card render key, so a plain
+    // re-render re-keys only the tool cards; message DOM stays cached.
     markTranscriptViewDirty();
   }
-  if (toolsChanged || thinkingChanged) {
+  if (editDiffsChanged) markToolsViewDirty();
+  if (toolsChanged || editDiffsChanged || thinkingChanged) {
     renderActiveSession();
   }
 }
@@ -5268,9 +5287,9 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
     }
 
     items.push({
-      key: `tool:${toolCardRenderKey(entry)}`,
+      key: `tool:${showEditDiffs ? "d1" : "d0"}:${toolCardRenderKey(entry)}`,
       cacheable: true,
-      render: () => renderToolCard(entry),
+      render: () => renderToolCard(entry, { showEditDiffs }),
     });
   }
   const currentTodos = nonEmptyTodoPhases(projection.todoPhases ?? []);
@@ -5329,9 +5348,9 @@ function buildToolsRenderItems(tools: Array<{ kind: "tool" } & ToolCard>): Panel
     }
 
     items.push({
-      key: `tool:${toolCardRenderKey(entry)}`,
+      key: `tool:${showEditDiffs ? "d1" : "d0"}:${toolCardRenderKey(entry)}`,
       cacheable: true,
-      render: () => renderToolCard(entry),
+      render: () => renderToolCard(entry, { showEditDiffs }),
     });
   }
   return items;

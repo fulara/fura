@@ -551,6 +551,7 @@ export type ServerConfig = {
   defaultCwd: string;
   voiceLanguage: string;
   showTools: boolean;
+  showEditDiffs: boolean;
   thinkingVisibility: ThinkingVisibilityMode;
   proposedModels: ProposedModelConfig[];
   presets: PresetSummary[];
@@ -803,7 +804,7 @@ export type GoalControlAction = "pause" | "resume" | "drop";
 export type ClientMessage =
   | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; sessionMode?: SessionMode; args?: string[]; worktree?: WorktreeCreateOptions; proposedModelId?: string }
   | { type: "session.setCategory"; sessionId: string; category?: string }
-  | { type: "config.set"; showTools?: boolean; thinkingVisibility?: ThinkingVisibilityMode; proposedModels?: ProposedModelConfig[] }
+  | { type: "config.set"; showTools?: boolean; showEditDiffs?: boolean; thinkingVisibility?: ThinkingVisibilityMode; proposedModels?: ProposedModelConfig[] }
   | { type: "config.modelCatalog.list"; requestId?: string }
   | { type: "preset.save"; name: string; description?: string; body: string; defaults?: Record<string, string> }
   | { type: "preset.delete"; name: string }

@@ -197,6 +197,8 @@ pub(crate) struct FuraConfig {
     pub(crate) voice_language: String,
     #[serde(default = "default_show_tools")]
     pub(crate) show_tools: bool,
+    #[serde(default = "default_show_edit_diffs")]
+    pub(crate) show_edit_diffs: bool,
     #[serde(default = "default_thinking_visibility")]
     pub(crate) thinking_visibility: ThinkingVisibilityPreference,
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -213,6 +215,7 @@ struct FuraConfigDisk<'a> {
     last_cwd: &'a Option<String>,
     voice_language: &'a String,
     show_tools: bool,
+    show_edit_diffs: bool,
     thinking_visibility: ThinkingVisibilityPreference,
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     session_categories: &'a HashMap<String, String>,
@@ -252,6 +255,7 @@ fn serialize_fura_config_for_disk(config: &FuraConfig) -> serde_yaml::Result<Str
         last_cwd: &config.last_cwd,
         voice_language: &config.voice_language,
         show_tools: config.show_tools,
+        show_edit_diffs: config.show_edit_diffs,
         thinking_visibility: config.thinking_visibility,
         session_categories: &config.session_categories,
         session_modes: &config.session_modes,
@@ -265,6 +269,7 @@ impl Default for FuraConfig {
             last_cwd: None,
             voice_language: default_voice_language(),
             show_tools: default_show_tools(),
+            show_edit_diffs: default_show_edit_diffs(),
             thinking_visibility: default_thinking_visibility(),
             session_categories: HashMap::new(),
             session_modes: HashMap::new(),
@@ -279,6 +284,7 @@ pub(crate) struct ClientConfig {
     pub(crate) default_cwd: String,
     pub(crate) voice_language: String,
     pub(crate) show_tools: bool,
+    pub(crate) show_edit_diffs: bool,
     pub(crate) thinking_visibility: ThinkingVisibilityPreference,
     pub(crate) proposed_models: Vec<ProposedModelConfig>,
     pub(crate) presets: Vec<PresetSummary>,
@@ -291,6 +297,10 @@ pub(crate) fn default_voice_language() -> String {
 }
 
 pub(crate) fn default_show_tools() -> bool {
+    true
+}
+
+pub(crate) fn default_show_edit_diffs() -> bool {
     true
 }
 
@@ -579,6 +589,7 @@ pub(crate) async fn client_config(state: &AppState) -> ClientConfig {
         default_cwd: state.default_cwd.read().await.clone(),
         voice_language: state.voice_language.read().await.clone(),
         show_tools: *state.show_tools.read().await,
+        show_edit_diffs: *state.show_edit_diffs.read().await,
         thinking_visibility: *state.thinking_visibility.read().await,
         proposed_models: state.proposed_models.read().await.clone(),
         presets: presets_dir(state.config_path.as_deref())
@@ -614,6 +625,7 @@ pub(crate) async fn save_fura_config(state: &AppState) -> anyhow::Result<()> {
         last_cwd: Some(state.default_cwd.read().await.clone()),
         voice_language: state.voice_language.read().await.clone(),
         show_tools: *state.show_tools.read().await,
+        show_edit_diffs: *state.show_edit_diffs.read().await,
         thinking_visibility: *state.thinking_visibility.read().await,
         session_categories: state.session_runtime.session_categories_snapshot().await,
         session_modes: state.session_runtime.session_modes_snapshot().await,

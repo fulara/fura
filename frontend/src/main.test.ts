@@ -48,6 +48,7 @@ const config: ServerConfig = {
   defaultCwd: "/repo",
   voiceLanguage: "en",
   showTools: true,
+  showEditDiffs: true,
   thinkingVisibility: "auto",
   proposedModels: [],
   presets: [],

@@ -46,9 +46,19 @@ pub(crate) async fn handle_client_message(
         } => set_session_category(state, session_id, category).await,
         ClientMessage::ConfigSet {
             show_tools,
+            show_edit_diffs,
             thinking_visibility,
             proposed_models,
-        } => set_client_config(state, show_tools, thinking_visibility, proposed_models).await,
+        } => {
+            set_client_config(
+                state,
+                show_tools,
+                show_edit_diffs,
+                thinking_visibility,
+                proposed_models,
+            )
+            .await
+        }
         ClientMessage::ConfigModelCatalogList { request_id } => {
             handle_model_catalog_list_command(state, request_id).await
         }
@@ -1121,14 +1131,20 @@ pub(crate) async fn set_session_category(
 pub(crate) async fn set_client_config(
     state: &AppState,
     show_tools: Option<bool>,
+    show_edit_diffs: Option<bool>,
     thinking_visibility: Option<ThinkingVisibilityPreference>,
     proposed_models: Option<Vec<ProposedModelConfig>>,
 ) -> Vec<ServerMessage> {
-    if show_tools.is_none() && thinking_visibility.is_none() && proposed_models.is_none() {
+    if show_tools.is_none()
+        && show_edit_diffs.is_none()
+        && thinking_visibility.is_none()
+        && proposed_models.is_none()
+    {
         return vec![ServerMessage::Error {
             request_id: None,
-            message: "config.set requires showTools, thinkingVisibility, or proposedModels"
-                .to_string(),
+            message:
+                "config.set requires showTools, showEditDiffs, thinkingVisibility, or proposedModels"
+                    .to_string(),
         }];
     }
 
@@ -1143,11 +1159,15 @@ pub(crate) async fn set_client_config(
     }
 
     let previous_show_tools = *state.show_tools.read().await;
+    let previous_show_edit_diffs = *state.show_edit_diffs.read().await;
     let previous_thinking_visibility = *state.thinking_visibility.read().await;
     let previous_proposed_models = state.proposed_models.read().await.clone();
 
     if let Some(value) = show_tools {
         *state.show_tools.write().await = value;
+    }
+    if let Some(value) = show_edit_diffs {
+        *state.show_edit_diffs.write().await = value;
     }
     if let Some(value) = thinking_visibility {
         *state.thinking_visibility.write().await = value;
@@ -1156,6 +1176,7 @@ pub(crate) async fn set_client_config(
     info!(
         action = "config.set",
         show_tools = show_tools.is_some(),
+        show_edit_diffs = show_edit_diffs.is_some(),
         thinking_visibility = thinking_visibility.is_some(),
         proposed_models = proposed_models.is_some()
     );
@@ -1165,6 +1186,7 @@ pub(crate) async fn set_client_config(
 
     if let Err(error) = save_fura_config(state).await {
         *state.show_tools.write().await = previous_show_tools;
+        *state.show_edit_diffs.write().await = previous_show_edit_diffs;
         *state.thinking_visibility.write().await = previous_thinking_visibility;
         *state.proposed_models.write().await = previous_proposed_models;
         return vec![ServerMessage::Error {

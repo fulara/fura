@@ -675,6 +675,7 @@ pub(crate) enum ClientMessage {
     #[serde(rename = "config.set")]
     ConfigSet {
         show_tools: Option<bool>,
+        show_edit_diffs: Option<bool>,
         thinking_visibility: Option<ThinkingVisibilityPreference>,
         proposed_models: Option<Vec<ProposedModelConfig>>,
     },

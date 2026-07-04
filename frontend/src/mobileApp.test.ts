@@ -45,7 +45,7 @@ class FakeConnection implements FuraConnection {
   }
 }
 
-const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en", showTools: true, thinkingVisibility: "auto", proposedModels: [], presets: [] };
+const config: ServerConfig = { defaultCwd: "/repo", voiceLanguage: "en", showTools: true, showEditDiffs: true, thinkingVisibility: "auto", proposedModels: [], presets: [] };
 
 function createHarness(path = "/mobile.html", storedToken = "dev", autoOpen = true) {
   document.body.innerHTML = `<div id="app"></div>`;

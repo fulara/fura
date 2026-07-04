@@ -425,6 +425,102 @@ for await (const line of rl) {
         write({ type: "agent_end", timestamp: now + 4 });
         break;
       }
+      if (promptText.toLowerCase().includes("mock edit")) {
+        const editToolCallId = `mock-edit-${now}`;
+        const bashToolCallId = `mock-bash-${now}`;
+        const editDiff = [
+          "--- a/src/main.rs",
+          "+++ b/src/main.rs",
+          "@@ -1,4 +1,5 @@",
+          " fn main() {",
+          '-    println!("hello");',
+          '+    println!("hello, fura!");',
+          '+    println!("mock edit fixture");',
+          " }",
+        ].join("\n");
+        const bashOutput = Array.from({ length: 12 }, (_, i) => `Checking crate segment ${i + 1} of 12`).join("\n");
+        // Persist the same toolCall + toolResult pairs that real OMP writes to
+        // the session log, so a post-agent get_messages refresh rebuilds the
+        // edit/bash cards instead of dropping them.
+        const editToolCallAssistant = {
+          id: `assistant-tc-edit-${now}`,
+          role: "assistant",
+          content: [{ type: "toolCall", id: editToolCallId, name: "edit", arguments: { path: "src/main.rs" }, intent: "updating the greeting" }],
+          timestamp: now + 1,
+        };
+        const editToolResult = {
+          id: `toolresult-edit-${now}`,
+          role: "toolResult",
+          toolCallId: editToolCallId,
+          toolName: "edit",
+          content: [{ type: "text", text: "Edited src/main.rs" }],
+          details: { path: "src/main.rs", diff: editDiff, firstChangedLine: 2 },
+          timestamp: now + 2,
+        };
+        const bashToolCallAssistant = {
+          id: `assistant-tc-bash-${now}`,
+          role: "assistant",
+          content: [{ type: "toolCall", id: bashToolCallId, name: "bash", arguments: { command: "cargo check" }, intent: "verifying the edit" }],
+          timestamp: now + 3,
+        };
+        const bashToolResult = {
+          id: `toolresult-bash-${now}`,
+          role: "toolResult",
+          toolCallId: bashToolCallId,
+          toolName: "bash",
+          content: [{ type: "text", text: bashOutput }],
+          timestamp: now + 4,
+        };
+        const assistant = {
+          id: `assistant-${now + 1}`,
+          role: "assistant",
+          content: [{ type: "text", text: "Mock edited one file and ran a command." }],
+          timestamp: now + 6,
+        };
+        messages.push(user, editToolCallAssistant, editToolResult, bashToolCallAssistant, bashToolResult, assistant);
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({
+          type: "tool_execution_start",
+          timestamp: now + 1,
+          toolCallId: editToolCallId,
+          toolName: "edit",
+          args: { path: "src/main.rs" },
+          intent: "updating the greeting",
+        });
+        write({
+          type: "tool_execution_end",
+          timestamp: now + 2,
+          toolCallId: editToolCallId,
+          toolName: "edit",
+          result: {
+            content: [{ type: "text", text: "Edited src/main.rs" }],
+            details: { path: "src/main.rs", diff: editDiff, firstChangedLine: 2 },
+          },
+          isError: false,
+        });
+        write({
+          type: "tool_execution_start",
+          timestamp: now + 3,
+          toolCallId: bashToolCallId,
+          toolName: "bash",
+          args: { command: "cargo check" },
+          intent: "verifying the edit",
+        });
+        write({
+          type: "tool_execution_end",
+          timestamp: now + 4,
+          toolCallId: bashToolCallId,
+          toolName: "bash",
+          result: {
+            content: [{ type: "text", text: bashOutput }],
+          },
+          isError: false,
+        });
+        write({ type: "message_end", timestamp: now + 5, message: assistant });
+        write({ type: "agent_end", timestamp: now + 6 });
+        break;
+      }
       if (promptText.toLowerCase().includes("mock review")) {
         const toolCallId = `mock-review-task-${now}`;
         const taskArgs = { agent: "reviewer", tasks: [{ description: "Review the diff" }] };

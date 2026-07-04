@@ -1,8 +1,8 @@
 import { appendEventTimestamp, renderEventTimestamp } from "./eventTime";
+import { copyTextToClipboard, mkEl } from "./dom";
 import { filePathWithIcon } from "./fileTypeIcons";
 import { formatTokens, shortPath } from "./format";
 import { renderImageAttachment, type RenderableImage } from "./imageRendering";
-import { mkEl } from "./dom";
 import type {
   AgentProgress,
   TaskResult,
@@ -13,15 +13,21 @@ import type {
   TranscriptEntry,
 } from "./protocol";
 
-export function renderToolCard(card: ToolCard): HTMLElement {
+export type ToolCardRenderOptions = {
+  showEditDiffs?: boolean;
+};
+
+export function renderToolCard(card: ToolCard, options: ToolCardRenderOptions = {}): HTMLElement {
   if (card.toolName === "todo" || card.toolName === "todo_write") return renderTodoWriteCard(card);
   if (card.toolName === "task") return renderTaskCard(card);
   if (card.toolName === "read") return renderReadToolCard(card);
   if (card.toolName === "grep") return renderGrepToolCard(card);
+  if (isEditToolCard(card)) return renderEditToolCard(card, options);
   const wrapper = mkEl("section");
   wrapper.className = `tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = card.toolName;
 
+  const resultText = toolResultText(card.partialResult ?? card.result);
   const header = mkEl("div");
   header.className = "tool-header";
   header.append(
@@ -30,9 +36,10 @@ export function renderToolCard(card: ToolCard): HTMLElement {
     toolHeaderText(toolArgSummary(card.args), "tool-args-summary"),
   );
   appendEventTimestamp(header, card.timestamp);
+  if (resultText) header.append(toolCopyButton(resultText));
   wrapper.append(header);
 
-  appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
+  appendToolResultBody(wrapper, resultText, card.isActive || card.isError);
   appendToolImageGrid(wrapper, toolResultImages(card.partialResult ?? card.result));
 
   return wrapper;
@@ -57,7 +64,7 @@ export function renderReadToolCard(card: ToolCard): HTMLElement {
   wrapper.append(header);
 
   if (card.isError) {
-    appendToolResultBody(wrapper, toolResultText(result));
+    appendToolResultBody(wrapper, toolResultText(result), true);
   }
   appendToolImageGrid(wrapper, images);
 
@@ -158,7 +165,7 @@ function renderGrepToolCard(card: ToolCard): HTMLElement {
   wrapper.append(header);
 
   if (card.isError) {
-    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
+    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result), true);
     return wrapper;
   }
 
@@ -235,15 +242,154 @@ function formatCount(noun: string, count: number): string {
   return `${count} ${count === 1 ? noun : plural}`;
 }
 
-function appendToolResultBody(wrapper: HTMLElement, resultText: string): void {
+function appendToolResultBody(wrapper: HTMLElement, resultText: string, open = false): void {
   if (!resultText) return;
-  const body = mkEl("div");
-  body.className = "tool-result-body";
+  const lineCount = resultText.split("\n").filter(line => line.trim()).length;
+  const body = mkEl("details");
+  body.className = "tool-result-details";
+  body.open = open;
+  const summary = mkEl("summary");
+  summary.className = "tool-result-summary";
+  summary.textContent = `└─ ${formatCount("line", lineCount)}`;
+  body.append(summary);
   const pre = mkEl("pre");
   pre.className = "tool-result-text";
   pre.textContent = truncate(resultText, 8000);
   body.append(pre);
   wrapper.append(body);
+}
+
+function toolCopyButton(text: string): HTMLElement {
+  const button = mkEl("button");
+  button.type = "button";
+  button.className = "tool-copy";
+  button.textContent = "Copy";
+  button.title = "Copy tool output";
+  button.addEventListener("click", async event => {
+    event.preventDefault();
+    event.stopPropagation();
+    const owner = button.ownerDocument;
+    const copied = await copyTextToClipboard(text, owner);
+    button.textContent = copied ? "Copied" : "Copy failed";
+    (owner.defaultView ?? window).setTimeout(() => {
+      button.textContent = "Copy";
+    }, 900);
+  });
+  return button;
+}
+
+// Edit-family tool cards render an inline unified-diff preview (Codex-style)
+// whenever OMP's result details carry a `diff` string. The name set only picks
+// the renderer for diff-less cases (errors, in-flight); any tool whose result
+// carries `details.diff` gets the preview regardless of name.
+const EDIT_TOOL_NAMES = new Set(["edit", "ast_edit", "write"]);
+
+function isEditToolCard(card: ToolCard): boolean {
+  return EDIT_TOOL_NAMES.has(card.toolName) || Boolean(editDiffText(card));
+}
+
+export function editDiffText(card: ToolCard): string {
+  const details = resultDetails(card.partialResult ?? card.result);
+  const diff = details?.diff;
+  return typeof diff === "string" && diff.trim() ? diff : "";
+}
+
+function editToolLabel(toolName: string): string {
+  switch (toolName) {
+    case "edit": return "Edit";
+    case "ast_edit": return "AST Edit";
+    case "write": return "Write";
+    default: return toolName;
+  }
+}
+
+function editArgSummary(card: ToolCard): string {
+  const details = resultDetails(card.partialResult ?? card.result);
+  const perFile = details?.perFileResults;
+  if (Array.isArray(perFile) && perFile.length > 1) return `${perFile.length} files`;
+  const path = stringDetail(details, "path")
+    ?? stringArg(card.args, "path")
+    ?? stringArg(card.args, "file_path")
+    ?? pathScopeArg(card.args);
+  return path ? filePathWithIcon(path, shortPath) : "…";
+}
+
+export function renderEditToolCard(card: ToolCard, options: ToolCardRenderOptions = {}): HTMLElement {
+  const diff = editDiffText(card);
+  const diffLines = diff ? diff.replace(/\n$/, "").split("\n") : [];
+  const showDiff = options.showEditDiffs !== false && diffLines.length > 0 && !card.isError;
+  const wrapper = mkEl("section");
+  wrapper.className = `tool-card edit-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${showDiff || card.isError ? "" : "tool-compact"}`;
+  wrapper.dataset.toolName = card.toolName;
+
+  const header = mkEl("div");
+  header.className = "tool-header edit-tool-header";
+  header.append(
+    toolStatusIcon(card),
+    toolHeaderText(editToolLabel(card.toolName), "tool-name"),
+    toolHeaderText(editArgSummary(card), "tool-args-summary"),
+  );
+  const stats = diffStats(diffLines);
+  if (stats) header.append(toolHeaderText(stats, "edit-diff-stats"));
+  appendEventTimestamp(header, card.timestamp);
+  if (diff) header.append(toolCopyButton(diff));
+  wrapper.append(header);
+
+  if (card.isError) {
+    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result), true);
+    return wrapper;
+  }
+  if (showDiff) wrapper.append(renderDiffPreview(diffLines));
+
+  return wrapper;
+}
+
+const DIFF_PREVIEW_MAX_LINES = 120;
+
+function diffStats(lines: string[]): string {
+  let added = 0;
+  let removed = 0;
+  for (const line of lines) {
+    if (line.startsWith("+") && !line.startsWith("+++ ")) added++;
+    else if (line.startsWith("-") && !line.startsWith("--- ")) removed++;
+  }
+  if (added === 0 && removed === 0) return "";
+  const parts: string[] = [];
+  if (added > 0) parts.push(`+${added}`);
+  if (removed > 0) parts.push(`-${removed}`);
+  return parts.join(" ");
+}
+
+function diffLineClass(line: string): string {
+  // File headers are "+++ <path>"/"--- <path>" (with the space); an added or
+  // removed content line that itself starts with "++"/"--" has no space there.
+  if (line.startsWith("+++ ") || line.startsWith("--- ") || line.startsWith("diff ") || line.startsWith("index ")) return "diff-line-meta";
+  if (line.startsWith("@@")) return "diff-line-hunk";
+  if (line.startsWith("+")) return "diff-line-add";
+  if (line.startsWith("-")) return "diff-line-del";
+  return "diff-line-context";
+}
+
+function renderDiffPreview(lines: string[]): HTMLElement {
+  const body = mkEl("div");
+  body.className = "edit-diff-preview";
+  const visible = lines.slice(0, DIFF_PREVIEW_MAX_LINES);
+  const pre = mkEl("pre");
+  pre.className = "edit-diff-lines";
+  for (const line of visible) {
+    const el = mkEl("span");
+    el.className = `diff-line ${diffLineClass(line)}`;
+    el.textContent = line.length > 0 ? line : " ";
+    pre.append(el);
+  }
+  body.append(pre);
+  if (lines.length > visible.length) {
+    const more = mkEl("div");
+    more.className = "edit-diff-more";
+    more.textContent = `… ${formatCount("line", lines.length - visible.length)} more`;
+    body.append(more);
+  }
+  return body;
 }
 
 export function renderCurrentTodoCard(phases: TodoPhase[]): HTMLElement {
@@ -289,7 +435,7 @@ function renderTodoWriteCard(card: ToolCard): HTMLElement {
     for (const phase of phases) tree.append(renderTodoPhase(phase, phases.length > 1));
     wrapper.append(tree);
   } else {
-    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result));
+    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result), card.isActive || card.isError);
   }
 
   return wrapper;
@@ -418,7 +564,7 @@ function renderTaskCard(card: ToolCard): HTMLElement {
     for (let i = 0; i < results.length; i++) list.append(renderTaskResult(results[i], i === results.length - 1));
     wrapper.append(list);
   } else {
-    appendToolResultBody(wrapper, toolResultText(source));
+    appendToolResultBody(wrapper, toolResultText(source), card.isActive || card.isError);
   }
 
   const totals = shouldRenderProgress ? taskProgressTotals(progress) : taskResultTotals(results, source);
