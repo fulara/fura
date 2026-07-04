@@ -477,6 +477,36 @@ describe("renderCodeBlock", () => {
     expect(button?.textContent).toBe("Copy");
     vi.useRealTimers();
   });
+  it("routes closed Textile fences to Textile HTML while preserving Mermaid and normal code blocks", () => {
+    const node = renderMarkdown([
+      "```textile",
+      "h3. Textile title",
+      "```",
+      "",
+      "```mermaid",
+      "flowchart TD",
+      "  A --> B",
+      "```",
+      "",
+      "```rust",
+      "fn main() {}",
+      "```",
+    ].join("\n"));
+
+    expect(node.querySelector("h3")?.textContent).toBe("Textile title");
+    expect(node.querySelector(".mermaid-block")).not.toBeNull();
+    expect(Array.from(node.querySelectorAll(".code-block .code-lang")).map(label => label.textContent)).toEqual(["rust"]);
+    expect(node.querySelector(".code-block code")?.textContent).toContain("fn main() {}");
+  });
+
+  it("keeps Textile code fences on the plain code path while highlighting is disabled", () => {
+    const node = renderCodeBlock("textile", "h3. Still streaming", { highlight: false });
+
+    expect(node.className).toBe("code-block");
+    expect(node.querySelector(".code-lang")?.textContent).toBe("textile");
+    expect(node.querySelector("code")?.textContent).toBe("h3. Still streaming");
+    expect(node.querySelector("h3")).toBeNull();
+  });
 });
 
 describe("transcript code highlighting performance", () => {

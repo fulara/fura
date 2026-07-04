@@ -254,6 +254,36 @@ fn collect_direct_session_files(path: &Path) -> Vec<DiscoveredSession> {
         .collect()
 }
 
+fn scan_session_header<I>(lines: &mut I) -> Option<(SessionHeader, Option<String>)>
+where
+    I: Iterator<Item = std::io::Result<String>>,
+{
+    let mut prelude_title = None;
+    for line in lines.take(16).flatten() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
+            continue;
+        };
+        match value.get("type").and_then(Value::as_str) {
+            Some("session") => {
+                let header = serde_json::from_value::<SessionHeader>(value).ok()?;
+                return Some((header, prelude_title));
+            }
+            Some("title") if prelude_title.is_none() => {
+                prelude_title = value
+                    .get("title")
+                    .and_then(Value::as_str)
+                    .and_then(sanitize_session_title);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 #[derive(Default)]
 struct HeaderProbe {
     first_entry_type: Option<String>,
@@ -341,8 +371,7 @@ fn sanitize_session_title(value: &str) -> Option<String> {
 pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
     let file = fs::File::open(path).ok()?;
     let mut lines = StdBufReader::new(file).lines();
-    let header_line = lines.next()?.ok()?;
-    let header = serde_json::from_str::<SessionHeader>(&header_line).ok()?;
+    let (header, prelude_title) = scan_session_header(&mut lines)?;
     if header.entry_type != "session" {
         return None;
     }
@@ -372,6 +401,7 @@ pub(crate) fn read_session_header(path: &Path) -> Option<DiscoveredSession> {
         .title
         .as_deref()
         .and_then(sanitize_session_title)
+        .or(prelude_title)
         .or_else(|| {
             probe
                 .first_user_prompt

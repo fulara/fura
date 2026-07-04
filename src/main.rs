@@ -61,9 +61,55 @@ use web::*;
 const SESSION_CATALOG_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const SESSION_CATALOG_PRELOAD_LIMIT: usize = 30;
 const DEFAULT_OMP_RPC_MODE: &str = "rpc-ui";
+const APPEND_SYSTEM_PROMPT_ARG: &str = "--append-system-prompt";
+const FURA_TEXTILE_SYSTEM_PROMPT_HINT: &str = "Fura browser UI renders fenced code blocks whose language is `textile` as sanitized Textile HTML. Use Textile fences only when the user asks for Textile/Redmine-formatted output or when drafting Redmine ticket/comment bodies; keep ordinary Markdown and programming-language code fences unchanged.";
 
 fn default_omp_rpc_args() -> Vec<String> {
     vec!["--mode".to_string(), DEFAULT_OMP_RPC_MODE.to_string()]
+}
+
+fn build_omp_rpc_args(no_default_rpc_args: bool, extra_args: Vec<String>) -> Vec<String> {
+    let mut rpc_args = if no_default_rpc_args {
+        Vec::new()
+    } else {
+        default_omp_rpc_args()
+    };
+    rpc_args.extend(extra_args);
+    if !no_default_rpc_args {
+        ensure_fura_textile_prompt_hint(&mut rpc_args);
+    }
+    rpc_args
+}
+
+fn ensure_fura_textile_prompt_hint(args: &mut Vec<String>) {
+    for index in (0..args.len()).rev() {
+        if args[index] == APPEND_SYSTEM_PROMPT_ARG {
+            if index + 1 == args.len() {
+                args.push(FURA_TEXTILE_SYSTEM_PROMPT_HINT.to_string());
+            } else {
+                args[index + 1] = append_fura_textile_prompt_hint(&args[index + 1]);
+            }
+            return;
+        }
+
+        if let Some(existing) = args[index].strip_prefix("--append-system-prompt=") {
+            let merged = append_fura_textile_prompt_hint(existing);
+            args[index] = format!("{APPEND_SYSTEM_PROMPT_ARG}={merged}");
+            return;
+        }
+    }
+
+    args.push(APPEND_SYSTEM_PROMPT_ARG.to_string());
+    args.push(FURA_TEXTILE_SYSTEM_PROMPT_HINT.to_string());
+}
+
+fn append_fura_textile_prompt_hint(existing: &str) -> String {
+    let existing = existing.trim_end();
+    if existing.is_empty() {
+        FURA_TEXTILE_SYSTEM_PROMPT_HINT.to_string()
+    } else {
+        format!("{existing}\n\n{FURA_TEXTILE_SYSTEM_PROMPT_HINT}")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,12 +163,7 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let mut rpc_args = if args.no_default_rpc_args {
-        Vec::new()
-    } else {
-        default_omp_rpc_args()
-    };
-    rpc_args.extend(args.rpc_args);
+    let rpc_args = build_omp_rpc_args(args.no_default_rpc_args, args.rpc_args);
 
     let session_root = args.session_root.unwrap_or_else(default_session_root);
     let startup_cwd = env::current_dir().context("failed to read bridge working directory")?;
@@ -133,6 +174,10 @@ async fn main() -> anyhow::Result<()> {
     let show_tools = fura_config.show_tools;
     let thinking_visibility = fura_config.thinking_visibility;
     let proposed_models = fura_config.proposed_models.clone();
+    let textile_redmine_root_url = args
+        .textile_redmine_root_url
+        .clone()
+        .map(normalize_textile_redmine_root_url);
     let session_categories = fura_config
         .session_categories
         .into_iter()
@@ -194,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
         voice_language: Arc::new(RwLock::new(voice_language)),
         show_tools: Arc::new(RwLock::new(show_tools)),
         thinking_visibility: Arc::new(RwLock::new(thinking_visibility)),
+        textile_redmine_root_url: Arc::new(RwLock::new(textile_redmine_root_url)),
         allowed_origins: None,
         secure_auth_cookie: false,
     };
@@ -496,6 +542,45 @@ pub(crate) mod tests {
             default_omp_rpc_args(),
             vec!["--mode".to_string(), "rpc-ui".to_string()]
         );
+    }
+
+    #[test]
+    fn build_omp_rpc_args_adds_fura_textile_prompt_hint() {
+        assert_eq!(
+            build_omp_rpc_args(false, Vec::new()),
+            vec![
+                "--mode".to_string(),
+                "rpc-ui".to_string(),
+                APPEND_SYSTEM_PROMPT_ARG.to_string(),
+                FURA_TEXTILE_SYSTEM_PROMPT_HINT.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_omp_rpc_args_merges_user_append_prompt() {
+        assert_eq!(
+            build_omp_rpc_args(
+                false,
+                vec![
+                    APPEND_SYSTEM_PROMPT_ARG.to_string(),
+                    "Project-specific note.".to_string(),
+                ],
+            ),
+            vec![
+                "--mode".to_string(),
+                "rpc-ui".to_string(),
+                APPEND_SYSTEM_PROMPT_ARG.to_string(),
+                format!("Project-specific note.\n\n{FURA_TEXTILE_SYSTEM_PROMPT_HINT}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_omp_rpc_args_respects_no_default_rpc_args() {
+        let extra_args = vec!["--mode".to_string(), "rpc".to_string()];
+
+        assert_eq!(build_omp_rpc_args(true, extra_args.clone()), extra_args);
     }
 
     fn text_message(id: &str, text: &str) -> TranscriptMessage {
@@ -1000,6 +1085,7 @@ pub(crate) mod tests {
             voice_language: Arc::new(RwLock::new(default_voice_language())),
             show_tools: Arc::new(RwLock::new(default_show_tools())),
             thinking_visibility: Arc::new(RwLock::new(default_thinking_visibility())),
+            textile_redmine_root_url: Arc::new(RwLock::new(None)),
             allowed_origins: None,
             secure_auth_cookie: false,
         }
@@ -1717,6 +1803,35 @@ pub(crate) mod tests {
 
         let discovered = read_session_header(&session_path).expect("session should be discovered");
         assert_eq!(discovered.title.as_deref(), Some("First request"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn read_session_header_accepts_title_prelude_before_header() {
+        let root = env::temp_dir().join(format!(
+            "fura-sessions-title-prelude-test-{}",
+            Uuid::new_v4().simple()
+        ));
+        let session_path = root.join("project").join("s1.jsonl");
+        fs::create_dir_all(session_path.parent().expect("session parent")).expect("session dir");
+        let title = serde_json::json!({
+            "type": "title",
+            "title": " Prelude title \nwith details",
+        });
+        let header = serde_json::json!({
+            "type": "session",
+            "id": "s1",
+            "timestamp": "2026-04-29T00:00:00.000Z",
+            "cwd": "/workspace/project",
+        });
+        fs::write(&session_path, format!("{title}\n{header}\n"))
+            .expect("session file should be written");
+
+        let discovered = read_session_header(&session_path).expect("session should be discovered");
+        assert_eq!(discovered.id, "s1");
+        assert_eq!(discovered.title.as_deref(), Some("Prelude title"));
+        assert_eq!(discovered.cwd.as_deref(), Some("/workspace/project"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -4507,6 +4622,7 @@ pub(crate) mod tests {
                 thinking_visibility: ThinkingVisibilityPreference::Auto,
                 proposed_models: Vec::new(),
                 presets: Vec::new(),
+                textile_redmine_root_url: Some("https://redmine.example.test".to_string()),
             },
         })
         .expect("hello should serialize");
@@ -4518,6 +4634,10 @@ pub(crate) mod tests {
         assert_eq!(json["config"]["voiceLanguage"], "pl-PL");
         assert_eq!(json["config"]["showTools"], true);
         assert_eq!(json["config"]["thinkingVisibility"], "auto");
+        assert_eq!(
+            json["config"]["textileRedmineRootUrl"],
+            "https://redmine.example.test"
+        );
     }
 
     #[test]
@@ -4536,6 +4656,7 @@ pub(crate) mod tests {
                 thinking_level: ProposedThinkingLevel::Default,
             }],
             presets: Vec::new(),
+            textile_redmine_root_url: None,
         })
         .expect("config should serialize");
 

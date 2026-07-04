@@ -122,6 +122,7 @@ import {
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { captureDiffFilterFocus, restoreDiffFilterFocus } from "./diffViewDom";
 import { messageText, renderMarkdown, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
+import { setTextileRedmineRootUrl } from "./textileRendering";
 import {
   buildTranscriptReviewPrompt,
   type TranscriptReviewComment,
@@ -1766,6 +1767,7 @@ function handleServerMessage(message: ServerMessage): void {
     case "hello":
       appendLog(`Connected to fura ${message.serverVersion} protocol ${message.protocolVersion}`);
       serverConfig = message.config;
+      const helloTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
       applyVisibilityPreferences(
         parseToolVisibility(message.config.showTools),
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
@@ -1779,13 +1781,22 @@ function handleServerMessage(message: ServerMessage): void {
       activeReviewCommentComposer = null;
       markDiffsViewDirty();
       if (activeSessionId) renderDiffsViewIfActive(activeSessionId);
+      if (helloTextileConfigChanged) {
+        markTranscriptViewDirty({ resetCache: true });
+        renderActiveSession();
+      }
       break;
     case "config.updated":
       serverConfig = message.config;
+      const updatedTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
       applyVisibilityPreferences(
         parseToolVisibility(message.config.showTools),
         parseThinkingVisibilityMode(message.config.thinkingVisibility),
       );
+      if (updatedTextileConfigChanged) {
+        markTranscriptViewDirty({ resetCache: true });
+        renderActiveSession();
+      }
       syncProposedModelsUi();
       if (proposedModelSavePending) {
         proposedModelSavePending = false;

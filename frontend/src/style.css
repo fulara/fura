@@ -2818,6 +2818,10 @@ h2 {
   text-align: center;
 }
 
+.textile-preview {
+  text-align: left;
+}
+
 .mermaid-preview svg {
   display: block;
   max-width: 100%;

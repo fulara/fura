@@ -65,6 +65,7 @@ import { createSessionListView, renderSessionCategoryFilter } from "./sessionLis
 import { isCompactReadCard, renderCurrentTodoCard, renderReadToolCard, renderReadToolGroup, renderToolCard } from "./toolCards";
 import { renderReviewCard, reviewCardRenderKey } from "./reviewCard";
 import { renderMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
+import { setTextileRedmineRootUrl } from "./textileRendering";
 import {
   buildTranscriptReviewPrompt,
   type TranscriptReviewComment,
@@ -1628,6 +1629,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     switch (message.type) {
       case "hello":
         serverConfig = message.config;
+        const helloTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
         applyVisibilityPreferences(
           parseToolVisibility(message.config.showTools),
           parseThinkingVisibilityMode(message.config.thinkingVisibility),
@@ -1637,13 +1639,16 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         syncMobilePresets();
         if (pendingPresetCommand) resolveMobilePendingPresetCommand();
         console.debug(`[fura-mobile] Connected to fura ${message.serverVersion}.`);
+        if (helloTextileConfigChanged) renderActiveSession();
         break;
       case "config.updated":
         serverConfig = message.config;
+        const updatedTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
         applyVisibilityPreferences(
           parseToolVisibility(message.config.showTools),
           parseThinkingVisibilityMode(message.config.thinkingVisibility),
         );
+        if (updatedTextileConfigChanged) renderActiveSession();
         syncCreateCwdDefault();
         syncMobileProposedModelsUi();
         syncMobilePresets();

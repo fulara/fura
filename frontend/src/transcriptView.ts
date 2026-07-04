@@ -4,6 +4,7 @@ import { copyTextToClipboard, mkEl, mkFrag, mkText } from "./dom";
 import { appendEventTimestamp } from "./eventTime";
 import { imagePlaceholderText, renderImageAttachment } from "./imageRendering";
 import { renderMermaidBlock } from "./mermaidRendering";
+import { renderTextileBlock } from "./textileRendering";
 import type { ContentBlock, TranscriptMessage } from "./protocol";
 import {
   commentsForTranscriptLine,
@@ -790,6 +791,9 @@ export function renderCodeBlock(lang: string, code: string, options: RenderCodeB
   const highlight = options.highlight ?? true;
   if (highlight && lang.trim().toLowerCase() === "mermaid") {
     return renderMermaidBlock(code);
+  }
+  if (highlight && lang.trim().toLowerCase() === "textile") {
+    return renderTextileBlock(code);
   }
 
   const wrapper = mkEl("div");

@@ -10,6 +10,7 @@ use std::{
 };
 use tokio::fs as async_fs;
 use tracing::warn;
+use url::Url;
 use x509_parser::pem::Pem;
 
 use crate::{AppState, PresetSummary, ServerMessage, SessionMode, load_presets, presets_dir};
@@ -47,6 +48,14 @@ pub(crate) struct Args {
 
     #[arg(long, env = "FURA_TOKEN")]
     pub(crate) token: Option<String>,
+
+    /// Redmine root URL used to link Textile issue references like `#123`.
+    #[arg(
+        long,
+        env = "FURA_TEXTILE_REDMINE_ROOT_URL",
+        value_parser = parse_http_url
+    )]
+    pub(crate) textile_redmine_root_url: Option<Url>,
 
     #[arg(long, env = "FURA_LOG_FRAMES", default_value_t = false)]
     pub(crate) log_frames: bool,
@@ -90,6 +99,23 @@ pub(crate) struct Args {
     /// startup. Code-panel navigation will report errors until it is installed.
     #[arg(long, env = "FURA_SKIP_RLS_UNAVAILABLE", default_value_t = false)]
     pub(crate) skip_rls_unavailable: bool,
+}
+
+fn parse_http_url(value: &str) -> Result<Url, String> {
+    let url = Url::parse(value).map_err(|error| format!("invalid URL: {error}"))?;
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return Err("URL scheme must be http or https".to_string());
+    }
+    if url.host_str().is_none() {
+        return Err("URL must include a host".to_string());
+    }
+    Ok(url)
+}
+
+pub(crate) fn normalize_textile_redmine_root_url(mut url: Url) -> String {
+    url.set_query(None);
+    url.set_fragment(None);
+    url.as_str().trim_end_matches('/').to_string()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,6 +282,8 @@ pub(crate) struct ClientConfig {
     pub(crate) thinking_visibility: ThinkingVisibilityPreference,
     pub(crate) proposed_models: Vec<ProposedModelConfig>,
     pub(crate) presets: Vec<PresetSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) textile_redmine_root_url: Option<String>,
 }
 
 pub(crate) fn default_voice_language() -> String {
@@ -556,6 +584,7 @@ pub(crate) async fn client_config(state: &AppState) -> ClientConfig {
         presets: presets_dir(state.config_path.as_deref())
             .map(|dir| load_presets(&dir))
             .unwrap_or_default(),
+        textile_redmine_root_url: state.textile_redmine_root_url.read().await.clone(),
     }
 }
 
@@ -687,6 +716,26 @@ mod tests {
         assert_eq!(
             normalize_remote_host(" serwer-mini.caracal-porgy.ts.net. "),
             Some("serwer-mini.caracal-porgy.ts.net".to_string())
+        );
+    }
+
+    #[test]
+    fn textile_redmine_root_url_requires_http_url() {
+        assert!(parse_http_url("https://redmine.example.test").is_ok());
+        assert!(parse_http_url("http://redmine.example.test/path").is_ok());
+        assert!(parse_http_url("redmine.example.test").is_err());
+        assert!(parse_http_url("javascript:alert(1)").is_err());
+        assert!(parse_http_url("file:///tmp/redmine").is_err());
+    }
+
+    #[test]
+    fn textile_redmine_root_url_normalizes_query_fragment_and_trailing_slash() {
+        let url =
+            parse_http_url("https://redmine.example.test/redmine/?token=secret#frag").expect("url");
+
+        assert_eq!(
+            normalize_textile_redmine_root_url(url),
+            "https://redmine.example.test/redmine"
         );
     }
 

@@ -554,6 +554,7 @@ export type ServerConfig = {
   thinkingVisibility: ThinkingVisibilityMode;
   proposedModels: ProposedModelConfig[];
   presets: PresetSummary[];
+  textileRedmineRootUrl?: string | null;
 };
 
 export type FrontendUiSnapshot = {
