@@ -3259,6 +3259,91 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_result_false_settles_slash_passthrough_command_notice() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
+        let mut events = state.events.subscribe();
+
+        let responses =
+            send_prompt(&state, "s1".to_string(), "/review".to_string(), None, None).await;
+
+        assert!(responses.is_empty());
+        let command = commands.recv().await.expect("prompt command sent");
+        let command_id = command
+            .get("id")
+            .and_then(|value| value.as_str())
+            .expect("prompt command id")
+            .to_string();
+        let notice_id = format!("__command_notice:{command_id}");
+        assert_eq!(
+            command.get("type").and_then(|value| value.as_str()),
+            Some("prompt")
+        );
+        assert_eq!(
+            command.get("message").and_then(|value| value.as_str()),
+            Some("/review")
+        );
+
+        match events.recv().await.expect("command notice snapshot") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert!(!state.is_busy);
+                assert_eq!(state.transcript.len(), 1);
+                match &state.transcript[0] {
+                    TranscriptEntry::Message(message) => {
+                        assert_eq!(message.id, notice_id);
+                        assert_eq!(message.role, MessageRole::System);
+                        assert_eq!(
+                            message.blocks,
+                            vec![ContentBlock::Text {
+                                text: "Command requested: /review".to_string(),
+                            }]
+                        );
+                    }
+                    other => panic!("unexpected transcript entry: {other:?}"),
+                }
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "prompt_result",
+                "id": command_id,
+                "agentInvoked": false
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert_ne!(
+            record.status,
+            SessionStatus::Busy,
+            "local-only prompt_result settlement must not leave the session busy"
+        );
+        let projection = record.projection();
+        assert!(
+            !projection.is_busy,
+            "local-only prompt_result settlement must not project a busy session"
+        );
+        assert!(
+            !projection.transcript.iter().any(|entry| matches!(
+                entry,
+                TranscriptEntry::Message(message) if message.id == notice_id
+            )),
+            "local-only prompt_result settlement should remove the matching command notice"
+        );
+    }
+
+    #[tokio::test]
     async fn rpc_model_list_response_emits_model_list() {
         let state = test_state(8, None);
         state

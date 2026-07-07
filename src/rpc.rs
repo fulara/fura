@@ -989,9 +989,13 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 warn!(session_id = %target_session_id, %message, "post server-side-slash refresh failed");
             }
         }
-        OmpRpcFrame::PromptResult { .. } => {
-            // Prompt settlement is already tracked through prompt responses and agent events.
+        OmpRpcFrame::PromptResult {
+            id: Some(id),
+            agent_invoked: false,
+        } => {
+            settle_local_only_prompt_result(state, &target_session_id, &id).await;
         }
+        OmpRpcFrame::PromptResult { .. } => {}
         OmpRpcFrame::Response(response) => {
             let _ = response.is_error();
             let _ = response.payload();
@@ -1780,6 +1784,52 @@ pub(crate) async fn take_pending_prompt_busy_message(
         text: draft.text,
         images: draft.images,
     })
+}
+
+pub(crate) async fn settle_local_only_prompt_result(
+    state: &AppState,
+    session_id: &str,
+    command_id: &str,
+) {
+    let draft = state.pending_prompt_drafts.write().await.remove(command_id);
+    let draft_message_id = draft
+        .as_ref()
+        .map(|draft| draft.optimistic_message_id.clone());
+    let had_draft = draft.is_some();
+    let command_notice_message_id = format!("__command_notice:{command_id}");
+    let pending_prompt_message_id = format!("__pending_prompt:{command_id}");
+
+    state
+        .events
+        .mutate_session_and_emit(state, session_id, |record| {
+            let before = record.messages.len();
+            record.messages.retain(|message| {
+                if message.id == command_notice_message_id
+                    || message.id == pending_prompt_message_id
+                {
+                    return false;
+                }
+                if draft_message_id
+                    .as_ref()
+                    .is_some_and(|draft_id| message.id == *draft_id)
+                {
+                    return false;
+                }
+                true
+            });
+            if had_draft {
+                record.status = SessionStatus::Idle;
+                record.streaming_message = None;
+            }
+            if record.messages.len() == before && !had_draft {
+                return None;
+            }
+            Some(ServerMessage::SessionSnapshot {
+                session_id: session_id.to_string(),
+                state: record.projection(),
+            })
+        })
+        .await;
 }
 
 pub(crate) async fn discard_pending_prompt_drafts_for_session(state: &AppState, session_id: &str) {
