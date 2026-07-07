@@ -625,6 +625,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             | OmpRpcFrame::CommandOutput { .. }
             | OmpRpcFrame::SessionInfoUpdate { .. }
             | OmpRpcFrame::ConfigUpdate { .. }
+            | OmpRpcFrame::PromptResult { .. }
             | OmpRpcFrame::Unknown => {}
         }
         return;
@@ -987,6 +988,9 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             if let Err(message) = refresh_rpc_state(state, &target_session_id).await {
                 warn!(session_id = %target_session_id, %message, "post server-side-slash refresh failed");
             }
+        }
+        OmpRpcFrame::PromptResult { .. } => {
+            // Prompt settlement is already tracked through prompt responses and agent events.
         }
         OmpRpcFrame::Response(response) => {
             let _ = response.is_error();

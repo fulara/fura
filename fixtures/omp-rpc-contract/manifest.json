@@ -35,6 +35,11 @@
     "file": "command-repo-diff-snapshot.json"
   },
   {
+    "name": "command-repo-diff-snapshot-turn",
+    "category": "command",
+    "file": "command-repo-diff-snapshot-turn.json"
+  },
+  {
     "name": "command-set-active-tools",
     "category": "command",
     "file": "command-set-active-tools.json"

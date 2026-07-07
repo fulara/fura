@@ -1449,6 +1449,7 @@ pub(crate) mod tests {
                 Some("/tmp/repo".to_string()),
                 Some("refs/omp/diff-snapshots/manual".to_string()),
             ),
+            "command-repo-diff-snapshot-turn" => return None,
             "command-set-host-uri-schemes" => return None,
             _ => panic!("unexpected command fixture {name}"),
         })
@@ -1516,14 +1517,16 @@ pub(crate) mod tests {
                         assert!(!data.messages.is_empty());
                     }
                     "get_session_stats" => {
-                        let data: OmpSessionStats = serde_json::from_value(
-                            response
-                                .payload()
-                                .expect("get_session_stats payload")
-                                .clone(),
-                        )
-                        .expect("get_session_stats data should decode");
+                        let payload = response.payload().expect("get_session_stats payload");
+                        let raw_reasoning = payload
+                            .get("tokens")
+                            .and_then(|tokens| tokens.get("reasoning"))
+                            .and_then(|value| value.as_u64())
+                            .expect("get_session_stats fixture should include tokens.reasoning");
+                        let data: OmpSessionStats = serde_json::from_value(payload.clone())
+                            .expect("get_session_stats data should decode");
                         assert!(data.tokens.total > 0);
+                        assert_eq!(data.tokens.reasoning, raw_reasoning);
                     }
                     "get_available_models" => {
                         let data: OmpAvailableModelsResponse = serde_json::from_value(
@@ -1587,6 +1590,44 @@ pub(crate) mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn omp_v16_3_9_prompt_result_and_reasoning_decode_explicitly() {
+        let prompt_result = OmpRpcFrame::decode(serde_json::json!({
+            "type": "prompt_result",
+            "id": "prompt-1",
+            "agentInvoked": true
+        }))
+        .expect("prompt_result frame should decode");
+
+        match prompt_result {
+            OmpRpcFrame::PromptResult { id, agent_invoked } => {
+                assert_eq!(id.as_deref(), Some("prompt-1"));
+                assert!(agent_invoked);
+            }
+            OmpRpcFrame::Unknown => panic!("prompt_result must not decode as Unknown"),
+            other => panic!("prompt_result decoded as unexpected frame: {other:?}"),
+        }
+
+        let stats: OmpSessionStats = serde_json::from_value(serde_json::json!({
+            "sessionFile": "/tmp/omp/session.jsonl",
+            "sessionId": "session-1",
+            "tokens": {
+                "input": 100,
+                "output": 50,
+                "reasoning": 7,
+                "cacheRead": 10,
+                "cacheWrite": 5,
+                "total": 172
+            },
+            "premiumRequests": 1,
+            "cost": 0.00123
+        }))
+        .expect("session stats should decode tokens.reasoning");
+
+        assert_eq!(stats.tokens.reasoning, 7);
+        assert_eq!(stats.tokens.total, 172);
     }
 
     #[test]

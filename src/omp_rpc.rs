@@ -147,6 +147,12 @@ pub(crate) enum OmpRpcFrame {
         #[serde(rename = "thinkingLevel")]
         thinking_level: Option<String>,
     },
+    #[serde(rename = "prompt_result")]
+    PromptResult {
+        id: Option<String>,
+        #[serde(rename = "agentInvoked", default)]
+        agent_invoked: bool,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -322,6 +328,8 @@ pub(crate) struct OmpSessionStats {
 pub(crate) struct OmpTokenStats {
     pub(crate) input: u64,
     pub(crate) output: u64,
+    #[serde(default)]
+    pub(crate) reasoning: u64,
     pub(crate) cache_read: u64,
     pub(crate) cache_write: u64,
     pub(crate) total: u64,
