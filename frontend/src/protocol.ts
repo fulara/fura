@@ -526,7 +526,7 @@ export type ModelSummary = {
   thinking: boolean;
 };
 
-export type ProposedThinkingLevel = "default" | "off" | "minimal" | "low" | "medium" | "high";
+export type ProposedThinkingLevel = "default" | "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export type ProposedModelConfig = {
   id: string;

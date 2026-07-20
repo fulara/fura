@@ -445,6 +445,7 @@ fn controller_tool_definitions() -> Vec<Value> {
         json!({
             "name": "fura_search_sessions",
             "label": "Search Fura sessions",
+            "loadMode": "essential",
             "description": "Search Fura session metadata and loaded transcript projection. This does not change the UI.",
             "parameters": {
                 "type": "object",
@@ -459,6 +460,7 @@ fn controller_tool_definitions() -> Vec<Value> {
         json!({
             "name": "fura_reply",
             "label": "Reply to user",
+            "loadMode": "essential",
             "description": "Send a conversational Ask Fura reply, optionally with structured session candidates.",
             "parameters": {
                 "type": "object",
@@ -474,6 +476,7 @@ fn controller_tool_definitions() -> Vec<Value> {
         json!({
             "name": "fura_select_session",
             "label": "Select session",
+            "loadMode": "essential",
             "description": "Dispatch a non-destructive frontend action to open/select an existing Fura session after explicit user intent.",
             "parameters": {
                 "type": "object",
@@ -485,6 +488,7 @@ fn controller_tool_definitions() -> Vec<Value> {
         json!({
             "name": "fura_set_prompt_draft",
             "label": "Set prompt draft",
+            "loadMode": "essential",
             "description": "Stage text in the active session prompt box. This never sends the prompt.",
             "parameters": {
                 "type": "object",
@@ -499,6 +503,7 @@ fn controller_tool_definitions() -> Vec<Value> {
         json!({
             "name": "fura_show_notice",
             "label": "Show notice",
+            "loadMode": "essential",
             "description": "Show a visible notice in the requesting frontend client.",
             "parameters": {
                 "type": "object",

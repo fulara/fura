@@ -3521,14 +3521,14 @@ pub(crate) mod tests {
 
     #[test]
     fn set_thinking_level_command_serializes_wire_shape() {
-        let command = set_thinking_level_command("rpc-1".to_string(), "high".to_string());
+        let command = set_thinking_level_command("rpc-1".to_string(), "max".to_string());
 
         assert_eq!(
             command,
             serde_json::json!({
                 "id": "rpc-1",
                 "type": "set_thinking_level",
-                "level": "high"
+                "level": "max"
             })
         );
     }
@@ -5604,7 +5604,7 @@ pub(crate) mod tests {
                     provider: "mock".to_string(),
                     model_id: "mock-reasoner".to_string(),
                     model_name: Some("Mock Reasoner".to_string()),
-                    thinking_level: ProposedThinkingLevel::High,
+                    thinking_level: ProposedThinkingLevel::Max,
                 }),
             },
         )
@@ -5617,11 +5617,14 @@ pub(crate) mod tests {
         )
         .await;
 
-        let mut command_types = Vec::new();
+        let mut commands = Vec::new();
         for _ in 0..6 {
-            let command = stdin_rx.recv().await.expect("queued command");
-            command_types.push(command["type"].as_str().unwrap_or_default().to_string());
+            commands.push(stdin_rx.recv().await.expect("queued command"));
         }
+        let command_types = commands
+            .iter()
+            .map(|command| command["type"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
         assert_eq!(
             command_types,
             vec![
@@ -5633,6 +5636,7 @@ pub(crate) mod tests {
                 "get_session_stats",
             ]
         );
+        assert_eq!(commands[2]["level"], "max");
     }
 
     #[tokio::test]

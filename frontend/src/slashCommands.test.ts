@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { buildCommandsPopupSections, findSlashCommand, SLASH_COMMANDS } from "./slashCommands";
+import { buildCommandsPopupSections, findSlashCommand, SLASH_COMMANDS, SUPPORTED_SLASH_COMMANDS } from "./slashCommands";
 
 describe("slash command registry", () => {
   it("does not advertise /goal in Fura", () => {
     expect(SLASH_COMMANDS.some(command => command.name === "goal")).toBe(false);
     expect(findSlashCommand("/goal")).toBeUndefined();
+  });
+
+  it("tracks upstream aliases and unsupported interactive commands", () => {
+    expect(findSlashCommand("/clear")?.name).toBe("new");
+    expect(findSlashCommand("/q")?.name).toBe("exit");
+    expect(findSlashCommand("/vibe")?.support).toBe("tui-only");
+    expect(findSlashCommand("/queue")?.support).toBe("tui-only");
+    expect(findSlashCommand("/pause")?.support).toBe("tui-only");
+    expect(SUPPORTED_SLASH_COMMANDS.some(command => command.name === "vibe")).toBe(false);
   });
 });
 

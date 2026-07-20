@@ -44,16 +44,16 @@ OMP (`--mode rpc-ui`) advertises and runs slash commands:
 ## Slash routing (backend, `src/commands.rs::handle_slash_command`)
 
 - **Fura-native** (dedicated UX) stays intercepted: `plan`→`set_plan_mode`, `goal`→Goal-card
-  notice, `model`/`thinking`/`fork`/`rebase`/`session`/`usage`/`export`/`new`/`compact`/
-  `handoff`/`rename`.
+  notice, `model`/`thinking`/`fork`/`rebase`/`session`/`usage`/`export`/`new` (alias
+  `clear`)/`compact`/`handoff`/`rename`.
 - **`handle`-bearing builtins Fura has no native UI for** (`tools`, `context`, `jobs`, `stats`,
   `changelog`, `fast`, `browser`, `dump`, `share`) fall through to OMP, which runs them
   server-side and returns `command_output`. They were removed from the TUI-only denylist.
 - **Interactive commands without safe Fura projection state** still return a notice. Most are
   `handleTui`-only: `settings`, `copy`, `hotkeys`, `extensions`, `agents`, `branch`, `tree`,
   `login`, `logout`, `mcp`, `ssh`, `resume`, `btw`, `background`, `debug`, `memory`, `exit`,
-  `marketplace`, `plugins`, `reload-plugins`, `force`. `/move` has an OMP server-side `handle`
-  in v16.2, but Fura keeps it blocked until OMP RPC exposes authoritative cwd after the move.
+  `quit`, `q`, `marketplace`, `plugins`, `reload-plugins`, `force`, `vibe`, `queue`, `pause`.
+  `/move` has an OMP server-side `handle` in v16.2, but Fura keeps it blocked until OMP RPC exposes authoritative cwd after the move.
 
 ## Desktop palette + commands popup (frontend)
 

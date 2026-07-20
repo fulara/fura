@@ -7,6 +7,8 @@ export const PROPOSED_THINKING_LEVELS: ProposedThinkingLevel[] = [
   "low",
   "medium",
   "high",
+  "xhigh",
+  "max",
 ];
 
 export function proposedModelIdFromName(name: string, existingIds: Iterable<string> = []): string {

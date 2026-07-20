@@ -1611,9 +1611,9 @@ pub(crate) async fn handle_slash_command(
         "help" | "commands" => vec![notice(
             session_id,
             NoticeLevel::Info,
-            "Supported commands: /help, /new, /abort, /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|inherit], /fork, /rebase <branch>, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
+            "Supported commands: /help, /new (alias /clear), /abort, /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|xhigh|max|inherit], /fork, /rebase <branch>, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
         )],
-        "new" => {
+        "new" | "clear" => {
             let (cwd, args) = {
                 let sessions = state.sessions.read().await;
                 sessions
@@ -1713,8 +1713,8 @@ pub(crate) async fn handle_slash_command(
         // prompt handler and streams the result back as a `command_output` frame.
         "settings" | "copy" | "hotkeys" | "extensions" | "agents" | "branch" | "tree" | "login"
         | "logout" | "mcp" | "ssh" | "resume" | "btw" | "background" | "bg" | "debug"
-        | "memory" | "move" | "exit" | "quit" | "marketplace" | "plugins" | "reload-plugins"
-        | "force" => vec![notice(
+        | "memory" | "move" | "exit" | "quit" | "q" | "marketplace" | "plugins"
+        | "reload-plugins" | "force" | "vibe" | "queue" | "pause" => vec![notice(
             session_id,
             NoticeLevel::Warning,
             format!(
@@ -2073,12 +2073,12 @@ pub(crate) async fn handle_thinking_slash_command(
     }
 
     let level = match arg.as_str() {
-        "off" | "minimal" | "low" | "medium" | "high" | "inherit" => arg,
+        "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "inherit" => arg,
         _ => {
             return vec![notice(
                 session_id,
                 NoticeLevel::Error,
-                "Usage: /thinking [cycle|off|minimal|low|medium|high|inherit]",
+                "Usage: /thinking [cycle|off|minimal|low|medium|high|xhigh|max|inherit]",
             )];
         }
     };
@@ -3426,6 +3426,7 @@ fn review_tool_definition() -> Value {
     json!({
         "name": "fura_add_review_comment",
         "label": "Add Fura diff review comment",
+        "loadMode": "essential",
         "description": "Persist an inline review comment on the explicit Fura diff review currently in progress. Fura resolves the exact diff anchor from the review refs/context.",
         "parameters": {
             "type": "object",
@@ -3459,6 +3460,7 @@ fn conflict_tool_definition() -> Value {
     json!({
         "name": "fura_submit_conflict_assistance",
         "label": "Submit Fura conflict assistance",
+        "loadMode": "essential",
         "description": "Submit the explanation or proposal for the active Fura Conflict Resolver request. Fura validates scope, risk label, and preview content before showing it to the user.",
         "parameters": {
             "type": "object",
@@ -3862,6 +3864,7 @@ mod review_comment_tests {
             set_host_tools["tools"][0]["name"],
             "fura_add_review_comment"
         );
+        assert_eq!(set_host_tools["tools"][0]["loadMode"], "essential");
         let prompt = stdin_rx.recv().await.expect("prompt command");
         assert_eq!(prompt["type"], "prompt");
         let text = prompt["message"].as_str().expect("prompt text");

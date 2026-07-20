@@ -150,6 +150,8 @@ pub(crate) enum ProposedThinkingLevel {
     Low,
     Medium,
     High,
+    XHigh,
+    Max,
 }
 
 impl Default for ProposedThinkingLevel {
@@ -167,6 +169,8 @@ impl ProposedThinkingLevel {
             Self::Low => Some("low"),
             Self::Medium => Some("medium"),
             Self::High => Some("high"),
+            Self::XHigh => Some("xhigh"),
+            Self::Max => Some("max"),
         }
     }
 }
@@ -835,14 +839,14 @@ mod tests {
                 provider: "cursor".to_string(),
                 model_id: "gpt-5.2-codex".to_string(),
                 model_name: None,
-                thinking_level: ProposedThinkingLevel::High,
+                thinking_level: ProposedThinkingLevel::Max,
             }],
             ..FuraConfig::default()
         };
 
         let text = serialize_fura_config_for_disk(&config).expect("serialize config");
 
-        assert!(text.contains("thinking-level: high"));
+        assert!(text.contains("thinking-level: max"));
     }
 
     #[test]
@@ -854,7 +858,7 @@ proposed-models:
     name: Fast review
     provider: openrouter
     model-id: anthropic/claude-sonnet-4.5
-    thinking-level: low
+    thinking-level: xhigh
 "#,
         )
         .expect("config");
@@ -866,7 +870,7 @@ proposed-models:
         );
         assert_eq!(
             config.proposed_models[0].thinking_level,
-            ProposedThinkingLevel::Low
+            ProposedThinkingLevel::XHigh
         );
     }
 

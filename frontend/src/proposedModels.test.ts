@@ -26,7 +26,7 @@ const proposed: ProposedModelConfig = {
   provider: "mock",
   modelId: "mock-reasoner",
   modelName: "Mock Reasoner",
-  thinkingLevel: "high",
+  thinkingLevel: "max",
 };
 
 describe("proposed model helpers", () => {
@@ -41,6 +41,7 @@ describe("proposed model helpers", () => {
     expect(validateProposedModels([{ ...proposed, id: "Bad Id" }])).toContain("Invalid proposed model id");
     expect(validateProposedModels([{ ...proposed, name: " " }])).toBe("Proposed model name is required.");
     expect(validateProposedModels([proposed, { ...proposed, id: "other" }])).toContain("Duplicate proposed model name");
+    expect(validateProposedModels([{ ...proposed, thinkingLevel: "xhigh" }])).toBeNull();
   });
 
   it("filters and formats runtime catalog models", () => {
@@ -52,7 +53,7 @@ describe("proposed model helpers", () => {
   });
 
   it("formats proposed model details and detects stale catalog entries", () => {
-    expect(formatProposedModelDetails(proposed)).toBe("Mock Reasoner · High thinking");
+    expect(formatProposedModelDetails(proposed)).toBe("Mock Reasoner · Max thinking");
     expect(catalogContainsProposedModel(catalog, proposed)).toBe(true);
     expect(catalogContainsProposedModel(catalog, { ...proposed, modelId: "missing" })).toBe(false);
   });
