@@ -80,6 +80,7 @@ struct PendingSessionDeltas {
     order: Vec<String>,
     flush_scheduled: bool,
     flush_generation: u64,
+    flush_due_at: Option<Instant>,
 }
 
 struct PendingSessionDelta {
@@ -126,6 +127,7 @@ impl WsEventCoordinator {
     ) -> (Vec<ServerMessage>, Option<u64>) {
         let mut prepared = Vec::with_capacity(messages.len());
         let mut schedule_generation = None;
+        let now = Instant::now();
         let sessions = state.sessions.read().await;
         let mut pending = self.pending_deltas.lock().await;
 
@@ -133,7 +135,7 @@ impl WsEventCoordinator {
             if let ServerMessage::SessionDelta { session_id, state } = message {
                 pending.record_delta(&session_id, state.transcript_replace_from);
                 if schedule_generation.is_none() {
-                    schedule_generation = pending.schedule_flush();
+                    schedule_generation = pending.schedule_flush(now);
                 }
             } else {
                 prepared.extend(drain_pending_delta_messages_locked(&mut pending, &sessions));
@@ -196,8 +198,9 @@ impl WsEventCoordinator {
     where
         F: FnOnce(&mut SessionRecord) -> Option<SessionProjectionDelta>,
     {
+        let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
-        let replace_from = {
+        let (messages, schedule_generation) = {
             let mut sessions = state.sessions.write().await;
             let Some(record) = sessions.get_mut(session_id) else {
                 return false;
@@ -205,26 +208,28 @@ impl WsEventCoordinator {
             let Some(delta) = build_delta(record) else {
                 return false;
             };
-            delta.transcript_replace_from
-        };
-
-        let schedule_generation = {
             let mut pending = self.pending_deltas.lock().await;
-            pending.record_delta(session_id, replace_from);
-            pending.schedule_flush()
+            pending.record_delta(session_id, delta.transcript_replace_from);
+            if pending.flush_due(started_at) {
+                (
+                    drain_pending_delta_messages_locked(&mut pending, &sessions),
+                    None,
+                )
+            } else {
+                (Vec::new(), pending.schedule_flush(started_at))
+            }
         };
 
-        if let Some(generation) = schedule_generation {
-            let coordinator = self.clone();
-            let state = state.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(SESSION_DELTA_THROTTLE_WINDOW).await;
-                coordinator
-                    .flush_pending_deltas_for_timer(&state, generation)
-                    .await;
-            });
+        if !messages.is_empty() {
+            let fields = session_event_timing_fields(started_at, &messages);
+            self.send_all(messages);
+            drop(_event_guard);
+            append_bridge_debug_event(state, "session_event.emit", fields).await;
+        } else {
+            drop(_event_guard);
         }
 
+        self.schedule_timer_flush_if_needed(state, schedule_generation);
         true
     }
 
@@ -391,14 +396,19 @@ impl PendingSessionDeltas {
         );
     }
 
-    fn schedule_flush(&mut self) -> Option<u64> {
+    fn schedule_flush(&mut self, now: Instant) -> Option<u64> {
         if self.flush_scheduled {
             return None;
         }
 
         self.flush_scheduled = true;
+        self.flush_due_at = Some(now + SESSION_DELTA_THROTTLE_WINDOW);
         self.flush_generation = self.flush_generation.wrapping_add(1);
         Some(self.flush_generation)
+    }
+
+    fn flush_due(&self, now: Instant) -> bool {
+        self.flush_scheduled && self.flush_due_at.is_some_and(|due_at| now >= due_at)
     }
 }
 
@@ -430,6 +440,7 @@ fn drain_pending_delta_messages_locked(
     sessions: &HashMap<String, SessionRecord>,
 ) -> Vec<ServerMessage> {
     pending.flush_scheduled = false;
+    pending.flush_due_at = None;
     let pending_by_session = std::mem::take(&mut pending.sessions);
     let pending_order = std::mem::take(&mut pending.order);
     let mut messages = Vec::with_capacity(pending_by_session.len());
@@ -1354,4 +1365,20 @@ pub(crate) struct ActiveReviewContext {
 pub(crate) struct RpcConfig {
     pub(crate) program: String,
     pub(crate) args: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pending_session_delta_flush_becomes_due_after_throttle_window() {
+        let mut pending = PendingSessionDeltas::default();
+        let now = Instant::now();
+
+        pending.record_delta("s1", 3);
+        assert_eq!(pending.schedule_flush(now), Some(1));
+        assert!(!pending.flush_due(now + SESSION_DELTA_THROTTLE_WINDOW / 2));
+        assert!(pending.flush_due(now + SESSION_DELTA_THROTTLE_WINDOW));
+    }
 }
