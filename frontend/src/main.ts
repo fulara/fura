@@ -869,6 +869,7 @@ let presetEditorDefaults: Record<string, string> = {};
 let presetPending: { kind: "save" | "delete"; name: string } | null = null;
 let pendingPresetCommand: { editorText: string; sessionId: string } | null = null;
 let projections = new Map<string, SessionProjection>();
+let pendingRestoreAfterSessionsSnapshot = false;
 const sessionChangesStates = new Map<string, SessionChangesSummaryState>();
 const sessionChangesPayloadKinds = new Map<string, DiffDetailMode>();
 const sessionChangesDiffIds = new Map<string, string>();
@@ -1656,14 +1657,12 @@ function connect(token: string): void {
     onStatus: setStatus,
     onOpen: () => {
       hideAuthGate();
+      // On (re)connect, defer transcript resync until the fresh `sessions.snapshot`
+      // arrives, then refresh only sessions the bridge still knows about. Refreshing
+      // every held projection blindly re-requests sessions whose files the bridge has
+      // since pruned, producing recurring `unknown session` errors on each reconnect.
+      pendingRestoreAfterSessionsSnapshot = true;
       send({ type: "session.list" });
-      // On (re)connect, re-fetch a fresh snapshot for every session we still
-      // hold a projection for. The socket only loses messages across a drop, and
-      // `session.list` refreshes summaries but not transcripts — so a stale
-      // projection (and its broadcast `seq`) must be resynced explicitly.
-      for (const sessionId of projections.keys()) {
-        send({ type: "state.refresh", sessionId });
-      }
     },
     onClose: () => {
       if (cwdPickerCreatePending && cwdPickerPendingRequestId) {
@@ -1831,6 +1830,16 @@ function handleServerMessage(message: ServerMessage): void {
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
         if (conflictResolverSessionId && !message.sessions.some(session => session.sessionId === conflictResolverSessionId)) {
           conflictResolverSessionId = null;
+        }
+        const liveSessionIds = new Set(message.sessions.map(session => session.sessionId));
+        for (const sessionId of [...projections.keys()]) {
+          if (!liveSessionIds.has(sessionId)) projections.delete(sessionId);
+        }
+        if (pendingRestoreAfterSessionsSnapshot) {
+          pendingRestoreAfterSessionsSnapshot = false;
+          for (const sessionId of projections.keys()) {
+            send({ type: "state.refresh", sessionId });
+          }
         }
         pruneVisiblePlanReviewsWithSessionList();
         if (previousActiveSessionId && !activeSessionId) resetPromptHistoryNavigation();

@@ -89,6 +89,8 @@ describe("renderMermaidBlock", () => {
       expect(mermaidMock.render).toHaveBeenCalledWith(expect.stringMatching(/^fura-mermaid-/), "flowchart TD\n  A --> B", expect.any(HTMLDivElement));
       expect(node.dataset.mermaidState).toBe("rendered");
       expect(node.querySelector(".mermaid-preview svg")?.getAttribute("viewBox")).toBe("0 0 100 50");
+      expect(node.querySelector<SVGSVGElement>(".mermaid-preview svg")?.style.width).toBe("100px");
+      expect(node.querySelector<SVGSVGElement>(".mermaid-preview svg")?.style.maxWidth).toBe("none");
       expect(Array.from(node.querySelectorAll<HTMLButtonElement>(".mermaid-action")).map(button => button.textContent)).toEqual([
         "Copy source",
         "Save SVG",

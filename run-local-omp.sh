@@ -76,7 +76,9 @@ if [[ "${FURA_SKIP_FRONTEND_BUILD:-0}" != "1" ]]; then
   fi
 fi
 
-exec cargo run --bin fura -- \
+cargo build --release --bin fura
+
+exec "${FURA_DIR}/target/release/fura" \
   --bind "${FURA_LOCAL_BIND}" \
   --static-dir "${FURA_DIR}/frontend/dist" \
   --bridge-debug-file "${FURA_BRIDGE_DEBUG_FILE}" \

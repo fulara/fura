@@ -115,6 +115,15 @@ export async function renderMermaidSvg(source: string, owner: Document = documen
   }
 }
 
+function sizeRenderedMermaidSvg(preview: HTMLElement, svg: string): void {
+  const svgElement = preview.querySelector<SVGSVGElement>("svg");
+  if (!svgElement) return;
+  const dimensions = canvasDimensionsForSvg(svg);
+  svgElement.style.width = `${dimensions.width}px`;
+  svgElement.style.maxWidth = "none";
+  svgElement.style.height = "auto";
+}
+
 export function renderMermaidBlock(source: string): HTMLElement {
   const wrapper = mkEl("section");
   wrapper.className = "mermaid-block";
@@ -206,6 +215,7 @@ export function renderMermaidBlock(source: string): HTMLElement {
         preview.classList.remove("mermaid-error");
         preview.replaceChildren();
         preview.innerHTML = svg;
+        sizeRenderedMermaidSvg(preview, svg);
         saveSvg.disabled = false;
         savePng.textContent = "Preparing PNG";
         void svgToPngBlob(svg, wrapper.ownerDocument)

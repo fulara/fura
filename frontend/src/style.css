@@ -90,7 +90,9 @@ textarea:focus {
 .shell {
   display: grid;
   grid-template-columns: 280px minmax(420px, 1fr);
+  width: 100vw;
   height: 100vh;
+  overflow: hidden;
 }
 
 .sidebar {
@@ -834,6 +836,7 @@ h2 {
   display: flex;
   flex-direction: column;
   height: 100%;
+  min-width: 0;
   overflow: hidden;
   background: #111318;
 }
@@ -868,12 +871,19 @@ h2 {
 /* Scrollable panel content area — mirrors old .transcript scroll/grid behaviour */
 .panel-scroll {
   flex: 1;
+  min-width: 0;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   display: grid;
   align-content: start;
   gap: var(--gap-transcript);
   padding: var(--pad-transcript);
+}
+
+.panel-scroll > * {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .panel-content-diffs .panel-scroll {
@@ -2024,6 +2034,9 @@ h2 {
 
 .message {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
   border-radius: var(--radius-card);
 }
 
@@ -2863,7 +2876,10 @@ h2 {
 }
 
 .mermaid-block {
+  min-width: 0;
+  max-width: 100%;
   margin: 0.7rem 0;
+  overflow: hidden;
   border-top: 1px solid #252a35;
   border-bottom: 1px solid #252a35;
   background: rgba(12, 15, 22, 0.55);
@@ -2899,6 +2915,8 @@ h2 {
 }
 
 .mermaid-preview {
+  min-width: 0;
+  max-width: 100%;
   min-height: 5rem;
   padding: 1rem;
   overflow: auto;
@@ -2912,7 +2930,7 @@ h2 {
 
 .mermaid-preview svg {
   display: block;
-  max-width: 100%;
+  max-width: none;
   height: auto;
   margin: 0 auto;
 }
@@ -2943,8 +2961,11 @@ h2 {
 }
 
 .markdown-body {
+  min-width: 0;
+  max-width: 100%;
   padding: 0.3rem 0.85rem 0.45rem;
   line-height: 1.55;
+  overflow-wrap: anywhere;
   word-break: break-word;
 }
 

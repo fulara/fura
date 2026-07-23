@@ -1476,9 +1476,28 @@ describe("desktop cog options", () => {
     connection.sent.length = 0;
     // Simulate a WebSocket reconnect: the coordinator re-fires onOpen.
     connection.options.onOpen?.();
-
+    // Refresh is deferred until the fresh session list arrives, so held
+    // projections for pruned sessions are not blindly re-requested.
     expect(connection.sent).toContainEqual({ type: "session.list" });
+    expect(connection.sent).not.toContainEqual({ type: "state.refresh", sessionId: "live" });
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "live" });
+  });
+
+  it("drops projections for sessions absent from a reconnect snapshot", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("gone")] });
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    connection.emit({ type: "session.snapshot", sessionId: "gone", state: projection("gone") });
+
+    connection.sent.length = 0;
+    connection.options.onOpen?.();
+    // Bridge pruned "gone" (its session file was deleted); it is absent from the snapshot.
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+
+    expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "live" });
+    expect(connection.sent).not.toContainEqual({ type: "state.refresh", sessionId: "gone" });
   });
 
   it("renders aggregate patch by default and drills down without refetching all files", async () => {

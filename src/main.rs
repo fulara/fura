@@ -2060,6 +2060,23 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn state_refresh_on_unknown_session_is_silent_no_op() {
+        let state = test_state(8, None);
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::StateRefresh {
+                session_id: "gone".to_string(),
+            },
+        )
+        .await;
+
+        // A refresh for a pruned session is expected resync churn: no error
+        // response, and no snapshot event since the session does not exist.
+        assert!(responses.is_empty());
+    }
+
     fn push_message_delta(
         record: &mut SessionRecord,
         id: &str,

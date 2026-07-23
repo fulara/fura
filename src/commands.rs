@@ -83,9 +83,8 @@ pub(crate) async fn handle_client_message(
             state.events.emit_sessions_snapshot(state).await;
             Vec::new()
         }
-        ClientMessage::SessionAttach { session_id }
-        | ClientMessage::StateRefresh { session_id } => {
-            info!(action = "session.attach_or_refresh", session_id = %session_id);
+        ClientMessage::SessionAttach { session_id } => {
+            info!(action = "session.attach", session_id = %session_id);
             if let Err(message) = refresh_rpc_state(state, &session_id).await {
                 warn!(session_id = %session_id, %message, "state refresh could not reach RPC child");
             }
@@ -98,6 +97,21 @@ pub(crate) async fn handle_client_message(
             } else {
                 vec![unknown_session_error(session_id)]
             }
+        }
+        ClientMessage::StateRefresh { session_id } => {
+            info!(action = "session.refresh", session_id = %session_id);
+            if let Err(message) = refresh_rpc_state(state, &session_id).await {
+                warn!(session_id = %session_id, %message, "state refresh could not reach RPC child");
+            }
+            // Refresh of a pruned session is expected resync churn, not an error:
+            // the authoritative `sessions.snapshot` reconciles the client's stale
+            // projections. Emit the snapshot when the session is live, stay silent
+            // otherwise so no session-less error lands in the active transcript.
+            state
+                .events
+                .emit_current_session_snapshot(state, &session_id)
+                .await;
+            Vec::new()
         }
         ClientMessage::SessionDetach { session_id } => {
             info!(action = "session.detach", session_id = %session_id);
