@@ -334,6 +334,108 @@ fn map_async_result_message(value: &Value) -> TranscriptMessage {
     )
 }
 
+fn map_late_diagnostics_message(value: &Value) -> Option<TranscriptMessage> {
+    let files = value
+        .get("details")
+        .and_then(|details| details.get("files"))
+        .and_then(Value::as_array)?;
+    let mut sections = Vec::new();
+    for file in files {
+        let messages = file
+            .get("messages")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|message| !message.is_empty())
+            .collect::<Vec<_>>();
+        if messages.is_empty() {
+            continue;
+        }
+
+        let path = file
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty());
+        let summary = file
+            .get("summary")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty());
+        let mut section = match (path, summary) {
+            (Some(path), Some(summary)) => format!("{path} — {summary}"),
+            (Some(path), None) => path.to_string(),
+            (None, Some(summary)) => summary.to_string(),
+            (None, None) => String::new(),
+        };
+        if !section.is_empty() {
+            section.push('\n');
+        }
+        section.push_str(&messages.join("\n"));
+        sections.push(section);
+    }
+    if sections.is_empty() {
+        return None;
+    }
+
+    Some(TranscriptMessage::new(
+        upstream_message_id(value),
+        MessageRole::System,
+        vec![ContentBlock::Text {
+            text: format!("Late diagnostics\n\n{}", sections.join("\n\n")),
+        }],
+        value_timestamp(value),
+        false,
+    ))
+}
+
+fn map_background_tan_dispatch_message(value: &Value) -> TranscriptMessage {
+    let details = value.get("details");
+    let detail = |key: &str| {
+        details
+            .and_then(|details| details.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+    let mut text = format!(
+        "Tangent dispatched [task] {}",
+        detail("jobId").unwrap_or("unknown")
+    );
+    if let Some(work) = detail("work") {
+        let single_line = work
+            .split_whitespace()
+            .fold(String::new(), |mut text, word| {
+                if !text.is_empty() {
+                    text.push(' ');
+                }
+                text.push_str(word);
+                text
+            });
+        let preview = if single_line.chars().count() > 56 {
+            let mut preview = single_line.chars().take(55).collect::<String>();
+            preview.push('…');
+            preview
+        } else {
+            single_line
+        };
+        if !preview.is_empty() {
+            text.push_str(" — ");
+            text.push_str(&preview);
+        }
+    }
+
+    TranscriptMessage::new(
+        upstream_message_id(value),
+        MessageRole::System,
+        vec![ContentBlock::Text { text }],
+        value_timestamp(value),
+        false,
+    )
+}
+
 fn map_irc_message(value: &Value, custom_type: &str) -> Option<TranscriptMessage> {
     let details = value.get("details");
     let detail = |key: &str| {
@@ -405,19 +507,37 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
             if value.get("display").and_then(|v| v.as_bool()) != Some(true) {
                 return None;
             }
-            if value.get("customType").and_then(Value::as_str) == Some("async-result") {
-                return Some(map_async_result_message(value));
+            let custom_type = value
+                .get("customType")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            match custom_type {
+                "async-result" => return Some(map_async_result_message(value)),
+                "lsp-late-diagnostic" => return map_late_diagnostics_message(value),
+                "background-tan-dispatch" => {
+                    return Some(map_background_tan_dispatch_message(value));
+                }
+                "irc:incoming" | "irc:autoreply" | "irc:relay" => {
+                    return map_irc_message(value, custom_type);
+                }
+                _ => {}
             }
-            if let Some(custom_type @ ("irc:incoming" | "irc:autoreply" | "irc:relay")) =
-                value.get("customType").and_then(Value::as_str)
-            {
-                return map_irc_message(value, custom_type);
-            }
-            // OMP uses <system-notice> as a model-only envelope and provides
-            // dedicated TUI components for the visible projection. Never expose the
-            // internal envelope when Fura has no corresponding projection.
+            // The envelope is model-facing, but `display: true` is user-facing. For an
+            // unknown future event, preserve its occurrence without exposing the prompt.
             if contains_model_only_system_notice(value) {
-                return None;
+                let custom_type = custom_type.trim();
+                let text = if custom_type.is_empty() {
+                    "System event".to_string()
+                } else {
+                    format!("System event [{custom_type}]")
+                };
+                return Some(TranscriptMessage::new(
+                    upstream_message_id(value),
+                    MessageRole::System,
+                    vec![ContentBlock::Text { text }],
+                    value_timestamp(value),
+                    false,
+                ));
             }
             // Fall through to normal text extraction.
         }
@@ -737,6 +857,62 @@ mod tests {
     }
 
     #[test]
+    fn visible_late_diagnostics_project_structured_details() {
+        let message = map_omp_message(&serde_json::json!({
+            "id": "late-diag",
+            "role": "custom",
+            "customType": "lsp-late-diagnostic",
+            "content": "<system-notice>\nInternal instructions for handling diagnostics.\n</system-notice>",
+            "display": true,
+            "attribution": "agent",
+            "details": {
+                "files": [{
+                    "path": "src/lib.rs",
+                    "summary": "1 error(s)",
+                    "errored": true,
+                    "messages": [
+                        "src/lib.rs:12:4 [error] [rust-analyzer] mismatched types"
+                    ]
+                }]
+            }
+        }))
+        .expect("late diagnostics should remain visible");
+
+        assert_eq!(message.role, MessageRole::System);
+        assert_eq!(
+            message.blocks,
+            vec![ContentBlock::Text {
+                text: "Late diagnostics\n\nsrc/lib.rs — 1 error(s)\nsrc/lib.rs:12:4 [error] [rust-analyzer] mismatched types".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn visible_background_tangent_projects_dispatch_summary() {
+        let message = map_omp_message(&serde_json::json!({
+            "id": "tan-dispatch",
+            "role": "custom",
+            "customType": "background-tan-dispatch",
+            "content": "<system-notice reason=\"background_task_dispatched\">\nInternal instructions for the model.\n</system-notice>",
+            "display": true,
+            "attribution": "user",
+            "details": {
+                "jobId": "tan-1",
+                "work": "Audit session rendering"
+            }
+        }))
+        .expect("background tangent should remain visible");
+
+        assert_eq!(message.role, MessageRole::System);
+        assert_eq!(
+            message.blocks,
+            vec![ContentBlock::Text {
+                text: "Tangent dispatched [task] tan-1 — Audit session rendering".to_string()
+            }]
+        );
+    }
+
+    #[test]
     fn hidden_xdev_system_notice_is_suppressed() {
         let message = map_omp_message(&serde_json::json!({
             "role": "custom",
@@ -750,15 +926,22 @@ mod tests {
     }
 
     #[test]
-    fn unknown_visible_system_notice_is_suppressed() {
+    fn unknown_visible_system_notice_preserves_safe_event_indicator() {
         let message = map_omp_message(&serde_json::json!({
             "role": "custom",
             "customType": "future-internal-notice",
             "content": "<system-notice>\nInternal model instructions.\n</system-notice>",
             "display": true,
             "attribution": "agent"
-        }));
+        }))
+        .expect("display-visible system event should not disappear");
 
-        assert!(message.is_none());
+        assert_eq!(message.role, MessageRole::System);
+        assert_eq!(
+            message.blocks,
+            vec![ContentBlock::Text {
+                text: "System event [future-internal-notice]".to_string()
+            }]
+        );
     }
 }
