@@ -886,6 +886,10 @@ h2 {
   max-width: 100%;
 }
 
+.panel-scroll > .message {
+  align-self: start;
+}
+
 .panel-content-diffs .panel-scroll {
   overflow: hidden;
   padding: 0;

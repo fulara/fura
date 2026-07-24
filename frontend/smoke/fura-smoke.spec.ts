@@ -61,6 +61,8 @@ test("desktop authenticates, creates a mock session, and receives a prompt respo
 
   await expect(page.locator(".message.user")).toContainText("hello from desktop smoke");
   await expect(page.locator(".message.assistant")).toContainText("Mock assistant received");
+  await expect.poll(async () => (await page.locator(".message.user").boundingBox())?.height ?? 0).toBeGreaterThan(20);
+  await expect.poll(async () => (await page.locator(".message.assistant").boundingBox())?.height ?? 0).toBeGreaterThan(20);
 });
 
 test("desktop lists and changes the active session model", async ({ page }) => {
