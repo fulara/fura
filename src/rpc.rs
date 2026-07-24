@@ -1840,6 +1840,8 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 RpcStateUpdate {
                     current_session_id: current_session_id.clone(),
                     target_session_id: target_session_id.clone(),
+                    is_streaming: data.is_streaming,
+                    is_compacting: data.is_compacting,
                     session_name,
                     model,
                     thinking_level,

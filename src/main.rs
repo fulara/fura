@@ -674,6 +674,39 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn active_tool_card_does_not_override_idle_agent_status() {
+        let mut record = test_record();
+        record.active_tool_calls.push(ToolCard::new(
+            "background-1".to_string(),
+            None,
+            "bash".to_string(),
+            Some("running in background".to_string()),
+            serde_json::json!({ "command": "long-running-task" }),
+            true,
+            false,
+            None,
+            Some(serde_json::json!({
+                "details": {
+                    "async": {
+                        "state": "running"
+                    }
+                }
+            })),
+            0,
+        ));
+
+        assert_eq!(
+            record.effective_status(),
+            SessionStatus::Idle,
+            "a background tool can keep updating after OMP has settled the agent"
+        );
+        assert!(
+            !record.projection().is_busy,
+            "background tool progress must not present an idle agent as working"
+        );
+    }
+
+    #[test]
     fn maps_goal_mode_projection_from_omp_state() {
         let value = serde_json::json!({
             "enabled": true,
@@ -749,6 +782,8 @@ pub(crate) mod tests {
 
         apply_rpc_state_to_record(
             &mut record,
+            false,
+            false,
             None,
             None,
             None,
@@ -775,6 +810,8 @@ pub(crate) mod tests {
 
         apply_rpc_state_to_record(
             &mut record,
+            false,
+            false,
             None,
             None,
             None,
@@ -809,6 +846,8 @@ pub(crate) mod tests {
 
         apply_rpc_state_to_record(
             &mut record,
+            false,
+            false,
             None,
             None,
             None,
@@ -1218,6 +1257,8 @@ pub(crate) mod tests {
             RpcStateUpdate {
                 current_session_id: "transport-session".to_string(),
                 target_session_id: "real-session".to_string(),
+                is_streaming: false,
+                is_compacting: false,
                 session_name: Some("Real session".to_string()),
                 model: Some("Mock Model".to_string()),
                 thinking_level: Some("high".to_string()),
@@ -3384,6 +3425,88 @@ pub(crate) mod tests {
                 .as_str(),
             "real-s1"
         );
+    }
+
+    #[tokio::test]
+    async fn get_state_runtime_flags_reconcile_busy_and_compacting_status() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.status = SessionStatus::Busy;
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        map_test_transport(&state, "transport-1", "s1").await;
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "s1",
+                    "isStreaming": true,
+                    "isCompacting": false
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session");
+        assert_eq!(
+            record.effective_status(),
+            SessionStatus::Busy,
+            "authoritative OMP streaming state must survive a refresh between output events"
+        );
+        assert!(!record.is_compacting);
+        drop(sessions);
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "s1",
+                    "isStreaming": false,
+                    "isCompacting": true
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session");
+        assert_eq!(record.effective_status(), SessionStatus::Busy);
+        assert!(record.is_compacting);
+        drop(sessions);
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "s1",
+                    "isStreaming": false,
+                    "isCompacting": false
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session");
+        assert_eq!(record.effective_status(), SessionStatus::Idle);
+        assert!(!record.is_compacting);
     }
 
     #[tokio::test]
@@ -5887,27 +6010,6 @@ pub(crate) mod tests {
         assert_eq!(record.messages.len(), 2);
         assert_eq!(projected_messages.len(), 1);
         assert_eq!(record.messages[1].id, projected_messages[0].id);
-    }
-
-    #[test]
-    fn active_tool_work_keeps_projection_busy() {
-        let mut record = test_record();
-        record.status = SessionStatus::Idle;
-        record.active_tool_calls.push(ToolCard::new(
-            "tool-1".to_string(),
-            Timestamp::from_rpc(&serde_json::json!(0)),
-            "task".to_string(),
-            None,
-            Value::Null,
-            true,
-            false,
-            None,
-            None,
-            0,
-        ));
-
-        assert!(record.projection().is_busy);
-        assert!(matches!(record.summary().status, SessionStatus::Busy));
     }
 
     #[tokio::test]

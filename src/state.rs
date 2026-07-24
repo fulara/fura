@@ -994,6 +994,8 @@ impl SessionRuntimeState {
 
 pub(crate) fn apply_rpc_state_to_record(
     record: &mut SessionRecord,
+    is_streaming: bool,
+    is_compacting: bool,
     session_name: Option<String>,
     model: Option<String>,
     thinking_level: Option<String>,
@@ -1005,7 +1007,12 @@ pub(crate) fn apply_rpc_state_to_record(
     goal_mode: Option<Option<GoalModeProjection>>,
     todo_phases: Option<Vec<TodoPhaseProjection>>,
 ) {
-    record.status = SessionStatus::Idle;
+    record.status = if is_streaming {
+        SessionStatus::Busy
+    } else {
+        SessionStatus::Idle
+    };
+    record.is_compacting = is_compacting;
     if let Some(name) = session_name {
         if record.title.is_none() || record.title.as_deref() != Some(&name) {
             record.title = Some(name);
@@ -1041,6 +1048,8 @@ pub(crate) fn apply_rpc_state_to_record(
 pub(crate) struct RpcStateUpdate {
     pub(crate) current_session_id: String,
     pub(crate) target_session_id: String,
+    pub(crate) is_streaming: bool,
+    pub(crate) is_compacting: bool,
     pub(crate) session_name: Option<String>,
     pub(crate) model: Option<String>,
     pub(crate) thinking_level: Option<String>,
@@ -1207,6 +1216,8 @@ pub(crate) async fn apply_get_state_update(
                     record.updated_at = Timestamp::now();
                     apply_rpc_state_to_record(
                         record,
+                        update.is_streaming,
+                        update.is_compacting,
                         effective_session_name,
                         update.model,
                         update.thinking_level,
@@ -1231,6 +1242,8 @@ pub(crate) async fn apply_get_state_update(
                 if let Some(record) = sessions.get_mut(&update.target_session_id) {
                     apply_rpc_state_to_record(
                         record,
+                        update.is_streaming,
+                        update.is_compacting,
                         effective_session_name,
                         update.model,
                         update.thinking_level,

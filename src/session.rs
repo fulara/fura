@@ -107,14 +107,10 @@ impl SessionRecord {
         }
     }
 
-    pub(crate) fn has_active_work(&self) -> bool {
-        self.streaming_message.is_some() || self.active_tool_calls.iter().any(|card| card.is_active)
-    }
-
     pub(crate) fn effective_status(&self) -> SessionStatus {
         match self.status {
             SessionStatus::Exited | SessionStatus::Available | SessionStatus::Error => self.status,
-            _ if self.has_active_work() || self.is_compacting => SessionStatus::Busy,
+            _ if self.is_compacting => SessionStatus::Busy,
             status => status,
         }
     }
