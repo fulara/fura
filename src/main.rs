@@ -621,6 +621,7 @@ pub(crate) mod tests {
             live_message_ids: HashSet::new(),
             streaming_message: None,
             is_compacting: false,
+            continuation_pending: false,
             tool_cards: Vec::new(),
             active_tool_calls: Vec::new(),
             todo_phases: None,
@@ -3425,6 +3426,138 @@ pub(crate) mod tests {
                 .as_str(),
             "real-s1"
         );
+    }
+
+    #[tokio::test]
+    async fn nonterminal_agent_end_keeps_session_busy_and_skips_refresh() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.status = SessionStatus::Busy;
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        let mut commands = register_test_transport(&state, "transport-1", "s1", 4).await;
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "agent_end",
+                "isTerminal": false
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session");
+        assert_eq!(
+            record.effective_status(),
+            SessionStatus::Busy,
+            "a scheduled continuation has not reached its true final settle"
+        );
+        drop(sessions);
+        assert!(
+            commands.try_recv().is_err(),
+            "a nonterminal settle must not refresh idle get_state between continuation turns"
+        );
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "s1",
+                    "isStreaming": false,
+                    "isCompacting": false
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session");
+        assert_eq!(
+            record.effective_status(),
+            SessionStatus::Busy,
+            "a stale idle refresh must not clear a scheduled continuation"
+        );
+        assert!(record.continuation_pending);
+        drop(sessions);
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({ "type": "agent_start" }),
+        )
+        .await;
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session");
+        assert_eq!(record.effective_status(), SessionStatus::Busy);
+        assert!(
+            !record.continuation_pending,
+            "the scheduled continuation started"
+        );
+        drop(sessions);
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({ "type": "agent_end", "isTerminal": true }),
+        )
+        .await;
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session");
+        assert_eq!(record.effective_status(), SessionStatus::Idle);
+        assert!(!record.continuation_pending);
+    }
+
+    #[tokio::test]
+    async fn controller_nonterminal_agent_end_keeps_active_run() {
+        let state = test_state(8, None);
+        {
+            let mut controller = state.bridge_controller.write().await;
+            controller.transport_session_id = Some("controller-transport".to_string());
+            controller.active_run = Some(BridgeControllerRun {
+                target_client_id: "client-1".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                active_session_id: Some("s1".to_string()),
+                prompt_started_at: Timestamp::now(),
+            });
+        }
+        let mut events = state.events.subscribe();
+
+        apply_rpc_frame(
+            &state,
+            "controller-transport",
+            &serde_json::json!({ "type": "agent_end", "isTerminal": false }),
+        )
+        .await;
+
+        assert!(state.bridge_controller.read().await.active_run.is_some());
+        assert!(
+            events.try_recv().is_err(),
+            "nonterminal controller settle must not announce idle"
+        );
+
+        apply_rpc_frame(
+            &state,
+            "controller-transport",
+            &serde_json::json!({ "type": "agent_end", "isTerminal": true }),
+        )
+        .await;
+
+        assert!(state.bridge_controller.read().await.active_run.is_none());
+        let ServerMessage::ControlStatus { status, .. } =
+            events.recv().await.expect("terminal controller status")
+        else {
+            panic!("expected controller status");
+        };
+        assert_eq!(status.status, "idle");
     }
 
     #[tokio::test]

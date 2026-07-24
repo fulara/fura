@@ -1108,6 +1108,7 @@ pub(crate) async fn apply_get_state_update(
                 let previous_snapshot =
                     sessions.get_mut(&update.current_session_id).map(|record| {
                         record.status = SessionStatus::Available;
+                        record.continuation_pending = false;
                         record.kind = SessionKind::Available;
                         record.streaming_message = None;
                         record.live_message_ids.clear();
@@ -1121,6 +1122,7 @@ pub(crate) async fn apply_get_state_update(
                     .entry(update.target_session_id.clone())
                     .and_modify(|record| {
                         record.status = SessionStatus::Idle;
+                        record.continuation_pending = false;
                         record.kind = SessionKind::Managed;
                         record.streaming_message = None;
                         record.live_message_ids.clear();
@@ -1164,6 +1166,7 @@ pub(crate) async fn apply_get_state_update(
                             live_message_ids: HashSet::new(),
                             streaming_message: None,
                             is_compacting: false,
+                            continuation_pending: false,
                             tool_cards: Vec::new(),
                             active_tool_calls: Vec::new(),
                             todo_phases: None,

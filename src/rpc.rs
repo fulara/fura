@@ -696,7 +696,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         .await;
                 }
             }
-            OmpRpcFrame::AgentEnd { .. } => handle_controller_agent_end(state).await,
+            OmpRpcFrame::AgentEnd { is_terminal, .. } => {
+                if is_terminal != Some(false) {
+                    handle_controller_agent_end(state).await;
+                }
+            }
             OmpRpcFrame::HostToolCall {
                 id,
                 tool_call_id,
@@ -777,17 +781,25 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             discard_pending_prompt_drafts_for_session(state, &target_session_id).await;
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Busy).await
         }
-        OmpRpcFrame::AgentEnd { .. } => {
-            clear_review_contexts_for_session(state, &target_session_id).await;
-            clear_conflict_contexts_for_session(
-                state,
-                &target_session_id,
-                Some("Conflict Resolver agent run finished without submitting an explanation or proposal."),
-            )
-            .await;
-            mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
-            if let Err(message) = refresh_rpc_state(state, &target_session_id).await {
-                warn!(session_id = %target_session_id, %message, "post-agent state refresh failed");
+        OmpRpcFrame::AgentEnd { is_terminal, .. } => {
+            if is_terminal == Some(false) {
+                // OMP has already scheduled another turn. Keep the session unavailable and
+                // avoid an idle get_state response winning the gap before the next agent_start.
+                mark_pending_continuation_and_broadcast(state, &target_session_id).await;
+            } else {
+                clear_review_contexts_for_session(state, &target_session_id).await;
+                clear_conflict_contexts_for_session(
+                    state,
+                    &target_session_id,
+                    Some(
+                        "Conflict Resolver agent run finished without submitting an explanation or proposal.",
+                    ),
+                )
+                .await;
+                mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
+                if let Err(message) = refresh_rpc_state(state, &target_session_id).await {
+                    warn!(session_id = %target_session_id, %message, "post-agent state refresh failed");
+                }
             }
         }
         OmpRpcFrame::PlanReview {
@@ -2084,6 +2096,7 @@ pub(crate) async fn settle_prompt_error_and_broadcast(state: &AppState, session_
         .mutate_session_snapshot(state, session_id, |record| {
             record.status = SessionStatus::Idle;
             record.streaming_message = None;
+            record.continuation_pending = false;
         })
         .await;
     if snapshot_sent {
@@ -2100,6 +2113,20 @@ pub(crate) async fn mark_status_and_broadcast(
         .events
         .mutate_session_snapshot(state, session_id, |record| {
             record.status = status;
+            record.continuation_pending = false;
+        })
+        .await;
+    if snapshot_sent {
+        broadcast_sessions_snapshot(state).await;
+    }
+}
+
+async fn mark_pending_continuation_and_broadcast(state: &AppState, session_id: &str) {
+    let snapshot_sent = state
+        .events
+        .mutate_session_snapshot(state, session_id, |record| {
+            record.status = SessionStatus::Busy;
+            record.continuation_pending = true;
         })
         .await;
     if snapshot_sent {

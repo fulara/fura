@@ -14,7 +14,11 @@ pub(crate) enum OmpRpcFrame {
     #[serde(rename = "agent_start")]
     AgentStart,
     #[serde(rename = "agent_end")]
-    AgentEnd { messages: Option<Vec<Value>> },
+    AgentEnd {
+        messages: Option<Vec<Value>>,
+        #[serde(rename = "isTerminal")]
+        is_terminal: Option<bool>,
+    },
     #[serde(rename = "plan_review")]
     PlanReview {
         #[serde(rename = "planFilePath")]

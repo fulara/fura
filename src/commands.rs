@@ -1345,6 +1345,7 @@ pub(crate) fn opened_session_record(
         live_message_ids: HashSet::new(),
         streaming_message: None,
         is_compacting: false,
+        continuation_pending: false,
         tool_cards: existing
             .map(|record| record.tool_cards.clone())
             .unwrap_or_default(),
@@ -1858,10 +1859,12 @@ pub(crate) async fn handle_rebase_slash_command(
         // edit the worktree, and an abort would then discard those edits. This residual race is
         // accepted (single-operator local tool; sub-second window; conflict required) rather than
         // adding a cross-cutting rebase-in-progress dispatch lock. Revisit if /rebase grows.
-        if matches!(
-            record.effective_status(),
-            SessionStatus::Busy | SessionStatus::Starting
-        ) {
+        if record.has_active_work_artifacts()
+            || matches!(
+                record.effective_status(),
+                SessionStatus::Busy | SessionStatus::Starting
+            )
+        {
             return vec![notice(
                 session_id,
                 NoticeLevel::Error,
@@ -2618,10 +2621,12 @@ pub(crate) async fn handle_review_agent_review_start(
         let Some(record) = sessions.get_mut(&session_id) else {
             return vec![unknown_session_error(session_id)];
         };
-        if matches!(
-            record.effective_status(),
-            SessionStatus::Starting | SessionStatus::Busy
-        ) {
+        if record.has_active_work_artifacts()
+            || matches!(
+                record.effective_status(),
+                SessionStatus::Starting | SessionStatus::Busy
+            )
+        {
             return vec![ServerMessage::Error {
                 request_id: None,
                 message: "Cannot start agent diff review while the session is busy.".to_string(),
@@ -3602,6 +3607,7 @@ mod review_comment_tests {
             live_message_ids: HashSet::new(),
             streaming_message: None,
             is_compacting: false,
+            continuation_pending: false,
             tool_cards: Vec::new(),
             active_tool_calls: Vec::new(),
             todo_phases: Some(Vec::new()),
@@ -3624,6 +3630,27 @@ mod review_comment_tests {
             pending_ask: None,
             available_commands: Vec::new(),
         }
+    }
+
+    fn active_background_tool_card(id: &str) -> ToolCard {
+        ToolCard::new(
+            id.to_string(),
+            None,
+            "bash".to_string(),
+            Some("running in background".to_string()),
+            serde_json::json!({ "command": "long-running-task" }),
+            true,
+            false,
+            None,
+            Some(serde_json::json!({
+                "details": {
+                    "async": {
+                        "state": "running"
+                    }
+                }
+            })),
+            0,
+        )
     }
 
     fn anchor() -> DiffLineLocation {
@@ -3899,6 +3926,58 @@ mod review_comment_tests {
             panic!("expected busy rejection for second review");
         };
         assert!(message.contains("session is busy"));
+    }
+
+    #[tokio::test]
+    async fn rebase_rejects_idle_session_with_active_background_tool() {
+        let state = crate::tests::test_state(8, None);
+        let mut record = test_session_record("s1");
+        record
+            .active_tool_calls
+            .push(active_background_tool_card("background-1"));
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+
+        let responses = handle_rebase_slash_command(&state, "s1".to_string(), "main").await;
+
+        let [ServerMessage::SessionNotice { level, text, .. }] = responses.as_slice() else {
+            panic!("expected busy notice");
+        };
+        assert!(matches!(level, NoticeLevel::Error));
+        assert!(text.contains("Session is busy"));
+    }
+
+    #[tokio::test]
+    async fn review_agent_review_start_rejects_active_background_tool() {
+        let state = crate::tests::test_state(8, None);
+        let mut record = test_session_record("s1");
+        record
+            .active_tool_calls
+            .push(active_background_tool_card("background-1"));
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::ReviewAgentReviewStart {
+                session_id: "s1".to_string(),
+                state: reviewable_state("+change"),
+                instructions: "Review while a background tool is active".to_string(),
+            },
+        )
+        .await;
+
+        let [ServerMessage::Error { message, .. }] = responses.as_slice() else {
+            panic!("expected busy error");
+        };
+        assert!(message.contains("session is busy"));
+        assert!(state.active_review_contexts.read().await.is_empty());
     }
 
     #[tokio::test]

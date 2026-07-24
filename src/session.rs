@@ -52,6 +52,10 @@ pub(crate) struct SessionRecord {
     /// never persisted.
     #[serde(skip)]
     pub(crate) is_compacting: bool,
+    /// True after OMP emits `agent_end.isTerminal=false` and until the scheduled continuation
+    /// starts or the session reaches a terminal settle. Transient and never persisted.
+    #[serde(skip)]
+    pub(crate) continuation_pending: bool,
     /// Completed tool-execution cards projected from live events or historical tool results.
     #[serde(skip)]
     pub(crate) tool_cards: Vec<ToolCard>,
@@ -107,10 +111,16 @@ impl SessionRecord {
         }
     }
 
+    /// In-flight transcript/tool artifacts that can still mutate the worktree. This is an
+    /// operational safety signal, not the source of the agent's displayed readiness.
+    pub(crate) fn has_active_work_artifacts(&self) -> bool {
+        self.streaming_message.is_some() || self.active_tool_calls.iter().any(|card| card.is_active)
+    }
+
     pub(crate) fn effective_status(&self) -> SessionStatus {
         match self.status {
             SessionStatus::Exited | SessionStatus::Available | SessionStatus::Error => self.status,
-            _ if self.is_compacting => SessionStatus::Busy,
+            _ if self.continuation_pending || self.is_compacting => SessionStatus::Busy,
             status => status,
         }
     }
