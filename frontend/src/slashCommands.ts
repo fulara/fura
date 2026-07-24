@@ -67,6 +67,13 @@ export function findSlashCommand(input: string): SlashCommandSpec | undefined {
   return SLASH_COMMANDS.find(cmd => cmd.name === name || cmd.aliases?.includes(name));
 }
 
+export function findLiveSlashCommand(input: string, live: readonly RpcAvailableSlashCommand[]): RpcAvailableSlashCommand | undefined {
+  const match = input.match(/^\/(\S+)/);
+  if (!match) return undefined;
+  const name = match[1].toLowerCase();
+  return live.find(cmd => cmd.name.toLowerCase() === name || cmd.aliases.some(alias => alias.toLowerCase() === name));
+}
+
 /** Returns score (lower = better match), null if no match. */
 function fuzzyScore(query: string, text: string): number | null {
   if (!query) return 0;

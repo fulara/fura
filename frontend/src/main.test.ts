@@ -2277,6 +2277,37 @@ describe("desktop compaction indicator", () => {
     expect(document.querySelector<HTMLTextAreaElement>("#promptInput")?.disabled).toBe(false);
   });
 
+  it("sends live OMP slash commands while the session is busy", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", {
+        isBusy: true,
+        summary: summary("busy", { status: "busy", title: "Busy" }),
+        availableCommands: [
+          { name: "prewalk", aliases: ["pw"], subcommands: [], source: "builtin", description: "Prewalk" },
+        ],
+      }),
+    });
+
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput");
+    const form = document.querySelector<HTMLFormElement>("#promptForm");
+    if (!input || !form) throw new Error("composer missing");
+    connection.sent.length = 0;
+    input.value = "/prewalk next";
+    form.requestSubmit();
+
+    expect(connection.sent).toContainEqual({
+      type: "prompt.send",
+      sessionId: "busy",
+      text: "/prewalk next",
+    });
+    expect(document.querySelector<HTMLElement>("#busyPromptOverlay")?.hidden).toBe(true);
+  });
+
   it("hides the busy-prompt choice and blocks steer/follow-up while compacting", async () => {
     const { connection } = await createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });

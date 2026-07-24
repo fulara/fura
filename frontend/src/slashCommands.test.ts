@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCommandsPopupSections, findSlashCommand, SLASH_COMMANDS, SUPPORTED_SLASH_COMMANDS } from "./slashCommands";
+import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, SLASH_COMMANDS, SUPPORTED_SLASH_COMMANDS } from "./slashCommands";
 
 describe("slash command registry", () => {
   it("does not advertise /goal in Fura", () => {
@@ -14,6 +14,18 @@ describe("slash command registry", () => {
     expect(findSlashCommand("/queue")?.support).toBe("tui-only");
     expect(findSlashCommand("/pause")?.support).toBe("tui-only");
     expect(SUPPORTED_SLASH_COMMANDS.some(command => command.name === "vibe")).toBe(false);
+  });
+
+  it("matches live command names and aliases, including skill names", () => {
+    const live = [
+      { name: "skill:develop-fura", aliases: [], subcommands: [], source: "skill", description: "Develop Fura" },
+      { name: "prewalk", aliases: ["pw"], subcommands: [], source: "builtin", description: "Prewalk" },
+    ];
+
+    expect(findLiveSlashCommand("/skill:develop-fura", live)?.name).toBe("skill:develop-fura");
+    expect(findLiveSlashCommand("/prewalk next", live)?.name).toBe("prewalk");
+    expect(findLiveSlashCommand("/pw next", live)?.name).toBe("prewalk");
+    expect(findLiveSlashCommand("/unknown", live)).toBeUndefined();
   });
 });
 

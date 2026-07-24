@@ -1,7 +1,7 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
-import { buildCommandsPopupSections, findSlashCommand, fuzzyMatchCommands, SUPPORTED_SLASH_COMMANDS, type CommandPopupSection, type SlashCommandSpec } from "./slashCommands";
+import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, fuzzyMatchCommands, SUPPORTED_SLASH_COMMANDS, type CommandPopupSection, type SlashCommandSpec } from "./slashCommands";
 import { formatContextUsage, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
@@ -3003,10 +3003,12 @@ function sendPromptWithBusyHandling(options: {
 }): boolean {
   const projection = projections.get(options.sessionId);
   const knownSlashCommand = findSlashCommand(options.editorText);
+  const liveSlashCommand = projection ? findLiveSlashCommand(options.editorText, projection.availableCommands ?? []) : undefined;
+  const isRunnableSlashCommand = knownSlashCommand || liveSlashCommand;
   const isSlashCommandLike = /^\/[^\s:]+/.test(options.editorText);
 
   if (projection?.isBusy) {
-    if (knownSlashCommand && options.images.length === 0) {
+    if (isRunnableSlashCommand && options.images.length === 0) {
       sendPromptMessage(options.sessionId, options.text, options.images);
       options.onSend?.();
       return true;
