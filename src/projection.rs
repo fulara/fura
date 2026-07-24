@@ -334,6 +334,49 @@ fn map_async_result_message(value: &Value) -> TranscriptMessage {
     )
 }
 
+fn map_irc_message(value: &Value, custom_type: &str) -> Option<TranscriptMessage> {
+    let details = value.get("details");
+    let detail = |key: &str| {
+        details
+            .and_then(|details| details.get(key))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    };
+
+    let (mut text, body_key) = match custom_type {
+        "irc:incoming" => (
+            format!("IRC ← {}", detail("from").unwrap_or("?")),
+            "message",
+        ),
+        "irc:autoreply" => (
+            format!("IRC → {} (auto)", detail("to").unwrap_or("?")),
+            "body",
+        ),
+        "irc:relay" => (
+            format!(
+                "IRC {} → {}",
+                detail("from").unwrap_or("?"),
+                detail("to").unwrap_or("?")
+            ),
+            "body",
+        ),
+        _ => return None,
+    };
+    if let Some(body) = detail(body_key) {
+        text.push_str("\n\n");
+        text.push_str(body);
+    }
+
+    Some(TranscriptMessage::new(
+        upstream_message_id(value),
+        MessageRole::System,
+        vec![ContentBlock::Text { text }],
+        value_timestamp(value),
+        false,
+    ))
+}
+
 fn contains_model_only_system_notice(value: &Value) -> bool {
     value
         .get("content")
@@ -364,6 +407,11 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
             }
             if value.get("customType").and_then(Value::as_str) == Some("async-result") {
                 return Some(map_async_result_message(value));
+            }
+            if let Some(custom_type @ ("irc:incoming" | "irc:autoreply" | "irc:relay")) =
+                value.get("customType").and_then(Value::as_str)
+            {
+                return map_irc_message(value, custom_type);
             }
             // OMP uses <system-notice> as a model-only envelope and provides
             // dedicated TUI components for the visible projection. Never expose the
@@ -625,6 +673,67 @@ mod tests {
                 text: "Background job completed [task] TextileRenderingTests".to_string()
             }]
         );
+    }
+
+    #[test]
+    fn irc_messages_project_structured_details_not_model_envelopes() {
+        let cases = [
+            (
+                serde_json::json!({
+                    "id": "irc-incoming",
+                    "role": "custom",
+                    "customType": "irc:incoming",
+                    "content": "<irc>\nIncoming IRC message from agent `Reviewer`:\n\nCheck the status fix.\n</irc>",
+                    "display": true,
+                    "details": {
+                        "from": "Reviewer",
+                        "message": "Check the status fix."
+                    }
+                }),
+                "IRC ← Reviewer\n\nCheck the status fix.",
+            ),
+            (
+                serde_json::json!({
+                    "id": "irc-autoreply",
+                    "role": "custom",
+                    "customType": "irc:autoreply",
+                    "content": "[IRC you → `Reviewer` (auto)]\n\nStill working.",
+                    "display": true,
+                    "details": {
+                        "to": "Reviewer",
+                        "body": "Still working.",
+                        "replyTo": "irc-incoming"
+                    }
+                }),
+                "IRC → Reviewer (auto)\n\nStill working.",
+            ),
+            (
+                serde_json::json!({
+                    "id": "irc-relay",
+                    "role": "custom",
+                    "customType": "irc:relay",
+                    "content": "[IRC `Reviewer` → `Worker`]\n\nPlease verify.",
+                    "display": true,
+                    "details": {
+                        "from": "Reviewer",
+                        "to": "Worker",
+                        "body": "Please verify."
+                    }
+                }),
+                "IRC Reviewer → Worker\n\nPlease verify.",
+            ),
+        ];
+
+        for (value, expected) in cases {
+            let message = map_omp_message(&value).expect("IRC message should remain visible");
+            assert_eq!(message.role, MessageRole::System);
+            assert_eq!(
+                message.blocks,
+                vec![ContentBlock::Text {
+                    text: expected.to_string()
+                }]
+            );
+        }
     }
 
     #[test]
