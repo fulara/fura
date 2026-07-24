@@ -76,8 +76,8 @@ Two distinct surfaces:
 - `buildCommandsPopupSections(live)` — pure, returns the popup's grouped sections (no DOM):
   - **Commands** — curated supported commands, minus `help`/`commands` (self-referential).
   - **Skills** — live `availableCommands` with `source === "skill"` (omitted when empty).
-  - **Other commands** — live `source ∈ file | custom | mcp_prompt | extension` not already
-    curated (omitted when empty).
+  - **Other commands** — live `source ∈ builtin | file | custom | mcp_prompt | extension`
+    not already curated (omitted when empty).
   Each row carries `{ label, description, insertText: "/<name> " }`.
 - `fuzzyMatchCommands(query, pool = SLASH_COMMANDS)` still takes the pool (inline passes
   `SUPPORTED_SLASH_COMMANDS`).
@@ -90,6 +90,12 @@ backdrop also close). **Skills are run, not just listed**: clicking a skill inse
 `/skill:<name> ` and submitting forwards it to OMP, whose `prompt` handler matches `/skill:`
 (`tryRunRpcSkillCommand`) and re-injects that skill via `promptCustomMessage`. Typing
 `/skill:<name>` directly does the same.
+
+While a session is busy, Fura immediately submits recognized static commands and live
+`builtin`, `skill`, or `extension` commands. Live prompt-template sources (`file`, `custom`,
+`mcp_prompt`) remain in the composer with a warning: OMP requires an explicit
+`streamingBehavior` to queue those prompts, and Fura does not silently choose steer versus
+follow-up on the user's behalf.
 
 `command_output` renders through the existing session-notice pipeline (`.message-command-notice`);
 no dedicated UI.

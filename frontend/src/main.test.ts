@@ -1485,11 +1485,12 @@ describe("desktop cog options", () => {
     expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "live" });
   });
 
-  it("drops projections for sessions absent from a reconnect snapshot", async () => {
+  it("drops projections and cached notices for sessions absent from a reconnect snapshot", async () => {
     const { connection } = await createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("gone")] });
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
     connection.emit({ type: "session.snapshot", sessionId: "gone", state: projection("gone") });
+    connection.emit({ type: "session.notice", sessionId: "gone", level: "warning", text: "stale gone notice" });
 
     connection.sent.length = 0;
     connection.options.onOpen?.();
@@ -1498,6 +1499,15 @@ describe("desktop cog options", () => {
 
     expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "live" });
     expect(connection.sent).not.toContainEqual({ type: "state.refresh", sessionId: "gone" });
+
+    // Reusing the id must not resurrect client-only state from the pruned session.
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("gone")] });
+    const goneButton = [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")]
+      .find(button => button.textContent?.includes("Session gone"));
+    if (!goneButton) throw new Error("gone session button missing");
+    goneButton.click();
+    connection.emit({ type: "session.snapshot", sessionId: "gone", state: projection("gone") });
+    expect(document.querySelector("#testTranscriptPanel")?.textContent).not.toContain("stale gone notice");
   });
 
   it("renders aggregate patch by default and drills down without refetching all files", async () => {
@@ -2306,6 +2316,36 @@ describe("desktop compaction indicator", () => {
       text: "/prewalk next",
     });
     expect(document.querySelector<HTMLElement>("#busyPromptOverlay")?.hidden).toBe(true);
+  });
+
+  it("rejects live prompt-template commands while the session is busy", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("busy", { status: "busy" })] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "busy",
+      state: projection("busy", {
+        isBusy: true,
+        summary: summary("busy", { status: "busy", title: "Busy" }),
+        availableCommands: [
+          { name: "deploy", aliases: [], subcommands: [], source: "file", description: "Deploy" },
+        ],
+      }),
+    });
+
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput");
+    const form = document.querySelector<HTMLFormElement>("#promptForm");
+    if (!input || !form) throw new Error("composer missing");
+    connection.sent.length = 0;
+    input.value = "/deploy";
+    form.requestSubmit();
+
+    expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+    expect(input.value).toBe("/deploy");
+    expect(document.querySelector("#testTranscriptPanel")?.textContent).toContain(
+      "Slash commands cannot be sent as steer or follow-up prompts while the agent is busy.",
+    );
   });
 
   it("hides the busy-prompt choice and blocks steer/follow-up while compacting", async () => {

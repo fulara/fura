@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, SLASH_COMMANDS, SUPPORTED_SLASH_COMMANDS } from "./slashCommands";
+import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, isLiveSlashCommandRunnableWhileBusy, SLASH_COMMANDS, SUPPORTED_SLASH_COMMANDS } from "./slashCommands";
 
 describe("slash command registry", () => {
   it("does not advertise /goal in Fura", () => {
@@ -26,6 +26,23 @@ describe("slash command registry", () => {
     expect(findLiveSlashCommand("/prewalk next", live)?.name).toBe("prewalk");
     expect(findLiveSlashCommand("/pw next", live)?.name).toBe("prewalk");
     expect(findLiveSlashCommand("/unknown", live)).toBeUndefined();
+  });
+
+  it("only treats live commands with immediate or explicit streaming behavior as busy-runnable", () => {
+    const command = (source: string) => ({
+      name: source,
+      aliases: [],
+      subcommands: [],
+      source,
+    });
+
+    expect(isLiveSlashCommandRunnableWhileBusy(command("builtin"))).toBe(true);
+    expect(isLiveSlashCommandRunnableWhileBusy(command("skill"))).toBe(true);
+    expect(isLiveSlashCommandRunnableWhileBusy(command("extension"))).toBe(true);
+    expect(isLiveSlashCommandRunnableWhileBusy(command("file"))).toBe(false);
+    expect(isLiveSlashCommandRunnableWhileBusy(command("custom"))).toBe(false);
+    expect(isLiveSlashCommandRunnableWhileBusy(command("mcp_prompt"))).toBe(false);
+    expect(isLiveSlashCommandRunnableWhileBusy(undefined)).toBe(false);
   });
 });
 

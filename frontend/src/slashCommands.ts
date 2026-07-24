@@ -74,6 +74,12 @@ export function findLiveSlashCommand(input: string, live: readonly RpcAvailableS
   return live.find(cmd => cmd.name.toLowerCase() === name || cmd.aliases.some(alias => alias.toLowerCase() === name));
 }
 
+const BUSY_RUNNABLE_LIVE_COMMAND_SOURCES = new Set(["builtin", "skill", "extension"]);
+
+export function isLiveSlashCommandRunnableWhileBusy(command: RpcAvailableSlashCommand | undefined): boolean {
+  return command !== undefined && BUSY_RUNNABLE_LIVE_COMMAND_SOURCES.has(command.source);
+}
+
 /** Returns score (lower = better match), null if no match. */
 function fuzzyScore(query: string, text: string): number | null {
   if (!query) return 0;

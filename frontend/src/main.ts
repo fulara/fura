@@ -1,7 +1,7 @@
 import "./style.css";
 import "highlight.js/styles/github-dark.css";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
-import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, fuzzyMatchCommands, SUPPORTED_SLASH_COMMANDS, type CommandPopupSection, type SlashCommandSpec } from "./slashCommands";
+import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, fuzzyMatchCommands, isLiveSlashCommandRunnableWhileBusy, SUPPORTED_SLASH_COMMANDS, type CommandPopupSection, type SlashCommandSpec } from "./slashCommands";
 import { formatContextUsage, formatCost, formatTokens, shortId, shortPath } from "./format";
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
@@ -1092,6 +1092,98 @@ let voiceHotkeyActive = false;
 let voiceTarget: HTMLInputElement | HTMLTextAreaElement | null = null;
 const voiceSegments = new Map<string, VoiceSegmentDraft>();
 
+function pruneStaleSessionCaches(liveSessionIds: ReadonlySet<string>): void {
+  const candidates = new Set<string>([
+    ...unreadSessions,
+    ...projections.keys(),
+    ...visiblePlanReviews.keys(),
+    ...sessionChangesStates.keys(),
+    ...sessionNotices.keys(),
+    ...codeComments.keys(),
+    ...transcriptReviewActiveMessages.keys(),
+    ...transcriptReviewComments.keys(),
+    ...promptHistories.keys(),
+    ...promptHistoryMessageIds.keys(),
+  ]);
+  for (const sessionId of [
+    currentSessionChangesRequest?.sessionId,
+    busyPromptDraft?.sessionId,
+    diffPreviewDraft?.sessionId,
+    agentReviewDraft?.sessionId,
+    codePreviewDraft?.sessionId,
+    transcriptPreviewDraft?.sessionId,
+    activeReviewCommentComposer?.sessionId,
+    pendingPresetCommand?.sessionId,
+    modelPickerSessionId,
+    commandsPopupSessionId,
+    snapshotLabelSessionId,
+    codeSessionId,
+  ]) {
+    if (sessionId) candidates.add(sessionId);
+  }
+
+  for (const sessionId of candidates) {
+    if (liveSessionIds.has(sessionId)) continue;
+
+    const changesState = sessionChangesStates.get(sessionId);
+    if (changesState?.status === "ready") {
+      clearDiffPatchCacheForComparison(changesState.comparison.comparisonKey);
+    }
+    if (currentSessionChangesRequest?.sessionId === sessionId) {
+      clearCurrentSessionChangesRequest("sessionChanged");
+    }
+
+    unreadSessions.delete(sessionId);
+    projections.delete(sessionId);
+    visiblePlanReviews.delete(sessionId);
+    sessionChangesStates.delete(sessionId);
+    sessionChangesPayloadKinds.delete(sessionId);
+    sessionChangesDiffIds.delete(sessionId);
+    sessionChangesSelectedFiles.delete(sessionId);
+    diffFileFilters.delete(sessionId);
+    diffAnnotations.delete(sessionId);
+    reviewComments.delete(sessionId);
+    reviewCommentsRequested.delete(sessionId);
+    reviewCommentsLoadInFlight.delete(sessionId);
+    reviewCommentsResyncNeeded.delete(sessionId);
+    diffErrors.delete(sessionId);
+    diffLoadingSessions.delete(sessionId);
+    pendingDiffFilePatches.delete(sessionId);
+    diffFilePatchErrors.delete(sessionId);
+    sessionNotices.delete(sessionId);
+    codeComments.delete(sessionId);
+    transcriptReviewActiveMessages.delete(sessionId);
+    transcriptReviewComments.delete(sessionId);
+    promptHistories.delete(sessionId);
+    promptHistoryMessageIds.delete(sessionId);
+
+    if (busyPromptDraft?.sessionId === sessionId) busyPromptDraft = null;
+    if (diffPreviewDraft?.sessionId === sessionId) diffPreviewDraft = null;
+    if (agentReviewDraft?.sessionId === sessionId) agentReviewDraft = null;
+    if (codePreviewDraft?.sessionId === sessionId) codePreviewDraft = null;
+    if (transcriptPreviewDraft?.sessionId === sessionId) transcriptPreviewDraft = null;
+    if (activeReviewCommentComposer?.sessionId === sessionId) activeReviewCommentComposer = null;
+    if (pendingPresetCommand?.sessionId === sessionId) pendingPresetCommand = null;
+    if (openDiffFileMenu?.annotationKey === sessionId) openDiffFileMenu = null;
+    if (snapshotLabelSessionId === sessionId) snapshotLabelSessionId = null;
+    if (modelPickerSessionId === sessionId) {
+      modelPickerSessionId = null;
+      modelPickerOverlay.hidden = true;
+    }
+    if (commandsPopupSessionId === sessionId) {
+      commandsPopupSessionId = null;
+      commandsPopupOverlay.hidden = true;
+    }
+    if (deleteSessionTarget?.sessionId === sessionId) {
+      deleteSessionTarget = null;
+      deleteSessionOverlay.hidden = true;
+    }
+    if (codeSessionId === sessionId) resetCodeViewForSession(null);
+  }
+
+  pruneDiffPatchCache();
+}
+
 const CONTROL_CLIENT_ID_STORAGE_KEY = "fura.controlClientId";
 const controlClientId = getOrCreateControlClientId();
 let controlConversationId: string | null = null;
@@ -1832,16 +1924,13 @@ function handleServerMessage(message: ServerMessage): void {
           conflictResolverSessionId = null;
         }
         const liveSessionIds = new Set(message.sessions.map(session => session.sessionId));
-        for (const sessionId of [...projections.keys()]) {
-          if (!liveSessionIds.has(sessionId)) projections.delete(sessionId);
-        }
+        pruneStaleSessionCaches(liveSessionIds);
         if (pendingRestoreAfterSessionsSnapshot) {
           pendingRestoreAfterSessionsSnapshot = false;
           for (const sessionId of projections.keys()) {
             send({ type: "state.refresh", sessionId });
           }
         }
-        pruneVisiblePlanReviewsWithSessionList();
         if (previousActiveSessionId && !activeSessionId) resetPromptHistoryNavigation();
         if (pendingSessionSelectionId) {
           const pendingSession = currentSessionSummary(pendingSessionSelectionId);
@@ -2673,12 +2762,6 @@ function syncVisiblePlanReviewFromProjection(sessionId: string, projection: Sess
   visiblePlanReviews.set(sessionId, { review: pending, mode });
 }
 
-function pruneVisiblePlanReviewsWithSessionList(): void {
-  const visibleSessionIds = new Set(sessions.map(session => session.sessionId));
-  for (const sessionId of visiblePlanReviews.keys()) {
-    if (!visibleSessionIds.has(sessionId)) visiblePlanReviews.delete(sessionId);
-  }
-}
 
 function handlePlanReview(message: Extract<ServerMessage, { type: "plan.review" }>): void {
   visiblePlanReviews.set(message.sessionId, { review: pendingPlanReviewFromMessage(message), mode: "pending" });
@@ -3004,7 +3087,7 @@ function sendPromptWithBusyHandling(options: {
   const projection = projections.get(options.sessionId);
   const knownSlashCommand = findSlashCommand(options.editorText);
   const liveSlashCommand = projection ? findLiveSlashCommand(options.editorText, projection.availableCommands ?? []) : undefined;
-  const isRunnableSlashCommand = knownSlashCommand || liveSlashCommand;
+  const isRunnableSlashCommand = knownSlashCommand || isLiveSlashCommandRunnableWhileBusy(liveSlashCommand);
   const isSlashCommandLike = /^\/[^\s:]+/.test(options.editorText);
 
   if (projection?.isBusy) {
