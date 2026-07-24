@@ -1,7 +1,19 @@
 import readline from "node:readline";
 import { stdin, stdout, stderr } from "node:process";
 
-const messages = [];
+const messages = [
+  {
+    role: "custom",
+    customType: "async-result",
+    content: "<system-notice>\nBackground job mock-bootstrap-job has completed. Resume work using its private result.\n</system-notice>",
+    display: true,
+    attribution: "agent",
+    details: {
+      jobs: [{ jobId: "mock-bootstrap-job", type: "task", label: "Mock bootstrap", durationMs: 1250 }],
+    },
+    timestamp: Date.now(),
+  },
+];
 const models = [
   {
     id: "mock-model",

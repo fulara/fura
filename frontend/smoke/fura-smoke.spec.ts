@@ -56,6 +56,11 @@ test("desktop authenticates, creates a mock session, and receives a prompt respo
   await authenticateDesktop(page);
   await createDesktopSession(page, sessionName);
 
+  await expect(page.locator(".message.system")).toContainText(
+    "Background job completed [task] mock-bootstrap-job",
+  );
+  await expect(page.locator(".message.system")).not.toContainText("<system-notice>");
+
   await page.locator("#promptInput").fill("hello from desktop smoke");
   await page.locator("#sendButton").click();
 

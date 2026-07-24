@@ -296,6 +296,51 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
     (messages, tool_cards)
 }
 
+fn map_async_result_message(value: &Value) -> TranscriptMessage {
+    fn summary_line(job: Option<&Value>) -> String {
+        let job_id = job
+            .and_then(|job| job.get("jobId"))
+            .and_then(Value::as_str)
+            .filter(|job_id| !job_id.is_empty())
+            .unwrap_or("unknown");
+        let kind = job
+            .and_then(|job| job.get("type"))
+            .and_then(Value::as_str)
+            .filter(|kind| !kind.is_empty())
+            .unwrap_or("job");
+        format!("Background job completed [{kind}] {job_id}")
+    }
+
+    let details = value.get("details");
+    let mut lines = details
+        .and_then(|details| details.get("jobs"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|job| summary_line(Some(job)))
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        lines.push(summary_line(details));
+    }
+
+    TranscriptMessage::new(
+        upstream_message_id(value),
+        MessageRole::System,
+        vec![ContentBlock::Text {
+            text: lines.join("\n"),
+        }],
+        value_timestamp(value),
+        false,
+    )
+}
+
+fn contains_model_only_system_notice(value: &Value) -> bool {
+    value
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| content.trim_start().starts_with("<system-notice"))
+}
+
 pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
     let role_str = value
         .get("role")
@@ -315,6 +360,15 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
         // Extension/hook messages: show only when explicitly flagged for display.
         "custom" | "hookMessage" => {
             if value.get("display").and_then(|v| v.as_bool()) != Some(true) {
+                return None;
+            }
+            if value.get("customType").and_then(Value::as_str) == Some("async-result") {
+                return Some(map_async_result_message(value));
+            }
+            // OMP uses <system-notice> as a model-only envelope and provides
+            // dedicated TUI components for the visible projection. Never expose the
+            // internal envelope when Fura has no corresponding projection.
+            if contains_model_only_system_notice(value) {
                 return None;
             }
             // Fall through to normal text extraction.
@@ -543,5 +597,59 @@ mod tests {
         assert_eq!(messages_without.len(), 2);
         assert_eq!(messages_with.len(), 2);
         assert_eq!(messages_without[1].id, messages_with[1].id);
+    }
+
+    #[test]
+    fn visible_async_result_projects_summary_not_model_envelope() {
+        let message = map_omp_message(&serde_json::json!({
+            "role": "custom",
+            "customType": "async-result",
+            "content": "<system-notice>\nBackground job finished with private model context.\n</system-notice>",
+            "display": true,
+            "attribution": "agent",
+            "details": {
+                "jobs": [{
+                    "jobId": "TextileRenderingTests",
+                    "type": "task",
+                    "label": "TextileRenderingTests",
+                    "durationMs": 177693
+                }]
+            }
+        }))
+        .expect("async result should remain visible");
+
+        assert_eq!(message.role, MessageRole::System);
+        assert_eq!(
+            message.blocks,
+            vec![ContentBlock::Text {
+                text: "Background job completed [task] TextileRenderingTests".to_string()
+            }]
+        );
+    }
+
+    #[test]
+    fn hidden_xdev_system_notice_is_suppressed() {
+        let message = map_omp_message(&serde_json::json!({
+            "role": "custom",
+            "customType": "xdev-mount-notice",
+            "content": "<system-notice>\nThe xd:// device inventory changed.\n</system-notice>",
+            "display": false,
+            "attribution": "agent"
+        }));
+
+        assert!(message.is_none());
+    }
+
+    #[test]
+    fn unknown_visible_system_notice_is_suppressed() {
+        let message = map_omp_message(&serde_json::json!({
+            "role": "custom",
+            "customType": "future-internal-notice",
+            "content": "<system-notice>\nInternal model instructions.\n</system-notice>",
+            "display": true,
+            "attribution": "agent"
+        }));
+
+        assert!(message.is_none());
     }
 }
