@@ -154,15 +154,18 @@ describe("todo cards", () => {
         { content: "Write tests", status: "completed" },
         { content: "Extract cards", status: "in_progress", notes: ["moving safely"] },
         { content: "Run checks", status: "pending" },
+        { content: "Wait on upstream", status: "blocked", blocker: "protocol v2" },
       ],
     }];
 
     const node = renderCurrentTodoCard(phases);
 
     expect(node.querySelector(".tool-name")?.textContent).toBe("Todos");
-    expect(node.querySelector(".tool-args-summary")?.textContent).toBe("2 remaining · 3 total");
+    expect(node.querySelector(".tool-args-summary")?.textContent).toBe("3 remaining · 4 total");
     expect(node.textContent).toContain("Write tests");
     expect(node.textContent).toContain("moving safely");
+    expect(node.textContent).toContain("blocked: protocol v2");
+    expect(node.querySelector(".todo-blocked .todo-icon")?.textContent).toBe("!");
   });
 });
 

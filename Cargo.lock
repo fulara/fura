@@ -935,6 +935,7 @@ dependencies = [
  "anyhow",
  "axum",
  "axum-server",
+ "base64",
  "blake3",
  "clap",
  "futures-util",

@@ -8,7 +8,7 @@ use crate::{PromptBehavior, TodoPhaseProjection};
 #[serde(tag = "type")]
 pub(crate) enum OmpRpcFrame {
     #[serde(rename = "ready")]
-    Ready,
+    Ready(OmpRpcReadyFrame),
     #[serde(rename = "response")]
     Response(OmpRpcResponseFrame),
     #[serde(rename = "agent_start")]
@@ -165,7 +165,18 @@ impl OmpRpcFrame {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct OmpRpcReadyFrame {
+    pub(crate) protocol_version: Option<u8>,
+    #[serde(default)]
+    pub(crate) supported_protocol_versions: Vec<u8>,
+    pub(crate) max_frame_bytes: Option<u64>,
+    pub(crate) max_reassembled_frame_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OmpRpcResponseFrame {
+    pub(crate) code: Option<String>,
     pub(crate) id: Option<String>,
     pub(crate) command: String,
     pub(crate) success: Option<bool>,
@@ -315,6 +326,14 @@ pub(crate) struct OmpMessagesResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct OmpMessagesPageResponse {
+    pub(crate) messages: Vec<Value>,
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) total_messages: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct OmpSessionStats {
     pub(crate) session_file: Option<String>,
     pub(crate) session_id: String,
@@ -379,8 +398,22 @@ pub(crate) struct OmpAvailableCommandsResponse {
 pub(crate) enum OmpRpcCommand {
     #[serde(rename = "get_state")]
     GetState { id: String },
+    #[serde(rename = "negotiate_protocol")]
+    NegotiateProtocol {
+        id: String,
+        #[serde(rename = "protocolVersion")]
+        protocol_version: u8,
+    },
     #[serde(rename = "get_messages")]
     GetMessages { id: String },
+    #[serde(rename = "get_messages_page")]
+    GetMessagesPage {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cursor: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        limit: Option<u16>,
+    },
     #[serde(rename = "get_session_stats")]
     GetSessionStats { id: String },
     #[serde(rename = "get_available_models")]
@@ -490,8 +523,24 @@ pub(crate) fn get_available_commands_command(id: String) -> Value {
     OmpRpcCommand::GetAvailableCommands { id }.into_value()
 }
 
+pub(crate) fn negotiate_protocol_command(id: String, protocol_version: u8) -> Value {
+    OmpRpcCommand::NegotiateProtocol {
+        id,
+        protocol_version,
+    }
+    .into_value()
+}
+
 pub(crate) fn get_messages_command(id: String) -> Value {
     OmpRpcCommand::GetMessages { id }.into_value()
+}
+
+pub(crate) fn get_messages_page_command(
+    id: String,
+    cursor: Option<String>,
+    limit: Option<u16>,
+) -> Value {
+    OmpRpcCommand::GetMessagesPage { id, cursor, limit }.into_value()
 }
 
 pub(crate) fn get_session_stats_command(id: String) -> Value {

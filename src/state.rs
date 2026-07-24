@@ -566,6 +566,15 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Approved plan metadata waiting for / attached to the execution session spawned by OMP.
     pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,
+    pub(crate) rpc_protocol_versions: Arc<RwLock<HashMap<String, u8>>>,
+    pub(crate) pending_rpc_message_pages: Arc<RwLock<HashMap<String, PendingRpcMessagesPage>>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingRpcMessagesPage {
+    pub(crate) transport_session_id: String,
+    pub(crate) messages: Vec<Value>,
+    pub(crate) restart_count: u8,
 }
 
 pub(crate) struct RemovedRpcTransport {
@@ -588,6 +597,8 @@ impl SessionRuntimeState {
             pending_new_session_names: Arc::new(RwLock::new(HashMap::new())),
             recent_rpc_stderr: Arc::new(RwLock::new(HashMap::new())),
             plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
+            rpc_protocol_versions: Arc::new(RwLock::new(HashMap::new())),
+            pending_rpc_message_pages: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -632,6 +643,14 @@ impl SessionRuntimeState {
             .await
             .remove(transport_session_id)
             .unwrap_or_else(|| transport_session_id.to_string());
+        self.rpc_protocol_versions
+            .write()
+            .await
+            .remove(transport_session_id);
+        self.pending_rpc_message_pages
+            .write()
+            .await
+            .retain(|_request_id, pending| pending.transport_session_id != transport_session_id);
         Some(RemovedRpcTransport {
             handle,
             target_session_id,
@@ -704,6 +723,53 @@ impl SessionRuntimeState {
             .await
             .get(transport_session_id)
             .map(|handle| handle.stdin.clone())
+    }
+
+    pub(crate) async fn set_rpc_protocol_version(&self, transport_session_id: &str, version: u8) {
+        self.rpc_protocol_versions
+            .write()
+            .await
+            .insert(transport_session_id.to_string(), version);
+    }
+
+    pub(crate) async fn rpc_protocol_version(&self, transport_session_id: &str) -> u8 {
+        self.rpc_protocol_versions
+            .read()
+            .await
+            .get(transport_session_id)
+            .copied()
+            .unwrap_or(1)
+    }
+
+    pub(crate) async fn insert_pending_rpc_message_page(
+        &self,
+        request_id: String,
+        pending: PendingRpcMessagesPage,
+    ) {
+        self.pending_rpc_message_pages
+            .write()
+            .await
+            .insert(request_id, pending);
+    }
+
+    pub(crate) async fn take_pending_rpc_message_page(
+        &self,
+        request_id: &str,
+    ) -> Option<PendingRpcMessagesPage> {
+        self.pending_rpc_message_pages
+            .write()
+            .await
+            .remove(request_id)
+    }
+
+    pub(crate) async fn clear_pending_rpc_message_pages_for_transport(
+        &self,
+        transport_session_id: &str,
+    ) {
+        self.pending_rpc_message_pages
+            .write()
+            .await
+            .retain(|_request_id, pending| pending.transport_session_id != transport_session_id);
     }
 
     pub(crate) async fn register_pending_create(
@@ -987,6 +1053,7 @@ pub(crate) struct RpcStateUpdate {
     pub(crate) todo_phases: Option<Vec<TodoPhaseProjection>>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct GetStateApplyOutcome {
     pub(crate) previous_snapshot: Option<ServerMessage>,
     pub(crate) target_snapshot: Option<ServerMessage>,

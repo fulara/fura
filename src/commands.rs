@@ -1625,7 +1625,7 @@ pub(crate) async fn handle_slash_command(
         "help" | "commands" => vec![notice(
             session_id,
             NoticeLevel::Info,
-            "Supported commands: /help, /new (alias /clear), /abort, /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|xhigh|max|inherit], /fork, /rebase <branch>, /session [info], /export [path]. TUI-only commands like /resume are intentionally unsupported in Fura.",
+            "Supported commands: /help, /new (alias /clear), /abort, /plan [prompt], /compact [instructions], /handoff [focus instructions], /rename <title>, /model [list|cycle|provider/model], /thinking [cycle|off|minimal|low|medium|high|xhigh|max|inherit], /fork, /rebase <branch>, /session [info]. Server-side OMP slash commands like /export, /tools, /fast, /browser, /dump, and /share are forwarded to OMP.",
         )],
         "new" | "clear" => {
             let (cwd, args) = {
@@ -1713,13 +1713,6 @@ pub(crate) async fn handle_slash_command(
                 "Requested session stats.",
             )
             .await
-        }
-        "export" => {
-            let mut command = serde_json::json!({ "id": next_rpc_id(), "type": "export_html" });
-            if !args.is_empty() {
-                command["outputPath"] = Value::String(args.to_string());
-            }
-            send_slash_rpc_command(state, session_id, command, "Requested HTML export.").await
         }
         // Genuinely TUI-only / interactive commands (no server-side `handle` in OMP): a notice.
         // `handle`-bearing builtins (tools, context, jobs, stats, changelog, fast, browser, dump,

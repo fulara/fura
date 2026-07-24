@@ -21,7 +21,7 @@ describe("buildCommandsPopupSections", () => {
   const live = [
     { name: "skill:develop-fura", aliases: [], subcommands: [], source: "skill", description: "Develop Fura" },
     { name: "deploy", aliases: [], subcommands: [], source: "file", description: "Deploy" },
-    { name: "tools", aliases: [], subcommands: [], source: "builtin", description: "Tools" },
+    { name: "prewalk", aliases: [], subcommands: [], source: "builtin", description: "Prewalk" },
   ];
 
   it("groups curated commands, live skills, and other live commands", () => {
@@ -33,7 +33,7 @@ describe("buildCommandsPopupSections", () => {
 
     const other = sections.find(section => section.title === "Other commands");
     expect(other?.rows.some(row => row.label === "/deploy")).toBe(true);
-    expect(other?.rows.some(row => row.label === "/tools")).toBe(false); // builtin excluded
+    expect(other?.rows.some(row => row.label === "/prewalk")).toBe(true); // new builtins surface from live OMP metadata
 
     const commands = sections.find(section => section.title === "Commands");
     expect(commands?.rows.some(row => row.label.startsWith("/plan"))).toBe(true);

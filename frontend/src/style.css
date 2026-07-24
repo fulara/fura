@@ -4111,6 +4111,11 @@ h2 {
   color: #ff7d7d;
 }
 
+.todo-blocked .todo-icon,
+.todo-blocked .todo-content {
+  color: #ffd166;
+}
+
 .todo-pending .todo-content {
   color: #8f9bb0;
 }
@@ -4120,6 +4125,9 @@ h2 {
   padding-left: 2.55rem;
 }
 
+.todo-blocker {
+  color: #ffd166;
+}
 
 /* Task tool panel */
 .task-card {

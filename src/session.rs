@@ -429,6 +429,8 @@ pub(crate) struct TodoPhaseProjection {
 pub(crate) struct TodoItemProjection {
     pub(crate) content: String,
     pub(crate) status: TodoStatusProjection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) blocker: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) notes: Vec<String>,
 }
@@ -440,6 +442,7 @@ pub(crate) enum TodoStatusProjection {
     InProgress,
     Completed,
     Abandoned,
+    Blocked,
 }
 
 pub(crate) fn parse_todo_phases_value(

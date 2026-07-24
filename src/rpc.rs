@@ -35,10 +35,19 @@ fn projected_message_ordinal_for_pending_prompt(record: &SessionRecord) -> usize
         .count()
 }
 const RECENT_RPC_STDERR_LINE_BYTES: usize = 4096;
+const RPC_MESSAGES_PAGE_LIMIT: u16 = 256;
+
+pub(crate) async fn refresh_rpc_messages(state: &AppState, session_id: &str) -> Result<(), String> {
+    if rpc_protocol_version(state, session_id).await >= 2 {
+        start_rpc_messages_page_refresh(state, session_id, 0).await
+    } else {
+        send_rpc_command(state, session_id, get_messages_command(next_rpc_id())).await
+    }
+}
 
 pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Result<(), String> {
     send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await?;
-    send_rpc_command(state, session_id, get_messages_command(next_rpc_id())).await?;
+    refresh_rpc_messages(state, session_id).await?;
     send_rpc_command(state, session_id, get_session_stats_command(next_rpc_id())).await?;
     send_rpc_command(
         state,
@@ -242,6 +251,101 @@ pub(crate) async fn send_rpc_command(
         .send(command)
         .await
         .map_err(|_| format!("session {session_id} RPC stdin is closed"))
+}
+
+async fn rpc_protocol_version(state: &AppState, session_id: &str) -> u8 {
+    let Some(transport_session_id) = rpc_transport_session_id(state, session_id).await else {
+        return 1;
+    };
+    state
+        .session_runtime
+        .rpc_protocol_version(&transport_session_id)
+        .await
+}
+
+fn ready_supports_rpc_protocol_v2(ready: &OmpRpcReadyFrame) -> bool {
+    ready.supported_protocol_versions.contains(&2) || ready.protocol_version == Some(2)
+}
+
+async fn negotiate_rpc_protocol_if_supported(
+    state: &AppState,
+    session_id: &str,
+    ready: &OmpRpcReadyFrame,
+) -> Result<(), String> {
+    if ready_supports_rpc_protocol_v2(ready) {
+        send_rpc_command(
+            state,
+            session_id,
+            negotiate_protocol_command(next_rpc_id(), 2),
+        )
+        .await?;
+        let Some(transport_session_id) = rpc_transport_session_id(state, session_id).await else {
+            return Err(format!("session {session_id} has no live RPC child"));
+        };
+        state
+            .session_runtime
+            .set_rpc_protocol_version(&transport_session_id, 2)
+            .await;
+    } else if let Some(transport_session_id) = rpc_transport_session_id(state, session_id).await {
+        state
+            .session_runtime
+            .set_rpc_protocol_version(&transport_session_id, 1)
+            .await;
+    }
+    Ok(())
+}
+
+async fn start_rpc_messages_page_refresh(
+    state: &AppState,
+    session_id: &str,
+    restart_count: u8,
+) -> Result<(), String> {
+    let transport_session_id = rpc_transport_session_id(state, session_id)
+        .await
+        .ok_or_else(|| format!("session {session_id} has no live RPC child"))?;
+    state
+        .session_runtime
+        .clear_pending_rpc_message_pages_for_transport(&transport_session_id)
+        .await;
+    queue_rpc_messages_page(
+        state,
+        &transport_session_id,
+        None,
+        Vec::new(),
+        restart_count,
+    )
+    .await
+}
+
+async fn queue_rpc_messages_page(
+    state: &AppState,
+    transport_session_id: &str,
+    cursor: Option<String>,
+    messages: Vec<Value>,
+    restart_count: u8,
+) -> Result<(), String> {
+    let request_id = next_rpc_id();
+    state
+        .session_runtime
+        .insert_pending_rpc_message_page(
+            request_id.clone(),
+            PendingRpcMessagesPage {
+                transport_session_id: transport_session_id.to_string(),
+                messages,
+                restart_count,
+            },
+        )
+        .await;
+    let command =
+        get_messages_page_command(request_id.clone(), cursor, Some(RPC_MESSAGES_PAGE_LIMIT));
+    if let Err(error) = send_rpc_command(state, transport_session_id, command).await {
+        let _ = state
+            .session_runtime
+            .take_pending_rpc_message_page(&request_id)
+            .await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 pub(crate) async fn spawn_rpc_child(
@@ -464,6 +568,7 @@ where
     R: tokio::io::AsyncRead + Unpin,
 {
     let mut lines = reader.lines();
+    let mut decoder = RpcFrameDecoder::default();
     while let Ok(Some(line)) = lines.next_line().await {
         if line.trim().is_empty() {
             continue;
@@ -474,8 +579,8 @@ where
             info!(direction = "rpc_to_bridge", session_id = %session_id, frame = %line, "rpc frame");
         }
 
-        match serde_json::from_str::<Value>(&line) {
-            Ok(frame) => {
+        match decoder.push_line(&line) {
+            Ok(Some(frame)) => {
                 log_rpc_frame(&session_id, &frame);
                 apply_rpc_frame(&state, &session_id, &frame).await;
                 if state.forward_raw_frames {
@@ -492,8 +597,9 @@ where
                         .await;
                 }
             }
+            Ok(None) => {}
             Err(error) => {
-                warn!(session_id = %session_id, %error, bytes = line.len(), "invalid RPC JSONL frame")
+                warn!(session_id = %session_id, %error, bytes = line.len(), "invalid RPC frame")
             }
         }
     }
@@ -571,7 +677,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
     let target_session_id = rpc_session_target_id(state, session_id).await;
     if is_controller_transport(state, session_id).await {
         match typed_frame {
-            OmpRpcFrame::Ready => {}
+            OmpRpcFrame::Ready(_) => {}
             OmpRpcFrame::AgentStart => {
                 let run = state.bridge_controller.read().await.active_run.clone();
                 if let Some(run) = run {
@@ -631,8 +737,13 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         return;
     }
     match typed_frame {
-        OmpRpcFrame::Ready => {
+        OmpRpcFrame::Ready(ready) => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
+            if let Err(message) =
+                negotiate_rpc_protocol_if_supported(state, session_id, &ready).await
+            {
+                warn!(session_id = %session_id, %message, "RPC protocol negotiation failed");
+            }
             if is_model_catalog_transport(state, session_id).await {
                 if let Err(message) = send_rpc_command(
                     state,
@@ -1287,6 +1398,90 @@ pub(crate) async fn apply_thinking_level_response(
         .await;
 }
 
+async fn apply_rpc_messages_page_response(state: &AppState, session_id: &str, frame: &Value) {
+    let Some(request_id) = value_str(frame, "id") else {
+        warn!(session_id = %session_id, "get_messages_page response missing request id");
+        return;
+    };
+    let Some(mut pending) = state
+        .session_runtime
+        .take_pending_rpc_message_page(request_id)
+        .await
+    else {
+        debug!(session_id = %session_id, request_id, "ignored stale get_messages_page response");
+        return;
+    };
+    let Some(page) = rpc_response_data_as::<OmpMessagesPageResponse>(frame) else {
+        warn!(session_id = %session_id, request_id, "get_messages_page response did not match expected shape");
+        return;
+    };
+    pending.messages.extend(page.messages);
+    if let Some(cursor) = page.next_cursor {
+        if let Err(message) = queue_rpc_messages_page(
+            state,
+            &pending.transport_session_id,
+            Some(cursor),
+            pending.messages,
+            pending.restart_count,
+        )
+        .await
+        {
+            warn!(session_id = %session_id, %message, "failed to queue next get_messages_page request");
+        }
+        return;
+    }
+
+    let current_session_id = rpc_session_target_id(state, session_id).await;
+    let projected = project_omp_transcript(&pending.messages);
+    let (mut messages, tool_cards) = projected;
+    prepend_plan_execution_carryover(state, &current_session_id, &mut messages).await;
+    replace_messages_and_broadcast(state, &current_session_id, messages, tool_cards, None).await;
+}
+
+async fn handle_rpc_messages_page_error(
+    state: &AppState,
+    session_id: &str,
+    frame: &Value,
+    message: &str,
+) -> bool {
+    if value_str(frame, "command") != Some("get_messages_page") {
+        return false;
+    }
+    let Some(request_id) = value_str(frame, "id") else {
+        return true;
+    };
+    let Some(pending) = state
+        .session_runtime
+        .take_pending_rpc_message_page(request_id)
+        .await
+    else {
+        return true;
+    };
+    match value_str(frame, "code") {
+        Some("session_busy") => {
+            debug!(session_id = %session_id, "deferred get_messages_page refresh while session is busy");
+        }
+        Some("stale_cursor") if pending.restart_count == 0 => {
+            if let Err(error) =
+                start_rpc_messages_page_refresh(state, &pending.transport_session_id, 1).await
+            {
+                warn!(session_id = %session_id, %error, "failed to restart stale get_messages_page refresh");
+            }
+        }
+        _ => {
+            let current_session_id = rpc_session_target_id(state, session_id).await;
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    notice(current_session_id, NoticeLevel::Error, message.to_string()),
+                )
+                .await;
+        }
+    }
+    true
+}
+
 pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
     let command = value_str(frame, "command").or_else(|| value_str(frame, "requestType"));
     let status = value_str(frame, "status");
@@ -1312,6 +1507,18 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     },
                 )
                 .await;
+            return;
+        }
+        if command == Some("negotiate_protocol") {
+            if let Some(transport_session_id) = rpc_transport_session_id(state, session_id).await {
+                state
+                    .session_runtime
+                    .set_rpc_protocol_version(&transport_session_id, 1)
+                    .await;
+            }
+            return;
+        }
+        if handle_rpc_messages_page_error(state, session_id, frame, &message).await {
             return;
         }
         let pending_create = state.session_runtime.pending_create(session_id).await;
@@ -1396,6 +1603,14 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
     }
 
     match command {
+        Some("negotiate_protocol") => {
+            if let Some(transport_session_id) = rpc_transport_session_id(state, session_id).await {
+                state
+                    .session_runtime
+                    .set_rpc_protocol_version(&transport_session_id, 2)
+                    .await;
+            }
+        }
         Some("repo_diff_snapshot") => {
             let pending = if let Some(command_id) = value_str(frame, "id") {
                 state
@@ -1574,6 +1789,9 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 .and_then(|value| value.as_str())
                 .map(str::to_string);
             apply_thinking_level_response(state, &current_session_id, thinking_level).await;
+        }
+        Some("get_messages_page") => {
+            apply_rpc_messages_page_response(state, session_id, frame).await;
         }
         Some("get_messages") => {
             let data = frame.get("data").or_else(|| frame.get("result"));
@@ -1759,7 +1977,18 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 warn!(session_id = %current_session_id, %message, "post-compaction state refresh failed");
             }
         }
-        Some("prompt") | Some("abort") => {}
+        Some("prompt") => {
+            let local_only = frame
+                .get("data")
+                .and_then(|data| data.get("agentInvoked"))
+                .and_then(|value| value.as_bool())
+                == Some(false);
+            if local_only {
+                if let Some(command_id) = value_str(frame, "id") {
+                    settle_local_only_prompt_result(state, &current_session_id, command_id).await;
+                }
+            }
+        }
         _ => {}
     }
 }

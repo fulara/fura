@@ -104,7 +104,7 @@ export function fuzzyMatchCommands(
 export type CommandPopupRow = { label: string; description: string; insertText: string };
 export type CommandPopupSection = { title: string; rows: CommandPopupRow[] };
 
-const POPUP_OTHER_SOURCES = new Set(["file", "custom", "mcp_prompt", "extension"]);
+const POPUP_OTHER_SOURCES = new Set(["builtin", "file", "custom", "mcp_prompt", "extension"]);
 
 /** Groups the commands popup: curated supported commands, then live OMP skills, then other
  *  live project commands. `help`/`commands` are omitted (self-referential). Empty groups are dropped. */

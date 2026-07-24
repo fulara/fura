@@ -409,7 +409,7 @@ export function renderCurrentTodoCard(phases: TodoPhase[]): HTMLElement {
   header.className = "tool-header todo-write-header";
   header.append(toolHeaderText("Todos", "tool-name"));
   const tasks = phases.flatMap(phase => phase.tasks);
-  const remaining = tasks.filter(todo => todo.status === "pending" || todo.status === "in_progress").length;
+  const remaining = tasks.filter(todo => todo.status === "pending" || todo.status === "in_progress" || todo.status === "blocked").length;
   header.append(toolHeaderText(`${remaining} remaining · ${tasks.length} total`, "tool-args-summary"));
   wrapper.append(header);
 
@@ -487,6 +487,13 @@ function renderTodoItem(todo: TodoItem, firstInPhase: boolean): HTMLElement {
 
   row.append(prefix, icon, content);
 
+  if (todo.status === "blocked" && todo.blocker) {
+    const details = mkEl("div");
+    details.className = "todo-details todo-blocker";
+    details.textContent = `blocked: ${todo.blocker}`;
+    row.append(details);
+  }
+
   if (todo.notes && todo.notes.length > 0) {
     const marker = mkEl("span");
     marker.className = "todo-note-marker";
@@ -513,6 +520,7 @@ function todoStatusGlyph(status: TodoStatus): string {
     case "completed": return "✓";
     case "in_progress": return "→";
     case "abandoned": return "✗";
+    case "blocked": return "!";
     default: return "○";
   }
 }
@@ -533,11 +541,12 @@ function isTodoItem(value: unknown): value is TodoItem {
   return isRecord(value)
     && typeof value.content === "string"
     && isTodoStatus(value.status)
+    && (value.blocker === undefined || typeof value.blocker === "string")
     && (value.notes === undefined || (Array.isArray(value.notes) && value.notes.every(note => typeof note === "string")));
 }
 
 function isTodoStatus(value: unknown): value is TodoStatus {
-  return value === "pending" || value === "in_progress" || value === "completed" || value === "abandoned";
+  return value === "pending" || value === "in_progress" || value === "completed" || value === "abandoned" || value === "blocked";
 }
 
 function renderTaskCard(card: ToolCard): HTMLElement {

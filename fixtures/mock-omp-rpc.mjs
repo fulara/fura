@@ -81,6 +81,7 @@ const todoPhases = [
     tasks: [
       { content: "Confirm todo projection", status: "completed" },
       { content: "Keep current todos visible", status: "in_progress", notes: ["Rendered from get_state.todoPhases"] },
+      { content: "Wait for upstream paged history", status: "blocked", blocker: "mock v2 cursor" },
     ],
   },
 ];
@@ -131,7 +132,13 @@ function error(command, message) {
   write({ id: command.id, type: "response", command: command.type, success: false, error: message });
 }
 
-write({ type: "ready" });
+write({
+  type: "ready",
+  protocolVersion: 1,
+  supportedProtocolVersions: [1, 2],
+  maxFrameBytes: 1024 * 1024,
+  maxReassembledFrameBytes: 64 * 1024 * 1024,
+});
 write({ type: "available_commands_update", commands: availableCommands });
 stderr.write("mock rpc child ready\n");
 
@@ -148,6 +155,14 @@ for await (const line of rl) {
   }
 
   switch (command.type) {
+    case "negotiate_protocol": {
+      if (command.protocolVersion === 2) {
+        success(command, { protocolVersion: 2 });
+      } else {
+        error(command, `unsupported protocol version: ${command.protocolVersion}`);
+      }
+      break;
+    }
     case "get_state": {
       success(command, {
         model: currentModel,
@@ -232,6 +247,19 @@ for await (const line of rl) {
     }
     case "get_messages": {
       success(command, { messages });
+      break;
+    }
+    case "get_messages_page": {
+      const limit = Number.isFinite(command.limit) ? Math.max(1, Math.min(256, Math.trunc(command.limit))) : 256;
+      const offset = command.cursor ? Number.parseInt(String(command.cursor), 10) : 0;
+      const safeOffset = Number.isFinite(offset) && offset >= 0 ? offset : 0;
+      const page = messages.slice(safeOffset, safeOffset + limit);
+      const nextOffset = safeOffset + page.length;
+      success(command, {
+        messages: page,
+        nextCursor: nextOffset < messages.length ? String(nextOffset) : undefined,
+        totalMessages: messages.length,
+      });
       break;
     }
     case "get_session_stats": {

@@ -57,11 +57,12 @@ export type TaskResult = {
   extractedToolData?: Record<string, unknown>;
 };
 
-export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned";
+export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";
 
 export type TodoItem = {
   content: string;
   status: TodoStatus;
+  blocker?: string;
   notes?: string[];
 };
 

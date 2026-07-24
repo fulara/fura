@@ -32,6 +32,7 @@ mod projection;
 mod protocol;
 mod review_comments;
 mod rpc;
+mod rpc_frame;
 mod session;
 mod state;
 mod timestamp;
@@ -52,6 +53,7 @@ use projection::*;
 use protocol::*;
 use review_comments::*;
 use rpc::*;
+use rpc_frame::*;
 use session::*;
 use state::*;
 use timestamp::*;
@@ -2077,6 +2079,199 @@ pub(crate) mod tests {
         assert!(responses.is_empty());
     }
 
+    async fn register_test_rpc_transport(
+        state: &AppState,
+        session_id: &str,
+    ) -> mpsc::Receiver<Value> {
+        let (stdin, rx) = mpsc::channel(16);
+        let (stop, _stop_rx) = oneshot::channel();
+        state
+            .session_runtime
+            .register_transport(session_id.to_string(), RpcSessionHandle { stdin, stop })
+            .await;
+        state
+            .sessions
+            .write()
+            .await
+            .insert(session_id.to_string(), test_record());
+        rx
+    }
+
+    #[tokio::test]
+    async fn ready_v2_negotiates_before_state_refresh() {
+        let state = test_state(8, None);
+        let mut rx = register_test_rpc_transport(&state, "s1").await;
+
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "ready",
+                "protocolVersion": 1,
+                "supportedProtocolVersions": [1, 2],
+                "maxFrameBytes": 1048576,
+                "maxReassembledFrameBytes": 67108864
+            }),
+        )
+        .await;
+
+        let first = rx.recv().await.expect("negotiate command");
+        let second = rx.recv().await.expect("state command");
+        let third = rx.recv().await.expect("messages page command");
+        assert_eq!(first["type"], "negotiate_protocol");
+        assert_eq!(first["protocolVersion"], 2);
+        assert_eq!(second["type"], "get_state");
+        assert_eq!(third["type"], "get_messages_page");
+        assert_eq!(third["limit"], 256);
+    }
+
+    #[tokio::test]
+    async fn paged_messages_rebuild_transcript_after_final_page() {
+        let state = test_state(8, None);
+        let mut rx = register_test_rpc_transport(&state, "s1").await;
+        state
+            .session_runtime
+            .set_rpc_protocol_version("s1", 2)
+            .await;
+
+        refresh_rpc_messages(&state, "s1")
+            .await
+            .expect("page refresh queued");
+        let first = rx.recv().await.expect("first page command");
+        let first_id = first["id"].as_str().expect("request id").to_string();
+        assert_eq!(first["type"], "get_messages_page");
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "id": first_id,
+                "type": "response",
+                "command": "get_messages_page",
+                "success": true,
+                "data": {
+                    "messages": [{
+                        "id": "u1",
+                        "role": "user",
+                        "content": [{ "type": "text", "text": "first" }]
+                    }],
+                    "nextCursor": "cursor-2",
+                    "totalMessages": 2
+                }
+            }),
+        )
+        .await;
+
+        let second = rx.recv().await.expect("second page command");
+        let second_id = second["id"].as_str().expect("request id").to_string();
+        assert_eq!(second["cursor"], "cursor-2");
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "id": second_id,
+                "type": "response",
+                "command": "get_messages_page",
+                "success": true,
+                "data": {
+                    "messages": [{
+                        "id": "a1",
+                        "role": "assistant",
+                        "content": [{ "type": "text", "text": "second" }]
+                    }],
+                    "totalMessages": 2
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session record");
+        assert_eq!(record.messages.len(), 2);
+        assert!(
+            matches!(&record.messages[0].blocks[0], ContentBlock::Text { text } if text == "first")
+        );
+        assert!(
+            matches!(&record.messages[1].blocks[0], ContentBlock::Text { text } if text == "second")
+        );
+    }
+
+    #[tokio::test]
+    async fn paged_messages_ignore_busy_error_without_clearing_transcript() {
+        let state = test_state(8, None);
+        let mut rx = register_test_rpc_transport(&state, "s1").await;
+        state
+            .session_runtime
+            .set_rpc_protocol_version("s1", 2)
+            .await;
+        state
+            .events
+            .mutate_session_snapshot(&state, "s1", |record| {
+                record.messages = vec![text_message("cached", "cached")];
+            })
+            .await;
+
+        refresh_rpc_messages(&state, "s1")
+            .await
+            .expect("page refresh queued");
+        let first = rx.recv().await.expect("first page command");
+        let first_id = first["id"].as_str().expect("request id").to_string();
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "id": first_id,
+                "type": "response",
+                "command": "get_messages_page",
+                "success": false,
+                "error": "session is busy",
+                "code": "session_busy"
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("session record");
+        assert_eq!(record.messages.len(), 1);
+        assert_eq!(record.messages[0].id, "cached");
+    }
+
+    #[tokio::test]
+    async fn paged_messages_restart_once_on_stale_cursor() {
+        let state = test_state(8, None);
+        let mut rx = register_test_rpc_transport(&state, "s1").await;
+        state
+            .session_runtime
+            .set_rpc_protocol_version("s1", 2)
+            .await;
+
+        refresh_rpc_messages(&state, "s1")
+            .await
+            .expect("page refresh queued");
+        let first = rx.recv().await.expect("first page command");
+        let first_id = first["id"].as_str().expect("request id").to_string();
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "id": first_id,
+                "type": "response",
+                "command": "get_messages_page",
+                "success": false,
+                "error": "stale cursor",
+                "code": "stale_cursor"
+            }),
+        )
+        .await;
+
+        let restarted = rx.recv().await.expect("restarted first page command");
+        assert_eq!(restarted["type"], "get_messages_page");
+        assert!(restarted.get("cursor").is_none());
+    }
+
     fn push_message_delta(
         record: &mut SessionRecord,
         id: &str,
@@ -3361,6 +3556,56 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_response_false_settles_slash_passthrough_command_notice() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
+        let mut events = state.events.subscribe();
+
+        let responses =
+            send_prompt(&state, "s1".to_string(), "/tools".to_string(), None, None).await;
+
+        assert!(responses.is_empty());
+        let command = commands.recv().await.expect("prompt command sent");
+        let command_id = command
+            .get("id")
+            .and_then(|value| value.as_str())
+            .expect("prompt command id")
+            .to_string();
+        let notice_id = format!("__command_notice:{command_id}");
+        let _ = events.recv().await.expect("command notice snapshot");
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "id": command_id,
+                "type": "response",
+                "command": "prompt",
+                "success": true,
+                "data": {
+                    "agentInvoked": false
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert!(
+            !record.projection().transcript.iter().any(|entry| matches!(
+                entry,
+                TranscriptEntry::Message(message) if message.id == notice_id
+            )),
+            "prompt response with agentInvoked:false should remove the matching command notice"
+        );
+    }
+
+    #[tokio::test]
     async fn rpc_model_list_response_emits_model_list() {
         let state = test_state(8, None);
         state
@@ -4453,7 +4698,8 @@ pub(crate) mod tests {
                         "name": "Investigation",
                         "tasks": [
                             { "content": "Check UI", "status": "completed" },
-                            { "content": "Run smoke", "status": "in_progress", "notes": ["Use mock RPC"] }
+                            { "content": "Run smoke", "status": "in_progress", "notes": ["Use mock RPC"] },
+                            { "content": "Wait upstream", "status": "blocked", "blocker": "protocol v2" }
                         ]
                     }],
                     "storage": "session"
@@ -4480,6 +4726,14 @@ pub(crate) mod tests {
         assert_eq!(
             projection.todo_phases[0].tasks[1].notes,
             vec!["Use mock RPC".to_string()]
+        );
+        assert_eq!(
+            projection.todo_phases[0].tasks[2].status,
+            TodoStatusProjection::Blocked
+        );
+        assert_eq!(
+            projection.todo_phases[0].tasks[2].blocker.as_deref(),
+            Some("protocol v2")
         );
     }
 

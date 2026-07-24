@@ -108,7 +108,7 @@ test("desktop surfaces and approves a mock plan review", async ({ page }) => {
   await page.locator("#sendButton").click();
 
   await expect(page.locator(".plan-review-card")).toContainText("Smoke Plan");
-  await page.locator(".plan-review-approve").click();
+  await page.locator(".plan-review-approve-execute").click();
   await expect(page.locator(".plan-review-card")).toHaveCount(0);
 });
 
