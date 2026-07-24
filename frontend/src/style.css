@@ -886,9 +886,6 @@ h2 {
   max-width: 100%;
 }
 
-.panel-scroll > .message {
-  align-self: start;
-}
 
 .panel-content-diffs .panel-scroll {
   overflow: hidden;
@@ -2040,7 +2037,6 @@ h2 {
   position: relative;
   min-width: 0;
   max-width: 100%;
-  overflow: hidden;
   border-radius: var(--radius-card);
 }
 
