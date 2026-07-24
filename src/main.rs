@@ -1404,6 +1404,17 @@ pub(crate) mod tests {
 
     fn canonical_command_fixture(name: &str) -> Option<Value> {
         Some(match name {
+            "command-negotiate-protocol" => {
+                negotiate_protocol_command("cmd-negotiate-1".to_string(), 2)
+            }
+            "command-get-messages-page" => get_messages_page_command(
+                "cmd-messages-page-1".to_string(),
+                Some("eyJ2ZXJzaW9uIjoxLCJvZmZzZXQiOjJ9".to_string()),
+                Some(2),
+            ),
+            "command-get-available-commands" => {
+                get_available_commands_command("cmd-available-commands-1".to_string())
+            }
             "command-get-state" => get_state_command("cmd-state-1".to_string()),
             "command-fork" => fork_command("cmd-fork-1".to_string()),
             "command-set-active-tools" => set_active_tools_command(
@@ -1459,6 +1470,40 @@ pub(crate) mod tests {
 
     #[test]
     fn omp_contract_fixtures_decode_as_typed_frames() {
+        fn assert_available_commands(commands: &[RpcAvailableSlashCommand]) {
+            let tools = commands
+                .iter()
+                .find(|command| command.name == "tools")
+                .expect("available commands must include tools");
+            assert_eq!(tools.aliases, ["tool"]);
+            assert_eq!(
+                tools.input.as_ref().and_then(|input| input.hint.as_deref()),
+                Some("list|enable|disable")
+            );
+            assert_eq!(
+                tools
+                    .subcommands
+                    .first()
+                    .and_then(|subcommand| subcommand.usage.as_deref()),
+                Some("/tools list")
+            );
+            let sources: HashSet<&str> = commands
+                .iter()
+                .map(|command| command.source.as_str())
+                .collect();
+            assert_eq!(
+                sources,
+                HashSet::from([
+                    "builtin",
+                    "skill",
+                    "extension",
+                    "custom",
+                    "mcp_prompt",
+                    "file",
+                ])
+            );
+        }
+
         let manifest: Vec<ContractManifestEntry> =
             serde_json::from_value(read_contract_fixture("manifest.json"))
                 .expect("contract manifest should decode");
@@ -1470,16 +1515,40 @@ pub(crate) mod tests {
         for entry in manifest {
             let value = read_contract_fixture(&entry.file);
             if entry.category == "command" {
-                let command = OmpRpcCommand::decode(value.clone()).unwrap_or_else(|error| {
+                OmpRpcCommand::decode(value.clone()).unwrap_or_else(|error| {
                     panic!(
                         "{} ({}) failed to decode as command: {error}",
                         entry.name, entry.category
                     )
                 });
-                let _ = command;
                 if let Some(expected) = canonical_command_fixture(&entry.name) {
                     assert_eq!(expected, value, "{} command helper drifted", entry.name);
                 }
+                continue;
+            }
+
+            if entry.name == "rpc-chunk" {
+                let mut decoder = RpcFrameDecoder::default();
+                let logical = decoder
+                    .push_value(value)
+                    .expect("rpc-chunk fixture should reassemble")
+                    .expect("single rpc-chunk fixture should complete one logical frame");
+                assert_eq!(
+                    logical,
+                    read_contract_fixture("response-get-messages-page.json"),
+                    "rpc-chunk payload must be the canonical paged response"
+                );
+                let frame =
+                    OmpRpcFrame::decode(logical).expect("reassembled rpc-chunk should decode");
+                let OmpRpcFrame::Response(response) = frame else {
+                    panic!("reassembled rpc-chunk must be a response");
+                };
+                assert_eq!(response.command, "get_messages_page");
+                let page: OmpMessagesPageResponse = response
+                    .data_as()
+                    .expect("reassembled paged response data should decode");
+                assert_eq!(page.messages.len(), 2);
+                assert_eq!(page.total_messages, 4);
                 continue;
             }
 
@@ -1491,24 +1560,67 @@ pub(crate) mod tests {
             });
 
             match frame {
+                OmpRpcFrame::Ready(ready) => {
+                    assert_eq!(ready.supported_protocol_versions, [1, 2]);
+                    assert!(ready.max_frame_bytes.is_some_and(|bytes| bytes > 0));
+                    assert!(
+                        ready
+                            .max_reassembled_frame_bytes
+                            .is_some_and(|bytes| bytes > 0)
+                    );
+                }
                 OmpRpcFrame::Response(response) => match response.command.as_str() {
+                    "negotiate_protocol" => {
+                        assert!(!response.is_error());
+                        assert_eq!(
+                            response
+                                .payload()
+                                .and_then(|data| data.get("protocolVersion"))
+                                .and_then(Value::as_u64),
+                            Some(2)
+                        );
+                    }
                     "get_state" => {
                         let data: OmpSessionState = serde_json::from_value(
                             response.payload().expect("get_state payload").clone(),
                         )
                         .expect("get_state data should decode");
-                        assert!(!data.session_id.is_empty());
-                        assert!(data.context_usage.is_some());
-                        assert!(
-                            data.plan_mode.as_ref().is_some_and(|state| state.enabled),
-                            "get_state fixture must cover planMode compatibility"
-                        );
-                        assert!(
-                            data.goal_mode
-                                .as_ref()
-                                .and_then(|state| state.goal.as_ref())
-                                .is_some(),
-                            "get_state fixture must cover goalMode compatibility"
+                        assert_eq!(data.session_id, "session-1");
+                        assert!(!data.is_compacting);
+                        let context = data
+                            .context_usage
+                            .as_ref()
+                            .expect("get_state fixture must include context usage");
+                        assert_eq!(context.tokens, Some(1234));
+                        assert_eq!(context.context_window, Some(200000));
+                        let model = data
+                            .model
+                            .as_ref()
+                            .expect("get_state fixture must include model");
+                        assert_eq!(model.get("contextWindow"), Some(&Value::Null));
+                        assert_eq!(model.get("maxTokens"), Some(&Value::Null));
+                        let plan = data
+                            .plan_mode
+                            .as_ref()
+                            .expect("get_state fixture must include planMode");
+                        assert!(plan.enabled);
+                        assert_eq!(plan.workflow.as_deref(), Some("parallel"));
+                        let goal = data
+                            .goal_mode
+                            .as_ref()
+                            .expect("get_state fixture must include goalMode");
+                        assert!(goal.enabled);
+                        assert_eq!(goal.mode, "active");
+                        assert!(goal.goal.is_some());
+                        let blocked = data
+                            .todo_phases
+                            .iter()
+                            .flat_map(|phase| &phase.tasks)
+                            .find(|task| matches!(task.status, TodoStatusProjection::Blocked))
+                            .expect("get_state fixture must include a blocked todo");
+                        assert_eq!(
+                            blocked.blocker.as_deref(),
+                            Some("Release manager approval is pending")
                         );
                     }
                     "get_messages" => {
@@ -1518,12 +1630,38 @@ pub(crate) mod tests {
                         .expect("get_messages data should decode");
                         assert!(!data.messages.is_empty());
                     }
+                    "get_messages_page" if response.is_error() => {
+                        let expected_code = match entry.name.as_str() {
+                            "response-get-messages-page-session-busy" => "session_busy",
+                            "response-get-messages-page-stale-cursor" => "stale_cursor",
+                            other => panic!("unexpected paged response error fixture {other}"),
+                        };
+                        assert_eq!(response.code.as_deref(), Some(expected_code));
+                        assert!(response.error.is_some());
+                    }
+                    "get_messages_page" => {
+                        let data: OmpMessagesPageResponse = response
+                            .data_as()
+                            .expect("get_messages_page data should decode");
+                        assert_eq!(data.messages.len(), 2);
+                        assert_eq!(
+                            data.next_cursor.as_deref(),
+                            Some("eyJ2ZXJzaW9uIjoxLCJvZmZzZXQiOjR9")
+                        );
+                        assert_eq!(data.total_messages, 4);
+                    }
+                    "get_available_commands" => {
+                        let data: OmpAvailableCommandsResponse = response
+                            .data_as()
+                            .expect("get_available_commands data should decode");
+                        assert_available_commands(&data.commands);
+                    }
                     "get_session_stats" => {
                         let payload = response.payload().expect("get_session_stats payload");
                         let raw_reasoning = payload
                             .get("tokens")
                             .and_then(|tokens| tokens.get("reasoning"))
-                            .and_then(|value| value.as_u64())
+                            .and_then(Value::as_u64)
                             .expect("get_session_stats fixture should include tokens.reasoning");
                         let data: OmpSessionStats = serde_json::from_value(payload.clone())
                             .expect("get_session_stats data should decode");
@@ -1588,6 +1726,44 @@ pub(crate) mod tests {
                     }
                     _ => {}
                 },
+                OmpRpcFrame::AvailableCommandsUpdate { commands } => {
+                    assert_available_commands(&commands);
+                }
+                OmpRpcFrame::PromptResult { id, agent_invoked } => {
+                    assert_eq!(id.as_deref(), Some("cmd-tools-1"));
+                    assert!(!agent_invoked);
+                }
+                OmpRpcFrame::CommandOutput { text } => {
+                    assert_eq!(text, "Active tools: read, todo, task");
+                }
+                OmpRpcFrame::SessionInfoUpdate { title, session_id } => {
+                    assert_eq!(title.as_deref(), Some("Fixture session renamed"));
+                    assert_eq!(session_id.as_deref(), Some("session-1"));
+                }
+                OmpRpcFrame::ConfigUpdate {
+                    model,
+                    thinking_level,
+                } => {
+                    let model = model.expect("config update fixture must include model");
+                    assert_eq!(model.get("contextWindow"), Some(&Value::Null));
+                    assert_eq!(model.get("maxTokens"), Some(&Value::Null));
+                    assert_eq!(thinking_level.as_deref(), Some("medium"));
+                }
+                OmpRpcFrame::GoalUpdated { goal, state } => {
+                    assert_eq!(
+                        goal.as_ref()
+                            .and_then(|goal| goal.get("id"))
+                            .and_then(Value::as_str),
+                        Some("goal-1")
+                    );
+                    assert_eq!(
+                        state
+                            .as_ref()
+                            .and_then(|state| state.get("mode"))
+                            .and_then(Value::as_str),
+                        Some("active")
+                    );
+                }
                 OmpRpcFrame::Unknown => panic!("{} decoded as unknown", entry.name),
                 _ => {}
             }
@@ -1595,23 +1771,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn omp_v16_3_9_prompt_result_and_reasoning_decode_explicitly() {
-        let prompt_result = OmpRpcFrame::decode(serde_json::json!({
-            "type": "prompt_result",
-            "id": "prompt-1",
-            "agentInvoked": true
-        }))
-        .expect("prompt_result frame should decode");
-
-        match prompt_result {
-            OmpRpcFrame::PromptResult { id, agent_invoked } => {
-                assert_eq!(id.as_deref(), Some("prompt-1"));
-                assert!(agent_invoked);
-            }
-            OmpRpcFrame::Unknown => panic!("prompt_result must not decode as Unknown"),
-            other => panic!("prompt_result decoded as unexpected frame: {other:?}"),
-        }
-
+    fn omp_v16_3_9_reasoning_tokens_decode_explicitly() {
         let stats: OmpSessionStats = serde_json::from_value(serde_json::json!({
             "sessionFile": "/tmp/omp/session.jsonl",
             "sessionId": "session-1",
