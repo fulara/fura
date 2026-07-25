@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run Fura against the local Oh My Pi checkout with two listeners:
+# Run Fura against the bundled Oh My Pi fork-stuff submodule with two listeners:
 # - local HTTP for laptop development:  http://<FURA_LOCAL_BIND>/
 # - remote HTTPS for phone development: https://<FURA_REMOTE_HOST>:<FURA_REMOTE_PORT>/mobile.html
 #
@@ -14,9 +14,9 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=./fura-env.sh
 source "${SCRIPT_DIR}/fura-env.sh"
 load_fura_env "${SCRIPT_DIR}"
+use_omp_submodule "${SCRIPT_DIR}"
 
 require_env \
-  OMP_REPO \
   BUN_BIN \
   FURA_TOKEN \
   FURA_LOCAL_BIND \
@@ -27,15 +27,9 @@ require_env \
   FURA_BRIDGE_DEBUG_FILE \
   FURA_EVENT_DEBUG_FILE
 require_executable BUN_BIN
-require_directory OMP_REPO
 require_directory FURA_DIR
 require_readable FURA_TLS_CERT
 require_readable FURA_TLS_KEY
-
-if [[ ! -d "${OMP_REPO}/packages/coding-agent" ]]; then
-  echo "OMP checkout is missing packages/coding-agent: ${OMP_REPO}" >&2
-  exit 1
-fi
 
 if ! command -v tailscale >/dev/null 2>&1; then
   echo "tailscale command not found. Install and log in to Tailscale first." >&2
@@ -55,8 +49,7 @@ native_addons=("${OMP_REPO}"/packages/natives/native/pi_natives."${native_platfo
 shopt -u nullglob
 if (( ${#native_addons[@]} == 0 )); then
   echo "OMP native addon is not built for ${native_platform}." >&2
-  echo "Run: PATH=\"$(dirname -- "${BUN_BIN}"):\$PATH\" bun run build" >&2
-  echo "from: ${OMP_REPO}/packages/natives" >&2
+  echo "Run: (cd \"${OMP_REPO}\" && ${BUN_BIN} install --frozen-lockfile && env -u RUSTUP_TOOLCHAIN ${BUN_BIN} run build:native)" >&2
   exit 1
 fi
 

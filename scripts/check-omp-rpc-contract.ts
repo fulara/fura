@@ -2,13 +2,10 @@ import { readdir, readFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const USAGE = "Usage: bun scripts/check-omp-rpc-contract.ts <OMP_ROOT>";
-const DEFAULT_FURA_FIXTURE_DIR = resolve(
-	dirname(fileURLToPath(import.meta.url)),
-	"..",
-	"fixtures",
-	"omp-rpc-contract",
-);
+const FURA_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const USAGE = "Usage: bun scripts/check-omp-rpc-contract.ts [OMP_ROOT]";
+const DEFAULT_OMP_ROOT = resolve(FURA_ROOT, "vendor", "oh-my-pi");
+const DEFAULT_FURA_FIXTURE_DIR = resolve(FURA_ROOT, "fixtures", "omp-rpc-contract");
 
 interface ContractDirectory {
 	files: string[];
@@ -189,11 +186,11 @@ export async function compareRpcContract(
 
 async function main(): Promise<void> {
 	const args = Bun.argv.slice(2);
-	if (args.length !== 1) {
+	if (args.length > 1) {
 		console.error(USAGE);
 		process.exit(2);
 	}
-	const result = await compareRpcContract(args[0]);
+	const result = await compareRpcContract(args[0] ?? DEFAULT_OMP_ROOT);
 	for (const error of result.errors) console.error(error);
 	for (const difference of result.differences) console.error(difference);
 	const output = result.exitCode === 0 ? console.log : console.error;

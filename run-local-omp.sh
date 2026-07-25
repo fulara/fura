@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run Fura against the local Oh My Pi checkout instead of the preinstalled `omp`.
+# Run Fura against the bundled Oh My Pi fork-stuff submodule.
 # Required configuration is loaded from .env next to this script, or from
 # FURA_ENV_FILE. Missing required values fail closed before anything starts.
 # Extra arguments are forwarded to Fura after the local OMP RPC wiring.
@@ -10,22 +10,16 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=./fura-env.sh
 source "${SCRIPT_DIR}/fura-env.sh"
 load_fura_env "${SCRIPT_DIR}"
+use_omp_submodule "${SCRIPT_DIR}"
 
 require_env \
-  OMP_REPO \
   BUN_BIN \
   FURA_TOKEN \
   FURA_LOCAL_BIND \
   FURA_BRIDGE_DEBUG_FILE \
   FURA_EVENT_DEBUG_FILE
 require_executable BUN_BIN
-require_directory OMP_REPO
 require_directory FURA_DIR
-
-if [[ ! -d "${OMP_REPO}/packages/coding-agent" ]]; then
-  echo "OMP checkout is missing packages/coding-agent: ${OMP_REPO}" >&2
-  exit 1
-fi
 
 native_platform=$("${BUN_BIN}" -e 'process.stdout.write(`${process.platform}-${process.arch}`);')
 shopt -s nullglob
@@ -33,8 +27,7 @@ native_addons=("${OMP_REPO}"/packages/natives/native/pi_natives."${native_platfo
 shopt -u nullglob
 if (( ${#native_addons[@]} == 0 )); then
   echo "OMP native addon is not built for ${native_platform}." >&2
-  echo "Run: PATH=\"$(dirname -- "${BUN_BIN}"):\$PATH\" bun run build" >&2
-  echo "from: ${OMP_REPO}/packages/natives" >&2
+  echo "Run: (cd \"${OMP_REPO}\" && ${BUN_BIN} install --frozen-lockfile && env -u RUSTUP_TOOLCHAIN ${BUN_BIN} run build:native)" >&2
   exit 1
 fi
 

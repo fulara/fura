@@ -51,15 +51,32 @@ These are only required for the native window binary. The default bridge binary 
 
 ### Oh My Pi
 
-The bridge spawns `omp --mode rpc` by default. Install OMP and ensure `omp` is on your `PATH`,
-or point `--rpc-program` at a custom script (see below).
+The bridge spawns an installed `omp --mode rpc-ui` by default. The local development
+launchers use the `vendor/oh-my-pi` submodule, pinned to Fura's compatible OMP commit
+and configured to track the `fork-stuff` branch.
 
 ### Bun (for local OMP development)
 
-Required only when using `run-local-omp.sh` against a local OMP checkout.
+Required only when using `run-local-omp.sh` against the bundled OMP submodule.
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
+```
+
+Initialize the submodule after cloning without `--recurse-submodules`:
+
+```bash
+git submodule update --init --recursive
+```
+
+Prepare the submodule once before the first local run:
+
+```bash
+(
+  cd vendor/oh-my-pi
+  bun install --frozen-lockfile
+  env -u RUSTUP_TOOLCHAIN bun run build:native
+)
 ```
 
 ## Building
@@ -83,24 +100,32 @@ FURA_TOKEN=dev cargo run -- --static-dir frontend/dist
 
 Open: `http://127.0.0.1:3737/`, then enter bridge token `dev` in the auth screen.
 
-### Against a local OMP checkout
+### Against the bundled OMP fork
 
 ```bash
+git submodule update --init --recursive
 ./run-local-omp.sh
+```
+
+`vendor/oh-my-pi` is the only OMP checkout used by the local launchers. To advance
+the pinned commit to the latest `fork-stuff` revision and check contract parity:
+
+```bash
+git submodule update --remote vendor/oh-my-pi
+bun scripts/check-omp-rpc-contract.ts
 ```
 
 Environment overrides for `run-local-omp.sh`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `OMP_REPO` | `~/repos/oh-my-pi` | Path to the OMP monorepo checkout |
 | `BUN_BIN` | `~/.bun/bin/bun` | Path to the `bun` executable |
 | `FURA_TOKEN` | `dev` | Bridge token entered in the browser auth screen |
 | `FURA_BRIDGE_DEBUG_FILE` | `./bridge-debug.jsonl` | Bridge debug JSONL log (raw RPC frames plus WebSocket traffic summaries; contains prompts and other sensitive data — do not commit) |
 | `FURA_EVENT_DEBUG_FILE` | `./fura-events.jsonl` | Compact bridge event log with large text fields truncated |
 | `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
 
-### Against a local OMP checkout over Tailscale + HTTPS
+### Against the bundled OMP fork over Tailscale + HTTPS
 
 ```bash
 ./run-local-with-tailscale.sh

@@ -130,8 +130,8 @@ describe("OMP RPC contract parity checker", () => {
 		]);
 	});
 
-	test("requires exactly one CLI argument and exits with code 2", async () => {
-		const child = Bun.spawn([process.execPath, checkerPath], {
+	test("rejects more than one CLI argument and exits with code 2", async () => {
+		const child = Bun.spawn([process.execPath, checkerPath, "first", "second"], {
 			cwd: dirname(checkerPath),
 			stdout: "pipe",
 			stderr: "pipe",
@@ -139,6 +139,6 @@ describe("OMP RPC contract parity checker", () => {
 		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
 
 		expect(exitCode).toBe(2);
-		expect(stderr.trim()).toBe("Usage: bun scripts/check-omp-rpc-contract.ts <OMP_ROOT>");
+		expect(stderr.trim()).toBe("Usage: bun scripts/check-omp-rpc-contract.ts [OMP_ROOT]");
 	});
 });

@@ -16,6 +16,19 @@ load_fura_env() {
   set +a
 }
 
+use_omp_submodule() {
+  local fura_root=$1
+  OMP_REPO="${fura_root}/vendor/oh-my-pi"
+  export OMP_REPO
+
+  if [[ ! -e "${OMP_REPO}/.git" || ! -d "${OMP_REPO}/packages/coding-agent" ]]; then
+    echo "OMP submodule is not initialized: ${OMP_REPO}" >&2
+    echo "Run: git submodule update --init --recursive" >&2
+    echo "from: ${fura_root}" >&2
+    exit 1
+  fi
+}
+
 require_env() {
   local missing=()
   local name

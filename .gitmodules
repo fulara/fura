@@ -1,0 +1,4 @@
+[submodule "vendor/oh-my-pi"]
+	path = vendor/oh-my-pi
+	url = ../oh-my-pi.git
+	branch = fork-stuff
