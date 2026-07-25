@@ -717,6 +717,28 @@ pub(crate) enum ClientMessage {
         images: Option<Vec<Value>>,
         behavior: Option<PromptBehavior>,
     },
+    #[serde(rename = "session.btw.start")]
+    SessionBtwStart {
+        client_id: String,
+        session_id: String,
+        request_id: String,
+        question: String,
+    },
+    #[serde(rename = "session.btw.cancel")]
+    SessionBtwCancel {
+        client_id: String,
+        request_id: String,
+    },
+    #[serde(rename = "session.btw.release")]
+    SessionBtwRelease {
+        client_id: String,
+        request_id: String,
+    },
+    #[serde(rename = "session.btw.promote")]
+    SessionBtwPromote {
+        client_id: String,
+        request_id: String,
+    },
     #[serde(rename = "prompt.abort")]
     PromptAbort { session_id: String },
     #[serde(rename = "goal.start")]
@@ -1040,6 +1062,31 @@ pub(crate) enum ServerMessage {
         session_id: String,
         text: String,
         images: Option<Vec<Value>>,
+    },
+    #[serde(rename = "session.btw.update")]
+    SessionBtwUpdate {
+        target_client_id: String,
+        source_session_id: String,
+        request_id: String,
+        state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        question: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delta: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        answer: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        can_promote: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+    #[serde(rename = "session.btw.promoted")]
+    SessionBtwPromoted {
+        target_client_id: String,
+        source_session_id: String,
+        request_id: String,
+        session_id: String,
+        session_file: String,
     },
     #[serde(rename = "model.list")]
     ModelList {

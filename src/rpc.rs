@@ -101,6 +101,22 @@ async fn complete_model_catalog_request(state: &AppState, session_id: &str) -> O
     catalog.in_flight_request_id.take()
 }
 
+pub(crate) async fn fail_removed_btw_requests(
+    state: &AppState,
+    btw_requests: Vec<(String, BtwRequestRoute)>,
+    message: &str,
+) {
+    for (request_id, route) in btw_requests {
+        let _ = state
+            .events
+            .emit(
+                state,
+                btw_update_error(&route, request_id, message.to_string()),
+            )
+            .await;
+    }
+}
+
 async fn stop_transport(state: &AppState, transport_session_id: &str) {
     if let Some(removed) = state
         .session_runtime
@@ -108,6 +124,12 @@ async fn stop_transport(state: &AppState, transport_session_id: &str) {
         .await
     {
         let _ = removed.handle.stop.send(());
+        fail_removed_btw_requests(
+            state,
+            removed.btw_requests,
+            "The OMP session closed before the BTW request completed.",
+        )
+        .await;
     }
 }
 
@@ -251,6 +273,159 @@ pub(crate) async fn send_rpc_command(
         .send(command)
         .await
         .map_err(|_| format!("session {session_id} RPC stdin is closed"))
+}
+
+fn btw_update_error(route: &BtwRequestRoute, request_id: String, message: String) -> ServerMessage {
+    ServerMessage::SessionBtwUpdate {
+        target_client_id: route.target_client_id.clone(),
+        source_session_id: route.source_session_id.clone(),
+        request_id,
+        state: "error".to_string(),
+        question: None,
+        delta: None,
+        answer: None,
+        can_promote: None,
+        error: Some(message),
+    }
+}
+
+pub(crate) async fn start_btw_request(
+    state: &AppState,
+    client_id: String,
+    session_id: String,
+    request_id: String,
+    question: String,
+) -> Vec<ServerMessage> {
+    let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await else {
+        return vec![ServerMessage::SessionBtwUpdate {
+            target_client_id: client_id,
+            source_session_id: session_id,
+            request_id,
+            state: "error".to_string(),
+            question: None,
+            delta: None,
+            answer: None,
+            can_promote: None,
+            error: Some("Session has no live OMP RPC child.".to_string()),
+        }];
+    };
+    let route = BtwRequestRoute {
+        target_client_id: client_id,
+        source_session_id: session_id.clone(),
+        transport_session_id,
+    };
+    if !state
+        .session_runtime
+        .insert_btw_request(request_id.clone(), route.clone())
+        .await
+    {
+        return vec![btw_update_error(
+            &route,
+            request_id,
+            "BTW request already exists.".to_string(),
+        )];
+    }
+
+    let command_id = next_rpc_id();
+    state
+        .session_runtime
+        .insert_pending_btw_command(
+            command_id.clone(),
+            PendingBtwCommand {
+                btw_id: request_id.clone(),
+                kind: PendingBtwCommandKind::Start,
+            },
+        )
+        .await;
+    if let Err(message) = send_rpc_command(
+        state,
+        &session_id,
+        btw_start_command(command_id.clone(), request_id.clone(), question),
+    )
+    .await
+    {
+        state
+            .session_runtime
+            .take_pending_btw_command(&command_id)
+            .await;
+        state.session_runtime.remove_btw_request(&request_id).await;
+        return vec![btw_update_error(&route, request_id, message)];
+    }
+    Vec::new()
+}
+
+pub(crate) async fn control_btw_request(
+    state: &AppState,
+    client_id: String,
+    request_id: String,
+    kind: PendingBtwCommandKind,
+) -> Vec<ServerMessage> {
+    let Some(route) = state.session_runtime.btw_request(&request_id).await else {
+        return vec![ServerMessage::SessionBtwUpdate {
+            target_client_id: client_id,
+            source_session_id: String::new(),
+            request_id,
+            state: "error".to_string(),
+            question: None,
+            delta: None,
+            answer: None,
+            can_promote: None,
+            error: Some("BTW request was not found.".to_string()),
+        }];
+    };
+    if route.target_client_id != client_id {
+        return vec![btw_update_error(
+            &route,
+            request_id,
+            "BTW request belongs to another browser client.".to_string(),
+        )];
+    }
+    let command_id = next_rpc_id();
+    state
+        .session_runtime
+        .insert_pending_btw_command(
+            command_id.clone(),
+            PendingBtwCommand {
+                btw_id: request_id.clone(),
+                kind,
+            },
+        )
+        .await;
+    let command = match kind {
+        PendingBtwCommandKind::Start => unreachable!("BTW start uses start_btw_request"),
+        PendingBtwCommandKind::Cancel => btw_cancel_command(command_id.clone(), request_id.clone()),
+        PendingBtwCommandKind::Release => {
+            btw_release_command(command_id.clone(), request_id.clone())
+        }
+        PendingBtwCommandKind::Promote => {
+            btw_promote_command(command_id.clone(), request_id.clone())
+        }
+    };
+    if let Err(message) = send_rpc_command(state, &route.source_session_id, command).await {
+        state
+            .session_runtime
+            .take_pending_btw_command(&command_id)
+            .await;
+        return vec![btw_update_error(&route, request_id, message)];
+    }
+    Vec::new()
+}
+
+pub(crate) async fn release_btw_request_on_disconnect(
+    state: &AppState,
+    client_id: String,
+    request_id: String,
+) {
+    let responses = control_btw_request(
+        state,
+        client_id,
+        request_id.clone(),
+        PendingBtwCommandKind::Release,
+    )
+    .await;
+    if !responses.is_empty() {
+        state.session_runtime.remove_btw_request(&request_id).await;
+    }
 }
 
 async fn rpc_protocol_version(state: &AppState, session_id: &str) -> u8 {
@@ -461,12 +636,19 @@ pub(crate) async fn spawn_rpc_child(
             .take_recent_rpc_stderr(&session_id)
             .await;
 
-        let target_session_id = state
-            .session_runtime
-            .remove_transport(&session_id)
-            .await
-            .map(|removed| removed.target_session_id)
+        let removed_transport = state.session_runtime.remove_transport(&session_id).await;
+        let target_session_id = removed_transport
+            .as_ref()
+            .map(|removed| removed.target_session_id.clone())
             .unwrap_or_else(|| session_id.clone());
+        if let Some(removed) = removed_transport {
+            fail_removed_btw_requests(
+                &state,
+                removed.btw_requests,
+                "The OMP session exited before the BTW request completed.",
+            )
+            .await;
+        }
         let removed_review_contexts =
             remove_review_contexts_for_session(&state, &target_session_id).await;
         if let Some(context) = removed_review_contexts.into_iter().last() {
@@ -721,6 +903,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             OmpRpcFrame::ExtensionUiRequest { .. }
             | OmpRpcFrame::MessageUpdate { .. }
             | OmpRpcFrame::MessageEnd { .. }
+            | OmpRpcFrame::BtwUpdate { .. }
             | OmpRpcFrame::ToolExecutionStart { .. }
             | OmpRpcFrame::ToolExecutionUpdate { .. }
             | OmpRpcFrame::ToolExecutionEnd { .. }
@@ -1119,6 +1302,41 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             settle_local_only_prompt_result(state, &target_session_id, &id).await;
         }
         OmpRpcFrame::PromptResult { .. } => {}
+        OmpRpcFrame::BtwUpdate {
+            btw_id,
+            state: btw_state,
+            question,
+            delta,
+            answer,
+            can_promote,
+            error,
+        } => {
+            let Some(route) = state.session_runtime.btw_request(&btw_id).await else {
+                debug!(session_id = %target_session_id, request_id = %btw_id, "ignored unowned BTW update");
+                return;
+            };
+            let terminal = matches!(btw_state.as_str(), "cancelled" | "error");
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    ServerMessage::SessionBtwUpdate {
+                        target_client_id: route.target_client_id,
+                        source_session_id: route.source_session_id,
+                        request_id: btw_id.clone(),
+                        state: btw_state,
+                        question,
+                        delta,
+                        answer,
+                        can_promote,
+                        error,
+                    },
+                )
+                .await;
+            if terminal {
+                state.session_runtime.remove_btw_request(&btw_id).await;
+            }
+        }
         OmpRpcFrame::Response(response) => {
             let _ = response.is_error();
             let _ = response.payload();
@@ -1507,6 +1725,32 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             handle_controller_rpc_error(state, message).await;
             return;
         }
+        if let Some(command_id) = value_str(frame, "id")
+            && let Some(pending) = state
+                .session_runtime
+                .take_pending_btw_command(command_id)
+                .await
+        {
+            if let Some(route) = state.session_runtime.btw_request(&pending.btw_id).await {
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        btw_update_error(&route, pending.btw_id.clone(), message),
+                    )
+                    .await;
+                if matches!(
+                    pending.kind,
+                    PendingBtwCommandKind::Start | PendingBtwCommandKind::Release
+                ) {
+                    state
+                        .session_runtime
+                        .remove_btw_request(&pending.btw_id)
+                        .await;
+                }
+            }
+            return;
+        }
         if is_model_catalog_transport(state, session_id).await {
             let request_id = complete_model_catalog_request(state, session_id).await;
             let _ = state
@@ -1611,6 +1855,71 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 notice(current_session_id, NoticeLevel::Error, message),
             )
             .await;
+        return;
+    }
+
+    if let Some(command_id) = value_str(frame, "id")
+        && let Some(pending) = state
+            .session_runtime
+            .take_pending_btw_command(command_id)
+            .await
+    {
+        let Some(route) = state.session_runtime.btw_request(&pending.btw_id).await else {
+            return;
+        };
+        match pending.kind {
+            PendingBtwCommandKind::Start | PendingBtwCommandKind::Cancel => {}
+            PendingBtwCommandKind::Release => {
+                state
+                    .session_runtime
+                    .remove_btw_request(&pending.btw_id)
+                    .await;
+            }
+            PendingBtwCommandKind::Promote => {
+                let data = frame.get("data").or_else(|| frame.get("result"));
+                let promoted_session_id = data
+                    .and_then(|value| value.get("sessionId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let session_file = data
+                    .and_then(|value| value.get("sessionFile"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let (Some(promoted_session_id), Some(session_file)) =
+                    (promoted_session_id, session_file)
+                else {
+                    let _ = state
+                        .events
+                        .emit(
+                            state,
+                            btw_update_error(
+                                &route,
+                                pending.btw_id,
+                                "OMP returned an incomplete BTW promotion response.".to_string(),
+                            ),
+                        )
+                        .await;
+                    return;
+                };
+                state
+                    .session_runtime
+                    .remove_btw_request(&pending.btw_id)
+                    .await;
+                let _ = state
+                    .events
+                    .emit(
+                        state,
+                        ServerMessage::SessionBtwPromoted {
+                            target_client_id: route.target_client_id,
+                            source_session_id: route.source_session_id,
+                            request_id: pending.btw_id,
+                            session_id: promoted_session_id,
+                            session_file,
+                        },
+                    )
+                    .await;
+            }
+        }
         return;
     }
 

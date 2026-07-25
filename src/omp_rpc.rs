@@ -36,6 +36,18 @@ pub(crate) enum OmpRpcFrame {
     },
     #[serde(rename = "message_end")]
     MessageEnd { message: Value },
+    #[serde(rename = "btw_update")]
+    BtwUpdate {
+        #[serde(rename = "btwId")]
+        btw_id: String,
+        state: String,
+        question: Option<String>,
+        delta: Option<String>,
+        answer: Option<String>,
+        #[serde(rename = "canPromote")]
+        can_promote: Option<bool>,
+        error: Option<String>,
+    },
     #[serde(rename = "tool_execution_start")]
     ToolExecutionStart {
         #[serde(rename = "toolCallId")]
@@ -424,6 +436,31 @@ pub(crate) enum OmpRpcCommand {
     GetAvailableModels { id: String },
     #[serde(rename = "fork")]
     Fork { id: String },
+    #[serde(rename = "btw_start")]
+    BtwStart {
+        id: String,
+        #[serde(rename = "btwId")]
+        btw_id: String,
+        question: String,
+    },
+    #[serde(rename = "btw_cancel")]
+    BtwCancel {
+        id: String,
+        #[serde(rename = "btwId")]
+        btw_id: String,
+    },
+    #[serde(rename = "btw_release")]
+    BtwRelease {
+        id: String,
+        #[serde(rename = "btwId")]
+        btw_id: String,
+    },
+    #[serde(rename = "btw_promote")]
+    BtwPromote {
+        id: String,
+        #[serde(rename = "btwId")]
+        btw_id: String,
+    },
     #[serde(rename = "set_model")]
     SetModel {
         id: String,
@@ -517,6 +554,27 @@ impl OmpRpcCommand {
     pub(crate) fn decode(value: Value) -> serde_json::Result<Self> {
         serde_json::from_value(value)
     }
+}
+
+pub(crate) fn btw_start_command(id: String, btw_id: String, question: String) -> Value {
+    OmpRpcCommand::BtwStart {
+        id,
+        btw_id,
+        question,
+    }
+    .into_value()
+}
+
+pub(crate) fn btw_cancel_command(id: String, btw_id: String) -> Value {
+    OmpRpcCommand::BtwCancel { id, btw_id }.into_value()
+}
+
+pub(crate) fn btw_release_command(id: String, btw_id: String) -> Value {
+    OmpRpcCommand::BtwRelease { id, btw_id }.into_value()
+}
+
+pub(crate) fn btw_promote_command(id: String, btw_id: String) -> Value {
+    OmpRpcCommand::BtwPromote { id, btw_id }.into_value()
 }
 
 pub(crate) fn get_state_command(id: String) -> Value {

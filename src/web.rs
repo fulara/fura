@@ -23,7 +23,7 @@ use crate::{
     AppState, AuthSession, ClientMessage, PlanApprovalMode, ServerMessage,
     append_bridge_debug_event, append_event_debug_client_message,
     append_event_debug_server_message, client_config, handle_client_message,
-    refresh_session_catalog, sessions_snapshot_from_map,
+    refresh_session_catalog, release_btw_request_on_disconnect, sessions_snapshot_from_map,
 };
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
@@ -250,6 +250,10 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::StateRefresh { .. } => "state.refresh",
         ClientMessage::PromptSend { .. } => "prompt.send",
         ClientMessage::PromptAbort { .. } => "prompt.abort",
+        ClientMessage::SessionBtwStart { .. } => "session.btw.start",
+        ClientMessage::SessionBtwCancel { .. } => "session.btw.cancel",
+        ClientMessage::SessionBtwRelease { .. } => "session.btw.release",
+        ClientMessage::SessionBtwPromote { .. } => "session.btw.promote",
         ClientMessage::GoalStart { .. } => "goal.start",
         ClientMessage::GoalControl { .. } => "goal.control",
         ClientMessage::GoalSetBudget { .. } => "goal.setBudget",
@@ -465,6 +469,7 @@ pub(crate) async fn handle_socket(
     let connection_id = next_websocket_connection_id();
     let mut outbound_seq = 0_u64;
     let opened_at = Instant::now();
+    let mut owned_btw_requests = HashMap::<String, String>::new();
     info!(?update_mode, connection_id, "websocket client connected");
     append_websocket_debug_event(
         &state,
@@ -540,6 +545,7 @@ pub(crate) async fn handle_socket(
                         connection_id,
                         &mut outbound_seq,
                         opened_at,
+                        &mut owned_btw_requests,
                     ).await {
                         Ok(FrameOutcome::Continue) => {}
                         Ok(FrameOutcome::Resynced) => {
@@ -635,6 +641,9 @@ pub(crate) async fn handle_socket(
     };
 
     run.await;
+    for (request_id, client_id) in owned_btw_requests {
+        release_btw_request_on_disconnect(&state, client_id, request_id).await;
+    }
 }
 
 fn client_text_frame_too_large(text: &str) -> bool {
@@ -673,6 +682,7 @@ pub(crate) async fn handle_websocket_frame(
     connection_id: u64,
     outbound_seq: &mut u64,
     opened_at: Instant,
+    owned_btw_requests: &mut HashMap<String, String>,
 ) -> Result<FrameOutcome, axum::Error> {
     let frame = match frame {
         Ok(frame) => frame,
@@ -731,6 +741,14 @@ pub(crate) async fn handle_websocket_frame(
                         &text,
                     )
                     .await;
+                    if let ClientMessage::SessionBtwStart {
+                        client_id,
+                        request_id,
+                        ..
+                    } = &message
+                    {
+                        owned_btw_requests.insert(request_id.clone(), client_id.clone());
+                    }
                     let outcome = if client_message_resyncs_stream(&message, update_mode) {
                         FrameOutcome::Resynced
                     } else {
@@ -1137,6 +1155,8 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::LogStderr { .. } => "log.stderr",
         ServerMessage::SessionNotice { .. } => "session.notice",
         ServerMessage::PromptBusy { .. } => "prompt.busy",
+        ServerMessage::SessionBtwUpdate { .. } => "session.btw.update",
+        ServerMessage::SessionBtwPromoted { .. } => "session.btw.promoted",
         ServerMessage::ModelList { .. } => "model.list",
         ServerMessage::ConfigModelCatalogList { .. } => "config.modelCatalog.list",
         ServerMessage::ModelChanged { .. } => "model.changed",
@@ -1251,6 +1271,30 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             bytes = text.len(),
             image_count = images.as_ref().map(Vec::len).unwrap_or(0)
+        ),
+        ServerMessage::SessionBtwUpdate {
+            source_session_id,
+            request_id,
+            state,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "session.btw.update",
+            session_id = %source_session_id,
+            request_id = %request_id,
+            state = %state
+        ),
+        ServerMessage::SessionBtwPromoted {
+            source_session_id,
+            request_id,
+            session_id,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "session.btw.promoted",
+            source_session_id = %source_session_id,
+            request_id = %request_id,
+            session_id = %session_id
         ),
         ServerMessage::ModelList { session_id, models } => info!(
             direction = "bridge_to_client",

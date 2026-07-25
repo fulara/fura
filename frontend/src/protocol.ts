@@ -742,6 +742,8 @@ export type ConflictAgentResult = {
   remainingConflictCount?: number | null;
 };
 
+export type BtwUpdateState = "started" | "streaming" | "completed" | "cancelled" | "error";
+
 export type ServerMessage =
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
   | { type: "config.updated"; config: ServerConfig }
@@ -753,6 +755,8 @@ export type ServerMessage =
   | { type: "log.stderr"; sessionId: string; text: string }
   | { type: "session.notice"; sessionId: string; level: "info" | "warning" | "error"; text: string }
   | { type: "prompt.busy"; sessionId: string; text: string; images?: unknown[] | null }
+  | { type: "session.btw.update"; targetClientId: string; sourceSessionId: string; requestId: string; state: BtwUpdateState; question?: string; delta?: string; answer?: string; canPromote?: boolean; error?: string }
+  | { type: "session.btw.promoted"; targetClientId: string; sourceSessionId: string; requestId: string; sessionId: string; sessionFile: string }
   | { type: "model.list"; sessionId: string; models: ModelSummary[] }
   | { type: "config.modelCatalog.list"; requestId?: string | null; models: ModelSummary[] }
   | { type: "plan.review"; sessionId: string; planFilePath: string; finalPlanFilePath: string; title?: string | null; content: string }
@@ -825,6 +829,10 @@ export type ClientMessage =
       behavior?: "steer" | "followUp";
     }
   | { type: "prompt.abort"; sessionId: string }
+  | { type: "session.btw.start"; clientId: string; sessionId: string; requestId: string; question: string }
+  | { type: "session.btw.cancel"; clientId: string; requestId: string }
+  | { type: "session.btw.release"; clientId: string; requestId: string }
+  | { type: "session.btw.promote"; clientId: string; requestId: string }
   | { type: "goal.start"; sessionId: string; objective: string; tokenBudget?: number | null }
   | { type: "goal.control"; sessionId: string; action: GoalControlAction }
   | { type: "goal.setBudget"; sessionId: string; tokenBudget?: number | null }

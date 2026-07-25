@@ -1564,6 +1564,20 @@ pub(crate) mod tests {
             }
             "command-get-state" => get_state_command("cmd-state-1".to_string()),
             "command-fork" => fork_command("cmd-fork-1".to_string()),
+            "command-btw-start" => btw_start_command(
+                "cmd-btw-start-1".to_string(),
+                "btw-1".to_string(),
+                "Why is the agent changing this interface?".to_string(),
+            ),
+            "command-btw-cancel" => {
+                btw_cancel_command("cmd-btw-cancel-1".to_string(), "btw-1".to_string())
+            }
+            "command-btw-release" => {
+                btw_release_command("cmd-btw-release-1".to_string(), "btw-1".to_string())
+            }
+            "command-btw-promote" => {
+                btw_promote_command("cmd-btw-promote-1".to_string(), "btw-1".to_string())
+            }
             "command-set-active-tools" => set_active_tools_command(
                 "cmd-tools-1".to_string(),
                 vec![
@@ -1857,6 +1871,27 @@ pub(crate) mod tests {
                             .expect("set_active_tools data should decode");
                         assert!(data.tool_names.iter().any(|tool| tool == "read"));
                     }
+                    "btw_start" | "btw_cancel" | "btw_release" => {
+                        assert_eq!(
+                            response
+                                .payload()
+                                .and_then(|data| data.get("btwId"))
+                                .and_then(Value::as_str),
+                            Some("btw-1")
+                        );
+                    }
+                    "btw_promote" => {
+                        let data = response.payload().expect("BTW promotion payload");
+                        assert_eq!(data.get("btwId").and_then(Value::as_str), Some("btw-1"));
+                        assert_eq!(
+                            data.get("sessionId").and_then(Value::as_str),
+                            Some("session-promoted-1")
+                        );
+                        assert_eq!(
+                            data.get("sessionFile").and_then(Value::as_str),
+                            Some("/tmp/omp/session-promoted-1.jsonl")
+                        );
+                    }
                     "repo_diff_get" | "repo_diff_snapshot" => {
                         let data: OmpRepoDiffResult =
                             response.data_as().expect("repo diff data should decode");
@@ -1910,6 +1945,28 @@ pub(crate) mod tests {
                             .and_then(Value::as_str),
                         Some("active")
                     );
+                }
+                OmpRpcFrame::BtwUpdate {
+                    btw_id,
+                    state,
+                    question,
+                    delta,
+                    answer,
+                    can_promote,
+                    error,
+                } => {
+                    assert_eq!(btw_id, "btw-1");
+                    match state.as_str() {
+                        "started" => assert!(question.is_some()),
+                        "streaming" => assert!(delta.is_some()),
+                        "completed" => {
+                            assert!(answer.is_some());
+                            assert_eq!(can_promote, Some(true));
+                        }
+                        "cancelled" => {}
+                        "error" => assert!(error.is_some()),
+                        other => panic!("unexpected BTW state {other}"),
+                    }
                 }
                 OmpRpcFrame::Unknown => panic!("{} decoded as unknown", entry.name),
                 _ => {}
@@ -4317,6 +4374,122 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_btw_update_routes_only_to_the_owning_browser_client() {
+        let state = test_state(8, None);
+        state
+            .session_runtime
+            .insert_btw_request(
+                "btw-1".to_string(),
+                BtwRequestRoute {
+                    target_client_id: "browser-1".to_string(),
+                    source_session_id: "source-1".to_string(),
+                    transport_session_id: "transport-1".to_string(),
+                },
+            )
+            .await;
+        let mut events = state.events.subscribe();
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "btw_update",
+                "btwId": "btw-1",
+                "state": "completed",
+                "answer": "Side answer",
+                "canPromote": true
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("BTW update event") {
+            ServerMessage::SessionBtwUpdate {
+                target_client_id,
+                source_session_id,
+                request_id,
+                state,
+                question,
+                delta,
+                answer,
+                can_promote,
+                error,
+            } => {
+                assert_eq!(target_client_id, "browser-1");
+                assert_eq!(source_session_id, "source-1");
+                assert_eq!(request_id, "btw-1");
+                assert_eq!(state, "completed");
+                assert_eq!(question, None);
+                assert_eq!(delta, None);
+                assert_eq!(answer.as_deref(), Some("Side answer"));
+                assert_eq!(can_promote, Some(true));
+                assert_eq!(error, None);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rpc_btw_promote_response_emits_new_session_identity_and_clears_route() {
+        let state = test_state(8, None);
+        state
+            .session_runtime
+            .insert_btw_request(
+                "btw-1".to_string(),
+                BtwRequestRoute {
+                    target_client_id: "browser-1".to_string(),
+                    source_session_id: "source-1".to_string(),
+                    transport_session_id: "transport-1".to_string(),
+                },
+            )
+            .await;
+        state
+            .session_runtime
+            .insert_pending_btw_command(
+                "rpc-promote-1".to_string(),
+                PendingBtwCommand {
+                    btw_id: "btw-1".to_string(),
+                    kind: PendingBtwCommandKind::Promote,
+                },
+            )
+            .await;
+        let mut events = state.events.subscribe();
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "id": "rpc-promote-1",
+                "type": "response",
+                "command": "btw_promote",
+                "success": true,
+                "data": {
+                    "btwId": "btw-1",
+                    "sessionId": "promoted-1",
+                    "sessionFile": "/tmp/promoted-1.jsonl"
+                }
+            }),
+        )
+        .await;
+
+        match events.recv().await.expect("BTW promoted event") {
+            ServerMessage::SessionBtwPromoted {
+                target_client_id,
+                source_session_id,
+                request_id,
+                session_id,
+                session_file,
+            } => {
+                assert_eq!(target_client_id, "browser-1");
+                assert_eq!(source_session_id, "source-1");
+                assert_eq!(request_id, "btw-1");
+                assert_eq!(session_id, "promoted-1");
+                assert_eq!(session_file, "/tmp/promoted-1.jsonl");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+    }
+    #[tokio::test]
     async fn rpc_stdout_does_not_forward_raw_frames_by_default() {
         let state = test_state(8, None);
         let mut events = state.events.subscribe();
@@ -4965,6 +5138,52 @@ pub(crate) mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_and_serializes_btw_browser_protocol_shapes() {
+        let start = serde_json::from_str::<ClientMessage>(
+            r#"{"type":"session.btw.start","clientId":"browser-1","sessionId":"source-1","requestId":"btw-1","question":"Why?"}"#,
+        )
+        .expect("BTW start should parse");
+        match start {
+            ClientMessage::SessionBtwStart {
+                client_id,
+                session_id,
+                request_id,
+                question,
+            } => {
+                assert_eq!(client_id, "browser-1");
+                assert_eq!(session_id, "source-1");
+                assert_eq!(request_id, "btw-1");
+                assert_eq!(question, "Why?");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        let update = serde_json::to_value(ServerMessage::SessionBtwUpdate {
+            target_client_id: "browser-1".to_string(),
+            source_session_id: "source-1".to_string(),
+            request_id: "btw-1".to_string(),
+            state: "streaming".to_string(),
+            question: None,
+            delta: Some("Because".to_string()),
+            answer: None,
+            can_promote: None,
+            error: None,
+        })
+        .expect("BTW update should serialize");
+        assert_eq!(
+            update,
+            serde_json::json!({
+                "type": "session.btw.update",
+                "targetClientId": "browser-1",
+                "sourceSessionId": "source-1",
+                "requestId": "btw-1",
+                "state": "streaming",
+                "delta": "Because"
+            })
+        );
     }
 
     #[test]

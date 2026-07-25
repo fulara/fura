@@ -1,7 +1,9 @@
 import "dockview-core/dist/styles/dockview.css";
 import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
 
-export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare" | "conflictResolver";
+export type DesktopStaticPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare" | "conflictResolver";
+export type DesktopEphemeralPanelId = `btw:${string}`;
+export type DesktopDockviewPanelId = DesktopStaticPanelId | DesktopEphemeralPanelId;
 
 export type DesktopDockviewLayoutMode = "normal" | "diffReview" | "conflictResolver";
 
@@ -15,6 +17,9 @@ export type DesktopDockview = {
   ensureDiffsPanel(): boolean;
   ensureComparePanel(): boolean;
   closePanel(id: "sessionChanges" | "diffs" | "compare"): boolean;
+  openEphemeralPanel(id: DesktopEphemeralPanelId, title: string): boolean;
+  setPanelTitle(id: DesktopEphemeralPanelId, title: string): boolean;
+  closeEphemeralPanel(id: DesktopEphemeralPanelId): boolean;
 };
 
 type DesktopDockviewOptions = {
@@ -23,7 +28,7 @@ type DesktopDockviewOptions = {
   storageKey: string;
   onPanelReady(id: DesktopDockviewPanelId, container: HTMLElement): void;
   onPanelActivated(id: DesktopDockviewPanelId): void;
-  onPanelClosed?(id: "sessionChanges" | "diffs" | "compare"): void;
+  onPanelClosed?(id: DesktopDockviewPanelId): void;
   onPopoutBlocked(): void;
 };
 
@@ -53,10 +58,11 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
         return { element, init() {} };
       }
 
+      const ephemeral = isBtwPanelId(panelId);
       let popoutPanel: (() => void) | null = null;
       const shell = createDesktopPanelShell(owner, panelId, () => {
         popoutPanel?.();
-      });
+      }, !ephemeral);
 
       return {
         element: shell.element,
@@ -85,6 +91,13 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     if (panelId) options.onPanelActivated(panelId);
   });
   api.onDidOpenPopoutWindowFail(options.onPopoutBlocked);
+  api.onDidRemovePanel(panel => {
+    const panelId = desktopPanelId(panel.id);
+    if (!panelId) return;
+    delete panelEls[panelId];
+    delete panelActivators[panelId];
+    options.onPanelClosed?.(panelId);
+  });
 
   restoreOrCreateLayout(api, storage(win), options.storageKey, options.layoutMode);
   ensureRequiredPanels(api, options.layoutMode);
@@ -93,6 +106,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   api.onDidLayoutChange(() => {
     win.clearTimeout(layoutSaveTimer);
     layoutSaveTimer = win.setTimeout(() => {
+      if (api.panels.some(panel => isBtwPanelId(panel.id))) return;
       const data: PersistedDockviewLayout = { version: 1, layout: api.toJSON() };
       storage(win).setItem(options.storageKey, JSON.stringify(data));
     }, 300);
@@ -140,10 +154,32 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     closePanel(id) {
       const panel = api.getGroupPanel(id);
       if (!panel) return false;
-      delete panelEls[id];
-      delete panelActivators[id];
       api.removePanel(panel);
-      options.onPanelClosed?.(id);
+      return true;
+    },
+    openEphemeralPanel(id, title) {
+      if (api.getGroupPanel(id)) {
+        return this.activatePanel(id);
+      }
+      api.addPanel({
+        id,
+        component: id,
+        title,
+        position: { referencePanel: "transcript", direction: "within" },
+        renderer: "always",
+      });
+      return this.activatePanel(id);
+    },
+    setPanelTitle(id, title) {
+      const panel = api.getGroupPanel(id);
+      if (!panel) return false;
+      panel.api.setTitle(title);
+      return true;
+    },
+    closeEphemeralPanel(id) {
+      const panel = api.getGroupPanel(id);
+      if (!panel) return false;
+      api.removePanel(panel);
       return true;
     },
   };
@@ -153,14 +189,16 @@ export function createDesktopPanelShell(
   owner: Document,
   panelId: DesktopDockviewPanelId,
   onPopout: () => void,
+  showPopout = true,
 ): DesktopPanelShell {
   const element = owner.createElement("div");
   element.className = `panel-content panel-content-${panelId}`;
 
-  const toolbar = createPanelToolbar(owner, onPopout);
+  const toolbar = showPopout ? createPanelToolbar(owner, onPopout) : null;
   const scroll = owner.createElement("div");
   scroll.className = "panel-scroll";
-  element.append(toolbar, scroll);
+  if (toolbar) element.append(toolbar);
+  element.append(scroll);
   return { element, scroll };
 }
 
@@ -405,7 +443,11 @@ function ensureConflictResolverPanel(api: DockviewComponent): void {
 }
 
 function desktopPanelId(name: string): DesktopDockviewPanelId | null {
-  return name === "sessionChanges" || name === "transcript" || name === "goal" || name === "code" || name === "tools" || name === "diffs" || name === "compare" || name === "conflictResolver" ? name : null;
+  return name === "sessionChanges" || name === "transcript" || name === "goal" || name === "code" || name === "tools" || name === "diffs" || name === "compare" || name === "conflictResolver" || isBtwPanelId(name) ? name : null;
+}
+
+function isBtwPanelId(name: string): name is DesktopEphemeralPanelId {
+  return name.startsWith("btw:") && name.length > 4;
 }
 
 function copyStylesToPopout(owner: Document, popWin: Window): void {

@@ -132,6 +132,28 @@ pub(crate) async fn handle_client_message(
             behavior,
         } => send_prompt(state, session_id, text, images, behavior).await,
         ClientMessage::PromptAbort { session_id } => abort_prompt(state, session_id).await,
+        ClientMessage::SessionBtwStart {
+            client_id,
+            session_id,
+            request_id,
+            question,
+        } => start_btw_request(state, client_id, session_id, request_id, question).await,
+        ClientMessage::SessionBtwCancel {
+            client_id,
+            request_id,
+        } => control_btw_request(state, client_id, request_id, PendingBtwCommandKind::Cancel).await,
+        ClientMessage::SessionBtwRelease {
+            client_id,
+            request_id,
+        } => {
+            control_btw_request(state, client_id, request_id, PendingBtwCommandKind::Release).await
+        }
+        ClientMessage::SessionBtwPromote {
+            client_id,
+            request_id,
+        } => {
+            control_btw_request(state, client_id, request_id, PendingBtwCommandKind::Promote).await
+        }
         ClientMessage::GoalStart {
             session_id,
             objective,
@@ -1492,6 +1514,12 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
             .await
         {
             let _ = removed.handle.stop.send(());
+            fail_removed_btw_requests(
+                state,
+                removed.btw_requests,
+                "The OMP session was stopped before the BTW request completed.",
+            )
+            .await;
         }
     }
 
@@ -1540,6 +1568,12 @@ pub(crate) async fn delete_session(
             .await
         {
             let _ = removed.handle.stop.send(());
+            fail_removed_btw_requests(
+                state,
+                removed.btw_requests,
+                "The OMP session was deleted before the BTW request completed.",
+            )
+            .await;
         }
     }
 

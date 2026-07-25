@@ -568,6 +568,8 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,
     pub(crate) rpc_protocol_versions: Arc<RwLock<HashMap<String, u8>>>,
     pub(crate) pending_rpc_message_pages: Arc<RwLock<HashMap<String, PendingRpcMessagesPage>>>,
+    pub(crate) btw_requests: Arc<RwLock<HashMap<String, BtwRequestRoute>>>,
+    pub(crate) pending_btw_commands: Arc<RwLock<HashMap<String, PendingBtwCommand>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -577,9 +579,31 @@ pub(crate) struct PendingRpcMessagesPage {
     pub(crate) restart_count: u8,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct BtwRequestRoute {
+    pub(crate) target_client_id: String,
+    pub(crate) source_session_id: String,
+    pub(crate) transport_session_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingBtwCommandKind {
+    Start,
+    Cancel,
+    Release,
+    Promote,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingBtwCommand {
+    pub(crate) btw_id: String,
+    pub(crate) kind: PendingBtwCommandKind,
+}
+
 pub(crate) struct RemovedRpcTransport {
     pub(crate) handle: RpcSessionHandle,
     pub(crate) target_session_id: String,
+    pub(crate) btw_requests: Vec<(String, BtwRequestRoute)>,
 }
 
 impl SessionRuntimeState {
@@ -599,6 +623,8 @@ impl SessionRuntimeState {
             plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
             rpc_protocol_versions: Arc::new(RwLock::new(HashMap::new())),
             pending_rpc_message_pages: Arc::new(RwLock::new(HashMap::new())),
+            btw_requests: Arc::new(RwLock::new(HashMap::new())),
+            pending_btw_commands: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -651,9 +677,29 @@ impl SessionRuntimeState {
             .write()
             .await
             .retain(|_request_id, pending| pending.transport_session_id != transport_session_id);
+        let btw_requests = {
+            let mut requests = self.btw_requests.write().await;
+            let ids = requests
+                .iter()
+                .filter(|(_btw_id, route)| route.transport_session_id == transport_session_id)
+                .map(|(btw_id, _route)| btw_id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|btw_id| requests.remove(&btw_id).map(|route| (btw_id, route)))
+                .collect::<Vec<_>>()
+        };
+        let removed_btw_ids = btw_requests
+            .iter()
+            .map(|(btw_id, _route)| btw_id.as_str())
+            .collect::<HashSet<_>>();
+        self.pending_btw_commands
+            .write()
+            .await
+            .retain(|_id, command| !removed_btw_ids.contains(command.btw_id.as_str()));
         Some(RemovedRpcTransport {
             handle,
             target_session_id,
+            btw_requests,
         })
     }
 
@@ -770,6 +816,41 @@ impl SessionRuntimeState {
             .write()
             .await
             .retain(|_request_id, pending| pending.transport_session_id != transport_session_id);
+    }
+
+    pub(crate) async fn insert_btw_request(&self, btw_id: String, route: BtwRequestRoute) -> bool {
+        let mut requests = self.btw_requests.write().await;
+        if requests.contains_key(&btw_id) {
+            return false;
+        }
+        requests.insert(btw_id, route);
+        true
+    }
+
+    pub(crate) async fn btw_request(&self, btw_id: &str) -> Option<BtwRequestRoute> {
+        self.btw_requests.read().await.get(btw_id).cloned()
+    }
+
+    pub(crate) async fn remove_btw_request(&self, btw_id: &str) -> Option<BtwRequestRoute> {
+        self.btw_requests.write().await.remove(btw_id)
+    }
+
+    pub(crate) async fn insert_pending_btw_command(
+        &self,
+        command_id: String,
+        command: PendingBtwCommand,
+    ) {
+        self.pending_btw_commands
+            .write()
+            .await
+            .insert(command_id, command);
+    }
+
+    pub(crate) async fn take_pending_btw_command(
+        &self,
+        command_id: &str,
+    ) -> Option<PendingBtwCommand> {
+        self.pending_btw_commands.write().await.remove(command_id)
     }
 
     pub(crate) async fn register_pending_create(

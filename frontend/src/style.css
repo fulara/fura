@@ -886,6 +886,62 @@ h2 {
   max-width: 100%;
 }
 
+.btw-panel {
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  max-width: 58rem;
+  margin: 0 auto;
+}
+
+.btw-question {
+  padding: 0.85rem 1rem;
+  border: 1px solid #30384a;
+  border-radius: 0.65rem;
+  background: #171b24;
+}
+
+.btw-question p {
+  margin: 0.35rem 0 0;
+  white-space: pre-wrap;
+}
+
+.btw-label {
+  color: #8f9bb0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.btw-answer {
+  min-height: 8rem;
+  padding: 1rem;
+  border-left: 3px solid #6d7cff;
+  border-radius: 0.3rem;
+  background: #141821;
+}
+
+.btw-answer .markdown-body {
+  margin: 0;
+}
+
+.btw-status {
+  margin: 0;
+  color: #8f9bb0;
+  font-size: 0.78rem;
+}
+
+.btw-status-error {
+  color: #fca5a5;
+}
+
+.btw-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+}
+
 
 .panel-content-diffs .panel-scroll {
   overflow: hidden;
