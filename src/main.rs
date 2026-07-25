@@ -1018,6 +1018,63 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn session_summaries_sort_by_recency_independent_of_runtime_kind() {
+        let mut older_live = test_record();
+        older_live.id = "older-live".into();
+        older_live.kind = SessionKind::Managed;
+        older_live.created_at =
+            Timestamp::from_rpc(&serde_json::json!(10)).expect("valid timestamp");
+        older_live.updated_at =
+            Timestamp::from_rpc(&serde_json::json!(20)).expect("valid timestamp");
+
+        let mut newer_saved = test_record();
+        newer_saved.id = "newer-saved".into();
+        newer_saved.kind = SessionKind::Available;
+        newer_saved.created_at =
+            Timestamp::from_rpc(&serde_json::json!(30)).expect("valid timestamp");
+        newer_saved.updated_at =
+            Timestamp::from_rpc(&serde_json::json!(40)).expect("valid timestamp");
+
+        let summaries = session_summaries_from_map(&HashMap::from([
+            (older_live.id.clone(), older_live),
+            (newer_saved.id.clone(), newer_saved),
+        ]));
+
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|summary| summary.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["newer-saved", "older-live"],
+            "runtime kind must not reorder durable session recency"
+        );
+    }
+
+    #[test]
+    fn session_summary_recency_ties_have_deterministic_order() {
+        let mut alpha = test_record();
+        alpha.id = "alpha".into();
+        alpha.created_at = Timestamp::from_rpc(&serde_json::json!(10)).expect("valid timestamp");
+        alpha.updated_at = Timestamp::from_rpc(&serde_json::json!(20)).expect("valid timestamp");
+
+        let mut beta = alpha.clone();
+        beta.id = "beta".into();
+
+        let summaries = session_summaries_from_map(&HashMap::from([
+            (beta.id.clone(), beta),
+            (alpha.id.clone(), alpha),
+        ]));
+
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|summary| summary.session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+    }
+
+    #[test]
     fn session_summary_preserves_managed_worktree_path() {
         let mut record = test_record();
         record.worktree = Some(SessionWorktreeSummary {
@@ -1303,6 +1360,54 @@ pub(crate) mod tests {
                 .as_deref(),
             Some("infra")
         );
+    }
+
+    #[tokio::test]
+    async fn get_state_rebind_preserves_durable_session_recency() {
+        let state = test_state(8, None);
+        let mut transport = test_record();
+        transport.id = "transport-session".to_string();
+        let mut saved = test_record();
+        saved.id = "saved-session".to_string();
+        saved.kind = SessionKind::Available;
+        saved.status = SessionStatus::Available;
+        saved.updated_at =
+            Timestamp::from_rpc(&serde_json::json!(123_000)).expect("valid timestamp");
+        state
+            .sessions
+            .write()
+            .await
+            .extend([(transport.id.clone(), transport), (saved.id.clone(), saved)]);
+        map_test_transport(&state, "transport-session", "transport-session").await;
+
+        apply_get_state_update(
+            &state,
+            "transport-session",
+            RpcStateUpdate {
+                current_session_id: "transport-session".to_string(),
+                target_session_id: "saved-session".to_string(),
+                is_streaming: false,
+                is_compacting: false,
+                session_name: Some("Saved session".to_string()),
+                model: None,
+                thinking_level: None,
+                session_file: Some("/tmp/saved-session.jsonl".to_string()),
+                context_tokens: None,
+                context_window: None,
+                context_percent: None,
+                plan_mode: None,
+                goal_mode: None,
+                todo_phases: None,
+            },
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        let rebound = sessions
+            .get("saved-session")
+            .expect("saved session remains");
+        assert_eq!(rebound.updated_at.millis(), 123_000);
+        assert_eq!(rebound.kind, SessionKind::Managed);
     }
 
     pub(crate) async fn register_test_transport(

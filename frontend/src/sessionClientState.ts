@@ -10,12 +10,23 @@ export type SessionSnapshotUpdate = {
   projections: Map<string, SessionProjection>;
 };
 
+function compareSessionRecency(left: SessionSummary, right: SessionSummary): number {
+  if (left.updatedAt !== right.updatedAt) return left.updatedAt < right.updatedAt ? 1 : -1;
+  if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? 1 : -1;
+  if (left.sessionId === right.sessionId) return 0;
+  return left.sessionId < right.sessionId ? -1 : 1;
+}
+
+function sortSessionSummaries(sessions: SessionSummary[]): SessionSummary[] {
+  return sessions.sort(compareSessionRecency);
+}
+
 export function applySessionsSnapshot(
   sessions: SessionSummary[],
   activeSessionId: string | null,
 ): SessionsSnapshotUpdate {
   return {
-    sessions,
+    sessions: sortSessionSummaries(sessions.slice()),
     activeSessionId: activeSessionId && sessions.some(session => session.sessionId === activeSessionId)
       ? activeSessionId
       : null,
@@ -24,10 +35,10 @@ export function applySessionsSnapshot(
 
 export function mergeSessionSummary(sessions: SessionSummary[], summary: SessionSummary): SessionSummary[] {
   const index = sessions.findIndex(session => session.sessionId === summary.sessionId);
-  if (index === -1) return [summary, ...sessions];
   const nextSessions = sessions.slice();
-  nextSessions[index] = summary;
-  return nextSessions;
+  if (index === -1) nextSessions.push(summary);
+  else nextSessions[index] = summary;
+  return sortSessionSummaries(nextSessions);
 }
 
 export function applySessionSnapshot(

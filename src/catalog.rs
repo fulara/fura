@@ -187,7 +187,12 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
 pub(crate) fn discover_sessions(root: &Path) -> Vec<DiscoveredSession> {
     let mut sessions = Vec::new();
     collect_session_files(root, &mut sessions);
-    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated_at));
+    sessions.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.id.cmp(&b.id))
+    });
     for (index, session) in sessions.iter_mut().enumerate() {
         session.preload_index = index;
     }
@@ -500,7 +505,12 @@ pub(crate) fn session_summaries_from_map(
         .filter(|record| !is_controller_session_record(record))
         .map(SessionRecord::summary)
         .collect::<Vec<_>>();
-    summaries.sort_by(|a, b| a.kind.cmp(&b.kind).then(b.updated_at.cmp(&a.updated_at)));
+    summaries.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.session_id.cmp(&b.session_id))
+    });
     summaries
 }
 

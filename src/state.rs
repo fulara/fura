@@ -1216,7 +1216,6 @@ pub(crate) async fn apply_get_state_update(
                     });
 
                 if let Some(record) = sessions.get_mut(&update.target_session_id) {
-                    record.updated_at = Timestamp::now();
                     apply_rpc_state_to_record(
                         record,
                         update.is_streaming,

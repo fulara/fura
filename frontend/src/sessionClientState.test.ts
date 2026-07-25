@@ -48,25 +48,51 @@ describe("applySessionsSnapshot", () => {
 
     expect(applySessionsSnapshot(sessions, "missing")).toEqual({ sessions, activeSessionId: null });
   });
+
+  it("sorts snapshots by durable recency instead of runtime kind", () => {
+    const olderLive = summary("older-live", {
+      kind: "managed",
+      createdAt: 10,
+      updatedAt: 20,
+    });
+    const newerSaved = summary("newer-saved", {
+      kind: "available",
+      createdAt: 30,
+      updatedAt: 40,
+    });
+
+    expect(applySessionsSnapshot([olderLive, newerSaved], null).sessions.map(session => session.sessionId))
+      .toEqual(["newer-saved", "older-live"]);
+  });
+
+  it("uses stable ids to break identical recency ties", () => {
+    expect(applySessionsSnapshot([summary("beta"), summary("alpha")], null).sessions.map(session => session.sessionId))
+      .toEqual(["alpha", "beta"]);
+  });
 });
 
 describe("mergeSessionSummary", () => {
-  it("prepends new summaries", () => {
+  it("places new summaries according to recency", () => {
     const sessions = [summary("existing")];
-    const next = mergeSessionSummary(sessions, summary("new"));
+    const next = mergeSessionSummary(sessions, summary("new", { createdAt: 2, updatedAt: 2 }));
 
     expect(next.map(session => session.sessionId)).toEqual(["new", "existing"]);
     expect(next).not.toBe(sessions);
   });
 
-  it("replaces existing summaries without mutating the input", () => {
+  it("replaces and reorders existing summaries without mutating the input", () => {
     const original = summary("a", { title: "old" });
-    const sessions = [original, summary("b")];
-    const next = mergeSessionSummary(sessions, summary("a", { title: "new" }));
+    const sessions = [summary("b", { createdAt: 2, updatedAt: 2 }), original];
+    const next = mergeSessionSummary(sessions, summary("a", {
+      title: "new",
+      createdAt: 3,
+      updatedAt: 3,
+    }));
 
+    expect(next.map(session => session.sessionId)).toEqual(["a", "b"]);
     expect(next[0]?.title).toBe("new");
-    expect(sessions[0]).toBe(original);
-    expect(sessions[0]?.title).toBe("old");
+    expect(sessions[1]).toBe(original);
+    expect(sessions[1]?.title).toBe("old");
   });
 });
 
@@ -74,7 +100,9 @@ describe("applySessionSnapshot", () => {
   it("returns updated sessions and projections without mutating the input map", () => {
     const oldProjection = projection("old");
     const projections = new Map([["old", oldProjection]]);
-    const nextProjection = projection("new", { summary: summary("new", { title: "New session" }) });
+    const nextProjection = projection("new", {
+      summary: summary("new", { title: "New session", createdAt: 2, updatedAt: 2 }),
+    });
 
     const result = applySessionSnapshot([summary("old")], projections, "new", nextProjection);
 
