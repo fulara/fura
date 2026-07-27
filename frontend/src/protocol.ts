@@ -248,7 +248,6 @@ export type SessionProjectionDelta = {
 };
 
 export type DiffDetailMode = "filePatch" | "statOnly";
-export type DiffPayloadKind = DiffDetailMode;
 export type DiffSide = "left" | "right";
 export type DiffRefKind = "branch" | "tag" | "commit" | "remote" | "other";
 
@@ -320,23 +319,12 @@ export type DiffCommitSummary = {
   isMerge: boolean;
 };
 
-export type DiffPayload =
-  | { kind: "statOnly"; files: DiffFileSummary[]; stat: string; truncated: boolean }
-  | { kind: "fullPatch"; files: DiffFileSummary[]; patch: string; truncated: boolean };
 
 export type DisplayedPatchRange = {
   base: DiffEndpoint;
   head: DiffEndpoint;
 };
 
-export type DiffRangeState = {
-  repoRoot: string;
-  base: DiffEndpoint;
-  head: DiffEndpoint;
-  payload: DiffPayload;
-  generatedAt: string;
-  displayedPatchRange?: DisplayedPatchRange | null;
-};
 
 export type CommitStepState = {
   commits: DiffCommitSummary[];
@@ -650,97 +638,6 @@ export type CodeLocation = {
   range: CodeRange;
 };
 
-export type ConflictOperation = "merge" | "rebase" | "cherryPick" | "revert";
-export type ConflictFileKind =
-  | "bothModified"
-  | "addAdd"
-  | "deleteModify"
-  | "renameModify"
-  | "renameDelete"
-  | "bothDeleted"
-  | "unknown";
-
-export type ConflictFileSummary = {
-  path: string;
-  kind: ConflictFileKind;
-  supported: boolean;
-};
-
-export type ConflictRepositorySummary = {
-  repoId: string;
-  root: string;
-  operation?: ConflictOperation | null;
-  files: ConflictFileSummary[];
-};
-
-export type ConflictFileBuffer = {
-  label: string;
-  language: string;
-  text: string;
-  size: number;
-};
-
-export type ConflictRegion = {
-  id: string;
-  startLine: number;
-  separatorLine?: number | null;
-  endLine: number;
-};
-
-export type ConflictFileState = {
-  repoId: string;
-  path: string;
-  kind: ConflictFileKind;
-  base?: ConflictFileBuffer | null;
-  ours?: ConflictFileBuffer | null;
-  theirs?: ConflictFileBuffer | null;
-  result?: ConflictFileBuffer | null;
-  conflicts: ConflictRegion[];
-  version: string;
-};
-
-export type ConflictMagicWandRule =
-  | "identicalSides"
-  | "importListUnion"
-  | "linewiseIndependentEdits"
-  | "sameLineNonOverlappingEdits";
-
-export type ConflictMagicWandRuleApplication = {
-  conflictId: string;
-  rule: ConflictMagicWandRule;
-  summary: string;
-};
-
-export type ConflictMagicWandPreview = {
-  repoId: string;
-  path: string;
-  sourceVersion: string;
-  content: string;
-  resolvedConflictCount: number;
-  remainingConflictCount: number;
-  summary: string;
-  rules: ConflictMagicWandRuleApplication[];
-};
-
-export type ConflictAgentMode = "explain" | "propose";
-
-export type ConflictAgentScope = "selectedConflict" | "file";
-
-export type ConflictAgentRisk = "low" | "medium" | "high";
-
-export type ConflictAgentResult = {
-  repoId: string;
-  path: string;
-  sourceVersion: string;
-  mode: ConflictAgentMode;
-  scope: ConflictAgentScope;
-  conflictId?: string | null;
-  risk: ConflictAgentRisk;
-  summary: string;
-  explanation: string;
-  content?: string | null;
-  remainingConflictCount?: number | null;
-};
 
 export type BtwUpdateState = "started" | "streaming" | "completed" | "cancelled" | "error";
 
@@ -771,12 +668,6 @@ export type ServerMessage =
   | { type: "code.references"; workspaceId: string; requestId: string; path: string; locations: CodeLocation[] }
   | { type: "code.status"; workspaceId: string; status: CodeStatus; message?: string | null }
   | { type: "code.hover"; workspaceId: string; requestId: string; path: string; contents?: string | null; range?: CodeRange | null }
-  | { type: "conflict.snapshot"; repos: ConflictRepositorySummary[] }
-  | { type: "conflict.file"; file: ConflictFileState }
-  | { type: "conflict.magicWandPreview"; preview: ConflictMagicWandPreview }
-  | { type: "conflict.agentResult"; result: ConflictAgentResult }
-  | { type: "conflict.status"; repoId: string; path?: string | null; state: "staged" | string; message: string }
-  | { type: "conflict.error"; repoId?: string | null; path?: string | null; message: string }
   | { type: "sessionChanges.summary"; state: SessionChangesSummaryState }
   | { type: "compareDiff.summary"; state: CompareDiffSummaryState }
   | { type: "diff.content"; content: DiffContentState }
@@ -855,22 +746,6 @@ export type ClientMessage =
   | { type: "code.definition"; workspaceId: string; path: string; line: number; character: number; requestId: string }
   | { type: "code.references"; workspaceId: string; path: string; line: number; character: number; requestId: string }
   | { type: "code.hover"; workspaceId: string; path: string; line: number; character: number; requestId: string }
-  | { type: "conflict.scan"; root: string }
-  | { type: "conflict.file.open"; repoId: string; path: string }
-  | { type: "conflict.file.previewMagicWand"; repoId: string; path: string; expectedVersion: string }
-  | { type: "conflict.file.writeResult"; repoId: string; path: string; content: string; expectedVersion: string }
-  | { type: "conflict.file.stageResolved"; repoId: string; path: string; expectedVersion: string }
-  | {
-      type: "conflict.agent.run";
-      sessionId: string;
-      repoId: string;
-      path: string;
-      expectedVersion: string;
-      mode: ConflictAgentMode;
-      scope: ConflictAgentScope;
-      conflictId?: string | null;
-      instructions: string;
-    }
   | {
       type: "plan.approve";
       sessionId: string;

@@ -161,7 +161,7 @@ function simpleDiffRows(patch: string): DiffRow[] {
 
 let connections: FakeConnection[] = [];
 let fakeConnectionAutoOpen = true;
-let desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
+let desktopMockActivePanelIds = new Set(["diffs"]);
 // The Code panel is opt-in per harness so its rendering does not perturb tests
 // that only assert on sent messages.
 let desktopMockMountCodePanel = false;
@@ -175,23 +175,23 @@ function installMocks(): void {
     },
   }));
   vi.doMock("./desktopDockview", () => ({
-    initDesktopDockview: () => {
+    initDesktopDockview: (options: {
+      onPanelReady(id: string, container: HTMLElement): void;
+      onPanelClosed?: (id: string) => void;
+    }) => {
       const diffPanel = document.createElement("div");
       diffPanel.id = "testDiffPanel";
       const transcriptPanel = document.createElement("div");
       transcriptPanel.id = "testTranscriptPanel";
       const goalPanel = document.createElement("div");
       goalPanel.id = "testGoalPanel";
-      const conflictResolverPanel = document.createElement("div");
-      conflictResolverPanel.id = "testConflictResolverPanel";
       const codePanel = document.createElement("div");
       codePanel.id = "testCodePanel";
-      document.body.append(diffPanel, transcriptPanel, goalPanel, conflictResolverPanel);
+      document.body.append(diffPanel, transcriptPanel, goalPanel);
       const panels: Record<string, HTMLElement> = {
         diffs: diffPanel,
         transcript: transcriptPanel,
         goal: goalPanel,
-        conflictResolver: conflictResolverPanel,
       };
       if (desktopMockMountCodePanel) {
         document.body.append(codePanel);
@@ -212,6 +212,24 @@ function installMocks(): void {
         ensureDiffsPanel: () => false,
         ensureComparePanel: () => false,
         closePanel: () => false,
+        openEphemeralPanel: (id: string) => {
+          if (panels[id]) return false;
+          const panel = document.createElement("div");
+          panel.dataset.panelId = id;
+          panels[id] = panel;
+          document.body.append(panel);
+          options.onPanelReady(id, panel);
+          return true;
+        },
+        setPanelTitle: () => true,
+        closeEphemeralPanel: (id: string) => {
+          const panel = panels[id];
+          if (!panel) return false;
+          delete panels[id];
+          panel.remove();
+          options.onPanelClosed?.(id);
+          return true;
+        },
       };
     },
   }));
@@ -221,7 +239,7 @@ async function createHarness(options: { preserveLocalStorage?: boolean; mountCod
   vi.resetModules();
   vi.restoreAllMocks();
   connections = [];
-  desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
+  desktopMockActivePanelIds = new Set(["diffs"]);
   desktopMockMountCodePanel = options.mountCodePanel ?? false;
   fakeConnectionAutoOpen = true;
   document.body.innerHTML = `<div id="app"></div>`;
@@ -242,7 +260,7 @@ async function createPendingHarness() {
   vi.resetModules();
   vi.restoreAllMocks();
   connections = [];
-  desktopMockActivePanelIds = new Set(["diffs", "conflictResolver"]);
+  desktopMockActivePanelIds = new Set(["diffs"]);
   desktopMockMountCodePanel = false;
   fakeConnectionAutoOpen = false;
   document.body.innerHTML = `<div id="app"></div>`;
@@ -282,46 +300,6 @@ describe("auth gate", () => {
     expect(window.sessionStorage.getItem("fura.diff.clientId")).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u);
     vi.unstubAllGlobals();
   });
-});
-describe("conflict resolver entry", () => {
-  beforeEach(() => {
-    vi.resetModules();
-    vi.restoreAllMocks();
-    connections = [];
-    vi.useRealTimers();
-  });
-
-  it("creates a Conflict Resolver session before opening the tool", async () => {
-    const { connection } = await createHarness();
-    expect(document.querySelector<HTMLButtonElement>("#conflictResolverButton")).toBeNull();
-    expect(document.querySelector<HTMLButtonElement>("#openDiffButton")).toBeNull();
-    document.querySelector<HTMLButtonElement>("#createSessionButton")?.click();
-    document.querySelector<HTMLButtonElement>("#cwdPickerConflictTab")?.click();
-    expect(connection.sent).not.toContainEqual({ type: "conflict.scan", root: "/repo" });
-    expect(document.querySelector("#cwdPickerOverlay")?.hasAttribute("hidden")).toBe(false);
-    expect(document.querySelector("#cwdPickerConflictBody")?.hasAttribute("hidden")).toBe(false);
-
-    const repoInput = document.querySelector<HTMLInputElement>("#cwdPickerConflictRepo");
-    if (!repoInput) throw new Error("conflict repo input missing");
-    repoInput.value = "/custom/repo";
-    document.querySelector<HTMLButtonElement>("#cwdPickerCreate")?.click();
-
-    expect(connection.sent).toContainEqual({
-      type: "session.create",
-      requestId: expect.any(String),
-      name: "conflicts: repo",
-      cwd: "/custom/repo",
-    });
-
-    connection.emit({ type: "sessions.snapshot", sessions: [summary("conflict", { cwd: "/custom/repo" })] });
-    connection.emit({
-      type: "session.snapshot",
-      sessionId: "conflict",
-      state: { ...projection("conflict"), summary: summary("conflict", { cwd: "/custom/repo" }) },
-    });
-    expect(connection.sent).toContainEqual({ type: "conflict.scan", root: "/custom/repo" });
-  });
-
 });
 
 describe("desktop Goal Mode panel", () => {
@@ -981,6 +959,61 @@ describe("desktop cog options", () => {
     expect(connection.sent.some(message => message.type === "code.file.open" && message.path === "src/target.rs")).toBe(false);
   });
 
+  it("refreshes an active Diffs view when an agent turn settles", async () => {
+    const { connection } = await createHarness();
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const initialRequest = connection.sent.find(message => message.type === "sessionChanges.request");
+    if (!initialRequest || initialRequest.type !== "sessionChanges.request") {
+      throw new Error("initial session changes request missing");
+    }
+    connection.emit({
+      type: "sessionChanges.summary",
+      state: {
+        ...sessionChangesState("live"),
+        targetClientId: initialRequest.clientId,
+        diffId: initialRequest.diffId,
+        request: {
+          scope: "sessionChanges",
+          clientId: initialRequest.clientId,
+          diffId: initialRequest.diffId,
+          sessionId: "live",
+          repoId: initialRequest.repoId,
+          detailMode: initialRequest.detailMode,
+          currentCommitOid: initialRequest.currentCommitOid,
+          selectedFile: initialRequest.selectedFile,
+          contextLines: initialRequest.contextLines ?? 3,
+        },
+      },
+    });
+    connection.sent.length = 0;
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        isBusy: true,
+        summary: summary("live", { status: "busy" }),
+      }),
+    });
+    expect(connection.sent.some(message => message.type === "sessionChanges.request")).toBe(false);
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live"),
+    });
+
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "sessionChanges.request",
+      sessionId: "live",
+      repoId: "/repo",
+      detailMode: "statOnly",
+    }));
+  });
+
   it("opens a diff snapshot form with a timestamp-prefilled label", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-05-06T12:34:56Z"));
@@ -1437,6 +1470,61 @@ describe("desktop cog options", () => {
     expect(document.querySelector(`${panel} .review-finding-title`)?.textContent).toBe("Validate token");
   });
 
+  it("keeps edit diffs in the desktop transcript when ordinary tool bubbles are hidden", async () => {
+    const { connection } = await createHarness();
+    const diff = [
+      "--- a/src/main.ts",
+      "+++ b/src/main.ts",
+      "@@ -1 +1 @@",
+      "-const value = 1;",
+      "+const value = 2;",
+    ].join("\n");
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", {
+        transcript: [
+          {
+            kind: "tool",
+            toolCallId: "bash-1",
+            toolName: "bash",
+            args: {},
+            isActive: false,
+            isError: false,
+            renderHash: "bash-1-hash",
+          },
+          {
+            kind: "tool",
+            toolCallId: "edit-1",
+            toolName: "edit",
+            args: { path: "src/main.ts" },
+            isActive: false,
+            isError: false,
+            result: { details: { diff } },
+            renderHash: "edit-1-hash",
+          },
+        ],
+      }),
+    });
+
+    const panel = "#testTranscriptPanel";
+    expect(document.querySelector(`${panel} .tool-card[data-tool-name="bash"]`)).not.toBeNull();
+    expect(document.querySelector(`${panel} .edit-diff-preview`)?.textContent).toContain("+const value = 2;");
+
+    document.querySelector<HTMLButtonElement>("#toolVisibilityToggle")?.click();
+
+    expect(connection.sent).toContainEqual({ type: "config.set", showTools: false });
+    expect(document.querySelector(`${panel} .tool-card[data-tool-name="bash"]`)).toBeNull();
+    expect(document.querySelector(`${panel} .edit-diff-preview`)?.textContent).toContain("+const value = 2;");
+
+    document.querySelector<HTMLButtonElement>("#editDiffVisibilityToggle")?.click();
+
+    expect(connection.sent).toContainEqual({ type: "config.set", showEditDiffs: false });
+    expect(document.querySelector(`${panel} .edit-tool-card`)).toBeNull();
+  });
+
   it("requests state refresh for desktop session deltas without a base projection", async () => {
     const { connection } = await createHarness();
     connection.sent.length = 0;
@@ -1483,6 +1571,40 @@ describe("desktop cog options", () => {
 
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "live" });
+  });
+
+  it("terminalizes active BTW panels and allows retry after reconnect", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput");
+    const btwButton = document.querySelector<HTMLButtonElement>("#btwButton");
+    if (!input || !btwButton) throw new Error("BTW composer missing");
+    input.value = "first side question";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    btwButton.click();
+
+    expect(connection.sent.filter(message => message.type === "session.btw.start")).toHaveLength(1);
+    expect(btwButton.disabled).toBe(true);
+
+    connection.connected = false;
+    connection.closed = true;
+    connection.options.onClose?.();
+
+    expect(document.body.textContent).toContain("Connection closed; this BTW request was released.");
+    expect(document.body.textContent).toContain("Dismiss");
+    expect(btwButton.disabled).toBe(false);
+
+    connection.connected = true;
+    connection.closed = false;
+    connection.options.onOpen?.();
+    input.value = "second side question";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    btwButton.click();
+
+    expect(connection.sent.filter(message => message.type === "session.btw.start")).toHaveLength(2);
   });
 
   it("drops projections and cached notices for sessions absent from a reconnect snapshot", async () => {
@@ -2162,95 +2284,6 @@ describe("desktop cog options", () => {
     expect(transcriptPanel.querySelector<HTMLElement>('[data-message-id="message-1"]')).toBe(untouchedBubble);
   });
 
-  it("requests and applies conflict resolver agent proposal previews", async () => {
-    const { connection } = await createHarness();
-    const conflicted = [
-      "const value = 1;",
-      "<<<<<<< HEAD",
-      "const picked = ours();",
-      "||||||| base",
-      "const picked = base();",
-      "=======",
-      "const picked = theirs();",
-      ">>>>>>> incoming",
-      "",
-    ].join("\n");
-    document.querySelector<HTMLButtonElement>("#createSessionButton")?.click();
-    document.querySelector<HTMLButtonElement>("#cwdPickerConflictTab")?.click();
-    const repoInput = document.querySelector<HTMLInputElement>("#cwdPickerConflictRepo");
-    if (!repoInput) throw new Error("conflict repo input missing");
-    repoInput.value = "/repo";
-    document.querySelector<HTMLButtonElement>("#cwdPickerCreate")?.click();
-    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
-    connection.emit({
-      type: "session.snapshot",
-      sessionId: "live",
-      state: projection("live"),
-    });
-    expect(connection.sent).toContainEqual({ type: "conflict.scan", root: "/repo" });
-    connection.emit({
-      type: "conflict.snapshot",
-      repos: [{
-        repoId: "/repo",
-        root: "/repo",
-        operation: "merge",
-        files: [{ path: "src/main.ts", kind: "bothModified", supported: true }],
-      }],
-    });
-    connection.emit({
-      type: "conflict.file",
-      file: {
-        repoId: "/repo",
-        path: "src/main.ts",
-        kind: "bothModified",
-        base: { label: "Common ancestor", language: "typescript", text: "const picked = base();\n", size: 22 },
-        ours: { label: "Current branch", language: "typescript", text: "const picked = ours();\n", size: 22 },
-        theirs: { label: "Incoming change", language: "typescript", text: "const picked = theirs();\n", size: 24 },
-        result: { label: "Result", language: "typescript", text: conflicted, size: conflicted.length },
-        conflicts: [{ id: "conflict-1", startLine: 2, separatorLine: 6, endLine: 8 }],
-        version: "1:9",
-      },
-    });
-    const instructions = document.querySelector<HTMLTextAreaElement>("#testConflictResolverPanel .conflict-agent-instructions");
-    if (!instructions) throw new Error("conflict resolver agent instructions missing");
-    instructions.value = "Prefer the smallest safe change.";
-    instructions.dispatchEvent(new Event("input", { bubbles: true }));
-    const proposeButton = [...document.querySelectorAll<HTMLButtonElement>("#testConflictResolverPanel button")]
-      .find(button => button.textContent === "Propose conflict");
-    proposeButton?.click();
-    const request = connection.sent.find(message => message.type === "conflict.agent.run");
-    expect(request).toMatchObject({
-      sessionId: "live",
-      type: "conflict.agent.run",
-      repoId: "/repo",
-      path: "src/main.ts",
-      expectedVersion: "1:9",
-      mode: "propose",
-      scope: "selectedConflict",
-      conflictId: "conflict-1",
-      instructions: "Prefer the smallest safe change.",
-    });
-    connection.emit({
-      type: "conflict.agentResult",
-      result: {
-        repoId: "/repo",
-        path: "src/main.ts",
-        sourceVersion: "1:9",
-        mode: "propose",
-        scope: "selectedConflict",
-        conflictId: "conflict-1",
-        risk: "medium",
-        summary: "Merged the selected conflict and left the rest untouched.",
-        explanation: "This keeps the surrounding file unchanged and resolves only the selected conflict block.",
-        content: "const merged = true;\n",
-        remainingConflictCount: 0,
-      },
-    });
-    const applyButton = [...document.querySelectorAll<HTMLButtonElement>("#testConflictResolverPanel button")]
-      .find(button => button.textContent === "Apply agent result");
-    applyButton?.click();
-    expect(document.querySelector<HTMLTextAreaElement>("#testConflictResolverPanel .conflict-result-editor")?.value).toBe("const merged = true;\n");
-  });
 });
 
 describe("desktop compaction indicator", () => {

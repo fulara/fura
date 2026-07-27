@@ -301,6 +301,14 @@ export function editDiffText(card: ToolCard): string {
   const diff = details?.diff;
   return typeof diff === "string" && diff.trim() ? diff : "";
 }
+export function shouldRenderToolInTranscript(
+  card: ToolCard,
+  showTools: boolean,
+  showEditDiffs: boolean,
+): boolean {
+  return showTools || (showEditDiffs && !card.isError && Boolean(editDiffText(card)));
+}
+
 
 function editToolLabel(toolName: string): string {
   switch (toolName) {

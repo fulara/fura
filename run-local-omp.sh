@@ -10,6 +10,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=./fura-env.sh
 source "${SCRIPT_DIR}/fura-env.sh"
 load_fura_env "${SCRIPT_DIR}"
+unset FURA_REMOTE_BIND FURA_REMOTE_HOST FURA_TLS_CERT FURA_TLS_KEY FURA_ALLOWED_ORIGINS
 use_omp_submodule "${SCRIPT_DIR}"
 
 require_env \

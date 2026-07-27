@@ -62,7 +62,7 @@ import {
 import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
 import { catalogContainsProposedModel, filterCatalogModels, formatCatalogModelLabel, formatProposedModelDetails, normalizeSelectedProposedModelId, proposedModelIdFromName, removeProposedModel, upsertProposedModel, validateProposedModels } from "./proposedModels";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
-import { isCompactReadCard, renderCurrentTodoCard, renderReadToolCard, renderReadToolGroup, renderToolCard } from "./toolCards";
+import { isCompactReadCard, renderCurrentTodoCard, renderReadToolCard, renderReadToolGroup, renderToolCard, shouldRenderToolInTranscript } from "./toolCards";
 import { renderReviewCard, reviewCardRenderKey } from "./reviewCard";
 import { renderMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import { setTextileRedmineRootUrl } from "./textileRendering";
@@ -2202,7 +2202,6 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       return;
     }
 
-    const isBusy = projection?.isBusy ?? summary.status === "busy";
     const awaitingAsk = Boolean(summary.awaitingAsk);
     const compacting = Boolean(projection?.compacting);
     sessionTitle.textContent = summary.title || `Session ${shortId(summary.sessionId)}`;
@@ -2273,7 +2272,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           : renderReviewCard(entry);
         nextNodes.set(key, node);
         desiredNodes.push(node);
-      } else if (showToolBubbles) {
+      } else if (shouldRenderToolInTranscript(entry, showToolBubbles, showEditDiffs)) {
         if (isCompactReadCard(entry)) {
           const readCards = [entry];
           while (isCompactReadCard(projection.transcript[i + 1])) {

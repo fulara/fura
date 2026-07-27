@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import type { PresetSummary } from "./protocol";
 import {
   buildPresetSaveMessage,
-  findPreset,
   isValidPresetName,
   parsePresetParams,
   presetNameFromInput,

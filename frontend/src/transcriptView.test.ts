@@ -333,6 +333,23 @@ describe("renderMarkdown", () => {
     expect(node.querySelector("a")?.getAttribute("href")).toBe("https://example.com/");
     expect(node.querySelector("input[type='checkbox']")).not.toBeNull();
   });
+  it("renders model display math instead of leaking LaTeX source", () => {
+    const node = renderMarkdown([
+      "Dla porównania nasz zmierzony peak:",
+      "",
+      "\\[",
+      String.raw`\frac{4{,}8\ \mathrm{GB}}{1{,}498\ \mathrm{mln\ tet}}`,
+      String.raw`\approx 3204\ \mathrm{B/tet}`,
+      "\\]",
+    ].join("\n"));
+
+    const math = node.querySelector(".math-block");
+    expect(math?.querySelector(".katex-display")).not.toBeNull();
+    expect(math?.querySelector("math mfrac")).not.toBeNull();
+    expect(math?.textContent).toContain("3204");
+    expect([...node.querySelectorAll("p")].some(paragraph => paragraph.textContent?.includes("\\frac"))).toBe(false);
+  });
+
 
   it("does not create javascript links", () => {
     const node = renderMarkdown("[bad](javascript:alert(1))");

@@ -121,13 +121,6 @@ export function selectedDiffAnnotations(
   return annotations.filter(annotation => annotation.comparisonKey === key && (!kind || annotation.kind === kind));
 }
 
-export function removeSelectedDiffAnnotations(annotations: DiffReviewAnnotation[], key: string): DiffReviewAnnotation[] {
-  return annotations.filter(annotation => annotation.comparisonKey !== key);
-}
-
-export function removeSelectedDiffComments(annotations: DiffReviewAnnotation[], key: string): DiffReviewAnnotation[] {
-  return annotations.filter(annotation => annotation.comparisonKey !== key || annotation.kind !== "comment");
-}
 
 export function formatDiffLocation(annotation: DiffReviewAnnotation): string {
   return formatDiffLineLocation(annotation.anchor);
@@ -305,51 +298,6 @@ export function prepareDiffAnnotationPrompt(
   };
 }
 
-export function prepareDiffCommentPrompt(
-  state: DiffReviewableState,
-  comments: DiffReviewAnnotation[],
-  rowsForComment?: (comment: DiffReviewAnnotation) => DiffRow[] | null,
-  promptMode: DiffAnnotationPromptMode = "comparisonReview",
-): DiffAnnotationPromptResult {
-  return prepareDiffAnnotationPrompt(
-    state,
-    comments.filter(annotation => annotation.kind === "comment"),
-    rowsForComment,
-    promptMode,
-  );
-}
-
-export function buildDiffCommentPrompt(state: DiffReviewableState, comments: DiffReviewAnnotation[], promptMode: DiffAnnotationPromptMode = "comparisonReview"): string {
-  const prompt = prepareDiffCommentPrompt(state, comments, undefined, promptMode);
-  return prompt.ok ? prompt.prompt : "";
-}
-
-export function buildDiffQuestionPrompt(state: DiffReviewableState, question: DiffReviewAnnotation, promptMode: DiffAnnotationPromptMode = "comparisonReview"): string {
-  const rows = reviewRows(state);
-  return [
-    promptMode === "sessionChanges"
-      ? "I used the ? action in Fura's Diffs view on this exact diff line."
-      : "I have a question about this exact diff line in Fura's Diff view.",
-    reviewHelperInstruction(promptMode),
-    ...comparisonLines(state),
-    "",
-    `Question location: ${formatDiffLocation(question)}`,
-    question.anchor.hunk ? `Hunk: ${question.anchor.hunk}` : undefined,
-    `Diff line: ${question.anchor.text}`,
-    `Question: ${question.text}`,
-    "",
-    "Relevant diff context:",
-    "```diff",
-    buildDiffAnnotationContext(rows, question),
-    "```",
-    "",
-    promptMode === "sessionChanges"
-      ? "Please respond to this note against the diff context. If it asks for a change, make that change in the active checkout; otherwise answer the question or explain the concern."
-      : "Please answer the question against this diff context. Do not propose direct file edits unless you explicitly frame them as work for a separate coding session.",
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
 
 export function diffCommentFlushEditorText(count: number): string {
   return `Flush ${count} diff comment${count === 1 ? "" : "s"}`;
@@ -368,14 +316,6 @@ function checkoutTargetForEndpoint(endpoint: DiffEndpoint): DiffCheckoutTarget {
   return { kind: "commit", oid: endpoint.oid };
 }
 
-export function checkoutTargetForDiffLocation(state: DiffReviewableState, location: DiffLineLocation): DiffCheckoutTarget {
-  if (location.side === "left") {
-    if (state.review.previousCommitOid) return { kind: "commit", oid: state.review.previousCommitOid };
-    return checkoutTargetForEndpoint(state.comparison.base);
-  }
-  if (state.review.currentCommitOid) return { kind: "commit", oid: state.review.currentCommitOid };
-  return checkoutTargetForEndpoint(state.comparison.head);
-}
 
 export function checkoutTargetForDiffFile(state: DiffReviewableState): DiffCheckoutTarget {
   if (state.review.currentCommitOid) return { kind: "commit", oid: state.review.currentCommitOid };
@@ -384,8 +324,4 @@ export function checkoutTargetForDiffFile(state: DiffReviewableState): DiffCheck
 
 export function pathForDiffLocation(location: DiffLineLocation): string {
   return location.side === "left" ? location.oldPath ?? location.newPath : location.newPath;
-}
-
-export function implementationChangeGuidance(): string {
-  return "Implementation changes should be made in a separate coding session/worktree, not by asking the review prompt to patch this diff checkout.";
 }

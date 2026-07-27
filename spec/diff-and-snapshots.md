@@ -17,6 +17,11 @@ Implemented:
 - backend `src/diff.rs` for `sessionChanges`/`compareDiff` summaries, scoped lazy `diff.content`
   per-file patches, tokenized diff jobs (stale results suppressed), repo/base candidate
   assembly, detached review-worktree create/checkout, and review-comment anchor mapping,
+- the normal `Diffs` panel is independent of `Tools`: `Tools` renders the patch reported by each
+  individual `edit` tool card, while `Diffs` computes the repository-wide snapshot→working-tree
+  Git diff, including committed, staged, unstaged, and untracked session changes,
+- transcript visibility is independent: `Edit diffs: on` keeps tool cards carrying a real diff
+  visible even when `Tools: off`; `Tools` controls the remaining ordinary tool bubbles,
 - repo-diff snapshots are **append-only OMP session-log entries** (`type: "custom"`,
   `customType: "repo-diff-snapshot"`, `data.version == 1`); OMP creates them, Fura only reads
   them via `read_session_diff_snapshots`. OMP auto-creates one `session-start` snapshot at
@@ -31,6 +36,9 @@ Implemented:
   no deletion, no sticky session-start,
 - base selection is **not persisted**: the repo/base dropdown selection is per-view only;
   reload recomputes the default (newest). The auto request sends `repoId: null`,
+- while `Diffs` is visible, it refreshes automatically when the active agent turn settles. If
+  the view or session is inactive at that point, the cached session diff is marked stale and
+  refreshed the next time that session's `Diffs` view becomes active,
 - **`/rebase <branch>`** Fura-native slash command (`commands.rs::handle_rebase_slash_command`
   → `diff::rebase_session_repo`): agent-free `git rebase <branch>` on the session `cwd` repo,
   followed by a branch-tip snapshot that becomes the newest base.
@@ -55,8 +63,7 @@ Current limitations / accepted residual risks:
 
 ## Product thesis
 
-Diffs & Snapshots is the session-changes lens, adjacent to session creation and the Conflict
-Resolver, scoped as:
+Diffs & Snapshots is the session-changes lens, adjacent to session creation, scoped as:
 
 - a read-only projection of OMP-owned, append-only snapshots,
 - a zero-config "changes since the session's base" diff, with the base re-baseable on demand,
@@ -74,8 +81,8 @@ snapshot keeps Fura aligned with OMP's own default selector and needs no OMP cha
 - snapshot deletion / tombstones (OMP is append-only; hiding is not worth the divergence),
 - persisting a pinned base across reloads (self-defeating with newest-wins: every new snapshot
   would have to clear it),
-- interactive rebase, `--onto`, conflict resolution inside `/rebase` (use the shell, or the
-  Conflict Resolver), or fetching as part of `/rebase`,
+- interactive rebase, `--onto`, conflict resolution inside `/rebase` (use the shell or recover
+  manually), or fetching as part of `/rebase`,
 - editing OMP's `kind` semantics or removing the field (no benefit to Fura; touches OMP TUI),
 - a hosted terminal/shell (separate feature with its own threat model).
 
@@ -116,8 +123,8 @@ Contract:
 4. On success, create a snapshot pinned at the branch tip via the existing `repo_diff_snapshot`
    RPC (`label: "rebase onto <branch>"`). Newest-wins makes it the diff base automatically.
 
-The happy path needs no agent and no form; the only decision point is a conflict, which is
-delegated to the shell / Conflict Resolver, not handled in-command.
+The happy path needs no agent and no form; conflicts are delegated to the shell or manual
+recovery, not handled in-command.
 
 ## Backend ownership
 

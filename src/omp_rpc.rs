@@ -1,9 +1,9 @@
-#![allow(dead_code)]
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::{PromptBehavior, TodoPhaseProjection};
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub(crate) enum OmpRpcFrame {
@@ -179,6 +179,7 @@ impl OmpRpcFrame {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpRpcReadyFrame {
@@ -189,6 +190,7 @@ pub(crate) struct OmpRpcReadyFrame {
     pub(crate) max_reassembled_frame_bytes: Option<u64>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpRpcResponseFrame {
@@ -221,6 +223,7 @@ impl OmpRpcResponseFrame {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpSessionState {
@@ -244,6 +247,7 @@ pub(crate) struct OmpSessionState {
     pub(crate) context_usage: Option<OmpContextUsage>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpPlanModeState {
@@ -289,6 +293,7 @@ pub(crate) struct OmpPlanModeResponse {
     pub(crate) plan_mode: Option<OmpPlanModeState>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpApprovePlanModeResponse {
@@ -304,12 +309,14 @@ pub(crate) struct OmpGoalModeResponse {
     pub(crate) goal_mode: Option<OmpGoalModeState>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpSetActiveToolsResponse {
     pub(crate) tool_names: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpRepoDiffSnapshot {
@@ -325,6 +332,7 @@ pub(crate) struct OmpRepoDiffSnapshot {
     pub(crate) source_ref: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpRepoDiffResult {
@@ -334,12 +342,14 @@ pub(crate) struct OmpRepoDiffResult {
     pub(crate) diff: Option<String>,
     pub(crate) stat: Option<bool>,
 }
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpMessagesResponse {
     pub(crate) messages: Vec<Value>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpMessagesPageResponse {
@@ -348,6 +358,7 @@ pub(crate) struct OmpMessagesPageResponse {
     pub(crate) total_messages: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpSessionStats {
@@ -358,6 +369,7 @@ pub(crate) struct OmpSessionStats {
     pub(crate) premium_requests: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpTokenStats {
@@ -370,6 +382,7 @@ pub(crate) struct OmpTokenStats {
     pub(crate) total: u64,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OmpAvailableModelsResponse {
@@ -550,10 +563,6 @@ impl OmpRpcCommand {
     pub(crate) fn into_value(self) -> Value {
         serde_json::to_value(self).expect("OMP RPC command serialization cannot fail")
     }
-
-    pub(crate) fn decode(value: Value) -> serde_json::Result<Self> {
-        serde_json::from_value(value)
-    }
 }
 
 pub(crate) fn btw_start_command(id: String, btw_id: String, question: String) -> Value {
@@ -705,21 +714,6 @@ pub(crate) fn approve_plan_mode_command(
         final_plan_file_path,
         preserve_context,
         compact_before_execute,
-    }
-    .into_value()
-}
-
-pub(crate) fn repo_diff_get_command(
-    id: String,
-    selector: Option<String>,
-    head_selector: Option<String>,
-    stat: Option<bool>,
-) -> Value {
-    OmpRpcCommand::RepoDiffGet {
-        id,
-        selector,
-        head_selector,
-        stat,
     }
     .into_value()
 }

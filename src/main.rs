@@ -22,7 +22,6 @@ mod code;
 mod code_lsp;
 mod commands;
 mod config;
-mod conflict;
 mod control;
 mod diff;
 mod event_debug;
@@ -43,7 +42,6 @@ use catalog::*;
 use code::*;
 use commands::*;
 use config::*;
-use conflict::*;
 use control::*;
 use diff::*;
 use event_debug::*;
@@ -222,7 +220,6 @@ async fn main() -> anyhow::Result<()> {
         session_host_tools: Arc::new(RwLock::new(HashMap::new())),
         review_comment_db_path,
         active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
-        active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
         events: WsEventCoordinator::new(events),
         rpc_config: Arc::new(RpcConfig {
             program: args.rpc_program,
@@ -1179,7 +1176,6 @@ pub(crate) mod tests {
             diff_jobs: Arc::new(RwLock::new(DiffJobRegistry::default())),
             review_comment_db_path: database_path_from_config(None),
             active_review_contexts: Arc::new(RwLock::new(HashMap::new())),
-            active_conflict_contexts: Arc::new(RwLock::new(HashMap::new())),
             events: WsEventCoordinator::new(events),
             session_host_tools: Arc::new(RwLock::new(HashMap::new())),
             rpc_config: Arc::new(RpcConfig {
@@ -1309,7 +1305,8 @@ pub(crate) mod tests {
         .await;
         map_test_transport(&state, "transport-session", "transport-session").await;
 
-        let outcome = apply_get_state_update(
+        let mut events = state.events.subscribe();
+        apply_get_state_update(
             &state,
             "transport-session",
             RpcStateUpdate {
@@ -1331,10 +1328,15 @@ pub(crate) mod tests {
         )
         .await;
 
-        assert!(outcome.previous_snapshot.is_none());
+        match events.recv().await.expect("target session snapshot") {
+            ServerMessage::SessionSnapshot { session_id, .. } => {
+                assert_eq!(session_id, "real-session");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
         assert!(matches!(
-            outcome.target_snapshot,
-            Some(ServerMessage::SessionSnapshot { ref session_id, .. }) if session_id == "real-session"
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
         ));
         assert!(
             !state
@@ -1611,12 +1613,13 @@ pub(crate) mod tests {
                 None,
                 Some(75000),
             ),
-            "command-repo-diff-get" => repo_diff_get_command(
-                "cmd-diff-get-1".to_string(),
-                Some("snap-session-start".to_string()),
-                Some("HEAD".to_string()),
-                Some(true),
-            ),
+            "command-repo-diff-get" => OmpRpcCommand::RepoDiffGet {
+                id: "cmd-diff-get-1".to_string(),
+                selector: Some("snap-session-start".to_string()),
+                head_selector: Some("HEAD".to_string()),
+                stat: Some(true),
+            }
+            .into_value(),
             "command-repo-diff-snapshot" => repo_diff_snapshot_command(
                 "cmd-diff-snapshot-1".to_string(),
                 "manual".to_string(),
@@ -1676,7 +1679,7 @@ pub(crate) mod tests {
         for entry in manifest {
             let value = read_contract_fixture(&entry.file);
             if entry.category == "command" {
-                OmpRpcCommand::decode(value.clone()).unwrap_or_else(|error| {
+                serde_json::from_value::<OmpRpcCommand>(value.clone()).unwrap_or_else(|error| {
                     panic!(
                         "{} ({}) failed to decode as command: {error}",
                         entry.name, entry.category
@@ -2462,9 +2465,22 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn ready_v2_negotiates_before_state_refresh() {
+    async fn attach_before_ready_defers_refresh_then_uses_v2_paging() {
         let state = test_state(8, None);
         let mut rx = register_test_rpc_transport(&state, "s1").await;
+
+        let responses = handle_client_message(
+            &state,
+            ClientMessage::SessionAttach {
+                session_id: "s1".to_string(),
+            },
+        )
+        .await;
+        assert!(responses.is_empty());
+        assert!(
+            rx.try_recv().is_err(),
+            "attach must not refresh before protocol negotiation"
+        );
 
         apply_rpc_frame(
             &state,
@@ -2479,14 +2495,21 @@ pub(crate) mod tests {
         )
         .await;
 
-        let first = rx.recv().await.expect("negotiate command");
-        let second = rx.recv().await.expect("state command");
-        let third = rx.recv().await.expect("messages page command");
-        assert_eq!(first["type"], "negotiate_protocol");
-        assert_eq!(first["protocolVersion"], 2);
-        assert_eq!(second["type"], "get_state");
-        assert_eq!(third["type"], "get_messages_page");
-        assert_eq!(third["limit"], 256);
+        let mut command_types = Vec::new();
+        for _ in 0..5 {
+            let command = rx.recv().await.expect("ready refresh command");
+            command_types.push(command["type"].as_str().unwrap_or_default().to_string());
+        }
+        assert_eq!(
+            command_types,
+            [
+                "negotiate_protocol",
+                "get_state",
+                "get_messages_page",
+                "get_session_stats",
+                "get_available_commands",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4382,6 +4405,7 @@ pub(crate) mod tests {
                 "btw-1".to_string(),
                 BtwRequestRoute {
                     target_client_id: "browser-1".to_string(),
+                    owner_connection_id: 41,
                     source_session_id: "source-1".to_string(),
                     transport_session_id: "transport-1".to_string(),
                 },
@@ -4402,8 +4426,12 @@ pub(crate) mod tests {
         )
         .await;
 
-        match events.recv().await.expect("BTW update event") {
+        let event = events.recv().await.expect("BTW update event");
+        assert!(server_message_visible_to_connection(&event, 41));
+        assert!(!server_message_visible_to_connection(&event, 42));
+        match event {
             ServerMessage::SessionBtwUpdate {
+                target_connection_id,
                 target_client_id,
                 source_session_id,
                 request_id,
@@ -4414,6 +4442,7 @@ pub(crate) mod tests {
                 can_promote,
                 error,
             } => {
+                assert_eq!(target_connection_id, 41);
                 assert_eq!(target_client_id, "browser-1");
                 assert_eq!(source_session_id, "source-1");
                 assert_eq!(request_id, "btw-1");
@@ -4426,6 +4455,7 @@ pub(crate) mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+        assert!(state.session_runtime.btw_request("btw-1").await.is_some());
     }
 
     #[tokio::test]
@@ -4437,6 +4467,7 @@ pub(crate) mod tests {
                 "btw-1".to_string(),
                 BtwRequestRoute {
                     target_client_id: "browser-1".to_string(),
+                    owner_connection_id: 41,
                     source_session_id: "source-1".to_string(),
                     transport_session_id: "transport-1".to_string(),
                 },
@@ -4473,12 +4504,14 @@ pub(crate) mod tests {
 
         match events.recv().await.expect("BTW promoted event") {
             ServerMessage::SessionBtwPromoted {
+                target_connection_id,
                 target_client_id,
                 source_session_id,
                 request_id,
                 session_id,
                 session_file,
             } => {
+                assert_eq!(target_connection_id, 41);
                 assert_eq!(target_client_id, "browser-1");
                 assert_eq!(source_session_id, "source-1");
                 assert_eq!(request_id, "btw-1");
@@ -4488,6 +4521,169 @@ pub(crate) mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
         assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn btw_control_is_bound_to_the_owning_websocket_connection() {
+        let state = test_state(8, None);
+        let mut commands = register_test_transport(&state, "source-1", "source-1", 8).await;
+
+        let responses = handle_client_message_for_connection(
+            &state,
+            ClientMessage::SessionBtwStart {
+                client_id: "browser-1".to_string(),
+                session_id: "source-1".to_string(),
+                request_id: "btw-1".to_string(),
+                question: "Why?".to_string(),
+            },
+            41,
+        )
+        .await;
+        assert!(responses.is_empty());
+        assert_eq!(
+            state
+                .session_runtime
+                .btw_request("btw-1")
+                .await
+                .expect("BTW route should exist")
+                .owner_connection_id,
+            41
+        );
+        assert_eq!(
+            commands.recv().await.expect("BTW start command")["type"],
+            "btw_start"
+        );
+
+        let rejected = handle_client_message_for_connection(
+            &state,
+            ClientMessage::SessionBtwCancel {
+                client_id: "browser-1".to_string(),
+                request_id: "btw-1".to_string(),
+            },
+            42,
+        )
+        .await;
+        assert_eq!(rejected.len(), 1);
+        assert!(server_message_visible_to_connection(&rejected[0], 42));
+        assert!(!server_message_visible_to_connection(&rejected[0], 41));
+        match &rejected[0] {
+            ServerMessage::SessionBtwUpdate {
+                target_connection_id,
+                state,
+                error,
+                ..
+            } => {
+                assert_eq!(*target_connection_id, 42);
+                assert_eq!(state, "error");
+                assert_eq!(
+                    error.as_deref(),
+                    Some("BTW request belongs to another browser connection.")
+                );
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+        assert!(commands.try_recv().is_err());
+
+        let accepted = handle_client_message_for_connection(
+            &state,
+            ClientMessage::SessionBtwCancel {
+                client_id: "browser-1".to_string(),
+                request_id: "btw-1".to_string(),
+            },
+            41,
+        )
+        .await;
+        assert!(accepted.is_empty());
+        let cancel_command = commands.recv().await.expect("BTW cancel command");
+        assert_eq!(cancel_command["type"], "btw_cancel");
+        apply_rpc_frame(
+            &state,
+            "source-1",
+            &serde_json::json!({
+                "id": cancel_command["id"],
+                "type": "response",
+                "command": "btw_cancel",
+                "success": true,
+                "data": { "btwId": "btw-1" }
+            }),
+        )
+        .await;
+        apply_rpc_frame(
+            &state,
+            "source-1",
+            &serde_json::json!({
+                "type": "btw_update",
+                "btwId": "btw-1",
+                "state": "cancelled"
+            }),
+        )
+        .await;
+        assert!(
+            state.session_runtime.btw_request("btw-1").await.is_some(),
+            "terminal BTW state must retain its route until release"
+        );
+
+        let released = handle_client_message_for_connection(
+            &state,
+            ClientMessage::SessionBtwRelease {
+                client_id: "browser-1".to_string(),
+                request_id: "btw-1".to_string(),
+            },
+            41,
+        )
+        .await;
+        assert!(released.is_empty());
+        let release_command = commands.recv().await.expect("BTW release command");
+        assert_eq!(release_command["type"], "btw_release");
+        apply_rpc_frame(
+            &state,
+            "source-1",
+            &serde_json::json!({
+                "id": release_command["id"],
+                "type": "response",
+                "command": "btw_release",
+                "success": true,
+                "data": { "btwId": "btw-1" }
+            }),
+        )
+        .await;
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn websocket_disconnect_releases_only_live_owned_btw_routes() {
+        let state = test_state(8, None);
+        for (request_id, owner_connection_id) in [("btw-owned", 41), ("btw-other", 42)] {
+            state
+                .session_runtime
+                .insert_btw_request(
+                    request_id.to_string(),
+                    BtwRequestRoute {
+                        target_client_id: format!("browser-{owner_connection_id}"),
+                        owner_connection_id,
+                        source_session_id: "source-1".to_string(),
+                        transport_session_id: "source-1".to_string(),
+                    },
+                )
+                .await;
+        }
+
+        release_btw_requests_on_disconnect(&state, 41).await;
+
+        assert!(
+            state
+                .session_runtime
+                .btw_request("btw-owned")
+                .await
+                .is_none()
+        );
+        assert!(
+            state
+                .session_runtime
+                .btw_request("btw-other")
+                .await
+                .is_some()
+        );
     }
     #[tokio::test]
     async fn rpc_stdout_does_not_forward_raw_frames_by_default() {
@@ -5162,6 +5358,7 @@ pub(crate) mod tests {
         }
 
         let update = serde_json::to_value(ServerMessage::SessionBtwUpdate {
+            target_connection_id: 41,
             target_client_id: "browser-1".to_string(),
             source_session_id: "source-1".to_string(),
             request_id: "btw-1".to_string(),
@@ -5244,93 +5441,6 @@ pub(crate) mod tests {
                 && head_value == "feature"
                 && commit_oid == "abc"
                 && selected_file.new_path == "src/main.rs"
-        ));
-    }
-
-    #[test]
-    fn parses_conflict_messages() {
-        let scan: ClientMessage =
-            serde_json::from_str(r#"{"type":"conflict.scan","root":"/repo"}"#)
-                .expect("scan parses");
-        assert!(matches!(
-            scan,
-            ClientMessage::ConflictScan { ref root } if root == "/repo"
-        ));
-
-        let open: ClientMessage = serde_json::from_str(
-            r#"{"type":"conflict.file.open","repoId":"/repo","path":"src/main.rs"}"#,
-        )
-        .expect("open parses");
-        assert!(matches!(
-            open,
-            ClientMessage::ConflictFileOpen { ref repo_id, ref path }
-                if repo_id == "/repo" && path == "src/main.rs"
-        ));
-
-        let preview: ClientMessage = serde_json::from_str(
-            r#"{"type":"conflict.file.previewMagicWand","repoId":"/repo","path":"src/main.rs","expectedVersion":"1:9"}"#,
-        )
-        .expect("preview parses");
-        assert!(matches!(
-            preview,
-            ClientMessage::ConflictFilePreviewMagicWand {
-                ref repo_id,
-                ref path,
-                ref expected_version,
-            } if repo_id == "/repo" && path == "src/main.rs" && expected_version == "1:9"
-        ));
-
-        let write: ClientMessage = serde_json::from_str(
-            r#"{"type":"conflict.file.writeResult","repoId":"/repo","path":"src/main.rs","content":"resolved\n","expectedVersion":"1:9"}"#,
-        )
-        .expect("write parses");
-        assert!(matches!(
-            write,
-            ClientMessage::ConflictFileWriteResult {
-                ref repo_id,
-                ref path,
-                ref content,
-                ref expected_version,
-            } if repo_id == "/repo"
-                && path == "src/main.rs"
-                && content == "resolved\n"
-                && expected_version == "1:9"
-        ));
-
-        let stage: ClientMessage = serde_json::from_str(
-            r#"{"type":"conflict.file.stageResolved","repoId":"/repo","path":"src/main.rs","expectedVersion":"1:9"}"#,
-        )
-        .expect("stage parses");
-        assert!(matches!(
-            stage,
-            ClientMessage::ConflictFileStageResolved {
-                ref repo_id,
-                ref path,
-                ref expected_version,
-            } if repo_id == "/repo" && path == "src/main.rs" && expected_version == "1:9"
-        ));
-
-        let agent: ClientMessage = serde_json::from_str(
-            r#"{"type":"conflict.agent.run","sessionId":"conflict-session","repoId":"/repo","path":"src/main.rs","expectedVersion":"1:9","mode":"propose","scope":"selectedConflict","conflictId":"conflict-1","instructions":"Resolve only the selected block."}"#,
-        )
-        .expect("agent parses");
-        assert!(matches!(
-            agent,
-            ClientMessage::ConflictAgentRun {
-                ref session_id,
-                ref repo_id,
-                ref path,
-                ref expected_version,
-                mode: ConflictAgentMode::Propose,
-                scope: ConflictAgentScope::SelectedConflict,
-                conflict_id: Some(ref conflict_id),
-                ref instructions,
-            } if session_id == "conflict-session"
-                && repo_id == "/repo"
-                && path == "src/main.rs"
-                && expected_version == "1:9"
-                && conflict_id == "conflict-1"
-                && instructions == "Resolve only the selected block."
         ));
     }
 
@@ -5866,11 +5976,6 @@ pub(crate) mod tests {
             }
             other => panic!("expected image block, got {other:?}"),
         }
-
-        let text = content_to_text(&serde_json::json!([
-            { "type": "image", "data": "aW1hZ2UtYnl0ZXM=", "mimeType": "image/png" }
-        ]));
-        assert_eq!(text, "[Image: image/png]");
     }
 
     #[test]

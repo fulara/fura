@@ -1,3 +1,5 @@
+import katex from "katex";
+import "katex/dist/katex.min.css";
 import hljs from "highlight.js/lib/common";
 import { marked, type Token, type Tokens } from "marked";
 import { copyTextToClipboard, mkEl, mkFrag, mkText } from "./dom";
@@ -445,7 +447,7 @@ export function renderMarkdown(text: string): HTMLElement {
   const wrapper = mkEl("div");
   wrapper.className = "markdown-body";
 
-  appendMarkdownWithDiffBlocks(wrapper, text.trim());
+  appendMarkdownWithRichBlocks(wrapper, text.trim());
 
   if (!wrapper.hasChildNodes() && text.trim()) {
     const p = mkEl("p");
@@ -456,35 +458,39 @@ export function renderMarkdown(text: string): HTMLElement {
   return wrapper;
 }
 
-// OMP's `/review` command embeds the raw unified diff inside `<diff>…</diff>`
-// tags rather than a fenced code block. Markdown would shred such a diff into
-// dozens of stray paragraphs/lists (every `-`, `@@`, and context line becomes
-// its own block, and blank context lines close the surrounding HTML block), so
-// extract those regions from the raw text and render them as a real diff code
-// block instead.
-//
-// The diff is pulled straight out of the source — never via the Markdown lexer —
-// because a unified diff routinely contains fence-like context lines (e.g. a
-// space-indented ``` from a reviewed Markdown file) that the lexer would
-// otherwise treat as a code fence and split the diff apart. The only thing the
-// lexer is consulted for is to leave a literal `<diff>` that lives inside a real
-// fenced code block untouched (see `fencedCodeRanges`).
-function appendMarkdownWithDiffBlocks(wrapper: HTMLElement, text: string): void {
+// OMP can embed raw regions that Markdown cannot render correctly. `/review`
+// wraps unified diffs in `<diff>…</diff>`, while model responses commonly use
+// `\[…\]` or `$$…$$` for display math. Extract both before lexing, but leave
+// lookalikes inside fenced code blocks untouched.
+function appendMarkdownWithRichBlocks(wrapper: HTMLElement, text: string): void {
   const fences = fencedCodeRanges(text);
   const insideFence = (index: number): boolean =>
     fences.some(([start, end]) => index >= start && index < end);
-  const diffBlock = /<diff>\n([\s\S]*?)\n<\/diff>/g;
+  const richBlock =
+    /<diff>\n([\s\S]*?)\n<\/diff>|(?:^|\n)\\\[\s*\n?([\s\S]*?)\n?\s*\\\](?=\n|$)|(?:^|\n)\$\$\s*\n?([\s\S]*?)\n?\s*\$\$(?=\n|$)/g;
   let cursor = 0;
-  for (let match = diffBlock.exec(text); match; match = diffBlock.exec(text)) {
-    // A `<diff>` opening inside a fenced code block is real code, not a review
-    // diff; leave it for the Markdown renderer to emit verbatim.
+  for (let match = richBlock.exec(text); match; match = richBlock.exec(text)) {
     if (insideFence(match.index)) continue;
+    const math = match[2] ?? match[3];
+    if (math !== undefined && !math.trim()) continue;
     appendMarkdownTokens(wrapper, text.slice(cursor, match.index));
-    wrapper.append(renderCodeBlock("diff", match[1]));
-    cursor = diffBlock.lastIndex;
+    wrapper.append(match[1] !== undefined ? renderCodeBlock("diff", match[1]) : renderMathBlock(math));
+    cursor = richBlock.lastIndex;
   }
   appendMarkdownTokens(wrapper, text.slice(cursor));
 }
+function renderMathBlock(source: string): HTMLElement {
+  const block = mkEl("div");
+  block.className = "math-block";
+  katex.render(source.trim(), block, {
+    displayMode: true,
+    throwOnError: false,
+    strict: "ignore",
+    trust: false,
+  });
+  return block;
+}
+
 
 // Character ranges of fenced code blocks, in `text`'s own coordinates. This is a
 // deliberately small CommonMark-ish line scan rather than a reuse of the Markdown

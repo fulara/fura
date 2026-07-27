@@ -1,17 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { comparisonKey } from "./diffState";
 import {
-  buildDiffCommentPrompt,
-  buildDiffQuestionPrompt,
-  checkoutTargetForDiffLocation,
   createDiffReviewAnnotation,
   createReviewCommentCreateMessage,
   diffCommentFlushEditorText,
   diffCommentPreviewStatus,
-  implementationChangeGuidance,
   isReviewCommentMatched,
   pathForDiffLocation,
-  removeSelectedDiffComments,
+  prepareDiffAnnotationPrompt,
   selectedDiffAnnotations,
   reviewCommentsForDiffLocation,
   reviewCommentsForComparison,
@@ -61,7 +57,6 @@ describe("diffReview", () => {
     expect(comment.status).toBe("draft");
     expect(question.status).toBe("sent");
     expect(selectedDiffAnnotations([comment, question], comparisonKey(state), "comment")).toEqual([comment]);
-    expect(removeSelectedDiffComments([comment, question], comparisonKey(state))).toEqual([question]);
   });
 
   it("builds persisted human review comment create messages from the shared diff state", () => {
@@ -77,7 +72,9 @@ describe("diffReview", () => {
 
   it("builds comment prompts with review helper boundaries and selected commit", () => {
     const comment = createDiffReviewAnnotation({ id: "c", kind: "comment", state, location: addLocation, text: "Please keep the exported name stable.", createdAt: "now" });
-    const prompt = buildDiffCommentPrompt(state, [comment]);
+    const result = prepareDiffAnnotationPrompt(state, [comment]);
+    if (!result.ok) throw new Error(result.message);
+    const prompt = result.prompt;
 
     expect(prompt.split("\n")[0]).toBe("I have read the code and have some comments please read them and address them");
     expect(prompt).toContain("Do not edit files, generate patches, or modify a checkout");
@@ -91,25 +88,8 @@ describe("diffReview", () => {
     expect(prompt).toContain("```diff\n@@ -1,3 +1,3 @@\n const same = true;\n-const value = 'old';\n+const value = 'new';\n export { value };\n```");
   });
 
-  it("builds question prompts differently for Diff and Diffs views", () => {
-    const question = createDiffReviewAnnotation({ id: "q", kind: "question", state, location: addLocation, text: "Is this safe?", createdAt: "now" });
-    const prompt = buildDiffQuestionPrompt(state, question);
-    const commentPrompt = buildDiffCommentPrompt(state, [question]);
-    const sessionChangesPrompt = buildDiffQuestionPrompt(state, question, "sessionChanges");
 
-    expect(prompt).toContain("I have a question about this exact diff line in Fura's Diff view");
-    expect(prompt).toContain("Question: Is this safe?");
-    expect(prompt).toContain("review helper");
-    expect(sessionChangesPrompt).toContain("I used the ? action in Fura's Diffs view");
-    expect(sessionChangesPrompt).toContain("request for an implementation change");
-    expect(sessionChangesPrompt).toContain("make that change in the active checkout");
-    expect(sessionChangesPrompt).not.toContain("Do not edit files");
-    expect(commentPrompt).not.toContain("Question: Is this safe?");
-  });
-
-  it("selects review worktree checkout targets by diff side", () => {
-    expect(checkoutTargetForDiffLocation(state, removeLocation)).toEqual({ kind: "commit", oid: "a".repeat(40) });
-    expect(checkoutTargetForDiffLocation(state, addLocation)).toEqual({ kind: "commit", oid: "b".repeat(40) });
+  it("selects the path for a left-side diff location", () => {
     expect(pathForDiffLocation(removeLocation)).toBe("src/main.ts");
   });
 
@@ -176,10 +156,9 @@ describe("diffReview", () => {
     expect(isReviewCommentMatched(rows, comparisonKey(state), persisted)).toBe(true);
   });
 
-  it("formats labels and exposes implementation boundary guidance", () => {
+  it("formats diff comment labels", () => {
     expect(diffCommentFlushEditorText(1)).toBe("Flush 1 diff comment");
     expect(diffCommentFlushEditorText(2)).toBe("Flush 2 diff comments");
     expect(diffCommentPreviewStatus(1)).toBe("1 comment ready to send");
-    expect(implementationChangeGuidance()).toContain("separate coding session/worktree");
   });
 });

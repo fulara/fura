@@ -3,7 +3,6 @@ import {
   buildCodeCommentPrompt,
   codeCommentFlushEditorText,
   codeCommentPreviewStatus,
-  commentsForCodeLine,
   createCodeFileComment,
   removeSelectedCodeComments,
   selectedCodeComments,
@@ -28,7 +27,6 @@ describe("code comments", () => {
     });
 
     expect(selectedCodeComments([comment], file.path)).toEqual([comment]);
-    expect(commentsForCodeLine([comment], file.path, 2, "println!(\"hi\");")).toEqual([comment]);
     expect(removeSelectedCodeComments([comment], file.path)).toEqual([]);
   });
 

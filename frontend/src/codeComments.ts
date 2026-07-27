@@ -32,18 +32,6 @@ export function createCodeFileComment(input: {
   };
 }
 
-export function commentsForCodeLine(
-  comments: CodeFileComment[],
-  path: string,
-  lineNumber: number,
-  lineText: string,
-): CodeFileComment[] {
-  return comments.filter(comment => (
-    comment.path === path &&
-    comment.lineNumber === lineNumber &&
-    comment.lineText === lineText
-  ));
-}
 
 export function selectedCodeComments(comments: CodeFileComment[], path: string): CodeFileComment[] {
   return comments.filter(comment => comment.path === path);

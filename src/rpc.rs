@@ -56,6 +56,20 @@ pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Res
     )
     .await
 }
+pub(crate) async fn refresh_rpc_state_if_ready(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), String> {
+    if let Some(transport_session_id) = rpc_transport_session_id(state, session_id).await
+        && !state
+            .session_runtime
+            .has_rpc_protocol_version(&transport_session_id)
+            .await
+    {
+        return Ok(());
+    }
+    refresh_rpc_state(state, session_id).await
+}
 
 async fn is_model_catalog_transport(state: &AppState, session_id: &str) -> bool {
     state
@@ -277,6 +291,7 @@ pub(crate) async fn send_rpc_command(
 
 fn btw_update_error(route: &BtwRequestRoute, request_id: String, message: String) -> ServerMessage {
     ServerMessage::SessionBtwUpdate {
+        target_connection_id: route.owner_connection_id,
         target_client_id: route.target_client_id.clone(),
         source_session_id: route.source_session_id.clone(),
         request_id,
@@ -291,6 +306,7 @@ fn btw_update_error(route: &BtwRequestRoute, request_id: String, message: String
 
 pub(crate) async fn start_btw_request(
     state: &AppState,
+    owner_connection_id: u64,
     client_id: String,
     session_id: String,
     request_id: String,
@@ -298,6 +314,7 @@ pub(crate) async fn start_btw_request(
 ) -> Vec<ServerMessage> {
     let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await else {
         return vec![ServerMessage::SessionBtwUpdate {
+            target_connection_id: owner_connection_id,
             target_client_id: client_id,
             source_session_id: session_id,
             request_id,
@@ -311,6 +328,7 @@ pub(crate) async fn start_btw_request(
     };
     let route = BtwRequestRoute {
         target_client_id: client_id,
+        owner_connection_id,
         source_session_id: session_id.clone(),
         transport_session_id,
     };
@@ -356,12 +374,14 @@ pub(crate) async fn start_btw_request(
 
 pub(crate) async fn control_btw_request(
     state: &AppState,
+    owner_connection_id: u64,
     client_id: String,
     request_id: String,
     kind: PendingBtwCommandKind,
 ) -> Vec<ServerMessage> {
     let Some(route) = state.session_runtime.btw_request(&request_id).await else {
         return vec![ServerMessage::SessionBtwUpdate {
+            target_connection_id: owner_connection_id,
             target_client_id: client_id,
             source_session_id: String::new(),
             request_id,
@@ -373,12 +393,19 @@ pub(crate) async fn control_btw_request(
             error: Some("BTW request was not found.".to_string()),
         }];
     };
-    if route.target_client_id != client_id {
-        return vec![btw_update_error(
-            &route,
+    if route.owner_connection_id != owner_connection_id || route.target_client_id != client_id {
+        return vec![ServerMessage::SessionBtwUpdate {
+            target_connection_id: owner_connection_id,
+            target_client_id: client_id,
+            source_session_id: String::new(),
             request_id,
-            "BTW request belongs to another browser client.".to_string(),
-        )];
+            state: "error".to_string(),
+            question: None,
+            delta: None,
+            answer: None,
+            can_promote: None,
+            error: Some("BTW request belongs to another browser connection.".to_string()),
+        }];
     }
     let command_id = next_rpc_id();
     state
@@ -411,20 +438,23 @@ pub(crate) async fn control_btw_request(
     Vec::new()
 }
 
-pub(crate) async fn release_btw_request_on_disconnect(
-    state: &AppState,
-    client_id: String,
-    request_id: String,
-) {
-    let responses = control_btw_request(
-        state,
-        client_id,
-        request_id.clone(),
-        PendingBtwCommandKind::Release,
-    )
-    .await;
-    if !responses.is_empty() {
-        state.session_runtime.remove_btw_request(&request_id).await;
+pub(crate) async fn release_btw_requests_on_disconnect(state: &AppState, owner_connection_id: u64) {
+    let requests = state
+        .session_runtime
+        .btw_requests_for_owner(owner_connection_id)
+        .await;
+    for (request_id, route) in requests {
+        let responses = control_btw_request(
+            state,
+            owner_connection_id,
+            route.target_client_id,
+            request_id.clone(),
+            PendingBtwCommandKind::Release,
+        )
+        .await;
+        if !responses.is_empty() {
+            state.session_runtime.remove_btw_request(&request_id).await;
+        }
     }
 }
 
@@ -653,30 +683,6 @@ pub(crate) async fn spawn_rpc_child(
             remove_review_contexts_for_session(&state, &target_session_id).await;
         if let Some(context) = removed_review_contexts.into_iter().last() {
             remember_session_host_tools(&state, &target_session_id, context.previous_host_tools)
-                .await;
-        }
-        let removed_conflict_contexts =
-            remove_conflict_contexts_for_session(&state, &target_session_id).await;
-        if let Some(context) = removed_conflict_contexts.iter().last() {
-            remember_session_host_tools(
-                &state,
-                &target_session_id,
-                context.previous_host_tools.clone(),
-            )
-            .await;
-        }
-        for context in removed_conflict_contexts {
-            let _ = state
-                .events
-                .emit(
-                    &state,
-                    ServerMessage::ConflictError {
-                        repo_id: Some(context.repo_id),
-                        path: Some(context.path),
-                        message: "Conflict Resolver session exited before returning a result."
-                            .to_string(),
-                    },
-                )
                 .await;
         }
         if reset_controller_if_transport_exited(&state, &session_id).await {
@@ -971,14 +977,6 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 mark_pending_continuation_and_broadcast(state, &target_session_id).await;
             } else {
                 clear_review_contexts_for_session(state, &target_session_id).await;
-                clear_conflict_contexts_for_session(
-                    state,
-                    &target_session_id,
-                    Some(
-                        "Conflict Resolver agent run finished without submitting an explanation or proposal.",
-                    ),
-                )
-                .await;
                 mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
                 if let Err(message) = refresh_rpc_state(state, &target_session_id).await {
                     warn!(session_id = %target_session_id, %message, "post-agent state refresh failed");
@@ -1315,12 +1313,12 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 debug!(session_id = %target_session_id, request_id = %btw_id, "ignored unowned BTW update");
                 return;
             };
-            let terminal = matches!(btw_state.as_str(), "cancelled" | "error");
             let _ = state
                 .events
                 .emit(
                     state,
                     ServerMessage::SessionBtwUpdate {
+                        target_connection_id: route.owner_connection_id,
                         target_client_id: route.target_client_id,
                         source_session_id: route.source_session_id,
                         request_id: btw_id.clone(),
@@ -1333,9 +1331,6 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     },
                 )
                 .await;
-            if terminal {
-                state.session_runtime.remove_btw_request(&btw_id).await;
-            }
         }
         OmpRpcFrame::Response(response) => {
             let _ = response.is_error();
@@ -1812,10 +1807,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     let cleared_review =
                         clear_review_context_for_command(state, &current_session_id, command_id)
                             .await;
-                    let cleared_conflict =
-                        clear_conflict_context_for_command(state, &current_session_id, command_id)
-                            .await;
-                    if cleared_review || cleared_conflict {
+                    if cleared_review {
                         let _ = refresh_rpc_state(state, &current_session_id).await;
                     }
                 }
@@ -1825,10 +1817,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             if let Some(command_id) = value_str(frame, "id") {
                 let cleared_review =
                     clear_review_context_for_command(state, &current_session_id, command_id).await;
-                let cleared_conflict =
-                    clear_conflict_context_for_command(state, &current_session_id, command_id)
-                        .await;
-                if (cleared_review || cleared_conflict) && command == Some("set_host_tools") {
+                if cleared_review && command == Some("set_host_tools") {
                     settle_prompt_error_and_broadcast(state, &current_session_id).await;
                 }
             }
@@ -1910,6 +1899,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     .emit(
                         state,
                         ServerMessage::SessionBtwPromoted {
+                            target_connection_id: route.owner_connection_id,
                             target_client_id: route.target_client_id,
                             source_session_id: route.source_session_id,
                             request_id: pending.btw_id,
@@ -2155,7 +2145,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             let plan_mode = Some(map_plan_mode_state_projection(data.plan_mode.as_ref()));
             let goal_mode = Some(map_goal_mode_state_projection(data.goal_mode.as_ref()));
             let todo_phases = Some(data.todo_phases);
-            let outcome = apply_get_state_update(
+            apply_get_state_update(
                 state,
                 session_id,
                 RpcStateUpdate {
@@ -2177,7 +2167,6 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             )
             .await;
 
-            let _ = outcome;
             broadcast_sessions_snapshot(state).await;
         }
         Some("handoff") => {

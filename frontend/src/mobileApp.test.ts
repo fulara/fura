@@ -584,11 +584,32 @@ describe("mountMobileApp", () => {
             isError: false,
             renderHash: "tool-1-hash",
           },
+          {
+            kind: "tool",
+            toolCallId: "edit-1",
+            toolName: "edit",
+            args: { path: "src/main.ts" },
+            isActive: false,
+            isError: false,
+            result: {
+              details: {
+                diff: [
+                  "--- a/src/main.ts",
+                  "+++ b/src/main.ts",
+                  "@@ -1 +1 @@",
+                  "-const value = 1;",
+                  "+const value = 2;",
+                ].join("\n"),
+              },
+            },
+            renderHash: "edit-1-hash",
+          },
         ],
       }),
     });
 
-    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(1);
+    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(2);
+    expect(document.querySelector("#mobileTranscript .edit-diff-preview")?.textContent).toContain("+const value = 2;");
     expect(document.querySelectorAll("#mobileTranscript .thinking-block").length).toBe(1);
 
     connection.emit({
@@ -600,8 +621,12 @@ describe("mountMobileApp", () => {
       },
     });
 
-    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(0);
+    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(1);
+    expect(document.querySelector("#mobileTranscript .tool-card")?.getAttribute("data-tool-name")).toBe("edit");
+    expect(document.querySelector("#mobileTranscript .edit-diff-preview")?.textContent).toContain("+const value = 2;");
     expect(document.querySelectorAll("#mobileTranscript .thinking-block").length).toBe(0);
+    connection.emit({ type: "config.updated", config: { ...config, showTools: false, showEditDiffs: false } });
+    expect(document.querySelectorAll("#mobileTranscript .tool-card").length).toBe(0);
   });
 
   it("keeps the review card in the mobile transcript when tools are hidden", () => {

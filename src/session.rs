@@ -243,7 +243,6 @@ pub(crate) enum SessionKind {
 #[serde(rename_all = "camelCase")]
 pub(crate) enum SessionMode {
     #[default]
-    #[serde(alias = "conflictResolution")]
     Standard,
     DiffReview,
 }

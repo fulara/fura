@@ -72,10 +72,6 @@ export function extensionDialogBodyText(request: ExtensionDialogRequest): string
   return "";
 }
 
-export function formatExtensionDialogNotification(request: ExtensionDialogRequest): string {
-  const prefix = request.notifyType ? `${request.notifyType}: ` : "";
-  return `${prefix}${request.message ?? request.title}`;
-}
 
 export function extensionDialogHttpUrl(request: ExtensionDialogRequest): string | null {
   if (!request.url) return null;

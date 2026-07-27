@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   extensionDialogBodyText,
-  formatExtensionDialogNotification,
   extensionDialogHttpUrl,
   parseExtensionDialogRequest,
 } from "./extensionDialog";
@@ -46,7 +45,6 @@ describe("extension dialog parsing", () => {
 
     expect(request?.title).toBe("Extension notice");
     expect(request ? extensionDialogBodyText(request) : "").toBe("Heads up");
-    expect(request ? formatExtensionDialogNotification(request) : "").toBe("warning: Heads up");
   });
 
   it("parses and validates open_url extension requests without accepting unsafe protocols", () => {

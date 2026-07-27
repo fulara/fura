@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { comparisonKey, DEFAULT_SESSION_CHANGES_DETAIL_MODE, diffRefInputFromText, diffRefInputText, resolvedDiffRefInputText, sessionChangesRefreshOptions } from "./diffState";
+import { comparisonKey, DEFAULT_SESSION_CHANGES_DETAIL_MODE, diffRefInputFromText, diffRefInputText, sessionChangesRefreshOptions } from "./diffState";
 import type { DiffReviewableState, SessionChangesSummaryState } from "./protocol";
 
 
@@ -41,7 +41,6 @@ describe("diffState", () => {
   it("round-trips the working tree pseudo-ref for diff controls", () => {
     expect(diffRefInputFromText("WORKTREE", { kind: "gitRef", value: "HEAD" })).toEqual({ kind: "workingTree" });
     expect(diffRefInputText({ kind: "workingTree" })).toBe("WORKTREE");
-    expect(resolvedDiffRefInputText({ kind: "workingTree" }, { kind: "gitRef", value: "HEAD" })).toBe("WORKTREE");
     expect(diffRefInputFromText("feature", { kind: "workingTree" })).toEqual({ kind: "gitRef", value: "feature" });
   });
 

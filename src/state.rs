@@ -13,12 +13,12 @@ use tokio::{
 use tracing::warn;
 
 use crate::{
-    ActiveConflictContext, CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode,
-    DiffFileSelector, DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot,
-    GoalModeProjection, PlanModeProjection, PreparedDiff, ProposedModelConfig, ServerMessage,
-    SessionKind, SessionMode, SessionProjectionDelta, SessionRecord, SessionStatus,
-    ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand,
-    append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
+    CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode, DiffFileSelector,
+    DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, GoalModeProjection,
+    PlanModeProjection, PreparedDiff, ProposedModelConfig, ServerMessage, SessionKind, SessionMode,
+    SessionProjectionDelta, SessionRecord, SessionStatus, ThinkingVisibilityPreference, Timestamp,
+    TodoPhaseProjection, VoiceCommand, append_bridge_debug_event, save_fura_config,
+    sessions_snapshot_from_map,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -40,7 +40,6 @@ pub(crate) struct AppState {
     pub(crate) diff_jobs: Arc<RwLock<DiffJobRegistry>>,
     pub(crate) review_comment_db_path: PathBuf,
     pub(crate) active_review_contexts: Arc<RwLock<HashMap<String, ActiveReviewContext>>>,
-    pub(crate) active_conflict_contexts: Arc<RwLock<HashMap<String, ActiveConflictContext>>>,
     pub(crate) events: WsEventCoordinator,
     pub(crate) session_host_tools: Arc<RwLock<HashMap<String, Vec<Value>>>>,
     pub(crate) rpc_config: Arc<RpcConfig>,
@@ -582,6 +581,7 @@ pub(crate) struct PendingRpcMessagesPage {
 #[derive(Clone, Debug)]
 pub(crate) struct BtwRequestRoute {
     pub(crate) target_client_id: String,
+    pub(crate) owner_connection_id: u64,
     pub(crate) source_session_id: String,
     pub(crate) transport_session_id: String,
 }
@@ -777,6 +777,12 @@ impl SessionRuntimeState {
             .await
             .insert(transport_session_id.to_string(), version);
     }
+    pub(crate) async fn has_rpc_protocol_version(&self, transport_session_id: &str) -> bool {
+        self.rpc_protocol_versions
+            .read()
+            .await
+            .contains_key(transport_session_id)
+    }
 
     pub(crate) async fn rpc_protocol_version(&self, transport_session_id: &str) -> u8 {
         self.rpc_protocol_versions
@@ -829,6 +835,19 @@ impl SessionRuntimeState {
 
     pub(crate) async fn btw_request(&self, btw_id: &str) -> Option<BtwRequestRoute> {
         self.btw_requests.read().await.get(btw_id).cloned()
+    }
+
+    pub(crate) async fn btw_requests_for_owner(
+        &self,
+        owner_connection_id: u64,
+    ) -> Vec<(String, BtwRequestRoute)> {
+        self.btw_requests
+            .read()
+            .await
+            .iter()
+            .filter(|(_btw_id, route)| route.owner_connection_id == owner_connection_id)
+            .map(|(btw_id, route)| (btw_id.clone(), route.clone()))
+            .collect()
     }
 
     pub(crate) async fn remove_btw_request(&self, btw_id: &str) -> Option<BtwRequestRoute> {
@@ -1143,17 +1162,11 @@ pub(crate) struct RpcStateUpdate {
     pub(crate) todo_phases: Option<Vec<TodoPhaseProjection>>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct GetStateApplyOutcome {
-    pub(crate) previous_snapshot: Option<ServerMessage>,
-    pub(crate) target_snapshot: Option<ServerMessage>,
-}
-
 pub(crate) async fn apply_get_state_update(
     state: &AppState,
     transport_session_id: &str,
     update: RpcStateUpdate,
-) -> GetStateApplyOutcome {
+) {
     let target_changed = update.target_session_id != update.current_session_id;
     let pending_create = if target_changed {
         state
@@ -1181,7 +1194,7 @@ pub(crate) async fn apply_get_state_update(
     };
     let effective_session_name = pending_switch_name.clone().or(update.session_name);
 
-    let (previous_snapshot, target_snapshot) = state
+    state
         .events
         .coordinate_sessions_and_emit(state, |sessions| {
             let (previous_snapshot, target_snapshot) = if target_changed {
@@ -1349,13 +1362,13 @@ pub(crate) async fn apply_get_state_update(
             };
 
             let mut messages = Vec::with_capacity(2);
-            if let Some(snapshot) = previous_snapshot.clone() {
+            if let Some(snapshot) = previous_snapshot {
                 messages.push(snapshot);
             }
-            if let Some(snapshot) = target_snapshot.clone() {
+            if let Some(snapshot) = target_snapshot {
                 messages.push(snapshot);
             }
-            ((previous_snapshot, target_snapshot), messages)
+            ((), messages)
         })
         .await;
 
@@ -1390,11 +1403,6 @@ pub(crate) async fn apply_get_state_update(
         if let Err(error) = save_fura_config(state).await {
             warn!(%error, "failed to save remapped session metadata");
         }
-    }
-
-    GetStateApplyOutcome {
-        previous_snapshot,
-        target_snapshot,
     }
 }
 

@@ -680,20 +680,6 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
     }
 }
 
-#[allow(dead_code)]
-pub(crate) fn content_to_text(value: &Value) -> String {
-    content_to_blocks(value)
-        .into_iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text),
-            ContentBlock::Image { mime_type, .. } => Some(format!("[Image: {mime_type}]")),
-            ContentBlock::Thinking { thinking } => Some(thinking),
-            ContentBlock::RedactedThinking => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

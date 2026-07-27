@@ -3,10 +3,8 @@ use serde_json::Value;
 
 use crate::{
     ClientConfig, CodeFileContent, CodeLocation, CodeRange, CodeStatus, CodeTreeEntry,
-    CodeWorkspaceSummary, ConflictAgentMode, ConflictAgentResult, ConflictAgentScope,
-    ConflictFileState, ConflictMagicWandPreview, ConflictRepositorySummary, PresetSummary,
-    ProposedModelConfig, SessionMode, SessionProjection, SessionProjectionDelta, SessionSummary,
-    ThinkingVisibilityPreference,
+    CodeWorkspaceSummary, PresetSummary, ProposedModelConfig, SessionMode, SessionProjection,
+    SessionProjectionDelta, SessionSummary, ThinkingVisibilityPreference,
 };
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -40,22 +38,6 @@ pub(crate) struct WorktreeCreateRequest {
 pub(crate) enum DiffDetailMode {
     FilePatch,
     StatOnly,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum DiffMode {
-    Full,
-    Stat,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum DiffReviewMode {
-    Range,
-    Commit,
 }
 
 #[allow(dead_code)]
@@ -915,40 +897,6 @@ pub(crate) enum ClientMessage {
         character: u32,
         request_id: String,
     },
-    #[serde(rename = "conflict.scan")]
-    ConflictScan { root: String },
-    #[serde(rename = "conflict.file.open")]
-    ConflictFileOpen { repo_id: String, path: String },
-    #[serde(rename = "conflict.file.previewMagicWand")]
-    ConflictFilePreviewMagicWand {
-        repo_id: String,
-        path: String,
-        expected_version: String,
-    },
-    #[serde(rename = "conflict.file.writeResult")]
-    ConflictFileWriteResult {
-        repo_id: String,
-        path: String,
-        content: String,
-        expected_version: String,
-    },
-    #[serde(rename = "conflict.file.stageResolved")]
-    ConflictFileStageResolved {
-        repo_id: String,
-        path: String,
-        expected_version: String,
-    },
-    #[serde(rename = "conflict.agent.run")]
-    ConflictAgentRun {
-        session_id: String,
-        repo_id: String,
-        path: String,
-        expected_version: String,
-        mode: ConflictAgentMode,
-        scope: ConflictAgentScope,
-        conflict_id: Option<String>,
-        instructions: String,
-    },
     #[serde(rename = "plan.approve")]
     PlanApprove {
         session_id: String,
@@ -1065,6 +1013,8 @@ pub(crate) enum ServerMessage {
     },
     #[serde(rename = "session.btw.update")]
     SessionBtwUpdate {
+        #[serde(skip)]
+        target_connection_id: u64,
         target_client_id: String,
         source_session_id: String,
         request_id: String,
@@ -1082,6 +1032,8 @@ pub(crate) enum ServerMessage {
     },
     #[serde(rename = "session.btw.promoted")]
     SessionBtwPromoted {
+        #[serde(skip)]
+        target_connection_id: u64,
         target_client_id: String,
         source_session_id: String,
         request_id: String,
@@ -1216,29 +1168,6 @@ pub(crate) enum ServerMessage {
         status: CodeStatus,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
-    },
-    #[serde(rename = "conflict.snapshot")]
-    ConflictSnapshot {
-        repos: Vec<ConflictRepositorySummary>,
-    },
-    #[serde(rename = "conflict.file")]
-    ConflictFile { file: ConflictFileState },
-    #[serde(rename = "conflict.magicWandPreview")]
-    ConflictMagicWandPreview { preview: ConflictMagicWandPreview },
-    #[serde(rename = "conflict.agentResult")]
-    ConflictAgentResult { result: ConflictAgentResult },
-    #[serde(rename = "conflict.status")]
-    ConflictStatus {
-        repo_id: String,
-        path: Option<String>,
-        state: String,
-        message: String,
-    },
-    #[serde(rename = "conflict.error")]
-    ConflictError {
-        repo_id: Option<String>,
-        path: Option<String>,
-        message: String,
     },
     #[serde(rename = "raw.omp")]
     RawOmp { session_id: String, frame: Value },

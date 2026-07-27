@@ -22,8 +22,8 @@ use tracing::{error, info, warn};
 use crate::{
     AppState, AuthSession, ClientMessage, PlanApprovalMode, ServerMessage,
     append_bridge_debug_event, append_event_debug_client_message,
-    append_event_debug_server_message, client_config, handle_client_message,
-    refresh_session_catalog, release_btw_request_on_disconnect, sessions_snapshot_from_map,
+    append_event_debug_server_message, client_config, handle_client_message_for_connection,
+    refresh_session_catalog, release_btw_requests_on_disconnect, sessions_snapshot_from_map,
 };
 
 const AUTH_SESSION_COOKIE: &str = "fura_session";
@@ -283,12 +283,6 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::CodeDefinition { .. } => "code.definition",
         ClientMessage::CodeReferences { .. } => "code.references",
         ClientMessage::CodeHover { .. } => "code.hover",
-        ClientMessage::ConflictScan { .. } => "conflict.scan",
-        ClientMessage::ConflictFileOpen { .. } => "conflict.file.open",
-        ClientMessage::ConflictFilePreviewMagicWand { .. } => "conflict.file.previewMagicWand",
-        ClientMessage::ConflictFileWriteResult { .. } => "conflict.file.writeResult",
-        ClientMessage::ConflictFileStageResolved { .. } => "conflict.file.stageResolved",
-        ClientMessage::ConflictAgentRun { .. } => "conflict.agent.run",
         ClientMessage::PlanApprove { .. } => "plan.approve",
         ClientMessage::RawRpc { .. } => "raw.rpc",
         ClientMessage::ReviewCommentsList { .. } => "review.comments.list",
@@ -469,7 +463,6 @@ pub(crate) async fn handle_socket(
     let connection_id = next_websocket_connection_id();
     let mut outbound_seq = 0_u64;
     let opened_at = Instant::now();
-    let mut owned_btw_requests = HashMap::<String, String>::new();
     info!(?update_mode, connection_id, "websocket client connected");
     append_websocket_debug_event(
         &state,
@@ -545,7 +538,6 @@ pub(crate) async fn handle_socket(
                         connection_id,
                         &mut outbound_seq,
                         opened_at,
-                        &mut owned_btw_requests,
                     ).await {
                         Ok(FrameOutcome::Continue) => {}
                         Ok(FrameOutcome::Resynced) => {
@@ -641,9 +633,7 @@ pub(crate) async fn handle_socket(
     };
 
     run.await;
-    for (request_id, client_id) in owned_btw_requests {
-        release_btw_request_on_disconnect(&state, client_id, request_id).await;
-    }
+    release_btw_requests_on_disconnect(&state, connection_id).await;
 }
 
 fn client_text_frame_too_large(text: &str) -> bool {
@@ -682,7 +672,6 @@ pub(crate) async fn handle_websocket_frame(
     connection_id: u64,
     outbound_seq: &mut u64,
     opened_at: Instant,
-    owned_btw_requests: &mut HashMap<String, String>,
 ) -> Result<FrameOutcome, axum::Error> {
     let frame = match frame {
         Ok(frame) => frame,
@@ -741,20 +730,14 @@ pub(crate) async fn handle_websocket_frame(
                         &text,
                     )
                     .await;
-                    if let ClientMessage::SessionBtwStart {
-                        client_id,
-                        request_id,
-                        ..
-                    } = &message
-                    {
-                        owned_btw_requests.insert(request_id.clone(), client_id.clone());
-                    }
                     let outcome = if client_message_resyncs_stream(&message, update_mode) {
                         FrameOutcome::Resynced
                     } else {
                         FrameOutcome::Continue
                     };
-                    for response in handle_client_message(state, message).await {
+                    for response in
+                        handle_client_message_for_connection(state, message, connection_id).await
+                    {
                         send_client_message(
                             socket,
                             state,
@@ -936,6 +919,23 @@ fn conflate_server_messages(messages: Vec<ServerMessage>) -> Vec<ServerMessage> 
     indexed.into_iter().map(|(_, message)| message).collect()
 }
 
+pub(crate) fn server_message_visible_to_connection(
+    message: &ServerMessage,
+    connection_id: u64,
+) -> bool {
+    match message {
+        ServerMessage::SessionBtwUpdate {
+            target_connection_id,
+            ..
+        }
+        | ServerMessage::SessionBtwPromoted {
+            target_connection_id,
+            ..
+        } => *target_connection_id == connection_id,
+        _ => true,
+    }
+}
+
 async fn send_client_message(
     socket: &mut WebSocket,
     state: &AppState,
@@ -945,6 +945,9 @@ async fn send_client_message(
     outbound_seq: &mut u64,
     source: &'static str,
 ) -> Result<(), axum::Error> {
+    if !server_message_visible_to_connection(&message, connection_id) {
+        return Ok(());
+    }
     let message = prepare_client_message(message, update_mode);
     *outbound_seq += 1;
     send_json_with_context(
@@ -1180,12 +1183,6 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::CodeReferences { .. } => "code.references",
         ServerMessage::CodeHover { .. } => "code.hover",
         ServerMessage::CodeStatus { .. } => "code.status",
-        ServerMessage::ConflictSnapshot { .. } => "conflict.snapshot",
-        ServerMessage::ConflictFile { .. } => "conflict.file",
-        ServerMessage::ConflictMagicWandPreview { .. } => "conflict.magicWandPreview",
-        ServerMessage::ConflictAgentResult { .. } => "conflict.agentResult",
-        ServerMessage::ConflictStatus { .. } => "conflict.status",
-        ServerMessage::ConflictError { .. } => "conflict.error",
         ServerMessage::RawOmp { .. } => "raw.omp",
         ServerMessage::VoiceStatus { .. } => "voice.status",
         ServerMessage::VoiceDelta { .. } => "voice.delta",
@@ -1525,61 +1522,6 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             status = ?status,
             bytes = message.as_deref().unwrap_or("").len()
         ),
-        ServerMessage::ConflictSnapshot { repos } => info!(
-            direction = "bridge_to_client",
-            message_type = "conflict.snapshot",
-            repo_count = repos.len()
-        ),
-        ServerMessage::ConflictFile { file } => info!(
-            direction = "bridge_to_client",
-            message_type = "conflict.file",
-            repo_id = %file.repo_id,
-            path = %file.path,
-            conflict_count = file.conflicts.len()
-        ),
-        ServerMessage::ConflictMagicWandPreview { preview } => info!(
-            direction = "bridge_to_client",
-            message_type = "conflict.magicWandPreview",
-            repo_id = %preview.repo_id,
-            path = %preview.path,
-            source_version = %preview.source_version,
-            resolved_conflict_count = preview.resolved_conflict_count,
-            remaining_conflict_count = preview.remaining_conflict_count
-        ),
-        ServerMessage::ConflictAgentResult { result } => info!(
-            direction = "bridge_to_client",
-            message_type = "conflict.agentResult",
-            repo_id = %result.repo_id,
-            path = %result.path,
-            mode = ?result.mode,
-            scope = ?result.scope,
-            risk = ?result.risk,
-            has_content = result.content.is_some()
-        ),
-        ServerMessage::ConflictStatus {
-            repo_id,
-            path,
-            state,
-            message,
-        } => info!(
-            direction = "bridge_to_client",
-            message_type = "conflict.status",
-            repo_id = %repo_id,
-            path = path.as_deref().unwrap_or(""),
-            state = %state,
-            bytes = message.len()
-        ),
-        ServerMessage::ConflictError {
-            repo_id,
-            path,
-            message,
-        } => info!(
-            direction = "bridge_to_client",
-            message_type = "conflict.error",
-            repo_id = repo_id.as_deref().unwrap_or(""),
-            path = path.as_deref().unwrap_or(""),
-            bytes = message.len()
-        ),
         ServerMessage::RawOmp { session_id, frame } => info!(
             direction = "bridge_to_client",
             message_type = "raw.omp",
@@ -1663,7 +1605,7 @@ mod tests {
     use crate::{
         ContentBlock, MessageRole, SessionKind, SessionMode, SessionProjection,
         SessionProjectionDelta, SessionStatus, SessionSummary, Timestamp, TranscriptEntry,
-        TranscriptMessage, tests::test_state,
+        TranscriptMessage,
     };
 
     fn test_summary(session_id: &str, message_count: usize) -> SessionSummary {

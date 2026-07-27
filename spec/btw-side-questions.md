@@ -6,11 +6,11 @@ BTW runs a short, read-only side question against a captured OMP conversation po
 
 ## Lifecycle
 
-1. The browser creates a unique request ID and sends `session.btw.start` with its client ID, the live source session ID, and a text-only question.
-2. Fura binds that request to the originating browser client and source RPC transport, then sends OMP `btw_start`.
+1. The browser creates a unique request ID and sends `session.btw.start` with its presentation client ID, the live source session ID, and a text-only question.
+2. Fura binds that request to the server-assigned WebSocket connection and source RPC transport, then sends OMP `btw_start`. The presentation client ID is correlation data, not an authorization credential.
 3. OMP captures an in-memory detached branch snapshot, including any visible in-flight assistant response, and runs an ephemeral model request with a developer reminder forbidding tool use. Tool definitions remain in the request for prompt-cache stability, but any returned tool calls are discarded rather than executed. OMP emits `btw_update` states `started`, `streaming`, and one terminal state.
-4. Fura forwards updates only to the owning browser. The tab renders streamed text independently of the source transcript.
-5. Closing a tab cancels a running request and always releases its OMP state. Browser disconnect performs the same release.
+4. Fura sends updates only on the owning WebSocket connection. The tab renders streamed text independently of the source transcript.
+5. Closing a tab cancels a running request and always releases its OMP state. Browser disconnect performs the same release and changes any active local tab to a dismissible connection error.
 
 Only one BTW request may run per source OMP session. Different live sessions may run independent requests. Image attachments are not supported.
 
@@ -20,7 +20,7 @@ Only one BTW request may run per source OMP session. Different live sessions may
 - `cancelled`: the ephemeral provider request was aborted; the source session is unchanged.
 - `error`: provider, transport, validation, or stale-promotion failure; the source session is unchanged.
 
-Completed, cancelled, and failed requests remain only as browser tabs until dismissed. They are not restored after reconnect.
+Completed, cancelled, and failed requests remain only as browser tabs until dismissed. Active tabs become terminal connection errors after disconnect; no BTW request is restored after reconnect.
 
 ## Promotion
 
@@ -37,9 +37,9 @@ It copies the source artifact directory, sets the source session file as `parent
 
 ## Ownership and teardown
 
-Fura records the browser client ID, source session ID, and RPC transport for every active request. Cancel, release, and promote commands from another browser client are rejected. Updates without a current route are ignored.
+Fura records the server-assigned WebSocket connection, presentation client ID, source session ID, and RPC transport for every live route. Cancel, release, and promote commands from another connection are rejected even if it replays the owning presentation client ID. Targeted events are filtered before WebSocket transmission; updates without a current route are ignored.
 
-Stopping, deleting, replacing, or losing the source RPC transport removes its routes and reports an error to each owning browser. Disconnect releases every request owned by that browser. No BTW route may outlive its transport.
+Completed, cancelled, and failed OMP requests retain their route until release so dismissal can free OMP state. Successful release or promotion removes the route. Stopping, deleting, replacing, or losing the source RPC transport removes its routes and reports an error to each owning browser. Disconnect releases every route owned by that connection. No BTW route may outlive its transport.
 
 ## Non-goals
 
