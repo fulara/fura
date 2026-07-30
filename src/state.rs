@@ -569,6 +569,8 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) pending_rpc_message_pages: Arc<RwLock<HashMap<String, PendingRpcMessagesPage>>>,
     pub(crate) btw_requests: Arc<RwLock<HashMap<String, BtwRequestRoute>>>,
     pub(crate) pending_btw_commands: Arc<RwLock<HashMap<String, PendingBtwCommand>>>,
+    /// `/compact` requests routed through OMP's builtin slash-command handler, keyed by RPC command id.
+    pub(crate) pending_compaction_commands: Arc<RwLock<HashMap<String, String>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -625,6 +627,7 @@ impl SessionRuntimeState {
             pending_rpc_message_pages: Arc::new(RwLock::new(HashMap::new())),
             btw_requests: Arc::new(RwLock::new(HashMap::new())),
             pending_btw_commands: Arc::new(RwLock::new(HashMap::new())),
+            pending_compaction_commands: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -696,6 +699,10 @@ impl SessionRuntimeState {
             .write()
             .await
             .retain(|_id, command| !removed_btw_ids.contains(command.btw_id.as_str()));
+        self.pending_compaction_commands
+            .write()
+            .await
+            .retain(|_id, session_id| session_id != &target_session_id);
         Some(RemovedRpcTransport {
             handle,
             target_session_id,
@@ -870,6 +877,24 @@ impl SessionRuntimeState {
         command_id: &str,
     ) -> Option<PendingBtwCommand> {
         self.pending_btw_commands.write().await.remove(command_id)
+    }
+
+    pub(crate) async fn insert_pending_compaction_command(
+        &self,
+        command_id: String,
+        session_id: String,
+    ) {
+        self.pending_compaction_commands
+            .write()
+            .await
+            .insert(command_id, session_id);
+    }
+
+    pub(crate) async fn take_pending_compaction_command(&self, command_id: &str) -> Option<String> {
+        self.pending_compaction_commands
+            .write()
+            .await
+            .remove(command_id)
     }
 
     pub(crate) async fn register_pending_create(

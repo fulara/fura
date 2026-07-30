@@ -1813,6 +1813,11 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 }
             }
         }
+        if command == Some("prompt")
+            && let Some(command_id) = value_str(frame, "id")
+        {
+            settle_local_only_prompt_result(state, &current_session_id, command_id).await;
+        }
         if matches!(command, Some("prompt" | "set_host_tools")) {
             if let Some(command_id) = value_str(frame, "id") {
                 let cleared_review =
@@ -2332,6 +2337,11 @@ pub(crate) async fn settle_local_only_prompt_result(
     session_id: &str,
     command_id: &str,
 ) {
+    let pending_compaction_session = state
+        .session_runtime
+        .take_pending_compaction_command(command_id)
+        .await;
+    let was_compacting = pending_compaction_session.as_deref() == Some(session_id);
     let draft = state.pending_prompt_drafts.write().await.remove(command_id);
     let draft_message_id = draft
         .as_ref()
@@ -2340,7 +2350,7 @@ pub(crate) async fn settle_local_only_prompt_result(
     let command_notice_message_id = format!("__command_notice:{command_id}");
     let pending_prompt_message_id = format!("__pending_prompt:{command_id}");
 
-    state
+    let snapshot_sent = state
         .events
         .mutate_session_and_emit(state, session_id, |record| {
             let before = record.messages.len();
@@ -2358,11 +2368,14 @@ pub(crate) async fn settle_local_only_prompt_result(
                 }
                 true
             });
+            if was_compacting {
+                record.is_compacting = false;
+            }
             if had_draft {
                 record.status = SessionStatus::Idle;
                 record.streaming_message = None;
             }
-            if record.messages.len() == before && !had_draft {
+            if record.messages.len() == before && !had_draft && !was_compacting {
                 return None;
             }
             Some(ServerMessage::SessionSnapshot {
@@ -2371,6 +2384,9 @@ pub(crate) async fn settle_local_only_prompt_result(
             })
         })
         .await;
+    if was_compacting && snapshot_sent {
+        broadcast_sessions_snapshot(state).await;
+    }
 }
 
 pub(crate) async fn discard_pending_prompt_drafts_for_session(state: &AppState, session_id: &str) {

@@ -1681,13 +1681,6 @@ pub(crate) async fn handle_slash_command(
             .await
         }
         "abort" => abort_prompt(state, session_id).await,
-        "compact" => {
-            let mut command = serde_json::json!({ "id": next_rpc_id(), "type": "compact" });
-            if !args.is_empty() {
-                command["customInstructions"] = Value::String(args.to_string());
-            }
-            begin_session_compaction(state, session_id, command).await
-        }
         "handoff" => {
             let mut command = serde_json::json!({ "id": next_rpc_id(), "type": "handoff" });
             if !args.is_empty() {
@@ -2160,28 +2153,6 @@ pub(crate) async fn set_session_compacting(state: &AppState, session_id: &str, c
     }
 }
 
-/// Marks the session as compacting for immediate UI feedback, then forwards the `compact`
-/// RPC command. The flag is cleared when OMP returns the `compact` response
-/// (`apply_rpc_response`) or rolled back here if the command cannot be sent.
-async fn begin_session_compaction(
-    state: &AppState,
-    session_id: String,
-    command: Value,
-) -> Vec<ServerMessage> {
-    set_session_compacting(state, &session_id, true).await;
-    match send_rpc_command(state, &session_id, command).await {
-        Ok(()) => vec![notice(
-            session_id,
-            NoticeLevel::Info,
-            "Compacting session context…",
-        )],
-        Err(message) => {
-            set_session_compacting(state, &session_id, false).await;
-            vec![notice(session_id, NoticeLevel::Error, message)]
-        }
-    }
-}
-
 pub(crate) fn parse_slash_command(text: &str) -> Option<(String, String)> {
     let body = text.strip_prefix('/')?.trim();
     if body.is_empty() {
@@ -2236,6 +2207,9 @@ pub(crate) async fn send_prompt(
 
     let suppress_optimistic_prompt =
         behavior.is_none() && !has_images && parse_slash_command(text.trim()).is_some();
+    let is_compaction_command = behavior.is_none()
+        && !has_images
+        && parse_slash_command(text.trim()).is_some_and(|(name, _args)| name == "compact");
 
     if !state.sessions.read().await.contains_key(&session_id) {
         return vec![unknown_session_error(session_id)];
@@ -2253,6 +2227,9 @@ pub(crate) async fn send_prompt(
     let command_images = images.filter(|images| !images.is_empty());
 
     let command_notice_message_id = format!("__command_notice:{command_id}");
+    if is_compaction_command {
+        set_session_compacting(state, &session_id, true).await;
+    }
 
     if suppress_optimistic_prompt {
         let snapshot_sent = state
@@ -2300,6 +2277,13 @@ pub(crate) async fn send_prompt(
         }
     }
 
+    if is_compaction_command {
+        state
+            .session_runtime
+            .insert_pending_compaction_command(command_id.clone(), session_id.clone())
+            .await;
+    }
+
     let command = prompt_command(command_id.clone(), text, command_images, behavior);
 
     match send_rpc_command(state, &session_id, command).await {
@@ -2310,11 +2294,19 @@ pub(crate) async fn send_prompt(
                 .write()
                 .await
                 .remove(&command_id);
+            let pending_compaction = state
+                .session_runtime
+                .take_pending_compaction_command(&command_id)
+                .await
+                .is_some();
             if suppress_optimistic_prompt {
                 remove_optimistic_prompt_message(state, &session_id, &command_notice_message_id)
                     .await;
             } else {
                 remove_optimistic_prompt_message(state, &session_id, &optimistic_message_id).await;
+            }
+            if pending_compaction {
+                set_session_compacting(state, &session_id, false).await;
             }
             vec![ServerMessage::Error {
                 request_id: None,

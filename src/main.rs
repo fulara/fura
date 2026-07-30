@@ -4072,6 +4072,153 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn slash_compact_reuses_omp_builtin_prompt_path_and_settles_ui_state() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
+
+        let responses = send_prompt(
+            &state,
+            "s1".to_string(),
+            "/compact snapcompact".to_string(),
+            None,
+            None,
+        )
+        .await;
+
+        assert!(responses.is_empty());
+        let command = commands
+            .recv()
+            .await
+            .expect("OMP builtin prompt command sent");
+        let command_id = command
+            .get("id")
+            .and_then(|value| value.as_str())
+            .expect("prompt command id")
+            .to_string();
+        assert_eq!(
+            command.get("type").and_then(|value| value.as_str()),
+            Some("prompt"),
+            "Fura must not bypass OMP's builtin /compact parser with the low-level compact RPC"
+        );
+        assert_eq!(
+            command.get("message").and_then(|value| value.as_str()),
+            Some("/compact snapcompact")
+        );
+        assert!(
+            state
+                .sessions
+                .read()
+                .await
+                .get("s1")
+                .expect("record remains")
+                .is_compacting
+        );
+        assert_eq!(
+            state
+                .session_runtime
+                .pending_compaction_commands
+                .read()
+                .await
+                .get(&command_id)
+                .map(String::as_str),
+            Some("s1")
+        );
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "id": command_id,
+                "type": "response",
+                "command": "prompt",
+                "success": true,
+                "data": {
+                    "agentInvoked": false
+                }
+            }),
+        )
+        .await;
+
+        assert!(
+            state
+                .session_runtime
+                .pending_compaction_commands
+                .read()
+                .await
+                .is_empty()
+        );
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert!(!record.is_compacting);
+        assert!(
+            !record
+                .messages
+                .iter()
+                .any(|message| { message.id == format!("__command_notice:{command_id}") })
+        );
+    }
+
+    #[tokio::test]
+    async fn slash_compact_error_unlocks_the_session() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut commands = register_test_transport(&state, "s1", "s1", 4).await;
+
+        let responses =
+            send_prompt(&state, "s1".to_string(), "/compact".to_string(), None, None).await;
+        assert!(responses.is_empty());
+        let command = commands
+            .recv()
+            .await
+            .expect("OMP builtin prompt command sent");
+        let command_id = command
+            .get("id")
+            .and_then(|value| value.as_str())
+            .expect("prompt command id")
+            .to_string();
+
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "id": command_id,
+                "type": "response",
+                "command": "prompt",
+                "success": false,
+                "error": "Nothing to compact (session too small)"
+            }),
+        )
+        .await;
+
+        assert!(
+            state
+                .session_runtime
+                .pending_compaction_commands
+                .read()
+                .await
+                .is_empty()
+        );
+        let sessions = state.sessions.read().await;
+        let record = sessions.get("s1").expect("record remains");
+        assert!(!record.is_compacting);
+        assert!(
+            !record
+                .messages
+                .iter()
+                .any(|message| message.id == format!("__command_notice:{command_id}"))
+        );
+    }
+
+    #[tokio::test]
     async fn prompt_result_false_settles_slash_passthrough_command_notice() {
         let state = test_state(8, None);
         state

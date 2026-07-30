@@ -350,6 +350,16 @@ describe("renderMarkdown", () => {
     expect([...node.querySelectorAll("p")].some(paragraph => paragraph.textContent?.includes("\\frac"))).toBe(false);
   });
 
+  it("renders inline math without parsing code or prices as math", () => {
+    const node = renderMarkdown("Potencjał $V_t$, kod `$V_t$`, ceny $5 and $10.");
+
+    expect(node.querySelectorAll(".math-inline")).toHaveLength(1);
+    expect(node.querySelector(".math-inline .katex")).not.toBeNull();
+    expect(node.querySelector(".math-inline math annotation")?.textContent).toBe("V_t");
+    expect(node.querySelector("code")?.textContent).toBe("$V_t$");
+    expect(node.textContent).toContain("$5 and $10");
+  });
+
 
   it("does not create javascript links", () => {
     const node = renderMarkdown("[bad](javascript:alert(1))");

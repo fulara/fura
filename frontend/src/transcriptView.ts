@@ -16,6 +16,24 @@ import {
 } from "./transcriptReview";
 import type { ThinkingVisibilityMode } from "./uiPreferences";
 
+const INLINE_MATH = /^\$(?!\s)([^$\n]*?\S)\$(?!\d)/;
+
+marked.use({
+  extensions: [{
+    name: "inlineMath",
+    level: "inline",
+    start: source => {
+      const index = source.indexOf("$");
+      return index >= 0 ? index : undefined;
+    },
+    tokenizer: source => {
+      const match = INLINE_MATH.exec(source);
+      if (!match) return undefined;
+      return { type: "inlineMath", raw: match[0], text: match[1] };
+    },
+  }],
+});
+
 type RenderedMessageState = {
   message: TranscriptMessage;
   signature: string;
@@ -474,21 +492,21 @@ function appendMarkdownWithRichBlocks(wrapper: HTMLElement, text: string): void 
     const math = match[2] ?? match[3];
     if (math !== undefined && !math.trim()) continue;
     appendMarkdownTokens(wrapper, text.slice(cursor, match.index));
-    wrapper.append(match[1] !== undefined ? renderCodeBlock("diff", match[1]) : renderMathBlock(math));
+    wrapper.append(match[1] !== undefined ? renderCodeBlock("diff", match[1]) : renderMath(math, true));
     cursor = richBlock.lastIndex;
   }
   appendMarkdownTokens(wrapper, text.slice(cursor));
 }
-function renderMathBlock(source: string): HTMLElement {
-  const block = mkEl("div");
-  block.className = "math-block";
-  katex.render(source.trim(), block, {
-    displayMode: true,
+function renderMath(source: string, displayMode: boolean): HTMLElement {
+  const element: HTMLElement = displayMode ? mkEl("div") : mkEl("span");
+  element.className = displayMode ? "math-block" : "math-inline";
+  katex.render(source.trim(), element, {
+    displayMode,
     throwOnError: false,
     strict: "ignore",
     trust: false,
   });
-  return block;
+  return element;
 }
 
 
@@ -687,6 +705,10 @@ function renderInlineTokens(tokens: Token[]): DocumentFragment {
 }
 
 function renderInlineToken(token: Token): Node {
+  if (token.type === "inlineMath") {
+    return renderMath((token as Tokens.Generic).text, false);
+  }
+
   switch (token.type) {
     case "text": {
       const text = token as Tokens.Text;
