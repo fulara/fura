@@ -1,11 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { compareRpcContract } from "./check-omp-rpc-contract";
+import { join } from "node:path";
+import { compareRpcContract, runRpcContractCheckCli } from "./check-omp-rpc-contract";
 
 const temporaryRoots: string[] = [];
-const checkerPath = join(import.meta.dir, "check-omp-rpc-contract.ts");
 
 interface FixtureTree {
 	root: string;
@@ -131,14 +130,15 @@ describe("OMP RPC contract parity checker", () => {
 	});
 
 	test("rejects more than one CLI argument and exits with code 2", async () => {
-		const child = Bun.spawn([process.execPath, checkerPath, "first", "second"], {
-			cwd: dirname(checkerPath),
-			stdout: "pipe",
-			stderr: "pipe",
+		const stdout: string[] = [];
+		const stderr: string[] = [];
+		const exitCode = await runRpcContractCheckCli(["first", "second"], {
+			stdout: line => stdout.push(line),
+			stderr: line => stderr.push(line),
 		});
-		const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
 
 		expect(exitCode).toBe(2);
-		expect(stderr.trim()).toBe("Usage: bun scripts/check-omp-rpc-contract.ts [OMP_ROOT]");
+		expect(stdout).toEqual([]);
+		expect(stderr).toEqual(["Usage: bun scripts/check-omp-rpc-contract.ts [OMP_ROOT]"]);
 	});
 });

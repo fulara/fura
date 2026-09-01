@@ -2185,11 +2185,14 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             if snapshot_sent {
                 broadcast_sessions_snapshot(state).await;
             }
-            // Queue the requested name before refresh so set_session_name reaches OMP before get_state.
-            // Keep the pending name until get_state reports the new OMP session id, then apply it to that target.
-            let pending_name = state.session_runtime.pending_session_name(session_id).await;
-            if let Some(ref name) = pending_name {
-                let cmd = set_session_name_command(next_rpc_id(), name.clone());
+            // Handoff now keeps the OMP session id and file. Apply the requested
+            // Fura title to that same session before refreshing its new transcript.
+            let pending_name = state
+                .session_runtime
+                .remove_pending_session_name(&current_session_id)
+                .await;
+            if let Some(name) = pending_name {
+                let cmd = set_session_name_command(next_rpc_id(), name);
                 if let Err(e) = send_rpc_command(state, session_id, cmd).await {
                     warn!(session_id = %session_id, error = %e, "failed to queue set_session_name after handoff");
                 }
@@ -2204,7 +2207,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     notice(
                         current_session_id,
                         NoticeLevel::Info,
-                        "Handoff complete. New session context loaded.",
+                        "Handoff complete. Session context replaced.",
                     ),
                 )
                 .await;

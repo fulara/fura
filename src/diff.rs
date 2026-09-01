@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{BufRead, BufReader as StdBufReader},
     path::{Path, PathBuf},
@@ -22,6 +22,7 @@ const MAX_DIFF_FILE_PATCH_BYTES: usize = 1_000_000;
 const MAX_GIT_OUTPUT_BYTES: usize = 4_000_000;
 const DEFAULT_DIFF_CONTEXT_LINES: u32 = 3;
 const MAX_DIFF_CONTEXT_LINES: u32 = 200;
+const OMP_SNAPSHOT_REF_PREFIX: &str = "refs/omp/diff-snapshots/";
 
 #[derive(Debug, Default)]
 pub(crate) struct DiffReviewWorktreeRegistry {
@@ -1092,6 +1093,11 @@ struct SessionDiffSnapshot {
     created_at: String,
 }
 
+pub(crate) struct DeletedSessionSnapshotRefCleanup {
+    deleted_snapshots: Vec<SessionDiffSnapshot>,
+    retained_refs: HashSet<(String, String)>,
+}
+
 impl SessionDiffSnapshot {
     fn summary(&self) -> SessionDiffSnapshotSummary {
         SessionDiffSnapshotSummary {
@@ -1167,6 +1173,81 @@ fn read_session_diff_snapshots(path: &Path) -> Vec<SessionDiffSnapshot> {
         });
     }
     snapshots
+}
+
+pub(crate) fn prepare_deleted_session_snapshot_ref_cleanup(
+    deleted_session_file: &Path,
+) -> Option<DeletedSessionSnapshotRefCleanup> {
+    let deleted_snapshots = read_session_diff_snapshots(deleted_session_file);
+    if deleted_snapshots.is_empty() {
+        return None;
+    }
+    let parent = deleted_session_file.parent()?;
+    let sibling_files = fs::read_dir(parent).ok()?;
+    let retained_refs = sibling_files
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path != deleted_session_file && path.extension().is_some_and(|ext| ext == "jsonl")
+        })
+        .flat_map(|path| read_session_diff_snapshots(&path))
+        .map(|snapshot| (snapshot.repo_root, snapshot.ref_name))
+        .collect();
+    Some(DeletedSessionSnapshotRefCleanup {
+        deleted_snapshots,
+        retained_refs,
+    })
+}
+
+pub(crate) async fn cleanup_deleted_session_snapshot_refs(
+    prepared: DeletedSessionSnapshotRefCleanup,
+) -> anyhow::Result<()> {
+    let mut seen = HashSet::new();
+    let mut failures = Vec::new();
+    for snapshot in prepared.deleted_snapshots {
+        let key = (snapshot.repo_root.clone(), snapshot.ref_name.clone());
+        if !seen.insert(key.clone())
+            || prepared.retained_refs.contains(&key)
+            || !snapshot.ref_name.starts_with(OMP_SNAPSHOT_REF_PREFIX)
+        {
+            continue;
+        }
+        if let Err(error) = cleanup_snapshot_ref(&snapshot).await {
+            failures.push(error.to_string());
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "failed to delete one or more repository diff snapshot refs: {}",
+            failures.join("; ")
+        )
+    }
+}
+
+async fn cleanup_snapshot_ref(snapshot: &SessionDiffSnapshot) -> anyhow::Result<()> {
+    let repo_root = discover_repo_root(&snapshot.repo_root)?;
+    if !snapshot_repo_matches(&snapshot.repo_root, &repo_root) {
+        bail!("snapshot repository root changed: {}", snapshot.repo_root);
+    }
+    let commit_ref = format!("{}^{{commit}}", snapshot.ref_name);
+    let Ok(resolved) = git_stdout(
+        &repo_root,
+        &["rev-parse", "--verify", "--end-of-options", &commit_ref],
+        1024,
+    )
+    .await
+    else {
+        // Missing or concurrently removed refs are already clean. Any other
+        // lookup failure must remain a conservative no-op.
+        return Ok(());
+    };
+    if resolved.trim() != snapshot.commit {
+        return Ok(());
+    }
+    git_stdout(&repo_root, &["update-ref", "-d", &snapshot.ref_name], 1024).await?;
+    Ok(())
 }
 
 fn snapshot_repo_matches(snapshot_repo: &str, repo_root: &Path) -> bool {
@@ -3151,6 +3232,75 @@ mod tests {
                 .files
                 .iter()
                 .any(|file| file.new_path == "untracked.txt")
+        );
+    }
+
+    #[tokio::test]
+    async fn keeps_shared_snapshot_refs_until_final_session_deletion() {
+        let (_temp, repo, base, _head) = test_repo();
+        let snapshot_ref = "refs/omp/diff-snapshots/shared-session-start";
+        git(&repo, &["update-ref", snapshot_ref, &base]);
+        let tree = git_output(&repo, &["rev-parse", &format!("{base}^{{tree}}")]);
+        let snapshot = serde_json::json!({
+            "type": "custom",
+            "customType": "repo-diff-snapshot",
+            "data": {
+                "version": 1,
+                "commit": base,
+                "createdAt": "2026-05-04T00:00:00.000Z",
+                "headCommit": base,
+                "kind": "session-start",
+                "label": "session-start",
+                "ref": snapshot_ref,
+                "repoRoot": repo,
+                "tree": tree
+            },
+            "id": "snapshot-entry",
+            "parentId": null,
+            "timestamp": "2026-05-04T00:00:00.000Z"
+        });
+        let first_session = repo.join("first.jsonl");
+        let second_session = repo.join("second.jsonl");
+        fs::write(&first_session, format!("{snapshot}\n")).expect("first session");
+        fs::write(&second_session, format!("{snapshot}\n")).expect("second session");
+
+        let first_cleanup = prepare_deleted_session_snapshot_ref_cleanup(&first_session)
+            .expect("first cleanup preparation");
+        assert!(
+            StdCommand::new("git")
+                .current_dir(&repo)
+                .args(["show-ref", "--verify", "--quiet", snapshot_ref])
+                .status()
+                .expect("git should run")
+                .success(),
+            "preparing cleanup must not delete refs before the session file"
+        );
+        fs::remove_file(&first_session).expect("delete first session");
+        cleanup_deleted_session_snapshot_refs(first_cleanup)
+            .await
+            .expect("shared ref cleanup");
+        assert!(
+            StdCommand::new("git")
+                .current_dir(&repo)
+                .args(["show-ref", "--verify", "--quiet", snapshot_ref])
+                .status()
+                .expect("git should run")
+                .success()
+        );
+
+        let second_cleanup = prepare_deleted_session_snapshot_ref_cleanup(&second_session)
+            .expect("second cleanup preparation");
+        fs::remove_file(&second_session).expect("delete second session");
+        cleanup_deleted_session_snapshot_refs(second_cleanup)
+            .await
+            .expect("final ref cleanup");
+        assert!(
+            !StdCommand::new("git")
+                .current_dir(&repo)
+                .args(["show-ref", "--verify", "--quiet", snapshot_ref])
+                .status()
+                .expect("git should run")
+                .success()
         );
     }
 

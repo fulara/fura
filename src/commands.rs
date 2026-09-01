@@ -1577,10 +1577,10 @@ pub(crate) async fn delete_session(
     // Grab paths before dropping from catalog.
     let (session_file, session_worktree) = {
         let sessions = state.sessions.read().await;
-        match sessions.get(&session_id) {
-            Some(record) => (record.session_file.clone(), record.worktree.clone()),
-            None => return vec![unknown_session_error(session_id)],
-        }
+        let Some(record) = sessions.get(&session_id) else {
+            return vec![unknown_session_error(session_id)];
+        };
+        (record.session_file.clone(), record.worktree.clone())
     };
 
     if delete_worktree && session_worktree.is_none() {
@@ -1596,8 +1596,20 @@ pub(crate) async fn delete_session(
 
     // Delete session file and sibling artifacts directory.
     if let Some(ref file) = session_file {
+        let snapshot_ref_cleanup =
+            crate::diff::prepare_deleted_session_snapshot_ref_cleanup(Path::new(file));
         match fs::remove_file(file) {
-            Ok(()) => info!(session_id = %session_id, file = %file, "deleted session file"),
+            Ok(()) => {
+                if let Some(snapshot_ref_cleanup) = snapshot_ref_cleanup {
+                    if let Err(error) =
+                        crate::diff::cleanup_deleted_session_snapshot_refs(snapshot_ref_cleanup)
+                            .await
+                    {
+                        warn!(session_id = %session_id, file = %file, %error, "failed to clean up repository diff snapshot refs");
+                    }
+                }
+                info!(session_id = %session_id, file = %file, "deleted session file");
+            }
             Err(error) => {
                 warn!(session_id = %session_id, file = %file, %error, "failed to delete session file")
             }

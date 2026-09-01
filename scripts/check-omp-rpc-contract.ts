@@ -184,18 +184,27 @@ export async function compareRpcContract(
 	};
 }
 
-async function main(): Promise<void> {
-	const args = Bun.argv.slice(2);
-	if (args.length > 1) {
-		console.error(USAGE);
-		process.exit(2);
-	}
-	const result = await compareRpcContract(args[0] ?? DEFAULT_OMP_ROOT);
-	for (const error of result.errors) console.error(error);
-	for (const difference of result.differences) console.error(difference);
-	const output = result.exitCode === 0 ? console.log : console.error;
-	output(result.summary);
-	process.exit(result.exitCode);
+export interface RpcContractCliOutput {
+	stdout(line: string): void;
+	stderr(line: string): void;
 }
 
-if (import.meta.main) await main();
+export async function runRpcContractCheckCli(
+	args: string[],
+	output: RpcContractCliOutput = {
+		stdout: line => console.log(line),
+		stderr: line => console.error(line),
+	},
+): Promise<0 | 1 | 2> {
+	if (args.length > 1) {
+		output.stderr(USAGE);
+		return 2;
+	}
+	const result = await compareRpcContract(args[0] ?? DEFAULT_OMP_ROOT);
+	for (const error of result.errors) output.stderr(error);
+	for (const difference of result.differences) output.stderr(difference);
+	(result.exitCode === 0 ? output.stdout : output.stderr)(result.summary);
+	return result.exitCode;
+}
+
+if (import.meta.main) process.exit(await runRpcContractCheckCli(Bun.argv.slice(2)));

@@ -561,7 +561,7 @@ pub(crate) struct SessionRuntimeState {
     /// Metadata for a newly spawned RPC child before OMP reports its real session id.
     pub(crate) pending_created_sessions: Arc<RwLock<HashMap<String, PendingCreatedSession>>>,
     pub(crate) recent_rpc_stderr: Arc<RwLock<HashMap<String, Vec<String>>>>,
-    /// Name to apply to the next new session spawned by a fork or handoff on this transport.
+    /// Name to apply after a session switch or in-place handoff on this transport.
     pub(crate) pending_new_session_names: Arc<RwLock<HashMap<String, String>>>,
     /// Approved plan metadata waiting for / attached to the execution session spawned by OMP.
     pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,

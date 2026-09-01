@@ -1971,6 +1971,18 @@ pub(crate) mod tests {
                         other => panic!("unexpected BTW state {other}"),
                     }
                 }
+                OmpRpcFrame::ExtensionUiRequest {
+                    method, payload, ..
+                } if entry.name == "extension-ui-request-select" => {
+                    assert_eq!(method, "select");
+                    assert_eq!(
+                        payload
+                            .get("optionDetails")
+                            .and_then(Value::as_array)
+                            .map(Vec::len),
+                        Some(2)
+                    );
+                }
                 OmpRpcFrame::Unknown => panic!("{} decoded as unknown", entry.name),
                 _ => {}
             }
@@ -7346,7 +7358,7 @@ pub(crate) mod tests {
             .session_runtime
             .set_pending_session_name(
                 "old-session".to_string(),
-                "Requested handoff name".to_string(),
+                "Requested switch name".to_string(),
             )
             .await;
 
@@ -7377,14 +7389,14 @@ pub(crate) mod tests {
             assert_eq!(
                 previous.messages.len(),
                 2,
-                "previous transcript must not be replaced by handoff context"
+                "previous transcript must not be replaced by switched-session context"
             );
 
             let next = sessions.get("new-session").expect("new record is visible");
             assert!(matches!(next.kind, SessionKind::Managed));
             assert!(matches!(next.status, SessionStatus::Idle));
             assert_eq!(next.session_file.as_deref(), Some("new-session.jsonl"));
-            assert_eq!(next.title.as_deref(), Some("Requested handoff name"));
+            assert_eq!(next.title.as_deref(), Some("Requested switch name"));
             assert!(next.messages.is_empty());
         }
 
@@ -7407,13 +7419,13 @@ pub(crate) mod tests {
                 .session_runtime
                 .has_pending_session_name("old-session")
                 .await,
-            "pending handoff name should be consumed once the new session id is known"
+            "pending switch name should be consumed once the new session id is known"
         );
         assert!(
             rpc_transport_session_id(&state, "old-session")
                 .await
                 .is_none(),
-            "previous session must not send prompts to the handoff transport"
+            "previous session must not send prompts to the switched transport"
         );
 
         apply_rpc_frame(
@@ -7457,7 +7469,7 @@ pub(crate) mod tests {
                 .expect("previous record remains");
             assert!(
                 previous.active_tool_calls.is_empty() && previous.tool_cards.is_empty(),
-                "tool progress from the post-handoff transport must not attach to the previous session",
+                "tool progress from the switched transport must not attach to the previous session",
             );
 
             let next = sessions.get("new-session").expect("new record remains");
@@ -7498,5 +7510,127 @@ pub(crate) mod tests {
         let next = sessions.get("new-session").expect("new record remains");
         assert_eq!(next.messages.len(), 1);
         assert_eq!(next.messages[0].id, "handoff-context");
+    }
+
+    #[tokio::test]
+    async fn rpc_handoff_replaces_context_in_place_without_remapping_the_transport() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.id = "session-1".to_string();
+        record.kind = SessionKind::Managed;
+        record.status = SessionStatus::Busy;
+        record.session_file = Some("session-1.jsonl".to_string());
+        record.messages = vec![text_message("old-user", "original question")];
+        state
+            .sessions
+            .write()
+            .await
+            .insert("session-1".to_string(), record);
+        let mut commands = register_test_transport(&state, "transport-1", "session-1", 8).await;
+
+        let responses = handle_session_handoff(
+            &state,
+            "session-1".to_string(),
+            "Focused continuation".to_string(),
+            Some("Continue with the RPC migration.".to_string()),
+        )
+        .await;
+        assert!(responses.is_empty());
+        let handoff = commands.recv().await.expect("handoff command");
+        assert_eq!(handoff["type"], "handoff");
+        assert_eq!(
+            handoff["customInstructions"],
+            "Continue with the RPC migration."
+        );
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "handoff",
+                "success": true,
+                "data": { "savedPath": "local://handoff.md" }
+            }),
+        )
+        .await;
+
+        let mut command_types = Vec::new();
+        for _ in 0..5 {
+            command_types.push(
+                commands.recv().await.expect("post-handoff command")["type"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+        assert_eq!(
+            command_types,
+            [
+                "set_session_name",
+                "get_state",
+                "get_messages",
+                "get_session_stats",
+                "get_available_commands",
+            ]
+        );
+        assert!(
+            !state
+                .session_runtime
+                .has_pending_session_name("session-1")
+                .await
+        );
+        assert_eq!(
+            state
+                .session_runtime
+                .target_session_id_for_transport("transport-1")
+                .await,
+            "session-1"
+        );
+
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "session-1",
+                    "sessionFile": "session-1.jsonl",
+                    "sessionName": "Focused continuation"
+                }
+            }),
+        )
+        .await;
+        apply_rpc_response(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_messages",
+                "success": true,
+                "data": {
+                    "messages": [{
+                        "id": "handoff-context",
+                        "role": "custom",
+                        "display": true,
+                        "customType": "handoff",
+                        "content": [{ "type": "text", "text": "replacement context" }]
+                    }]
+                }
+            }),
+        )
+        .await;
+
+        let sessions = state.sessions.read().await;
+        assert_eq!(sessions.len(), 1);
+        let session = sessions.get("session-1").expect("same session remains");
+        assert!(matches!(session.kind, SessionKind::Managed));
+        assert!(matches!(session.status, SessionStatus::Idle));
+        assert_eq!(session.session_file.as_deref(), Some("session-1.jsonl"));
+        assert_eq!(session.title.as_deref(), Some("Focused continuation"));
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].id, "handoff-context");
     }
 }
