@@ -140,6 +140,24 @@ pub(crate) async fn handle_client_message_for_connection(
             images,
             behavior,
         } => send_prompt(state, session_id, text, images, behavior).await,
+        ClientMessage::SessionRewindList {
+            session_id,
+            request_id,
+        } => handle_session_rewind_list(state, owner_connection_id, session_id, request_id).await,
+        ClientMessage::SessionRewindSelect {
+            session_id,
+            request_id,
+            entry_id,
+        } => {
+            handle_session_rewind_select(
+                state,
+                owner_connection_id,
+                session_id,
+                request_id,
+                entry_id,
+            )
+            .await
+        }
         ClientMessage::PromptAbort { session_id } => abort_prompt(state, session_id).await,
         ClientMessage::SessionBtwStart {
             client_id,
@@ -514,6 +532,191 @@ pub(crate) async fn handle_client_message_for_connection(
             custom_instructions,
         } => handle_session_handoff(state, session_id, name, custom_instructions).await,
     }
+}
+fn session_rewind_error(
+    target_connection_id: u64,
+    request_id: String,
+    source_session_id: String,
+    session_id: String,
+    message: impl Into<String>,
+) -> ServerMessage {
+    ServerMessage::SessionRewindError {
+        target_connection_id: Some(target_connection_id),
+        request_id,
+        source_session_id,
+        session_id,
+        message: message.into(),
+    }
+}
+
+async fn rewind_transport_for_managed_session(
+    state: &AppState,
+    session_id: &str,
+) -> Result<String, String> {
+    let is_managed = state
+        .sessions
+        .read()
+        .await
+        .get(session_id)
+        .is_some_and(|record| record.kind == SessionKind::Managed);
+    if !is_managed {
+        return Err("Rollback is only available for a managed session.".to_string());
+    }
+    let transport_session_id = rpc_transport_session_id(state, session_id)
+        .await
+        .ok_or_else(|| "This session has no live OMP process.".to_string())?;
+    if !state
+        .session_runtime
+        .contains_transport(&transport_session_id)
+        .await
+    {
+        return Err("This session has no live OMP process.".to_string());
+    }
+    Ok(transport_session_id)
+}
+
+async fn handle_session_rewind_list(
+    state: &AppState,
+    owner_connection_id: u64,
+    session_id: String,
+    request_id: String,
+) -> Vec<ServerMessage> {
+    let transport_session_id = match rewind_transport_for_managed_session(state, &session_id).await
+    {
+        Ok(transport_session_id) => transport_session_id,
+        Err(message) => {
+            return vec![session_rewind_error(
+                owner_connection_id,
+                request_id,
+                session_id.clone(),
+                session_id,
+                message,
+            )];
+        }
+    };
+    let command_id = next_rpc_id();
+    let route = RewindRoute {
+        target_connection_id: Some(owner_connection_id),
+        request_id: request_id.clone(),
+        source_session_id: session_id.clone(),
+        transport_session_id: transport_session_id.clone(),
+    };
+    if !state
+        .session_runtime
+        .insert_pending_rewind_list(command_id.clone(), route)
+        .await
+    {
+        return vec![session_rewind_error(
+            owner_connection_id,
+            request_id,
+            session_id.clone(),
+            session_id,
+            "A rollback is already in progress for this session.",
+        )];
+    }
+    if let Err(message) = send_rpc_command(
+        state,
+        &transport_session_id,
+        get_branch_messages_command(command_id.clone()),
+    )
+    .await
+        && state
+            .session_runtime
+            .take_pending_rewind_rpc(&command_id)
+            .await
+            .is_some()
+    {
+        return vec![session_rewind_error(
+            owner_connection_id,
+            request_id,
+            session_id.clone(),
+            session_id,
+            message,
+        )];
+    }
+    Vec::new()
+}
+
+async fn handle_session_rewind_select(
+    state: &AppState,
+    owner_connection_id: u64,
+    session_id: String,
+    request_id: String,
+    entry_id: String,
+) -> Vec<ServerMessage> {
+    let available = state
+        .sessions
+        .read()
+        .await
+        .get(&session_id)
+        .is_some_and(|record| {
+            record.kind == SessionKind::Managed
+                && record.effective_status() == SessionStatus::Idle
+                && !record.is_compacting
+        });
+    if !available {
+        return vec![session_rewind_error(
+            owner_connection_id,
+            request_id,
+            session_id.clone(),
+            session_id,
+            "Rollback requires an idle managed session.",
+        )];
+    }
+    let transport_session_id = match rewind_transport_for_managed_session(state, &session_id).await
+    {
+        Ok(transport_session_id) => transport_session_id,
+        Err(message) => {
+            return vec![session_rewind_error(
+                owner_connection_id,
+                request_id,
+                session_id.clone(),
+                session_id,
+                message,
+            )];
+        }
+    };
+    let command_id = next_rpc_id();
+    let route = RewindRoute {
+        target_connection_id: Some(owner_connection_id),
+        request_id: request_id.clone(),
+        source_session_id: session_id.clone(),
+        transport_session_id: transport_session_id.clone(),
+    };
+    if !state
+        .session_runtime
+        .insert_pending_rewind_branch(command_id.clone(), route)
+        .await
+    {
+        return vec![session_rewind_error(
+            owner_connection_id,
+            request_id,
+            session_id.clone(),
+            session_id,
+            "A rollback is already in progress for this session.",
+        )];
+    }
+    if let Err(message) = send_rpc_command(
+        state,
+        &transport_session_id,
+        branch_command(command_id.clone(), entry_id),
+    )
+    .await
+        && state
+            .session_runtime
+            .take_pending_rewind_rpc(&command_id)
+            .await
+            .is_some()
+    {
+        return vec![session_rewind_error(
+            owner_connection_id,
+            request_id,
+            session_id.clone(),
+            session_id,
+            message,
+        )];
+    }
+    Vec::new()
 }
 
 pub(crate) fn normalize_optional_field(value: Option<String>) -> Option<String> {
@@ -1518,6 +1721,12 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
                 "The OMP session was stopped before the BTW request completed.",
             )
             .await;
+            fail_removed_rewind_requests(
+                state,
+                removed.rewind_requests,
+                "The OMP session was stopped before the rollback completed.",
+            )
+            .await;
         }
     }
 
@@ -1569,6 +1778,12 @@ pub(crate) async fn delete_session(
                 state,
                 removed.btw_requests,
                 "The OMP session was deleted before the BTW request completed.",
+            )
+            .await;
+            fail_removed_rewind_requests(
+                state,
+                removed.rewind_requests,
+                "The OMP session was deleted before the rollback completed.",
             )
             .await;
         }
@@ -2204,7 +2419,7 @@ pub(crate) async fn send_prompt(
     state: &AppState,
     session_id: String,
     text: String,
-    images: Option<Vec<Value>>,
+    images: Option<Vec<PromptImagePayload>>,
     behavior: Option<PromptBehavior>,
 ) -> Vec<ServerMessage> {
     info!(action = "prompt.send", session_id = %session_id, bytes = text.len(), has_images = images.as_ref().is_some_and(|images| !images.is_empty()), behavior = ?behavior.map(PromptBehavior::as_rpc_streaming_behavior));
@@ -2343,7 +2558,7 @@ fn command_notice_message(id: String, text: String) -> TranscriptMessage {
 fn optimistic_prompt_message(
     id: String,
     text: String,
-    images: Option<&Vec<Value>>,
+    images: Option<&Vec<PromptImagePayload>>,
 ) -> TranscriptMessage {
     let mut blocks = Vec::new();
     if !text.is_empty() {
@@ -2351,17 +2566,8 @@ fn optimistic_prompt_message(
     }
     if let Some(images) = images {
         for image in images {
-            let data = image
-                .get("data")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            let mime_type = image
-                .get("mimeType")
-                .or_else(|| image.get("mime_type"))
-                .and_then(Value::as_str)
-                .unwrap_or("image/png")
-                .to_string();
+            let data = image.data.clone();
+            let mime_type = image.mime_type.clone();
             if !data.is_empty() {
                 blocks.push(ContentBlock::Image {
                     data,

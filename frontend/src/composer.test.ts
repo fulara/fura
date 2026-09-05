@@ -5,9 +5,10 @@ import {
   promptDraftAttachmentCount,
   promptDraftDisplayText,
   promptImagePayloads,
-  restorePendingImagesFromPayload,
+  restorePendingImagesFromDraft,
   resolvePromptSubmitAction,
 } from "./composer";
+import { removePendingMarkerFromText } from "./composerAttachments";
 import type { PendingImage, PendingSnippet } from "./composerAttachments";
 
 const image: PendingImage = { type: "image", marker: "[Image 1]", data: "abc", mimeType: "image/png" };
@@ -81,21 +82,60 @@ describe("prompt image payloads", () => {
     expect(isPromptImagePayload(null)).toBe(false);
   });
 
-  it("restores pending images from prompt.busy payloads and ignores malformed values", () => {
-    let nextId = 1;
+  it("restores exact OMP and legacy markers and creates fallbacks only when absent", () => {
+    let nextId = 9;
+    const restored = restorePendingImagesFromDraft(
+      "a [Image #1, 640x480] attachment://1 b [Image 2] c [Image #4, detail]",
+      [
+        { type: "image", data: "one", mimeType: "image/png", detail: "high" },
+        { type: "image", data: "two", mimeType: "image/jpeg", providerFile: "file-2" },
+        { type: "image", data: "three", mimeType: "image/webp", url: "https://example.test/3" },
+        { type: "image", data: "four", mimeType: "image/gif" },
+      ],
+      () => `[Image ${nextId++}]`,
+    );
 
-    expect(restorePendingImagesFromPayload([
-      { type: "image", data: "abc", mimeType: "image/png" },
-      { type: "text", data: "ignored", mimeType: "text/plain" },
-      { type: "image", data: "def", mimeType: "image/jpeg" },
-    ], () => `[Image ${nextId++}]`)).toEqual([
-      { type: "image", marker: "[Image 1]", data: "abc", mimeType: "image/png" },
-      { type: "image", marker: "[Image 2]", data: "def", mimeType: "image/jpeg" },
+    expect(restored.map(value => value.marker)).toEqual([
+      "[Image #1, 640x480] attachment://1",
+      "[Image 2]",
+      "[Image 11]",
+      "[Image #4, detail]",
     ]);
+    expect(removePendingMarkerFromText("before [Image #1, 640x480] attachment://1 after", restored[0]?.marker ?? ""))
+      .toBe("before after");
+    expect(promptImagePayloads(restored)).toEqual([
+      { type: "image", data: "one", mimeType: "image/png", detail: "high" },
+      { type: "image", data: "two", mimeType: "image/jpeg", providerFile: "file-2" },
+      { type: "image", data: "three", mimeType: "image/webp", url: "https://example.test/3" },
+      { type: "image", data: "four", mimeType: "image/gif" },
+    ]);
+    expect(nextId).toBe(13);
   });
 
-  it("strips local markers from outgoing image payloads", () => {
-    expect(promptImagePayloads([image])).toEqual([{ type: "image", data: "abc", mimeType: "image/png" }]);
+  it("reserves restored marker ids before a new image is attached", () => {
+    let nextId = 1;
+    const createMarker = () => `[Image ${nextId++}]`;
+    const restored = restorePendingImagesFromDraft(
+      "existing [Image 1]",
+      [{ type: "image", data: "old", mimeType: "image/png" }],
+      createMarker,
+    );
+    const newMarker = createMarker();
+
+    expect(restored[0]?.marker).toBe("[Image 1]");
+    expect(newMarker).toBe("[Image 2]");
+    expect(removePendingMarkerFromText(`existing [Image 1] ${newMarker}`, newMarker)).toBe("existing [Image 1]");
+  });
+
+  it("ignores malformed values while preserving every own payload field", () => {
+    const restored = restorePendingImagesFromDraft("", [
+      { type: "text", data: "ignored", mimeType: "text/plain" },
+      { type: "image", data: "abc", mimeType: "image/png", detail: "low" },
+    ], () => "[Image 1]");
+
+    expect(restored).toEqual([
+      { type: "image", marker: "[Image 1]", data: "abc", mimeType: "image/png", detail: "low" },
+    ]);
   });
 });
 

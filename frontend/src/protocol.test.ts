@@ -64,6 +64,33 @@ describe("protocol type fixtures", () => {
     expect(message.behavior).toBe("followUp");
   });
 
+  it("preserves private rollback request and response shapes", () => {
+    const list = {
+      type: "session.rewind.list",
+      sessionId: "session-1",
+      requestId: "rewind-list-1",
+    } satisfies ClientMessage;
+    const select = {
+      type: "session.rewind.select",
+      sessionId: "session-1",
+      requestId: "rewind-select-1",
+      entryId: "entry-1",
+    } satisfies ClientMessage;
+    const result = {
+      type: "session.rewind.result",
+      requestId: "rewind-select-1",
+      sourceSessionId: "session-1",
+      sessionId: "session-2",
+      text: "[Image 1]",
+      images: [{ type: "image", data: "abc", mimeType: "image/png", providerFile: "file-1" }],
+      cancelled: false,
+    } satisfies ServerMessage;
+
+    expect(list.requestId).toBe("rewind-list-1");
+    expect(select.entryId).toBe("entry-1");
+    expect(result.images[0]?.providerFile).toBe("file-1");
+  });
+
   it("preserves proposed model config and catalog message shapes", () => {
     const create = {
       type: "session.create",

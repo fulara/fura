@@ -487,6 +487,142 @@ describe("desktop cog options", () => {
     expect(document.querySelector("#workspaceOptionsMenu")?.hasAttribute("hidden")).toBe(false);
   });
 
+  it("lists rollback points with the latest selected and restores an exact unsent draft", async () => {
+    const { connection } = await createHarness();
+    connection.emit({
+      type: "sessions.snapshot",
+      sessions: [summary("live", { updatedAt: 2 }), summary("branched", { updatedAt: 1 })],
+    });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    connection.emit({ type: "session.snapshot", sessionId: "branched", state: projection("branched") });
+
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput");
+    if (!input) throw new Error("composer missing");
+    input.value = "current draft";
+    document.querySelector<HTMLButtonElement>("#workspaceOptionsToggle")?.click();
+    const rollbackButton = document.querySelector<HTMLButtonElement>("#rollbackChatButton");
+    expect(rollbackButton?.classList.contains("danger-action")).toBe(false);
+    rollbackButton?.click();
+
+    const listRequest = connection.sent.find(message => message.type === "session.rewind.list");
+    if (!listRequest || listRequest.type !== "session.rewind.list") throw new Error("rollback list request missing");
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: "stale",
+      sessionId: "live",
+      points: [{ entryId: "ignored", text: "ignored", imageCount: 0 }],
+    });
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: listRequest.requestId,
+      sessionId: "live",
+      points: [
+        { entryId: "first", text: "earlier text", imageCount: 0 },
+        { entryId: "latest", text: "", imageCount: 2 },
+      ],
+    });
+
+    const rows = document.querySelectorAll<HTMLButtonElement>("#rollbackChatList .rollback-chat-row");
+    expect(rows).toHaveLength(2);
+    expect(rows[1]?.getAttribute("aria-selected")).toBe("true");
+    expect(rows[1]?.textContent).toContain("Image-only prompt");
+    expect(rows[1]?.textContent).toContain("2 images");
+    expect(document.querySelector("#rollbackChatWarning")?.hasAttribute("hidden")).toBe(false);
+    document.querySelector<HTMLButtonElement>("#rollbackChatRestore")?.click();
+
+    const selectRequest = connection.sent.find(message => message.type === "session.rewind.select");
+    if (!selectRequest || selectRequest.type !== "session.rewind.select") throw new Error("rollback select request missing");
+    expect(selectRequest.entryId).toBe("latest");
+    expect(document.querySelector("#rollbackChatStatus")?.textContent).toBe("Rolling back…");
+    expect(document.querySelector<HTMLButtonElement>("#rollbackChatCancel")?.disabled).toBe(true);
+    expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+
+    connection.emit({
+      type: "session.rewind.result",
+      requestId: selectRequest.requestId,
+      sourceSessionId: "live",
+      sessionId: "branched",
+      text: "restored [Image #1, 1x1] attachment://1",
+      images: [{ type: "image", data: "abc", mimeType: "image/png", detail: "high", providerFile: "file-1" }],
+      cancelled: false,
+    });
+
+    expect(input.value).toBe("restored [Image #1, 1x1] attachment://1");
+    expect(document.querySelector<HTMLImageElement>("#imagePreviews img")).toBeTruthy();
+    expect(document.querySelector<HTMLElement>("#rollbackChatOverlay")?.hidden).toBe(true);
+    expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+
+    document.querySelector<HTMLFormElement>("#promptForm")?.requestSubmit();
+    expect(connection.sent).toContainEqual({
+      type: "prompt.send",
+      sessionId: "branched",
+      text: "restored [Image #1, 1x1] attachment://1",
+      images: [{ type: "image", data: "abc", mimeType: "image/png", detail: "high", providerFile: "file-1" }],
+    });
+  });
+
+  it("preserves the current draft on rollback errors and cancellation", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput");
+    if (!input) throw new Error("composer missing");
+    input.value = "keep this draft";
+
+    document.querySelector<HTMLButtonElement>("#workspaceOptionsToggle")?.click();
+    document.querySelector<HTMLButtonElement>("#rollbackChatButton")?.click();
+    const listRequest = connection.sent.find(message => message.type === "session.rewind.list");
+    if (!listRequest || listRequest.type !== "session.rewind.list") throw new Error("rollback list request missing");
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: listRequest.requestId,
+      sessionId: "live",
+      points: [{ entryId: "point", text: "old prompt", imageCount: 0 }],
+    });
+    document.querySelector<HTMLButtonElement>("#rollbackChatRestore")?.click();
+    const firstSelect = connection.sent.find(message => message.type === "session.rewind.select");
+    if (!firstSelect || firstSelect.type !== "session.rewind.select") throw new Error("rollback select request missing");
+    connection.emit({
+      type: "session.rewind.error",
+      requestId: firstSelect.requestId,
+      sourceSessionId: "live",
+      sessionId: "live",
+      message: "Rollback hook failed.",
+    });
+
+    expect(input.value).toBe("keep this draft");
+    expect(document.querySelector("#rollbackChatStatus")?.textContent).toBe("Rollback hook failed.");
+    expect(document.querySelector("#rollbackChatRetry")?.hasAttribute("hidden")).toBe(false);
+
+    document.querySelector<HTMLButtonElement>("#rollbackChatRetry")?.click();
+    const retryRequest = [...connection.sent].reverse().find(message => message.type === "session.rewind.list");
+    if (!retryRequest || retryRequest.type !== "session.rewind.list") throw new Error("rollback retry request missing");
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: retryRequest.requestId,
+      sessionId: "live",
+      points: [{ entryId: "point", text: "old prompt", imageCount: 0 }],
+    });
+    document.querySelector<HTMLButtonElement>("#rollbackChatRestore")?.click();
+    const secondSelect = [...connection.sent].reverse().find(message => message.type === "session.rewind.select");
+    if (!secondSelect || secondSelect.type !== "session.rewind.select") throw new Error("second rollback select missing");
+    connection.emit({
+      type: "session.rewind.result",
+      requestId: secondSelect.requestId,
+      sourceSessionId: "live",
+      sessionId: "live",
+      text: "old prompt",
+      images: [],
+      cancelled: true,
+    });
+
+    expect(input.value).toBe("keep this draft");
+    expect(document.querySelector<HTMLElement>("#rollbackChatOverlay")?.hidden).toBe(true);
+    expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+  });
+
   it("opens model templates in a dialog and sends config.set from the form", async () => {
     const { connection } = await createHarness();
 

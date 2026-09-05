@@ -12,6 +12,8 @@ use tracing::{debug, info, warn};
 use crate::*;
 
 const RECENT_RPC_STDERR_LINE_COUNT: usize = 4;
+const REWIND_IDENTITY_REFRESH_ERROR: &str =
+    "OMP changed the conversation, but Fura could not refresh its new session identity";
 
 fn is_synthetic_transcript_message_id(id: &str) -> bool {
     id.starts_with("approved-plan:") || id.starts_with("__pending_prompt:")
@@ -45,8 +47,7 @@ pub(crate) async fn refresh_rpc_messages(state: &AppState, session_id: &str) -> 
     }
 }
 
-pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Result<(), String> {
-    send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await?;
+async fn refresh_rpc_state_tail(state: &AppState, session_id: &str) -> Result<(), String> {
     refresh_rpc_messages(state, session_id).await?;
     send_rpc_command(state, session_id, get_session_stats_command(next_rpc_id())).await?;
     send_rpc_command(
@@ -55,6 +56,11 @@ pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Res
         get_available_commands_command(next_rpc_id()),
     )
     .await
+}
+
+pub(crate) async fn refresh_rpc_state(state: &AppState, session_id: &str) -> Result<(), String> {
+    send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await?;
+    refresh_rpc_state_tail(state, session_id).await
 }
 pub(crate) async fn refresh_rpc_state_if_ready(
     state: &AppState,
@@ -130,6 +136,31 @@ pub(crate) async fn fail_removed_btw_requests(
             .await;
     }
 }
+pub(crate) async fn fail_removed_rewind_requests(
+    state: &AppState,
+    rewind_requests: Vec<PendingRewindRpc>,
+    message: &str,
+) {
+    for pending in rewind_requests {
+        let route = pending.route();
+        if route.target_connection_id.is_none() {
+            continue;
+        }
+        let _ = state
+            .events
+            .emit(
+                state,
+                ServerMessage::SessionRewindError {
+                    target_connection_id: route.target_connection_id,
+                    request_id: route.request_id.clone(),
+                    source_session_id: route.source_session_id.clone(),
+                    session_id: route.source_session_id.clone(),
+                    message: message.to_string(),
+                },
+            )
+            .await;
+    }
+}
 
 async fn stop_transport(state: &AppState, transport_session_id: &str) {
     if let Some(removed) = state
@@ -142,6 +173,12 @@ async fn stop_transport(state: &AppState, transport_session_id: &str) {
             state,
             removed.btw_requests,
             "The OMP session closed before the BTW request completed.",
+        )
+        .await;
+        fail_removed_rewind_requests(
+            state,
+            removed.rewind_requests,
+            "The OMP session closed before the rollback completed.",
         )
         .await;
     }
@@ -676,6 +713,12 @@ pub(crate) async fn spawn_rpc_child(
                 &state,
                 removed.btw_requests,
                 "The OMP session exited before the BTW request completed.",
+            )
+            .await;
+            fail_removed_rewind_requests(
+                &state,
+                removed.rewind_requests,
+                "The OMP session exited before the rollback completed.",
             )
             .await;
         }
@@ -1706,6 +1749,230 @@ async fn handle_rpc_messages_page_error(
     }
     true
 }
+fn rewind_error_message(
+    route: &RewindRoute,
+    session_id: String,
+    message: impl Into<String>,
+) -> ServerMessage {
+    ServerMessage::SessionRewindError {
+        target_connection_id: route.target_connection_id,
+        request_id: route.request_id.clone(),
+        source_session_id: route.source_session_id.clone(),
+        session_id,
+        message: message.into(),
+    }
+}
+
+async fn apply_omp_session_state(
+    state: &AppState,
+    transport_session_id: &str,
+    current_session_id: String,
+    data: OmpSessionState,
+) -> String {
+    let target_session_id = data.session_id.clone();
+    let model = data.model.as_ref().and_then(model_display_name);
+    let context_tokens = data.context_usage.as_ref().and_then(|usage| usage.tokens);
+    let context_window = data
+        .context_usage
+        .as_ref()
+        .and_then(|usage| usage.context_window);
+    let context_percent = data.context_usage.as_ref().and_then(|usage| usage.percent);
+    apply_get_state_update(
+        state,
+        transport_session_id,
+        RpcStateUpdate {
+            current_session_id,
+            target_session_id: target_session_id.clone(),
+            is_streaming: data.is_streaming,
+            is_compacting: data.is_compacting,
+            session_name: data.session_name,
+            model,
+            thinking_level: data.thinking_level,
+            session_file: data.session_file,
+            context_tokens,
+            context_window,
+            context_percent,
+            plan_mode: Some(map_plan_mode_state_projection(data.plan_mode.as_ref())),
+            goal_mode: Some(map_goal_mode_state_projection(data.goal_mode.as_ref())),
+            todo_phases: Some(data.todo_phases),
+        },
+    )
+    .await;
+    broadcast_sessions_snapshot(state).await;
+    target_session_id
+}
+
+async fn handle_pending_rewind_response(
+    state: &AppState,
+    transport_session_id: &str,
+    current_session_id: &str,
+    command: Option<&str>,
+    status: Option<&str>,
+    success: Option<bool>,
+    frame: &Value,
+) -> bool {
+    let Some(command_id) = value_str(frame, "id") else {
+        return false;
+    };
+    let Some(pending) = state.session_runtime.pending_rewind_rpc(command_id).await else {
+        return false;
+    };
+    let failed = status == Some("error") || success == Some(false);
+    match pending {
+        PendingRewindRpc::List { route } => {
+            state
+                .session_runtime
+                .take_pending_rewind_rpc(command_id)
+                .await;
+            let response = if failed {
+                rewind_error_message(
+                    &route,
+                    route.source_session_id.clone(),
+                    rpc_error_message(frame),
+                )
+            } else if command != Some("get_branch_messages") {
+                rewind_error_message(
+                    &route,
+                    route.source_session_id.clone(),
+                    "OMP returned an unexpected rollback-list response.",
+                )
+            } else if let Some(data) = rpc_response_data_as::<OmpBranchMessagesResponse>(frame) {
+                ServerMessage::SessionRewindPoints {
+                    target_connection_id: route.target_connection_id,
+                    request_id: route.request_id,
+                    session_id: route.source_session_id,
+                    points: data.messages,
+                }
+            } else {
+                rewind_error_message(
+                    &route,
+                    route.source_session_id.clone(),
+                    "OMP returned an invalid rollback-list response.",
+                )
+            };
+            let _ = state.events.emit(state, response).await;
+        }
+        PendingRewindRpc::Branch { route } => {
+            let outcome = if failed {
+                RewindOutcome::Error {
+                    message: rpc_error_message(frame),
+                }
+            } else if command != Some("branch") {
+                RewindOutcome::Error {
+                    message: "OMP returned an unexpected rollback response.".to_string(),
+                }
+            } else if let Some(result) = rpc_response_data_as::<OmpBranchResult>(frame) {
+                if result.cancelled {
+                    state
+                        .session_runtime
+                        .take_pending_rewind_rpc(command_id)
+                        .await;
+                    let _ = state
+                        .events
+                        .emit(
+                            state,
+                            ServerMessage::SessionRewindResult {
+                                target_connection_id: route.target_connection_id,
+                                request_id: route.request_id,
+                                source_session_id: route.source_session_id.clone(),
+                                session_id: route.source_session_id,
+                                text: result.text,
+                                images: result.images,
+                                cancelled: true,
+                            },
+                        )
+                        .await;
+                    return true;
+                }
+                RewindOutcome::Success {
+                    text: result.text,
+                    images: result.images,
+                }
+            } else {
+                RewindOutcome::Error {
+                    message: "OMP returned an invalid rollback response.".to_string(),
+                }
+            };
+            let get_state_command_id = next_rpc_id();
+            if !state
+                .session_runtime
+                .transition_rewind_branch_to_get_state(
+                    command_id,
+                    get_state_command_id.clone(),
+                    outcome,
+                )
+                .await
+            {
+                return true;
+            }
+            if send_rpc_command(
+                state,
+                transport_session_id,
+                get_state_command(get_state_command_id.clone()),
+            )
+            .await
+            .is_err()
+                && let Some(pending) = state
+                    .session_runtime
+                    .take_pending_rewind_rpc(&get_state_command_id)
+                    .await
+            {
+                let response = rewind_error_message(
+                    pending.route(),
+                    pending.route().source_session_id.clone(),
+                    REWIND_IDENTITY_REFRESH_ERROR,
+                );
+                let _ = state.events.emit(state, response).await;
+            }
+        }
+        PendingRewindRpc::BranchGetState { route, outcome } => {
+            state
+                .session_runtime
+                .take_pending_rewind_rpc(command_id)
+                .await;
+            let data = if !failed && command == Some("get_state") {
+                rpc_response_data_as::<OmpSessionState>(frame)
+            } else {
+                None
+            };
+            let Some(data) = data else {
+                let response = rewind_error_message(
+                    &route,
+                    current_session_id.to_string(),
+                    REWIND_IDENTITY_REFRESH_ERROR,
+                );
+                let _ = state.events.emit(state, response).await;
+                return true;
+            };
+            let target_session_id = apply_omp_session_state(
+                state,
+                transport_session_id,
+                current_session_id.to_string(),
+                data,
+            )
+            .await;
+            if let Err(message) = refresh_rpc_state_tail(state, transport_session_id).await {
+                warn!(session_id = %target_session_id, %message, "post-rollback refresh failed");
+            }
+            let response = match outcome {
+                RewindOutcome::Success { text, images } => ServerMessage::SessionRewindResult {
+                    target_connection_id: route.target_connection_id,
+                    request_id: route.request_id,
+                    source_session_id: route.source_session_id,
+                    session_id: target_session_id,
+                    text,
+                    images,
+                    cancelled: false,
+                },
+                RewindOutcome::Error { message } => {
+                    rewind_error_message(&route, target_session_id, message)
+                }
+            };
+            let _ = state.events.emit(state, response).await;
+        }
+    }
+    true
+}
 
 pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
     let command = value_str(frame, "command").or_else(|| value_str(frame, "requestType"));
@@ -1713,6 +1980,19 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
     let success = frame.get("success").and_then(|value| value.as_bool());
     let current_session_id = rpc_session_target_id(state, session_id).await;
     let is_controller = is_controller_transport(state, session_id).await;
+    if handle_pending_rewind_response(
+        state,
+        session_id,
+        &current_session_id,
+        command,
+        status,
+        success,
+        frame,
+    )
+    .await
+    {
+        return;
+    }
     if status == Some("error") || success == Some(false) {
         let message = rpc_error_message(frame);
         warn!(session_id = %session_id, command = command.unwrap_or("unknown"), %message, "RPC command returned error");

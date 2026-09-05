@@ -8,6 +8,19 @@ export type ContentBlock =
   | { kind: "thinking"; thinking: string }
   | { kind: "redactedthinking" };
 
+export type PromptImagePayload = {
+  type: "image";
+  data: string;
+  mimeType: string;
+  [futureField: string]: unknown;
+};
+
+export type SessionRewindPoint = {
+  entryId: string;
+  text: string;
+  imageCount: number;
+};
+
 export type TranscriptMessage = {
   id: string;
   role: MessageRole;
@@ -651,7 +664,10 @@ export type ServerMessage =
   | { type: "session.exited"; sessionId: string; code?: number; signal?: string }
   | { type: "log.stderr"; sessionId: string; text: string }
   | { type: "session.notice"; sessionId: string; level: "info" | "warning" | "error"; text: string }
-  | { type: "prompt.busy"; sessionId: string; text: string; images?: unknown[] | null }
+  | { type: "prompt.busy"; sessionId: string; text: string; images?: PromptImagePayload[] | null }
+  | { type: "session.rewind.points"; requestId: string; sessionId: string; points: SessionRewindPoint[] }
+  | { type: "session.rewind.result"; requestId: string; sourceSessionId: string; sessionId: string; text: string; images: PromptImagePayload[]; cancelled: boolean }
+  | { type: "session.rewind.error"; requestId: string; sourceSessionId: string; sessionId: string; message: string }
   | { type: "session.btw.update"; targetClientId: string; sourceSessionId: string; requestId: string; state: BtwUpdateState; question?: string; delta?: string; answer?: string; canPromote?: boolean; error?: string }
   | { type: "session.btw.promoted"; targetClientId: string; sourceSessionId: string; requestId: string; sessionId: string; sessionFile: string }
   | { type: "model.list"; sessionId: string; models: ModelSummary[] }
@@ -710,13 +726,15 @@ export type ClientMessage =
   | { type: "session.detach"; sessionId: string }
   | { type: "session.stop"; sessionId: string }
   | { type: "session.delete"; sessionId: string; deleteWorktree?: boolean }
+  | { type: "session.rewind.list"; sessionId: string; requestId: string }
+  | { type: "session.rewind.select"; sessionId: string; requestId: string; entryId: string }
   | { type: "session.list" }
   | { type: "state.refresh"; sessionId: string }
   | {
       type: "prompt.send";
       sessionId: string;
       text: string;
-      images?: unknown[];
+      images?: PromptImagePayload[];
       behavior?: "steer" | "followUp";
     }
   | { type: "prompt.abort"; sessionId: string }

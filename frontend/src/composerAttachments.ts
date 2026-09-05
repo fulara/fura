@@ -1,4 +1,10 @@
-export type PendingImage = { type: "image"; marker: string; data: string; mimeType: string };
+export type PendingImage = {
+  type: "image";
+  marker: string;
+  data: string;
+  mimeType: string;
+  [futureField: string]: unknown;
+};
 export type PendingSnippet = { type: "snippet"; marker: string; text: string };
 
 export function blobToBase64(blob: Blob): Promise<string> {

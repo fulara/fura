@@ -249,6 +249,8 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::SessionList => "session.list",
         ClientMessage::StateRefresh { .. } => "state.refresh",
         ClientMessage::PromptSend { .. } => "prompt.send",
+        ClientMessage::SessionRewindList { .. } => "session.rewind.list",
+        ClientMessage::SessionRewindSelect { .. } => "session.rewind.select",
         ClientMessage::PromptAbort { .. } => "prompt.abort",
         ClientMessage::SessionBtwStart { .. } => "session.btw.start",
         ClientMessage::SessionBtwCancel { .. } => "session.btw.cancel",
@@ -360,6 +362,22 @@ fn client_message_debug_fields(
                     Value::String(behavior.as_rpc_streaming_behavior().to_string()),
                 );
             }
+        }
+        ClientMessage::SessionRewindList {
+            session_id,
+            request_id,
+        } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert("requestId".to_string(), Value::String(request_id.clone()));
+        }
+        ClientMessage::SessionRewindSelect {
+            session_id,
+            request_id,
+            entry_id,
+        } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert("requestId".to_string(), Value::String(request_id.clone()));
+            fields.insert("entryId".to_string(), Value::String(entry_id.clone()));
         }
         ClientMessage::PlanApprove {
             session_id,
@@ -634,6 +652,10 @@ pub(crate) async fn handle_socket(
 
     run.await;
     release_btw_requests_on_disconnect(&state, connection_id).await;
+    state
+        .session_runtime
+        .detach_rewind_connection(connection_id)
+        .await;
 }
 
 fn client_text_frame_too_large(text: &str) -> bool {
@@ -932,6 +954,18 @@ pub(crate) fn server_message_visible_to_connection(
             target_connection_id,
             ..
         } => *target_connection_id == connection_id,
+        ServerMessage::SessionRewindPoints {
+            target_connection_id,
+            ..
+        }
+        | ServerMessage::SessionRewindResult {
+            target_connection_id,
+            ..
+        }
+        | ServerMessage::SessionRewindError {
+            target_connection_id,
+            ..
+        } => *target_connection_id == Some(connection_id),
         _ => true,
     }
 }
@@ -1158,6 +1192,9 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::LogStderr { .. } => "log.stderr",
         ServerMessage::SessionNotice { .. } => "session.notice",
         ServerMessage::PromptBusy { .. } => "prompt.busy",
+        ServerMessage::SessionRewindPoints { .. } => "session.rewind.points",
+        ServerMessage::SessionRewindResult { .. } => "session.rewind.result",
+        ServerMessage::SessionRewindError { .. } => "session.rewind.error",
         ServerMessage::SessionBtwUpdate { .. } => "session.btw.update",
         ServerMessage::SessionBtwPromoted { .. } => "session.btw.promoted",
         ServerMessage::ModelList { .. } => "model.list",
@@ -1268,6 +1305,46 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             bytes = text.len(),
             image_count = images.as_ref().map(Vec::len).unwrap_or(0)
+        ),
+        ServerMessage::SessionRewindPoints {
+            request_id,
+            session_id,
+            points,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "session.rewind.points",
+            request_id = %request_id,
+            session_id = %session_id,
+            point_count = points.len()
+        ),
+        ServerMessage::SessionRewindResult {
+            request_id,
+            source_session_id,
+            session_id,
+            images,
+            cancelled,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "session.rewind.result",
+            request_id = %request_id,
+            source_session_id = %source_session_id,
+            session_id = %session_id,
+            image_count = images.len(),
+            cancelled
+        ),
+        ServerMessage::SessionRewindError {
+            request_id,
+            source_session_id,
+            session_id,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "session.rewind.error",
+            request_id = %request_id,
+            source_session_id = %source_session_id,
+            session_id = %session_id
         ),
         ServerMessage::SessionBtwUpdate {
             source_session_id,

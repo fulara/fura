@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::{PromptBehavior, TodoPhaseProjection};
+use crate::{PromptBehavior, PromptImagePayload, SessionRewindPoint, TodoPhaseProjection};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -348,6 +348,19 @@ pub(crate) struct OmpRepoDiffResult {
 pub(crate) struct OmpMessagesResponse {
     pub(crate) messages: Vec<Value>,
 }
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OmpBranchMessagesResponse {
+    pub(crate) messages: Vec<SessionRewindPoint>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OmpBranchResult {
+    pub(crate) text: String,
+    pub(crate) images: Vec<PromptImagePayload>,
+    pub(crate) cancelled: bool,
+}
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -435,6 +448,10 @@ pub(crate) enum OmpRpcCommand {
     },
     #[serde(rename = "get_messages")]
     GetMessages { id: String },
+    #[serde(rename = "get_branch_messages")]
+    GetBranchMessages { id: String },
+    #[serde(rename = "branch")]
+    Branch { id: String, entry_id: String },
     #[serde(rename = "get_messages_page")]
     GetMessagesPage {
         id: String,
@@ -490,7 +507,7 @@ pub(crate) enum OmpRpcCommand {
         id: String,
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
-        images: Option<Vec<Value>>,
+        images: Option<Vec<PromptImagePayload>>,
         #[serde(rename = "streamingBehavior", skip_serializing_if = "Option::is_none")]
         streaming_behavior: Option<String>,
     },
@@ -605,6 +622,13 @@ pub(crate) fn negotiate_protocol_command(id: String, protocol_version: u8) -> Va
 pub(crate) fn get_messages_command(id: String) -> Value {
     OmpRpcCommand::GetMessages { id }.into_value()
 }
+pub(crate) fn get_branch_messages_command(id: String) -> Value {
+    OmpRpcCommand::GetBranchMessages { id }.into_value()
+}
+
+pub(crate) fn branch_command(id: String, entry_id: String) -> Value {
+    OmpRpcCommand::Branch { id, entry_id }.into_value()
+}
 
 pub(crate) fn get_messages_page_command(
     id: String,
@@ -638,7 +662,7 @@ pub(crate) fn set_thinking_level_command(id: String, level: String) -> Value {
 pub(crate) fn prompt_command(
     id: String,
     message: String,
-    images: Option<Vec<Value>>,
+    images: Option<Vec<PromptImagePayload>>,
     behavior: Option<PromptBehavior>,
 ) -> Value {
     OmpRpcCommand::Prompt {

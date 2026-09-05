@@ -1,14 +1,15 @@
-import type { ClientMessage } from "./protocol";
+import type { ClientMessage, PromptImagePayload } from "./protocol";
 import type { PendingImage, PendingSnippet } from "./composerAttachments";
 
 export type PromptBehavior = "steer" | "followUp";
-export type PromptImagePayload = { type: "image"; data: string; mimeType: string };
 export type ComposerPromptDraft = {
   text: string;
   editorText: string;
   images: PendingImage[];
   snippets: PendingSnippet[];
 };
+
+const IMAGE_MARKER_PATTERN = /\[Image (?:#)?([1-9]\d*)(?:,[^\]\n]*)?\](?: attachment:\/\/\1)?/g;
 export type PromptSubmitWorkspaceMode = "session" | "controller";
 export type PromptSubmitAction =
   | { type: "ignore" }
@@ -57,25 +58,35 @@ export function isPromptImagePayload(value: unknown): value is PromptImagePayloa
   return image.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string";
 }
 
-export function restorePendingImagesFromPayload(
-  images: unknown[],
-  createMarker: (label: "Image") => string,
+export function restorePendingImagesFromDraft(
+  text: string,
+  images: readonly unknown[],
+  createFallbackMarker: (label: "Image") => string,
 ): PendingImage[] {
+  const markers = new Map<number, string>();
+  for (const match of text.matchAll(IMAGE_MARKER_PATTERN)) {
+    const position = Number(match[1]);
+    if (!markers.has(position)) markers.set(position, match[0]);
+  }
+
   const restored: PendingImage[] = [];
-  for (const image of images) {
+  for (let index = 0; index < images.length; index++) {
+    const image = images[index];
     if (!isPromptImagePayload(image)) continue;
+    const fallbackMarker = createFallbackMarker("Image");
     restored.push({
-      type: "image",
-      marker: createMarker("Image"),
-      data: image.data,
-      mimeType: image.mimeType,
+      ...image,
+      marker: markers.get(index + 1) ?? fallbackMarker,
     });
   }
   return restored;
 }
 
 export function promptImagePayloads(images: PendingImage[]): PromptImagePayload[] {
-  return images.map(({ type, data, mimeType }) => ({ type, data, mimeType }));
+  return images.map(image => {
+    const { marker: _marker, ...payload } = image;
+    return payload as PromptImagePayload;
+  });
 }
 
 export function createPromptSendMessage(

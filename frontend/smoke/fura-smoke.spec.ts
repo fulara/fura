@@ -3,6 +3,21 @@ import path from "node:path";
 
 const bridgeToken = "dev";
 const repoRoot = path.resolve("..");
+const tinyPngBase64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
+async function pasteTinyPng(page: Page, selector: string): Promise<void> {
+  await page.locator(selector).evaluate((element, pngBase64) => {
+    const bytes = Uint8Array.from(atob(pngBase64), character => character.charCodeAt(0));
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], "rollback.png", { type: "image/png" }));
+    element.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true,
+      cancelable: true,
+      clipboardData: transfer,
+    }));
+  }, tinyPngBase64);
+}
 
 test.describe.configure({ mode: "serial" });
 
@@ -70,6 +85,42 @@ test("desktop authenticates, creates a mock session, and receives a prompt respo
   await expect.poll(async () => (await page.locator(".message.assistant").boundingBox())?.height ?? 0).toBeGreaterThan(20);
 });
 
+test("desktop rolls back a text and image prompt into an unsent draft", async ({ page }) => {
+  const sessionName = `Desktop rollback ${Date.now()}`;
+  const promptText = "desktop rollback draft";
+
+  await authenticateDesktop(page);
+  await createDesktopSession(page, sessionName);
+  const sessionCountBefore = await page.locator("#sessionsList .session-item").count();
+
+  await page.locator("#promptInput").fill(promptText);
+  await pasteTinyPng(page, "#promptInput");
+  await expect(page.locator("#imagePreviews img")).toBeVisible();
+  const exactDraft = await page.locator("#promptInput").inputValue();
+  await page.locator("#sendButton").click();
+  await expect(page.locator(".message.assistant")).toContainText("Mock assistant received");
+
+  await expect(page.locator("#workspaceOptionsToggle")).toHaveAttribute("title", "Session options");
+  await page.locator("#workspaceOptionsToggle").click();
+  const rollbackAction = page.getByRole("menuitem", { name: "Rollback chat…" });
+  await expect(rollbackAction).toBeEnabled();
+  await rollbackAction.click();
+  await expect(page.getByRole("dialog", { name: "Rollback chat" })).toBeVisible();
+  await expect(page.locator("#rollbackChatList")).toContainText(promptText);
+  await page.locator("#rollbackChatRestore").click();
+
+  await expect(page.locator("#rollbackChatOverlay")).toBeHidden();
+  await expect(page.locator("#sessionsList .session-item")).toHaveCount(sessionCountBefore + 1);
+  await expect(page.locator("#promptInput")).toHaveValue(exactDraft);
+  await expect(page.locator("#imagePreviews img")).toBeVisible();
+  await expect(page.locator(".message.user")).toHaveCount(0);
+  await expect(page.locator(".message.assistant")).toHaveCount(0);
+
+  await page.locator("#sendButton").click();
+  await expect(page.locator(".message.user")).toContainText(promptText);
+  await expect(page.locator(".message.assistant")).toContainText("Mock assistant received");
+});
+
 test("desktop lists and changes the active session model", async ({ page }) => {
   const sessionName = `Model smoke ${Date.now()}`;
 
@@ -129,5 +180,45 @@ test("mobile authenticates, creates a mock session, and receives a prompt respon
   await page.locator("#mobileSendButton").click();
 
   await expect(page.locator("#mobileTranscript .message.user")).toContainText("hello from mobile smoke");
+  await expect(page.locator("#mobileTranscript .message.assistant")).toContainText("Mock assistant received");
+});
+
+test("mobile rolls back a text and image prompt into an unsent draft", async ({ page }) => {
+  const sessionName = `Mobile rollback ${Date.now()}`;
+  const promptText = "mobile rollback draft";
+
+  await authenticateMobile(page);
+  await createMobileSession(page, sessionName);
+  const sessionCountBefore = await page.locator("#mobileSessionsList .session-item").count();
+
+  await page.locator("#mobilePromptInput").fill(promptText);
+  await page.locator("#mobileImageInput").setInputFiles({
+    name: "rollback.png",
+    mimeType: "image/png",
+    buffer: Buffer.from(tinyPngBase64, "base64"),
+  });
+  await expect(page.locator("#mobileImagePreviews img")).toBeVisible();
+  const exactDraft = await page.locator("#mobilePromptInput").inputValue();
+  await page.locator("#mobileSendButton").click();
+  await expect(page.locator("#mobileTranscript .message.assistant")).toContainText("Mock assistant received");
+
+  await expect(page.locator("#mobileOptionsToggle")).toHaveAttribute("title", "Session options");
+  await page.locator("#mobileOptionsToggle").click();
+  const rollbackAction = page.getByRole("menuitem", { name: "Rollback chat…" });
+  await expect(rollbackAction).toBeEnabled();
+  await rollbackAction.click();
+  await expect(page.getByRole("dialog", { name: "Rollback chat" })).toBeVisible();
+  await expect(page.locator("#mobileRollbackList")).toContainText(promptText);
+  await page.locator("#mobileRollbackConfirm").click();
+
+  await expect(page.locator("#mobileRollbackOverlay")).toBeHidden();
+  await expect(page.locator("#mobileSessionsList .session-item")).toHaveCount(sessionCountBefore + 1);
+  await expect(page.locator("#mobilePromptInput")).toHaveValue(exactDraft);
+  await expect(page.locator("#mobileImagePreviews img")).toBeVisible();
+  await expect(page.locator("#mobileTranscript .message.user")).toHaveCount(0);
+  await expect(page.locator("#mobileTranscript .message.assistant")).toHaveCount(0);
+
+  await page.locator("#mobileSendButton").click();
+  await expect(page.locator("#mobileTranscript .message.user")).toContainText(promptText);
   await expect(page.locator("#mobileTranscript .message.assistant")).toContainText("Mock assistant received");
 });

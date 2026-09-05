@@ -5,7 +5,7 @@ import {
   renderAttachmentPreviews,
   type PendingImage,
 } from "./composerAttachments";
-import { createPromptSendMessage, type PromptBehavior } from "./composer";
+import { createPromptSendMessage, restorePendingImagesFromDraft, type PromptBehavior } from "./composer";
 import { findSlashCommand } from "./slashCommands";
 import {
   parsePresetParams,
@@ -45,6 +45,7 @@ import type {
   PresetSummary,
   ServerMessage,
   SessionProjection,
+  SessionRewindPoint,
   SessionSummary,
   ThinkingVisibilityMode,
   TodoPhase,
@@ -101,6 +102,16 @@ type MobileTranscriptRenderCache = {
   nodes: Map<string, HTMLElement>;
 };
 type SessionNotice = { level: "info" | "warning" | "error"; text: string };
+
+type MobileRollbackState = {
+  sourceSessionId: string;
+  listRequestId: string;
+  selectRequestId: string | null;
+  points: SessionRewindPoint[];
+  selectedEntryId: string | null;
+  phase: "loading" | "ready" | "empty" | "error" | "selecting";
+  error: string;
+};
 
 
 function mobileToolCardRenderKey(card: ToolCard): string {
@@ -170,11 +181,13 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
             <button id="mobileSessionsToggle" class="mobile-sessions-toggle" type="button" aria-expanded="false" aria-controls="mobileSessionsDrawer">Sessions</button>
             <button id="mobileAskFuraButton" class="mobile-ask-fura-button" type="button" aria-pressed="false" aria-controls="mobileController">Ask</button>
             <div class="mobile-options">
-              <button id="mobileOptionsToggle" class="mobile-options-toggle" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="mobileOptionsMenu" title="Display options">⚙</button>
+              <button id="mobileOptionsToggle" class="mobile-options-toggle" type="button" aria-expanded="false" aria-haspopup="menu" aria-controls="mobileOptionsMenu" title="Session options">⚙</button>
               <div id="mobileOptionsMenu" class="mobile-options-menu" role="menu" hidden>
                 <button id="mobileToolVisibilityToggle" class="mobile-option-item" type="button" role="menuitemcheckbox" aria-checked="true">Tools: on</button>
                 <button id="mobileThinkingVisibilityToggle" class="mobile-option-item" type="button" role="menuitem">Thinking: auto</button>
                 <button id="mobileModelTemplatesOpen" class="mobile-option-item" type="button" role="menuitem">Model templates</button>
+                <div class="mobile-options-divider" role="separator"></div>
+                <button id="mobileRollbackOpen" class="mobile-option-item" type="button" role="menuitem">Rollback chat…</button>
               </div>
             </div>
           </div>
@@ -296,6 +309,27 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           <div id="mobilePresetsActions" class="mobile-dialog-actions"></div>
         </div>
       </section>
+      <section id="mobileRollbackOverlay" class="mobile-dialog-overlay" hidden>
+        <div class="mobile-dialog mobile-rollback-dialog" role="dialog" aria-modal="true" aria-labelledby="mobileRollbackTitle" aria-describedby="mobileRollbackDescription">
+          <header class="mobile-dialog-header">
+            <div>
+              <p class="mobile-dialog-kicker">Session history</p>
+              <h2 id="mobileRollbackTitle">Rollback chat</h2>
+            </div>
+          </header>
+          <div id="mobileRollbackDescription" class="mobile-dialog-body">
+            <p>Create a new branch before an earlier prompt and restore that prompt as an unsent draft. The current chat remains in session history. Files and worktree are not rolled back.</p>
+          </div>
+          <p id="mobileRollbackWarning" class="mobile-rollback-warning" hidden>Your current draft and attachments will be replaced after a successful rollback.</p>
+          <p id="mobileRollbackStatus" class="mobile-dialog-status" aria-live="polite"></p>
+          <div id="mobileRollbackList" class="mobile-rollback-list" role="radiogroup" aria-label="Earlier user prompts"></div>
+          <button id="mobileRollbackRetry" class="mobile-rollback-retry" type="button" hidden>Retry</button>
+          <div class="mobile-dialog-actions">
+            <button id="mobileRollbackCancel" type="button">Cancel</button>
+            <button id="mobileRollbackConfirm" type="button">Restore draft</button>
+          </div>
+        </div>
+      </section>
       <section id="mobileDeleteSessionOverlay" class="mobile-dialog-overlay" hidden>
         <div class="mobile-dialog mobile-delete-session" role="dialog" aria-modal="true" aria-labelledby="mobileDeleteSessionTitle" aria-describedby="mobileDeleteSessionMessage">
           <header class="mobile-dialog-header">
@@ -389,6 +423,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const toolVisibilityToggle = requireElement<HTMLButtonElement>(document, "mobileToolVisibilityToggle");
   const thinkingVisibilityToggle = requireElement<HTMLButtonElement>(document, "mobileThinkingVisibilityToggle");
   const modelTemplatesOpen = requireElement<HTMLButtonElement>(document, "mobileModelTemplatesOpen");
+  const rollbackOpen = requireElement<HTMLButtonElement>(document, "mobileRollbackOpen");
+  const rollbackOverlay = requireElement<HTMLElement>(document, "mobileRollbackOverlay");
+  const rollbackWarning = requireElement<HTMLParagraphElement>(document, "mobileRollbackWarning");
+  const rollbackStatus = requireElement<HTMLParagraphElement>(document, "mobileRollbackStatus");
+  const rollbackList = requireElement<HTMLDivElement>(document, "mobileRollbackList");
+  const rollbackRetry = requireElement<HTMLButtonElement>(document, "mobileRollbackRetry");
+  const rollbackCancel = requireElement<HTMLButtonElement>(document, "mobileRollbackCancel");
+  const rollbackConfirm = requireElement<HTMLButtonElement>(document, "mobileRollbackConfirm");
   const proposedModelsOverlay = requireElement<HTMLElement>(document, "mobileProposedModelsOverlay");
   const proposedModelsList = requireElement<HTMLDivElement>(document, "mobileProposedModelsList");
   const proposedModelName = requireElement<HTMLInputElement>(document, "mobileProposedModelName");
@@ -501,6 +543,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let pendingPresetCommand: { editorText: string; sessionId: string } | null = null;
   const sessionNotices = new Map<string, SessionNotice[]>();
 
+  let rollbackState: MobileRollbackState | null = null;
 
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
@@ -546,6 +589,28 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     applyVisibilityPreferences(showToolBubbles, showEditDiffs, nextMode);
   });
   modelTemplatesOpen.addEventListener("click", () => openMobileProposedModelsDialog());
+  rollbackOpen.addEventListener("click", openMobileRollback);
+  rollbackCancel.addEventListener("click", () => closeMobileRollback(true));
+  rollbackRetry.addEventListener("click", requestMobileRollbackPoints);
+  rollbackConfirm.addEventListener("click", submitMobileRollback);
+  rollbackOverlay.addEventListener("mousedown", event => {
+    if (event.target === rollbackOverlay && rollbackState?.phase !== "selecting") closeMobileRollback(true);
+  });
+  rollbackList.addEventListener("keydown", event => {
+    if (!rollbackState || rollbackState.phase !== "ready" || rollbackState.points.length === 0) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      submitMobileRollback();
+      return;
+    }
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const current = Math.max(0, rollbackState.points.findIndex(point => point.entryId === rollbackState?.selectedEntryId));
+    const next = event.key === "ArrowUp"
+      ? Math.max(0, current - 1)
+      : Math.min(rollbackState.points.length - 1, current + 1);
+    selectMobileRollbackPoint(rollbackState.points[next].entryId, true);
+  });
   proposedModelsClose.addEventListener("click", () => closeMobileProposedModelsDialog());
   proposedModelsOverlay.addEventListener("click", event => {
     if (event.target === proposedModelsOverlay) closeMobileProposedModelsDialog();
@@ -562,7 +627,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   });
   document.addEventListener("keydown", event => {
     if (event.key !== "Escape") return;
-    if (!proposedModelsOverlay.hidden) {
+    if (!rollbackOverlay.hidden) {
+      event.preventDefault();
+      if (rollbackState?.phase !== "selecting") closeMobileRollback(true);
+    } else if (!proposedModelsOverlay.hidden) {
       closeMobileProposedModelsDialog();
     } else if (optionsMenuOpen) {
       setOptionsMenuOpen(false);
@@ -706,6 +774,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
       clientKind: "mobile",
       onStatus: setStatus,
       onOpen: () => {
+        closeMobileRollback(false, true);
         pendingRestoreAfterSessionsSnapshot = true;
         hideAuthGate();
         clearConnectionFailureStatus();
@@ -882,6 +951,231 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   function setOptionsMenuOpen(open: boolean): void {
     optionsMenuOpen = open;
     syncOptionsMenu();
+  }
+
+  function canRollbackMobileSession(sessionId: string | null = activeSessionId): boolean {
+    if (!sessionId) return false;
+    const projection = projections.get(sessionId);
+    const summary = projection?.summary ?? sessions.find(candidate => candidate.sessionId === sessionId);
+    return Boolean(
+      projection
+      && summary?.kind === "managed"
+      && summary.status === "idle"
+      && !projection.isBusy
+      && !projection.compacting,
+    );
+  }
+
+  function syncMobileRollbackAvailability(): void {
+    rollbackOpen.disabled = rollbackState !== null || !canRollbackMobileSession();
+  }
+
+
+  function openMobileRollback(): void {
+    if (!activeSessionId || !canRollbackMobileSession(activeSessionId)) return;
+    const sourceSessionId = activeSessionId;
+    rollbackState = {
+      sourceSessionId,
+      listRequestId: "",
+      selectRequestId: null,
+      points: [],
+      selectedEntryId: null,
+      phase: "loading",
+      error: "",
+    };
+    const sessionDraftText = activeMobileView === "controller" ? sessionPromptDraft : promptInput.value;
+    rollbackWarning.hidden = sessionDraftText.length === 0 && pendingImages.length === 0;
+    rollbackOverlay.hidden = false;
+    setOptionsMenuOpen(false);
+    requestMobileRollbackPoints();
+  }
+
+  function requestMobileRollbackPoints(): void {
+    const state = rollbackState;
+    if (!state || state.phase === "selecting") return;
+    if (activeSessionId !== state.sourceSessionId || !canRollbackMobileSession(state.sourceSessionId)) {
+      closeMobileRollback(false, true);
+      return;
+    }
+    state.listRequestId = nextClientRequestId("mobile-session-rewind-list");
+    state.selectRequestId = null;
+    state.points = [];
+    state.selectedEntryId = null;
+    state.phase = "loading";
+    state.error = "";
+    renderMobileRollback();
+    if (!send({
+      type: "session.rewind.list",
+      sessionId: state.sourceSessionId,
+      requestId: state.listRequestId,
+    })) {
+      state.phase = "error";
+      state.error = "Not connected to the Fura bridge.";
+      renderMobileRollback();
+    }
+  }
+
+
+  function closeMobileRollback(returnFocus: boolean, force = false): void {
+    if (!rollbackState && rollbackOverlay.hidden) return;
+    if (rollbackState?.phase === "selecting" && !force) return;
+    rollbackState = null;
+    rollbackOverlay.hidden = true;
+    rollbackList.replaceChildren();
+    syncMobileRollbackAvailability();
+    if (returnFocus) window.setTimeout(() => optionsToggle.focus(), 0);
+  }
+
+  function selectMobileRollbackPoint(entryId: string, focus: boolean): void {
+    const state = rollbackState;
+    if (!state || state.phase !== "ready" || !state.points.some(point => point.entryId === entryId)) return;
+    state.selectedEntryId = entryId;
+    renderMobileRollback();
+    if (!focus) return;
+    const row = Array.from(rollbackList.querySelectorAll<HTMLButtonElement>(".mobile-rollback-row"))
+      .find(candidate => candidate.dataset.entryId === entryId);
+    row?.focus();
+  }
+
+  function renderMobileRollback(): void {
+    const state = rollbackState;
+    if (!state) return;
+    rollbackList.replaceChildren();
+    rollbackList.hidden = state.phase !== "ready";
+    rollbackRetry.hidden = state.phase !== "error";
+    rollbackCancel.disabled = state.phase === "selecting";
+    rollbackConfirm.disabled = state.phase !== "ready" || !state.selectedEntryId;
+    rollbackConfirm.textContent = state.phase === "selecting" ? "Rolling back…" : "Restore draft";
+    rollbackStatus.textContent = state.phase === "loading"
+      ? "Loading earlier prompts…"
+      : state.phase === "empty"
+        ? "No earlier user prompts are available."
+        : state.phase === "error"
+          ? state.error
+          : state.phase === "selecting"
+            ? "Rolling back…"
+            : "";
+    rollbackList.setAttribute("aria-busy", String(state.phase === "loading"));
+    if (state.phase !== "ready") {
+      syncMobileRollbackAvailability();
+      return;
+    }
+    for (const point of state.points) {
+      const row = document.createElement("button");
+      row.type = "button";
+      row.className = "mobile-rollback-row";
+      row.dataset.entryId = point.entryId;
+      row.setAttribute("role", "radio");
+      const selected = point.entryId === state.selectedEntryId;
+      row.setAttribute("aria-checked", String(selected));
+      row.classList.toggle("selected", selected);
+      const text = document.createElement("span");
+      text.className = "mobile-rollback-text";
+      text.textContent = point.text.length > 0 ? point.text : "Image-only prompt";
+      text.title = point.text;
+      const count = document.createElement("span");
+      count.className = "mobile-rollback-image-count";
+      count.textContent = `${point.imageCount} image${point.imageCount === 1 ? "" : "s"}`;
+      row.append(text, count);
+      row.addEventListener("click", () => selectMobileRollbackPoint(point.entryId, false));
+      rollbackList.append(row);
+    }
+    syncMobileRollbackAvailability();
+  }
+
+  function submitMobileRollback(): void {
+    const state = rollbackState;
+    if (!state || state.phase !== "ready" || !state.selectedEntryId) return;
+    state.selectRequestId = nextClientRequestId("mobile-session-rewind-select");
+    state.phase = "selecting";
+    state.error = "";
+    renderMobileRollback();
+    if (!send({
+      type: "session.rewind.select",
+      sessionId: state.sourceSessionId,
+      requestId: state.selectRequestId,
+      entryId: state.selectedEntryId,
+    })) {
+      state.selectRequestId = null;
+      state.phase = "error";
+      state.error = "Not connected to the Fura bridge.";
+      renderMobileRollback();
+    }
+  }
+
+  function handleMobileRollbackPoints(message: Extract<ServerMessage, { type: "session.rewind.points" }>): void {
+    const state = rollbackState;
+    if (
+      !state
+      || message.requestId !== state.listRequestId
+      || message.sessionId !== state.sourceSessionId
+      || state.phase !== "loading"
+    ) return;
+    state.points = message.points;
+    state.selectedEntryId = message.points.at(-1)?.entryId ?? null;
+    state.phase = message.points.length > 0 ? "ready" : "empty";
+    renderMobileRollback();
+    if (state.phase === "ready" && state.selectedEntryId) {
+      window.setTimeout(() => selectMobileRollbackPoint(state.selectedEntryId!, true), 0);
+    } else {
+      window.setTimeout(() => rollbackCancel.focus(), 0);
+    }
+  }
+
+  function handleMobileRollbackResult(message: Extract<ServerMessage, { type: "session.rewind.result" }>): void {
+    const state = rollbackState;
+    if (
+      !state
+      || message.requestId !== state.selectRequestId
+      || message.sourceSessionId !== state.sourceSessionId
+      || state.phase !== "selecting"
+    ) return;
+    if (message.cancelled) {
+      const sourceSessionId = state.sourceSessionId;
+      closeMobileRollback(false, true);
+      appendSessionNotice(sourceSessionId, { level: "info", text: "Rollback cancelled." });
+      renderActiveSession();
+      promptInput.focus();
+      return;
+    }
+
+    closeMobileRollback(false, true);
+    activateSession(message.sessionId, true);
+    const restoredImages = restorePendingImagesFromDraft(message.text, message.images, createPendingImageMarker);
+    sessionPromptDraft = message.text;
+    pendingImages = restoredImages;
+    imageInput.value = "";
+    if (activeMobileView === "controller") {
+      setActiveMobileView("transcript");
+    } else {
+      promptInput.value = message.text;
+    }
+    renderMobileImagePreviews();
+    render();
+    promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
+    promptInput.focus();
+  }
+
+  function handleMobileRollbackError(message: Extract<ServerMessage, { type: "session.rewind.error" }>): void {
+    const state = rollbackState;
+    if (!state || message.sourceSessionId !== state.sourceSessionId) return;
+    const matchesList = message.requestId === state.listRequestId && state.phase === "loading";
+    const matchesSelect = message.requestId === state.selectRequestId && state.phase === "selecting";
+    if (!matchesList && !matchesSelect) return;
+    if (matchesSelect && message.sessionId !== state.sourceSessionId) {
+      closeMobileRollback(false, true);
+      activateSession(message.sessionId, true);
+      appendSessionNotice(message.sessionId, { level: "error", text: message.message });
+      appendLog(`Rollback failed: ${message.message}`);
+      render();
+      promptInput.focus();
+      return;
+    }
+    state.selectRequestId = null;
+    state.phase = "error";
+    state.error = message.message;
+    renderMobileRollback();
+    window.setTimeout(() => rollbackRetry.focus(), 0);
   }
 
   function openMobileProposedModelsDialog(): void {
@@ -1597,6 +1891,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   function handleConnectionClosed(): void {
+    closeMobileRollback(false, true);
     if (!createPendingRequestId) return;
     const requestId = createPendingRequestId;
     handleCreateError(requestId, "Connection closed before session creation completed.");
@@ -1735,6 +2030,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       case "prompt.busy":
         handlePromptBusy(message);
+        break;
+      case "session.rewind.points":
+        handleMobileRollbackPoints(message);
+        break;
+      case "session.rewind.result":
+        handleMobileRollbackResult(message);
+        break;
+      case "session.rewind.error":
+        handleMobileRollbackError(message);
         break;
       case "log.stderr":
         console.debug(`[fura-mobile] [${message.sessionId}] ${message.text}`);
@@ -1960,7 +2264,15 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     render();
   }
 
-  function activateSession(sessionId: string): void {
+  function activateSession(sessionId: string, preserveRollback = false): void {
+    if (
+      !preserveRollback
+      && rollbackState
+      && rollbackState.phase !== "selecting"
+      && rollbackState.sourceSessionId !== sessionId
+    ) {
+      closeMobileRollback(false, true);
+    }
     activeSessionId = activateSessionState(unreadSessions, sessionId);
     rememberTrackedSessionId(sessionId);
     writeStoredActiveSessionId(window.sessionStorage, sessionId);
@@ -2167,6 +2479,14 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     };
   }
   function renderActiveSession(): void {
+    if (
+      rollbackState
+      && rollbackState.phase !== "selecting"
+      && (activeSessionId !== rollbackState.sourceSessionId || !canRollbackMobileSession(rollbackState.sourceSessionId))
+    ) {
+      closeMobileRollback(false, true);
+    }
+    syncMobileRollbackAvailability();
     if (activeMobileView === "controller") {
       const isWorking = controlStatusState.status === "working";
       sessionTitle.textContent = "Ask Fura";

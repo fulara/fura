@@ -1,7 +1,7 @@
 import readline from "node:readline";
 import { stdin, stdout, stderr } from "node:process";
 
-const messages = [
+let messages = [
   {
     role: "custom",
     customType: "async-result",
@@ -68,6 +68,9 @@ let currentSessionId = resumedSessionId ?? `mock-session-${processSeed}`;
 let currentSessionFile = resumeFile ?? `${currentSessionId}.jsonl`;
 let currentSessionName = "Mock RPC Session";
 let forkCount = 0;
+let branchCount = 0;
+let userEntryCount = 0;
+const sessionHistories = new Map([[currentSessionId, messages]]);
 let planExecutionCount = 0;
 let planMode = null;
 let isCompacting = false;
@@ -142,6 +145,19 @@ function stats() {
 
 function error(command, message) {
   write({ id: command.id, type: "response", command: command.type, success: false, error: message });
+}
+
+function userPromptDraft(message) {
+  const content = Array.isArray(message?.content) ? message.content : [];
+  return {
+    text: content
+      .filter(item => item?.type === "text" && typeof item.text === "string")
+      .map(item => item.text)
+      .join(""),
+    images: content.filter(
+      item => item?.type === "image" && typeof item.data === "string" && typeof item.mimeType === "string",
+    ),
+  };
 }
 
 write({
@@ -248,6 +264,7 @@ for await (const line of rl) {
         planExecutionCount += 1;
         currentSessionId = `mock-session-plan-execution-${planExecutionCount}-${processSeed}`;
         currentSessionFile = `${currentSessionId}.jsonl`;
+        sessionHistories.set(currentSessionId, messages);
       }
       success(command, {
         finalPlanFilePath: command.finalPlanFilePath,
@@ -313,11 +330,47 @@ for await (const line of rl) {
       success(command, { model: currentModel, thinkingLevel: undefined, isScoped: false });
       break;
     }
+    case "get_branch_messages": {
+      const branchMessages = [];
+      for (const message of messages) {
+        if (message?.role !== "user" || typeof message.entryId !== "string") continue;
+        const draft = userPromptDraft(message);
+        if (draft.text.length === 0 && draft.images.length === 0) continue;
+        branchMessages.push({
+          entryId: message.entryId,
+          text: draft.text,
+          imageCount: draft.images.length,
+        });
+      }
+      success(command, { messages: branchMessages });
+      break;
+    }
+    case "branch": {
+      const sourceMessages = sessionHistories.get(currentSessionId) ?? messages;
+      const selectedIndex = sourceMessages.findIndex(
+        message => message?.role === "user" && message.entryId === command.entryId,
+      );
+      if (selectedIndex < 0) {
+        error(command, `Branch entry not found: ${String(command.entryId ?? "")}`);
+        break;
+      }
+      const draft = userPromptDraft(sourceMessages[selectedIndex]);
+      const branchedMessages = sourceMessages.slice(0, selectedIndex);
+      branchCount += 1;
+      currentSessionId = `mock-session-rollback-${branchCount}-${processSeed}`;
+      currentSessionFile = `${currentSessionId}.jsonl`;
+      currentSessionName = `Mock RPC Rollback ${branchCount}`;
+      messages = branchedMessages;
+      sessionHistories.set(currentSessionId, messages);
+      success(command, { text: draft.text, images: draft.images, cancelled: false });
+      break;
+    }
     case "fork": {
       forkCount += 1;
       currentSessionId = `mock-session-fork-${forkCount}-${processSeed}`;
       currentSessionFile = `${currentSessionId}.jsonl`;
       currentSessionName = `Mock RPC Fork ${forkCount}`;
+      sessionHistories.set(currentSessionId, messages);
       success(command, { cancelled: false });
       break;
     }
@@ -398,13 +451,13 @@ for await (const line of rl) {
       for (const image of Array.isArray(command.images) ? command.images : []) {
         if (!image || typeof image !== "object") continue;
         if (image.type !== "image" || typeof image.data !== "string" || typeof image.mimeType !== "string") continue;
-        const content = { type: "image", data: image.data, mimeType: image.mimeType };
-        if (typeof image.alt === "string" && image.alt.trim()) content.alt = image.alt.trim();
-        userContent.push(content);
+        userContent.push({ ...image });
       }
       if (userContent.length === 0) userContent.push({ type: "text", text: promptText });
+      const userEntryId = `mock-user-entry-${++userEntryCount}`;
       const user = {
-        id: `user-${now}`,
+        id: `user-${userEntryId}`,
+        entryId: userEntryId,
         role: "user",
         content: userContent,
         timestamp: now,

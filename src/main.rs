@@ -1565,6 +1565,12 @@ pub(crate) mod tests {
                 get_available_commands_command("cmd-available-commands-1".to_string())
             }
             "command-get-state" => get_state_command("cmd-state-1".to_string()),
+            "command-get-branch-messages" => {
+                get_branch_messages_command("cmd-branch-messages-1".to_string())
+            }
+            "command-branch" => {
+                branch_command("cmd-branch-1".to_string(), "entry-image-only".to_string())
+            }
             "command-fork" => fork_command("cmd-fork-1".to_string()),
             "command-btw-start" => btw_start_command(
                 "cmd-btw-start-1".to_string(),
@@ -3914,11 +3920,14 @@ pub(crate) mod tests {
             &state,
             "s1".to_string(),
             "queue this safely".to_string(),
-            Some(vec![serde_json::json!({
-                "type": "image",
-                "data": "abc123",
-                "mimeType": "image/png"
-            })]),
+            Some(vec![
+                serde_json::from_value(serde_json::json!({
+                    "type": "image",
+                    "data": "abc123",
+                    "mimeType": "image/png"
+                }))
+                .expect("valid prompt image"),
+            ]),
             None,
         )
         .await;
@@ -4004,10 +4013,7 @@ pub(crate) mod tests {
                 assert_eq!(text, "queue this safely");
                 let images = images.expect("image attachments are preserved");
                 assert_eq!(images.len(), 1);
-                assert_eq!(
-                    images[0].get("mimeType").and_then(|value| value.as_str()),
-                    Some("image/png")
-                );
+                assert_eq!(images[0].mime_type, "image/png");
             }
             other => panic!("unexpected prompt busy event: {other:?}"),
         }
@@ -5014,10 +5020,17 @@ pub(crate) mod tests {
         let message = ClientMessage::PromptSend {
             session_id: "session-123".to_string(),
             text: "hello from browser".to_string(),
-            images: Some(vec![serde_json::json!({"type": "image"})]),
+            images: Some(vec![
+                serde_json::from_value(serde_json::json!({
+                    "type": "image",
+                    "data": "AA==",
+                    "mimeType": "image/png"
+                }))
+                .expect("valid prompt image"),
+            ]),
             behavior: Some(PromptBehavior::FollowUp),
         };
-        let raw = r#"{"type":"prompt.send","sessionId":"session-123","text":"hello from browser","images":[{"type":"image"}],"behavior":"followUp"}"#;
+        let raw = r#"{"type":"prompt.send","sessionId":"session-123","text":"hello from browser","images":[{"type":"image","data":"AA==","mimeType":"image/png"}],"behavior":"followUp"}"#;
 
         append_client_message_debug_event(
             &state,
@@ -7632,5 +7645,274 @@ pub(crate) mod tests {
         assert_eq!(session.title.as_deref(), Some("Focused continuation"));
         assert_eq!(session.messages.len(), 1);
         assert_eq!(session.messages[0].id, "handoff-context");
+    }
+    #[test]
+    fn rewind_rpc_contract_is_strict_and_lossless() {
+        assert_eq!(
+            get_branch_messages_command("list-1".to_string()),
+            serde_json::json!({"type": "get_branch_messages", "id": "list-1"})
+        );
+        assert_eq!(
+            branch_command("branch-1".to_string(), "entry-7".to_string()),
+            serde_json::json!({
+                "type": "branch",
+                "id": "branch-1",
+                "entryId": "entry-7"
+            })
+        );
+        let result: OmpBranchResult = serde_json::from_value(serde_json::json!({
+            "text": "restore",
+            "images": [{
+                "type": "image",
+                "data": "AA==",
+                "mimeType": "image/webp",
+                "providerFile": "file-1"
+            }],
+            "cancelled": false
+        }))
+        .expect("strict branch result");
+        assert_eq!(result.images[0].extra["providerFile"], "file-1");
+        assert!(
+            serde_json::from_value::<OmpBranchResult>(serde_json::json!({
+                "text": "restore",
+                "cancelled": false
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PromptImagePayload>(serde_json::json!({
+                "type": "image",
+                "data": "AA=="
+            }))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn rewind_rejects_busy_and_concurrent_mutations() {
+        let state = test_state(8, None);
+        let mut source = test_record();
+        source.id = "source".to_string();
+        source.status = SessionStatus::Busy;
+        state
+            .sessions
+            .write()
+            .await
+            .insert("source".to_string(), source);
+        let mut commands = register_test_transport(&state, "transport", "source", 8).await;
+
+        let busy = handle_client_message_for_connection(
+            &state,
+            ClientMessage::SessionRewindSelect {
+                session_id: "source".to_string(),
+                request_id: "busy".to_string(),
+                entry_id: "entry-1".to_string(),
+            },
+            1,
+        )
+        .await;
+        assert!(matches!(
+            busy.as_slice(),
+            [ServerMessage::SessionRewindError { .. }]
+        ));
+        assert!(commands.try_recv().is_err());
+
+        state
+            .sessions
+            .write()
+            .await
+            .get_mut("source")
+            .unwrap()
+            .status = SessionStatus::Idle;
+        assert!(
+            handle_client_message_for_connection(
+                &state,
+                ClientMessage::SessionRewindSelect {
+                    session_id: "source".to_string(),
+                    request_id: "first".to_string(),
+                    entry_id: "entry-1".to_string(),
+                },
+                1,
+            )
+            .await
+            .is_empty()
+        );
+        let concurrent = handle_client_message_for_connection(
+            &state,
+            ClientMessage::SessionRewindSelect {
+                session_id: "source".to_string(),
+                request_id: "second".to_string(),
+                entry_id: "entry-2".to_string(),
+            },
+            2,
+        )
+        .await;
+        assert!(matches!(
+            concurrent.as_slice(),
+            [ServerMessage::SessionRewindError { .. }]
+        ));
+        assert_eq!(
+            commands.recv().await.expect("single branch")["type"],
+            "branch"
+        );
+        assert!(commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn rewind_waits_for_correlated_state_and_disconnect_keeps_private_draft() {
+        let state = test_state(32, None);
+        let mut source = test_record();
+        source.id = "source".to_string();
+        source.worktree = Some(SessionWorktreeSummary {
+            path: "/tmp/source-worktree".to_string(),
+        });
+        state
+            .sessions
+            .write()
+            .await
+            .insert("source".to_string(), source);
+        let mut commands = register_test_transport(&state, "transport", "source", 16).await;
+        let mut events = state.events.subscribe();
+
+        assert!(
+            handle_client_message_for_connection(
+                &state,
+                ClientMessage::SessionRewindSelect {
+                    session_id: "source".to_string(),
+                    request_id: "ui-1".to_string(),
+                    entry_id: "entry-7".to_string(),
+                },
+                41,
+            )
+            .await
+            .is_empty()
+        );
+        let branch = commands.recv().await.expect("branch command");
+        let branch_id = branch["id"].as_str().expect("branch id").to_string();
+
+        apply_rpc_response(
+            &state,
+            "transport",
+            &serde_json::json!({
+                "type": "response",
+                "id": branch_id,
+                "command": "branch",
+                "success": true,
+                "data": {
+                    "text": "restore",
+                    "images": [{
+                        "type": "image",
+                        "data": "AA==",
+                        "mimeType": "image/png",
+                        "detail": "high"
+                    }],
+                    "cancelled": false
+                }
+            }),
+        )
+        .await;
+        let correlated_state = commands.recv().await.expect("correlated get_state");
+        let correlated_id = correlated_state["id"]
+            .as_str()
+            .expect("correlated id")
+            .to_string();
+
+        apply_rpc_response(
+            &state,
+            "transport",
+            &serde_json::json!({
+                "type": "response",
+                "id": "unrelated-state",
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "source",
+                    "sessionFile": "source.jsonl",
+                    "sessionName": null,
+                    "model": null,
+                    "thinkingLevel": null,
+                    "planMode": null,
+                    "goalMode": null,
+                    "contextUsage": null
+                }
+            }),
+        )
+        .await;
+        assert!(
+            state
+                .session_runtime
+                .pending_rewind_rpc(&correlated_id)
+                .await
+                .is_some()
+        );
+
+        state.session_runtime.detach_rewind_connection(41).await;
+        apply_rpc_response(
+            &state,
+            "transport",
+            &serde_json::json!({
+                "type": "response",
+                "id": correlated_id,
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "target",
+                    "sessionFile": "target.jsonl",
+                    "sessionName": null,
+                    "model": null,
+                    "thinkingLevel": null,
+                    "planMode": null,
+                    "goalMode": null,
+                    "contextUsage": null
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            state
+                .session_runtime
+                .target_session_id_for_transport("transport")
+                .await,
+            "target"
+        );
+        let sessions = state.sessions.read().await;
+        assert_eq!(
+            sessions.get("source").expect("source").kind,
+            SessionKind::Available
+        );
+        assert_eq!(
+            sessions.get("target").expect("target").kind,
+            SessionKind::Managed
+        );
+        assert_eq!(
+            sessions.get("target").expect("target").worktree,
+            sessions.get("source").expect("source").worktree
+        );
+        drop(sessions);
+
+        let mut rewind_result = None;
+        while let Ok(message) = events.try_recv() {
+            if matches!(message, ServerMessage::SessionRewindResult { .. }) {
+                rewind_result = Some(message);
+            }
+        }
+        let rewind_result = rewind_result.expect("private rewind result");
+        assert!(!server_message_visible_to_connection(&rewind_result, 41));
+        assert!(!server_message_visible_to_connection(&rewind_result, 99));
+        match rewind_result {
+            ServerMessage::SessionRewindResult {
+                target_connection_id,
+                session_id,
+                images,
+                ..
+            } => {
+                assert_eq!(target_connection_id, None);
+                assert_eq!(session_id, "target");
+                assert_eq!(images[0].extra["detail"], "high");
+            }
+            _ => unreachable!(),
+        }
+        assert!(state.pending_prompt_drafts.read().await.is_empty());
     }
 }

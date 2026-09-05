@@ -15,10 +15,10 @@ use tracing::warn;
 use crate::{
     CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode, DiffFileSelector,
     DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, GoalModeProjection,
-    PlanModeProjection, PreparedDiff, ProposedModelConfig, ServerMessage, SessionKind, SessionMode,
-    SessionProjectionDelta, SessionRecord, SessionStatus, ThinkingVisibilityPreference, Timestamp,
-    TodoPhaseProjection, VoiceCommand, append_bridge_debug_event, save_fura_config,
-    sessions_snapshot_from_map,
+    PlanModeProjection, PreparedDiff, PromptImagePayload, ProposedModelConfig, ServerMessage,
+    SessionKind, SessionMode, SessionProjectionDelta, SessionRecord, SessionStatus,
+    ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand,
+    append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -571,6 +571,7 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) pending_btw_commands: Arc<RwLock<HashMap<String, PendingBtwCommand>>>,
     /// `/compact` requests routed through OMP's builtin slash-command handler, keyed by RPC command id.
     pub(crate) pending_compaction_commands: Arc<RwLock<HashMap<String, String>>>,
+    pub(crate) pending_rewind_rpcs: Arc<RwLock<HashMap<String, PendingRewindRpc>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -601,11 +602,66 @@ pub(crate) struct PendingBtwCommand {
     pub(crate) btw_id: String,
     pub(crate) kind: PendingBtwCommandKind,
 }
+#[derive(Clone, Debug)]
+pub(crate) struct RewindRoute {
+    pub(crate) target_connection_id: Option<u64>,
+    pub(crate) request_id: String,
+    pub(crate) source_session_id: String,
+    pub(crate) transport_session_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum RewindOutcome {
+    Success {
+        text: String,
+        images: Vec<PromptImagePayload>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum PendingRewindRpc {
+    List {
+        route: RewindRoute,
+    },
+    Branch {
+        route: RewindRoute,
+    },
+    BranchGetState {
+        route: RewindRoute,
+        outcome: RewindOutcome,
+    },
+}
+
+impl PendingRewindRpc {
+    pub(crate) fn route(&self) -> &RewindRoute {
+        match self {
+            Self::List { route } | Self::Branch { route } | Self::BranchGetState { route, .. } => {
+                route
+            }
+        }
+    }
+
+    fn route_mut(&mut self) -> &mut RewindRoute {
+        match self {
+            Self::List { route } | Self::Branch { route } | Self::BranchGetState { route, .. } => {
+                route
+            }
+        }
+    }
+
+    fn is_mutation(&self) -> bool {
+        matches!(self, Self::Branch { .. } | Self::BranchGetState { .. })
+    }
+}
 
 pub(crate) struct RemovedRpcTransport {
     pub(crate) handle: RpcSessionHandle,
     pub(crate) target_session_id: String,
     pub(crate) btw_requests: Vec<(String, BtwRequestRoute)>,
+    pub(crate) rewind_requests: Vec<PendingRewindRpc>,
 }
 
 impl SessionRuntimeState {
@@ -628,6 +684,7 @@ impl SessionRuntimeState {
             btw_requests: Arc::new(RwLock::new(HashMap::new())),
             pending_btw_commands: Arc::new(RwLock::new(HashMap::new())),
             pending_compaction_commands: Arc::new(RwLock::new(HashMap::new())),
+            pending_rewind_rpcs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -703,10 +760,22 @@ impl SessionRuntimeState {
             .write()
             .await
             .retain(|_id, session_id| session_id != &target_session_id);
+        let rewind_requests = {
+            let mut pending = self.pending_rewind_rpcs.write().await;
+            let ids = pending
+                .iter()
+                .filter(|(_id, rewind)| rewind.route().transport_session_id == transport_session_id)
+                .map(|(id, _rewind)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| pending.remove(&id))
+                .collect()
+        };
         Some(RemovedRpcTransport {
             handle,
             target_session_id,
             btw_requests,
+            rewind_requests,
         })
     }
 
@@ -829,6 +898,94 @@ impl SessionRuntimeState {
             .write()
             .await
             .retain(|_request_id, pending| pending.transport_session_id != transport_session_id);
+    }
+    pub(crate) async fn insert_pending_rewind_list(
+        &self,
+        command_id: String,
+        route: RewindRoute,
+    ) -> bool {
+        let mut pending = self.pending_rewind_rpcs.write().await;
+        if pending.contains_key(&command_id)
+            || pending.values().any(|rewind| {
+                rewind.is_mutation()
+                    && rewind.route().transport_session_id == route.transport_session_id
+            })
+        {
+            return false;
+        }
+        pending.insert(command_id, PendingRewindRpc::List { route });
+        true
+    }
+
+    pub(crate) async fn insert_pending_rewind_branch(
+        &self,
+        command_id: String,
+        route: RewindRoute,
+    ) -> bool {
+        let mut pending = self.pending_rewind_rpcs.write().await;
+        if pending.contains_key(&command_id)
+            || pending.values().any(|rewind| {
+                rewind.is_mutation()
+                    && rewind.route().transport_session_id == route.transport_session_id
+            })
+        {
+            return false;
+        }
+        pending.insert(command_id, PendingRewindRpc::Branch { route });
+        true
+    }
+
+    pub(crate) async fn pending_rewind_rpc(&self, command_id: &str) -> Option<PendingRewindRpc> {
+        self.pending_rewind_rpcs
+            .read()
+            .await
+            .get(command_id)
+            .cloned()
+    }
+
+    pub(crate) async fn take_pending_rewind_rpc(
+        &self,
+        command_id: &str,
+    ) -> Option<PendingRewindRpc> {
+        self.pending_rewind_rpcs.write().await.remove(command_id)
+    }
+
+    pub(crate) async fn transition_rewind_branch_to_get_state(
+        &self,
+        branch_command_id: &str,
+        get_state_command_id: String,
+        outcome: RewindOutcome,
+    ) -> bool {
+        let mut pending = self.pending_rewind_rpcs.write().await;
+        if pending.contains_key(&get_state_command_id) {
+            return false;
+        }
+        if !matches!(
+            pending.get(branch_command_id),
+            Some(PendingRewindRpc::Branch { .. })
+        ) {
+            return false;
+        }
+        let PendingRewindRpc::Branch { route } = pending
+            .remove(branch_command_id)
+            .expect("validated pending rewind branch")
+        else {
+            unreachable!()
+        };
+        pending.insert(
+            get_state_command_id,
+            PendingRewindRpc::BranchGetState { route, outcome },
+        );
+        true
+    }
+
+    pub(crate) async fn detach_rewind_connection(&self, connection_id: u64) {
+        for rewind in self.pending_rewind_rpcs.write().await.values_mut() {
+            let route = rewind.route_mut();
+            if route.target_connection_id == Some(connection_id) {
+                route.target_connection_id = None;
+            }
+        }
     }
 
     pub(crate) async fn insert_btw_request(&self, btw_id: String, route: BtwRequestRoute) -> bool {
@@ -1469,7 +1626,7 @@ pub(crate) struct PendingCreatedSession {
 pub(crate) struct PendingPromptDraft {
     pub(crate) session_id: String,
     pub(crate) text: String,
-    pub(crate) images: Option<Vec<Value>>,
+    pub(crate) images: Option<Vec<PromptImagePayload>>,
     pub(crate) optimistic_message_id: String,
 }
 

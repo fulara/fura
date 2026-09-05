@@ -1,7 +1,7 @@
 import {
   promptDraftAttachmentCount,
   promptDraftDisplayText,
-  restorePendingImagesFromPayload,
+  restorePendingImagesFromDraft,
   type ComposerPromptDraft,
 } from "./composer";
 import type { PendingImage, PendingSnippet } from "./composerAttachments";
@@ -36,7 +36,7 @@ export function createBusyPromptDraftFromServer(
   return createBusyPromptDraft({
     sessionId: input.sessionId,
     text: input.text,
-    images: restorePendingImagesFromPayload(input.images ?? [], createImageMarker),
+    images: restorePendingImagesFromDraft(input.text, input.images ?? [], createImageMarker),
   });
 }
 

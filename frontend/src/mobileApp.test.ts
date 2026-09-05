@@ -554,6 +554,244 @@ describe("mountMobileApp", () => {
     expect(document.querySelector("#mobileOptionsMenu")?.hasAttribute("hidden")).toBe(false);
   });
 
+  it("labels session options and enables rollback only for a managed idle live session", () => {
+    const { connection } = createHarness();
+    const options = document.querySelector<HTMLButtonElement>("#mobileOptionsToggle");
+    const rollback = document.querySelector<HTMLButtonElement>("#mobileRollbackOpen");
+    const templates = document.querySelector<HTMLButtonElement>("#mobileModelTemplatesOpen");
+
+    expect(options?.title).toBe("Session options");
+    expect(templates?.nextElementSibling?.getAttribute("role")).toBe("separator");
+    expect(templates?.nextElementSibling?.nextElementSibling).toBe(rollback);
+    expect(rollback?.disabled).toBe(true);
+
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { isBusy: true, summary: summary("live", { status: "busy" }) }),
+    });
+    expect(rollback?.disabled).toBe(true);
+
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { compacting: true }) });
+    expect(rollback?.disabled).toBe(true);
+
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    expect(rollback?.disabled).toBe(false);
+
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "live",
+      state: projection("live", { summary: summary("live", { kind: "available", status: "available" }) }),
+    });
+    expect(rollback?.disabled).toBe(true);
+  });
+
+  it("lists rollback points with counts, an image-only label, keyboard selection, and latest default", () => {
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+
+    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    document.querySelector<HTMLButtonElement>("#mobileRollbackOpen")?.click();
+    const request = connection.sent.find(
+      (message): message is Extract<ClientMessage, { type: "session.rewind.list" }> => message.type === "session.rewind.list",
+    );
+    if (!request) throw new Error("rewind list request missing");
+    expect(request.sessionId).toBe("live");
+
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: "stale-request",
+      sessionId: "live",
+      points: [{ entryId: "stale", text: "Stale", imageCount: 0 }],
+    });
+    expect(document.querySelectorAll(".mobile-rollback-row")).toHaveLength(0);
+
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: request.requestId,
+      sessionId: "live",
+      points: [
+        { entryId: "first", text: "First prompt", imageCount: 0 },
+        { entryId: "image", text: "", imageCount: 1 },
+        { entryId: "latest", text: "Latest\nprompt", imageCount: 2 },
+      ],
+    });
+
+    let rows = Array.from(document.querySelectorAll<HTMLButtonElement>(".mobile-rollback-row"));
+    expect(rows.map(row => row.querySelector(".mobile-rollback-text")?.textContent)).toEqual([
+      "First prompt",
+      "Image-only prompt",
+      "Latest\nprompt",
+    ]);
+    expect(rows.map(row => row.querySelector(".mobile-rollback-image-count")?.textContent)).toEqual([
+      "0 images",
+      "1 image",
+      "2 images",
+    ]);
+    expect(rows.map(row => row.getAttribute("aria-checked"))).toEqual(["false", "false", "true"]);
+
+    document.querySelector("#mobileRollbackList")?.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    rows = Array.from(document.querySelectorAll<HTMLButtonElement>(".mobile-rollback-row"));
+    expect(rows.map(row => row.getAttribute("aria-checked"))).toEqual(["false", "true", "false"]);
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(document.querySelector<HTMLElement>("#mobileRollbackOverlay")?.hidden).toBe(true);
+  });
+
+  it("restores the selected draft and lossless images without submitting it", async () => {
+    stubFileReader("b2xk");
+    const { connection } = createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("source")] });
+    clickSession();
+    connection.emit({ type: "session.snapshot", sessionId: "source", state: projection("source") });
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
+    if (!input) throw new Error("mobile prompt input missing");
+    input.value = "Current draft";
+    await selectMobileImage();
+
+    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    document.querySelector<HTMLButtonElement>("#mobileRollbackOpen")?.click();
+    expect(document.querySelector<HTMLElement>("#mobileRollbackWarning")?.hidden).toBe(false);
+    const listRequest = connection.sent.find(
+      (message): message is Extract<ClientMessage, { type: "session.rewind.list" }> => message.type === "session.rewind.list",
+    );
+    if (!listRequest) throw new Error("rewind list request missing");
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: listRequest.requestId,
+      sessionId: "source",
+      points: [{ entryId: "chosen", text: "  Restored [Image #1, 1x1] attachment://1  ", imageCount: 1 }],
+    });
+    document.querySelector<HTMLButtonElement>("#mobileRollbackConfirm")?.click();
+    const selectRequest = connection.sent.find(
+      (message): message is Extract<ClientMessage, { type: "session.rewind.select" }> => message.type === "session.rewind.select",
+    );
+    if (!selectRequest) throw new Error("rewind select request missing");
+    expect(document.querySelector<HTMLButtonElement>("#mobileRollbackCancel")?.disabled).toBe(true);
+    expect(document.querySelector("#mobileRollbackConfirm")?.textContent).toBe("Rolling back…");
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    document.querySelector<HTMLElement>("#mobileRollbackOverlay")?.dispatchEvent(new MouseEvent("mousedown", { bubbles: true }));
+    expect(document.querySelector<HTMLElement>("#mobileRollbackOverlay")?.hidden).toBe(false);
+
+    connection.emit({ type: "session.snapshot", sessionId: "branched", state: projection("branched") });
+    const restoredText = "  Restored [Image #1, 1x1] attachment://1  ";
+    connection.emit({
+      type: "session.rewind.result",
+      requestId: selectRequest.requestId,
+      sourceSessionId: "source",
+      sessionId: "branched",
+      text: restoredText,
+      images: [{ type: "image", data: "bmV3", mimeType: "image/jpeg", detail: "high", providerFile: { id: "file-1" } }],
+      cancelled: false,
+    });
+
+    expect(window.sessionStorage.getItem("fura.mobile.activeSessionId")).toBe("branched");
+    expect(input.value).toBe(restoredText);
+    expect(document.querySelectorAll("#mobileImagePreviews img")).toHaveLength(1);
+    expect(document.querySelector("#mobileImagePreviews img")?.getAttribute("src")).toBe("data:image/jpeg;base64,bmV3");
+    expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+    expect(document.querySelector<HTMLElement>("#mobileRollbackOverlay")?.hidden).toBe(true);
+
+    document.querySelector<HTMLFormElement>("#mobilePromptForm")?.requestSubmit();
+    expect(connection.sent.find(message => message.type === "prompt.send")).toEqual({
+      type: "prompt.send",
+      sessionId: "branched",
+      text: restoredText.trim(),
+      images: [{ type: "image", data: "bmV3", mimeType: "image/jpeg", detail: "high", providerFile: { id: "file-1" } }],
+    });
+  });
+
+  it("preserves the draft across errors, cancellation, session switches, and reconnect cleanup", () => {
+    const { connection } = createHarness();
+    connection.emit({
+      type: "sessions.snapshot",
+      sessions: [summary("source", { updatedAt: 2 }), summary("other", { updatedAt: 1 })],
+    });
+    clickSession(0);
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "source",
+      state: projection("source", { summary: summary("source", { updatedAt: 2 }) }),
+    });
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
+    if (!input) throw new Error("mobile prompt input missing");
+    input.value = "Keep me";
+
+    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    document.querySelector<HTMLButtonElement>("#mobileRollbackOpen")?.click();
+    let listRequest = connection.sent.find(
+      (message): message is Extract<ClientMessage, { type: "session.rewind.list" }> => message.type === "session.rewind.list",
+    );
+    if (!listRequest) throw new Error("rewind list request missing");
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: listRequest.requestId,
+      sessionId: "source",
+      points: [{ entryId: "chosen", text: "Chosen", imageCount: 0 }],
+    });
+    document.querySelector<HTMLButtonElement>("#mobileRollbackConfirm")?.click();
+    let selectRequest = connection.sent.find(
+      (message): message is Extract<ClientMessage, { type: "session.rewind.select" }> => message.type === "session.rewind.select",
+    );
+    if (!selectRequest) throw new Error("rewind select request missing");
+    connection.emit({
+      type: "session.rewind.error",
+      requestId: selectRequest.requestId,
+      sourceSessionId: "source",
+      sessionId: "source",
+      message: "Branch hook failed.",
+    });
+    expect(input.value).toBe("Keep me");
+    expect(document.querySelector("#mobileRollbackStatus")?.textContent).toBe("Branch hook failed.");
+
+    document.querySelector<HTMLButtonElement>("#mobileRollbackRetry")?.click();
+    const listRequests = connection.sent.filter(
+      (message): message is Extract<ClientMessage, { type: "session.rewind.list" }> => message.type === "session.rewind.list",
+    );
+    listRequest = listRequests.at(-1);
+    if (!listRequest) throw new Error("retry rewind list request missing");
+    connection.emit({
+      type: "session.rewind.points",
+      requestId: listRequest.requestId,
+      sessionId: "source",
+      points: [{ entryId: "chosen", text: "Chosen", imageCount: 0 }],
+    });
+    document.querySelector<HTMLButtonElement>("#mobileRollbackConfirm")?.click();
+    const selectRequests = connection.sent.filter(
+      (message): message is Extract<ClientMessage, { type: "session.rewind.select" }> => message.type === "session.rewind.select",
+    );
+    selectRequest = selectRequests.at(-1);
+    if (!selectRequest) throw new Error("retry rewind select request missing");
+    connection.emit({
+      type: "session.rewind.result",
+      requestId: selectRequest.requestId,
+      sourceSessionId: "source",
+      sessionId: "source",
+      text: "ignored",
+      images: [],
+      cancelled: true,
+    });
+    expect(input.value).toBe("Keep me");
+    expect(document.querySelector<HTMLElement>("#mobileRollbackOverlay")?.hidden).toBe(true);
+
+    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    document.querySelector<HTMLButtonElement>("#mobileRollbackOpen")?.click();
+    clickSession(1);
+    expect(input.value).toBe("Keep me");
+    expect(document.querySelector<HTMLElement>("#mobileRollbackOverlay")?.hidden).toBe(true);
+
+    connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+    document.querySelector<HTMLButtonElement>("#mobileOptionsToggle")?.click();
+    document.querySelector<HTMLButtonElement>("#mobileRollbackOpen")?.click();
+    connection.options.onOpen?.();
+    expect(input.value).toBe("Keep me");
+    expect(document.querySelector<HTMLElement>("#mobileRollbackOverlay")?.hidden).toBe(true);
+  });
+
   it("applies config visibility updates to the mobile transcript", () => {
     const { connection } = createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });

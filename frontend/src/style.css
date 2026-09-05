@@ -10,6 +10,23 @@
   --gap-transcript: 0.5rem;
   --pad-transcript: 0.75rem;
   --radius-card: 0.6rem;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --color-border: #343a46;
+  --color-border-subtle: #252a35;
+  --color-surface-raised: #151922;
+  --color-text-muted: #9ba4b5;
+  --color-accent: #6d7cff;
+  --color-accent-soft: rgba(127, 140, 255, 0.12);
+  --color-warning: #ffd681;
+  --color-warning-soft: rgba(255, 196, 87, 0.1);
+  --font-size-small: 0.82rem;
+  --focus-ring-width: 2px;
+  --rollback-list-min-height: 12rem;
+  --rollback-list-max-height: 50vh;
+  --color-warning-border: rgba(255, 196, 87, 0.42);
 }
 
 * {
@@ -3211,6 +3228,76 @@ h2 {
 .modal-actions {
   display: flex;
   gap: 0.5rem;
+}
+
+.rollback-chat-body {
+  display: grid;
+  min-height: 0;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+
+.rollback-chat-warning {
+  margin: 0;
+  border: 1px solid var(--color-warning-border);
+  border-radius: var(--radius-card);
+  background: var(--color-warning-soft);
+  color: var(--color-warning);
+  padding: var(--space-3);
+}
+
+.rollback-chat-feedback {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.rollback-chat-feedback .modal-status {
+  margin: 0;
+}
+
+.rollback-chat-list {
+  display: grid;
+  min-height: var(--rollback-list-min-height);
+  max-height: var(--rollback-list-max-height);
+  gap: var(--space-1);
+  overflow: auto;
+}
+
+.rollback-chat-list[hidden] {
+  display: none;
+}
+
+.rollback-chat-list:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-accent);
+  outline-offset: var(--space-1);
+}
+
+.rollback-chat-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  width: 100%;
+  gap: var(--space-3);
+  text-align: left;
+}
+
+.rollback-chat-row.selected {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.rollback-chat-row-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rollback-chat-row-count {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+  white-space: nowrap;
 }
 
 .auth-panel {

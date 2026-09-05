@@ -27,6 +27,7 @@ import {
 } from "./composerAttachments";
 import {
   createPromptSendMessage,
+  restorePendingImagesFromDraft,
   resolvePromptSubmitAction,
   type PromptBehavior,
 } from "./composer";
@@ -177,6 +178,7 @@ import type {
   SessionChangesSummaryState,
   SessionProjection,
   SessionSummary,
+  SessionRewindPoint,
   TodoPhase,
   ToolCard,
   TranscriptMessage,
@@ -260,6 +262,7 @@ app.innerHTML = `
                 <button id="activeCategorySave" type="button">Save</button>
               </div>
               <div class="workspace-menu-divider" role="separator"></div>
+              <button id="rollbackChatButton" class="workspace-option-item" type="button" role="menuitem">Rollback chat…</button>
               <button id="deleteSessionButton" class="workspace-option-item danger-action" type="button" role="menuitem">Delete session</button>
             </div>
           </div>
@@ -351,6 +354,33 @@ app.innerHTML = `
         <div class="modal-actions">
           <button id="modelPickerCancel" type="button">Cancel</button>
           <button id="modelPickerSelect" type="button">Use selected model</button>
+        </div>
+      </footer>
+    </section>
+  </div>
+
+  <div id="rollbackChatOverlay" class="modal-overlay" hidden>
+    <section class="rollback-chat modal-panel" role="dialog" aria-modal="true" aria-labelledby="rollbackChatTitle" aria-describedby="rollbackChatDescription">
+      <header class="modal-header">
+        <div>
+          <h2 id="rollbackChatTitle">Rollback chat</h2>
+          <p id="rollbackChatDescription">Create a new branch before an earlier prompt and restore that prompt as an unsent draft. The current chat remains in session history. Files and worktree are not rolled back.</p>
+        </div>
+        <button id="rollbackChatClose" class="modal-close" type="button" aria-label="Close rollback chat">×</button>
+      </header>
+      <div class="rollback-chat-body">
+        <p id="rollbackChatWarning" class="rollback-chat-warning" role="note" hidden>Your current draft and attachments will be replaced after a successful rollback.</p>
+        <div class="rollback-chat-feedback">
+          <p id="rollbackChatStatus" class="modal-status" aria-live="polite"></p>
+          <button id="rollbackChatRetry" type="button" hidden>Retry</button>
+        </div>
+        <div id="rollbackChatList" class="rollback-chat-list" role="listbox" aria-label="Earlier user prompts" tabindex="0"></div>
+      </div>
+      <footer class="modal-footer">
+        <span></span>
+        <div class="modal-actions">
+          <button id="rollbackChatCancel" type="button">Cancel</button>
+          <button id="rollbackChatRestore" type="button">Restore draft</button>
         </div>
       </footer>
     </section>
@@ -668,6 +698,15 @@ const presetsActions = requireElement<HTMLDivElement>("presetsActions");
 const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const deleteSessionButton = requireElement<HTMLButtonElement>("deleteSessionButton");
+const rollbackChatButton = requireElement<HTMLButtonElement>("rollbackChatButton");
+const rollbackChatOverlay = requireElement<HTMLDivElement>("rollbackChatOverlay");
+const rollbackChatClose = requireElement<HTMLButtonElement>("rollbackChatClose");
+const rollbackChatWarning = requireElement<HTMLParagraphElement>("rollbackChatWarning");
+const rollbackChatStatus = requireElement<HTMLParagraphElement>("rollbackChatStatus");
+const rollbackChatRetry = requireElement<HTMLButtonElement>("rollbackChatRetry");
+const rollbackChatList = requireElement<HTMLDivElement>("rollbackChatList");
+const rollbackChatCancel = requireElement<HTMLButtonElement>("rollbackChatCancel");
+const rollbackChatRestore = requireElement<HTMLButtonElement>("rollbackChatRestore");
 const activeCategoryInput = requireElement<HTMLInputElement>("activeCategoryInput");
 const activeCategorySuggestions = requireElement<HTMLDivElement>("activeCategorySuggestions");
 const activeCategorySave = requireElement<HTMLButtonElement>("activeCategorySave");
@@ -1035,6 +1074,23 @@ let lastDiffsRenderedSessionId: string | null = null;
 let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
 let busyPromptDraft: BusyPromptDraft | null = null;
+type RollbackChatPhase = "loading" | "ready" | "error" | "applying";
+type RollbackChatDraft = {
+  text: string;
+  images: PendingImage[];
+  snippets: PendingSnippet[];
+};
+type RollbackChatState = {
+  sourceSessionId: string;
+  listRequestId: string;
+  selectRequestId: string | null;
+  points: SessionRewindPoint[];
+  selectedIndex: number;
+  phase: RollbackChatPhase;
+  error: string | null;
+  draft: RollbackChatDraft | null;
+};
+let rollbackChatState: RollbackChatState | null = null;
 let diffPreviewDraft: DiffPreviewDraft | null = null;
 
 let agentReviewDraft: { sessionId: string; state: DiffReviewableState } | null = null;
@@ -1506,6 +1562,7 @@ workspaceOptionsToggle.addEventListener("click", event => {
   setWorkspaceOptionsOpen(!workspaceOptionsOpen);
 });
 workspaceOptionsMenu.addEventListener("click", event => event.stopPropagation());
+rollbackChatButton.addEventListener("click", openRollbackChat);
 toolVisibilityToggle.addEventListener("click", () => {
   const nextShowTools = !showToolBubbles;
   if (!send({ type: "config.set", showTools: nextShowTools })) return;
@@ -1627,6 +1684,20 @@ busyPromptOverlay.addEventListener("mousedown", event => {
 busyPromptOverlay.addEventListener("keydown", event => {
   if (event.key === "Escape") { event.preventDefault(); restoreBusyPromptDraft(); }
 });
+rollbackChatClose.addEventListener("click", closeRollbackChat);
+rollbackChatCancel.addEventListener("click", closeRollbackChat);
+rollbackChatRetry.addEventListener("click", requestRollbackChatPoints);
+rollbackChatRestore.addEventListener("click", submitRollbackChat);
+rollbackChatOverlay.addEventListener("mousedown", event => {
+  if (event.target === rollbackChatOverlay) closeRollbackChat();
+});
+rollbackChatOverlay.addEventListener("keydown", event => {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  event.stopPropagation();
+  closeRollbackChat();
+});
+rollbackChatList.addEventListener("keydown", handleRollbackChatKeydown);
 deleteSessionButton.addEventListener("click", () => {
   if (activeSessionId) openDeleteSessionPicker(activeSessionId);
 });
@@ -1860,6 +1931,7 @@ promptInput.addEventListener("paste", async event => {
 promptInput.addEventListener("input", () => {
   resetPromptHistoryNavigation();
   updatePalette();
+  syncRollbackChatDraftWarning();
 });
 promptInput.addEventListener("blur", () => {
   window.setTimeout(hidePalette, 120);
@@ -1923,6 +1995,7 @@ function connect(token: string): void {
     auth: { type: "sessionCookie", token: bridgeToken },
     onStatus: setStatus,
     onOpen: () => {
+      invalidateRollbackChat();
       hideAuthGate();
       // On (re)connect, defer transcript resync until the fresh `sessions.snapshot`
       // arrives, then refresh only sessions the bridge still knows about. Refreshing
@@ -1932,6 +2005,7 @@ function connect(token: string): void {
       send({ type: "session.list" });
     },
     onClose: () => {
+      invalidateRollbackChat();
       terminalizeBtwPanelsAfterDisconnect();
       if (cwdPickerCreatePending && cwdPickerPendingRequestId) {
         handleCwdPickerCreateError(
@@ -1969,6 +2043,7 @@ function activeWorkspaceKey(): string | null {
 }
 
 function activateControllerWorkspace(): void {
+  invalidateRollbackChat();
   if (workspaceMode !== "controller") {
     sessionPromptDraft = promptInput.value;
     promptInput.value = controllerPromptDraft;
@@ -1983,6 +2058,12 @@ function activateControllerWorkspace(): void {
 }
 
 function activateSession(sessionId: string): void {
+  if (
+    rollbackChatState &&
+    (workspaceMode !== "session" || rollbackChatState.sourceSessionId !== sessionId)
+  ) {
+    invalidateRollbackChat();
+  }
   const previousMode = workspaceMode;
   const previousSessionId = activeSessionId;
   const sessionChanged = activeSessionId !== sessionId || workspaceMode !== "session";
@@ -2090,6 +2171,9 @@ function handleServerMessage(message: ServerMessage): void {
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
         const liveSessionIds = new Set(message.sessions.map(session => session.sessionId));
         pruneStaleSessionCaches(liveSessionIds);
+        if (rollbackChatState && !liveSessionIds.has(rollbackChatState.sourceSessionId)) {
+          invalidateRollbackChat();
+        }
         if (pendingRestoreAfterSessionsSnapshot) {
           pendingRestoreAfterSessionsSnapshot = false;
           for (const sessionId of projections.keys()) {
@@ -2579,6 +2663,15 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     case "prompt.busy":
       handlePromptBusy(message);
+      break;
+    case "session.rewind.points":
+      handleRollbackChatPoints(message);
+      break;
+    case "session.rewind.result":
+      handleRollbackChatResult(message);
+      break;
+    case "session.rewind.error":
+      handleRollbackChatError(message);
       break;
     case "session.btw.update": {
       if (message.targetClientId !== controlClientId) break;
@@ -3290,6 +3383,301 @@ function sendBusyPromptDraft(behavior: "steer" | "followUp"): void {
   onSend?.();
   renderBusyPromptChoice();
   render();
+}
+
+function rollbackSourceIsReady(sessionId: string): boolean {
+  const projection = projections.get(sessionId);
+  const summary = projection?.summary ?? currentSessionSummary(sessionId);
+  return Boolean(
+    connection?.isOpen() &&
+    projection &&
+    summary?.kind === "managed" &&
+    summary.status === "idle" &&
+    !projection.isBusy &&
+    !projection.compacting
+  );
+}
+
+function canOpenRollbackChat(): boolean {
+  return Boolean(
+    workspaceMode === "session" &&
+    activeSessionId &&
+    !rollbackChatState &&
+    rollbackSourceIsReady(activeSessionId)
+  );
+}
+
+function openRollbackChat(): void {
+  if (!canOpenRollbackChat() || !activeSessionId) return;
+  setWorkspaceOptionsOpen(false);
+  rollbackChatState = {
+    sourceSessionId: activeSessionId,
+    listRequestId: nextClientRequestId("rewind-list"),
+    selectRequestId: null,
+    points: [],
+    selectedIndex: -1,
+    phase: "loading",
+    error: null,
+    draft: null,
+  };
+  rollbackChatOverlay.hidden = false;
+  syncRollbackChatDraftWarning();
+  renderRollbackChat();
+  renderActiveSession();
+  const state = rollbackChatState;
+  if (state && !send({ type: "session.rewind.list", sessionId: state.sourceSessionId, requestId: state.listRequestId })) {
+    state.phase = "error";
+    state.error = "Not connected to the Fura bridge.";
+    renderRollbackChat();
+  }
+  window.setTimeout(() => rollbackChatList.focus(), 0);
+}
+
+function dismissRollbackChat(focusMenu: boolean): void {
+  rollbackChatState = null;
+  rollbackChatOverlay.hidden = true;
+  rollbackChatList.replaceChildren();
+  rollbackChatStatus.textContent = "";
+  rollbackChatStatus.className = "modal-status";
+  rollbackChatWarning.hidden = true;
+  rollbackChatRetry.hidden = true;
+  rollbackChatRestore.textContent = "Restore draft";
+  renderActiveSession();
+  if (focusMenu) workspaceOptionsToggle.focus();
+}
+
+function closeRollbackChat(): void {
+  if (rollbackChatState?.phase === "applying") return;
+  dismissRollbackChat(true);
+}
+
+function invalidateRollbackChat(): void {
+  if (!rollbackChatState) return;
+  dismissRollbackChat(false);
+}
+
+function requestRollbackChatPoints(): void {
+  const state = rollbackChatState;
+  if (!state || state.phase === "applying") return;
+  if (
+    workspaceMode !== "session" ||
+    activeSessionId !== state.sourceSessionId ||
+    !rollbackSourceIsReady(state.sourceSessionId)
+  ) {
+    invalidateRollbackChat();
+    return;
+  }
+  state.listRequestId = nextClientRequestId("rewind-list");
+  state.selectRequestId = null;
+  state.points = [];
+  state.selectedIndex = -1;
+  state.phase = "loading";
+  state.error = null;
+  renderRollbackChat();
+  if (!send({ type: "session.rewind.list", sessionId: state.sourceSessionId, requestId: state.listRequestId })) {
+    state.phase = "error";
+    state.error = "Not connected to the Fura bridge.";
+    renderRollbackChat();
+  }
+}
+
+function syncRollbackChatDraftWarning(): void {
+  if (!rollbackChatState || rollbackChatOverlay.hidden) return;
+  rollbackChatWarning.hidden =
+    promptInput.value.length === 0 &&
+    pendingImages.length === 0 &&
+    pendingSnippets.length === 0;
+}
+
+function renderRollbackChat(): void {
+  const state = rollbackChatState;
+  if (!state) return;
+  const applying = state.phase === "applying";
+  rollbackChatClose.disabled = applying;
+  rollbackChatCancel.disabled = applying;
+  rollbackChatRetry.hidden = state.phase !== "error";
+  rollbackChatRetry.disabled = applying;
+  rollbackChatRestore.disabled =
+    applying ||
+    state.phase !== "ready" ||
+    state.selectedIndex < 0 ||
+    state.selectedIndex >= state.points.length;
+  rollbackChatRestore.textContent = applying ? "Rolling back…" : "Restore draft";
+  rollbackChatStatus.className = `modal-status${state.phase === "error" ? " error" : state.phase === "loading" || applying ? " loading" : ""}`;
+  rollbackChatStatus.textContent =
+    state.phase === "loading" ? "Loading earlier prompts…" :
+    state.phase === "applying" ? "Rolling back…" :
+    state.phase === "error" ? (state.error ?? "Rollback failed.") :
+    state.points.length === 0 ? "No earlier user prompts are available." :
+    `${state.points.length} earlier prompt${state.points.length === 1 ? "" : "s"}. Choose where to roll back.`;
+  syncRollbackChatDraftWarning();
+
+  rollbackChatList.replaceChildren();
+  rollbackChatList.hidden = state.phase !== "ready" || state.points.length === 0;
+  if (rollbackChatList.hidden) return;
+  for (let index = 0; index < state.points.length; index++) {
+    const point = state.points[index];
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = `rollback-chat-row${index === state.selectedIndex ? " selected" : ""}`;
+    row.setAttribute("role", "option");
+    row.setAttribute("aria-selected", String(index === state.selectedIndex));
+    row.dataset.entryId = point.entryId;
+
+    const text = document.createElement("span");
+    text.className = "rollback-chat-row-text";
+    text.textContent = point.text || "Image-only prompt";
+    text.title = point.text || "Image-only prompt";
+    row.append(text);
+    if (point.imageCount > 0) {
+      const count = document.createElement("span");
+      count.className = "rollback-chat-row-count";
+      count.textContent = `${point.imageCount} image${point.imageCount === 1 ? "" : "s"}`;
+      row.append(count);
+    }
+    row.addEventListener("click", () => {
+      const current = rollbackChatState;
+      if (!current || current.phase !== "ready") return;
+      current.selectedIndex = index;
+      renderRollbackChat();
+      rollbackChatList.querySelectorAll<HTMLButtonElement>(".rollback-chat-row")[index]?.focus();
+    });
+    rollbackChatList.append(row);
+  }
+}
+
+function handleRollbackChatKeydown(event: KeyboardEvent): void {
+  const state = rollbackChatState;
+  if (!state || state.phase !== "ready" || state.points.length === 0) return;
+  if (event.key === "Enter") {
+    event.preventDefault();
+    submitRollbackChat();
+    return;
+  }
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+  event.preventDefault();
+  const offset = event.key === "ArrowUp" ? -1 : 1;
+  state.selectedIndex = (state.selectedIndex + offset + state.points.length) % state.points.length;
+  renderRollbackChat();
+  rollbackChatList.querySelectorAll<HTMLButtonElement>(".rollback-chat-row")[state.selectedIndex]?.focus();
+}
+
+function submitRollbackChat(): void {
+  const state = rollbackChatState;
+  const point = state?.points[state.selectedIndex];
+  if (!state || !point || state.phase !== "ready") return;
+  state.draft = {
+    text: promptInput.value,
+    images: pendingImages.map(image => ({ ...image })),
+    snippets: pendingSnippets.map(snippet => ({ ...snippet })),
+  };
+  state.selectRequestId = nextClientRequestId("rewind-select");
+  state.phase = "applying";
+  state.error = null;
+  renderRollbackChat();
+  renderActiveSession();
+  if (!send({
+    type: "session.rewind.select",
+    sessionId: state.sourceSessionId,
+    requestId: state.selectRequestId,
+    entryId: point.entryId,
+  })) {
+    state.selectRequestId = null;
+    state.phase = "error";
+    state.error = "Not connected to the Fura bridge.";
+    renderRollbackChat();
+    renderActiveSession();
+  }
+}
+
+function restoreRollbackDraft(draft: RollbackChatDraft): void {
+  promptInput.value = draft.text;
+  pendingImages = draft.images.map(image => ({ ...image }));
+  pendingSnippets = draft.snippets.map(snippet => ({ ...snippet }));
+  renderImagePreviews();
+  resetPromptHistoryNavigation();
+  updatePalette();
+}
+
+function handleRollbackChatPoints(message: Extract<ServerMessage, { type: "session.rewind.points" }>): void {
+  const state = rollbackChatState;
+  if (
+    !state ||
+    state.phase !== "loading" ||
+    message.requestId !== state.listRequestId ||
+    message.sessionId !== state.sourceSessionId
+  ) return;
+  state.points = message.points;
+  state.selectedIndex = message.points.length - 1;
+  state.phase = "ready";
+  state.error = null;
+  renderRollbackChat();
+  window.setTimeout(() => {
+    const rows = rollbackChatList.querySelectorAll<HTMLButtonElement>(".rollback-chat-row");
+    rows[state.selectedIndex]?.focus();
+  }, 0);
+}
+
+function handleRollbackChatResult(message: Extract<ServerMessage, { type: "session.rewind.result" }>): void {
+  const state = rollbackChatState;
+  if (
+    !state ||
+    state.phase !== "applying" ||
+    message.requestId !== state.selectRequestId ||
+    message.sourceSessionId !== state.sourceSessionId
+  ) return;
+  if (message.cancelled) {
+    const sourceSessionId = state.sourceSessionId;
+    dismissRollbackChat(false);
+    appendSessionNotice(sourceSessionId, { level: "info", text: "Rollback cancelled." });
+    render();
+    promptInput.focus();
+    return;
+  }
+
+  rollbackChatState = null;
+  rollbackChatOverlay.hidden = true;
+  activateSession(message.sessionId);
+  promptInput.value = message.text;
+  pendingImages = restorePendingImagesFromDraft(message.text, message.images, createPendingMarker);
+  pendingSnippets = [];
+  renderImagePreviews();
+  resetPromptHistoryNavigation();
+  updatePalette();
+  render();
+  promptInput.setSelectionRange(promptInput.value.length, promptInput.value.length);
+  promptInput.focus();
+}
+
+function handleRollbackChatError(message: Extract<ServerMessage, { type: "session.rewind.error" }>): void {
+  const state = rollbackChatState;
+  if (!state || message.sourceSessionId !== state.sourceSessionId) return;
+  if (message.requestId === state.listRequestId && state.phase === "loading") {
+    state.phase = "error";
+    state.error = message.message;
+    renderRollbackChat();
+    return;
+  }
+  if (message.requestId !== state.selectRequestId || state.phase !== "applying") return;
+
+  const draft = state.draft;
+  if (message.sessionId !== state.sourceSessionId) {
+    rollbackChatState = null;
+    rollbackChatOverlay.hidden = true;
+    activateSession(message.sessionId);
+    if (draft) restoreRollbackDraft(draft);
+    appendSessionNotice(message.sessionId, { level: "error", text: message.message });
+    render();
+    promptInput.focus();
+    return;
+  }
+  if (draft) restoreRollbackDraft(draft);
+  state.selectRequestId = null;
+  state.phase = "error";
+  state.error = message.message;
+  renderRollbackChat();
+  renderActiveSession();
+  rollbackChatRetry.focus();
 }
 
 
@@ -4078,6 +4466,7 @@ function renderActiveSession(): void {
     abortButton.disabled = true;
     stopButton.disabled = true;
     deleteSessionButton.disabled = true;
+    rollbackChatButton.disabled = true;
     syncActiveCategoryEditor(undefined);
     const isWorking = controlStatusState.status === "working";
     promptInput.disabled = isWorking;
@@ -4091,8 +4480,20 @@ function renderActiveSession(): void {
     renderActiveDockviewPanel(undefined);
     return;
   }
+  if (
+    rollbackChatState &&
+    rollbackChatState.phase !== "applying" &&
+    (
+      activeSessionId !== rollbackChatState.sourceSessionId ||
+      !rollbackSourceIsReady(rollbackChatState.sourceSessionId)
+    )
+  ) {
+    invalidateRollbackChat();
+    return;
+  }
 
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
+  const rollbackApplying = rollbackChatState?.phase === "applying";
   const summary = projection?.summary ?? activeSessionSummary();
   const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
   const awaitingAsk = Boolean(summary?.awaitingAsk);
@@ -4101,9 +4502,10 @@ function renderActiveSession(): void {
   abortButton.disabled = !activeSessionId;
   stopButton.disabled = !activeSessionId;
   deleteSessionButton.disabled = !activeSessionId;
+  rollbackChatButton.disabled = !canOpenRollbackChat();
   syncActiveCategoryEditor(projection);
-  promptInput.disabled = !activeSessionId || hasBusyDraft || awaitingAsk || compacting;
-  sendButton.disabled = !activeSessionId || hasBusyDraft || awaitingAsk || compacting;
+  promptInput.disabled = !activeSessionId || hasBusyDraft || awaitingAsk || compacting || rollbackApplying;
+  sendButton.disabled = !activeSessionId || hasBusyDraft || awaitingAsk || compacting || rollbackApplying;
   syncBtwButtonState();
 
   if (!activeSessionId || !summary) {

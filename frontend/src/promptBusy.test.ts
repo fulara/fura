@@ -15,7 +15,7 @@ describe("prompt busy helpers", () => {
         sessionId: "s1",
         text: "look",
         images: [
-          { type: "image", data: "abc", mimeType: "image/png" },
+          { type: "image", data: "abc", mimeType: "image/png", detail: "high" },
           { type: "text", text: "ignored" },
         ],
       },
@@ -26,7 +26,7 @@ describe("prompt busy helpers", () => {
       sessionId: "s1",
       text: "look",
       editorText: "look",
-      images: [{ type: "image", marker: "[Image #1]", data: "abc", mimeType: "image/png" }],
+      images: [{ type: "image", marker: "[Image #1]", data: "abc", mimeType: "image/png", detail: "high" }],
       snippets: [],
     });
   });

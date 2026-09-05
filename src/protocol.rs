@@ -1,11 +1,35 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::{
     ClientConfig, CodeFileContent, CodeLocation, CodeRange, CodeStatus, CodeTreeEntry,
     CodeWorkspaceSummary, PresetSummary, ProposedModelConfig, SessionMode, SessionProjection,
     SessionProjectionDelta, SessionSummary, ThinkingVisibilityPreference,
 };
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub(crate) enum PromptImageType {
+    #[serde(rename = "image")]
+    Image,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PromptImagePayload {
+    #[serde(rename = "type")]
+    pub(crate) image_type: PromptImageType,
+    pub(crate) data: String,
+    pub(crate) mime_type: String,
+    #[serde(flatten)]
+    pub(crate) extra: Map<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionRewindPoint {
+    pub(crate) entry_id: String,
+    pub(crate) text: String,
+    pub(crate) image_count: usize,
+}
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub(crate) enum PromptBehavior {
@@ -696,8 +720,19 @@ pub(crate) enum ClientMessage {
     PromptSend {
         session_id: String,
         text: String,
-        images: Option<Vec<Value>>,
+        images: Option<Vec<PromptImagePayload>>,
         behavior: Option<PromptBehavior>,
+    },
+    #[serde(rename = "session.rewind.list")]
+    SessionRewindList {
+        session_id: String,
+        request_id: String,
+    },
+    #[serde(rename = "session.rewind.select")]
+    SessionRewindSelect {
+        session_id: String,
+        request_id: String,
+        entry_id: String,
     },
     #[serde(rename = "session.btw.start")]
     SessionBtwStart {
@@ -1009,7 +1044,35 @@ pub(crate) enum ServerMessage {
     PromptBusy {
         session_id: String,
         text: String,
-        images: Option<Vec<Value>>,
+        images: Option<Vec<PromptImagePayload>>,
+    },
+    #[serde(rename = "session.rewind.points")]
+    SessionRewindPoints {
+        #[serde(skip)]
+        target_connection_id: Option<u64>,
+        request_id: String,
+        session_id: String,
+        points: Vec<SessionRewindPoint>,
+    },
+    #[serde(rename = "session.rewind.result")]
+    SessionRewindResult {
+        #[serde(skip)]
+        target_connection_id: Option<u64>,
+        request_id: String,
+        source_session_id: String,
+        session_id: String,
+        text: String,
+        images: Vec<PromptImagePayload>,
+        cancelled: bool,
+    },
+    #[serde(rename = "session.rewind.error")]
+    SessionRewindError {
+        #[serde(skip)]
+        target_connection_id: Option<u64>,
+        request_id: String,
+        source_session_id: String,
+        session_id: String,
+        message: String,
     },
     #[serde(rename = "session.btw.update")]
     SessionBtwUpdate {
