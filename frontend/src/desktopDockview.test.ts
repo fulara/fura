@@ -225,27 +225,4 @@ describe("initDesktopDockview", () => {
     expect(desktopDockview.closePanel("compare")).toBe(true);
     expect(dockviewMock.instances[0].panels.some(panel => panel.id === "compare")).toBe(false);
   });
-
-  it("manages BTW tabs as ephemeral panels in the transcript group", () => {
-    const readyContainers = new Map<string, HTMLElement>();
-    const onPanelClosed = vi.fn();
-    const desktopDockview = initTestDockview({
-      onPanelReady: (id, container) => readyContainers.set(id, container),
-      onPanelClosed,
-    });
-    const dockview = dockviewMock.instances[0];
-    const transcript = dockview.panels.find(panel => panel.id === "transcript");
-
-    expect(desktopDockview.openEphemeralPanel("btw:request-1", "BTW · 12:34")).toBe(true);
-    const btw = dockview.panels.find(panel => panel.id === "btw:request-1");
-    expect(btw?.group).toBe(transcript?.group);
-    expect(dockview.activePanel).toBe(btw);
-    expect(readyContainers.get("btw:request-1")?.parentElement?.querySelector(".panel-toolbar")).toBeNull();
-
-    expect(desktopDockview.setPanelTitle("btw:request-1", "BTW · Why this change?")).toBe(true);
-    expect(btw?.title).toBe("BTW · Why this change?");
-    expect(desktopDockview.closeEphemeralPanel("btw:request-1")).toBe(true);
-    expect(dockview.panels.some(panel => panel.id === "btw:request-1")).toBe(false);
-    expect(onPanelClosed).toHaveBeenCalledWith("btw:request-1");
-  });
 });

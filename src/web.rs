@@ -656,6 +656,10 @@ pub(crate) async fn handle_socket(
         .session_runtime
         .detach_rewind_connection(connection_id)
         .await;
+    state
+        .session_runtime
+        .detach_session_fork_connection(connection_id)
+        .await;
 }
 
 fn client_text_frame_too_large(text: &str) -> bool {
@@ -954,6 +958,14 @@ pub(crate) fn server_message_visible_to_connection(
             target_connection_id,
             ..
         } => *target_connection_id == connection_id,
+        ServerMessage::SessionForked {
+            target_connection_id,
+            ..
+        }
+        | ServerMessage::SessionForkError {
+            target_connection_id,
+            ..
+        } => *target_connection_id == Some(connection_id),
         ServerMessage::SessionRewindPoints {
             target_connection_id,
             ..
@@ -1192,6 +1204,8 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::LogStderr { .. } => "log.stderr",
         ServerMessage::SessionNotice { .. } => "session.notice",
         ServerMessage::PromptBusy { .. } => "prompt.busy",
+        ServerMessage::SessionForked { .. } => "session.forked",
+        ServerMessage::SessionForkError { .. } => "session.fork.error",
         ServerMessage::SessionRewindPoints { .. } => "session.rewind.points",
         ServerMessage::SessionRewindResult { .. } => "session.rewind.result",
         ServerMessage::SessionRewindError { .. } => "session.rewind.error",
@@ -1305,6 +1319,28 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             session_id = %session_id,
             bytes = text.len(),
             image_count = images.as_ref().map(Vec::len).unwrap_or(0)
+        ),
+        ServerMessage::SessionForked {
+            request_id,
+            source_session_id,
+            session_id,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "session.forked",
+            request_id = %request_id,
+            source_session_id = %source_session_id,
+            session_id = %session_id
+        ),
+        ServerMessage::SessionForkError {
+            request_id,
+            source_session_id,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "session.fork.error",
+            request_id = %request_id,
+            source_session_id = %source_session_id
         ),
         ServerMessage::SessionRewindPoints {
             request_id,

@@ -3051,6 +3051,104 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn session_fork_names_copy_and_reports_exact_new_session() {
+        let state = test_state(16, None);
+        let mut source = test_record();
+        source.id = "source".to_string();
+        source.title = Some("Investigate parser".to_string());
+        let mut existing_copy = test_record();
+        existing_copy.id = "existing-copy".to_string();
+        existing_copy.title = Some("Investigate parser copy 2".to_string());
+        state.sessions.write().await.extend([
+            ("source".to_string(), source),
+            ("existing-copy".to_string(), existing_copy),
+        ]);
+        let mut commands = register_test_transport(&state, "source", "source", 16).await;
+        let mut events = state.events.subscribe();
+
+        let responses = handle_client_message_for_connection(
+            &state,
+            ClientMessage::SessionFork {
+                request_id: "fork-request".to_string(),
+                session_id: "source".to_string(),
+            },
+            41,
+        )
+        .await;
+        assert!(responses.is_empty());
+        let fork = commands.recv().await.expect("fork command");
+        assert_eq!(fork["type"], "fork");
+        let fork_command_id = fork["id"].as_str().expect("fork command id");
+
+        apply_rpc_response(
+            &state,
+            "source",
+            &serde_json::json!({
+                "type": "response",
+                "id": fork_command_id,
+                "command": "fork",
+                "success": true,
+                "data": { "cancelled": false }
+            }),
+        )
+        .await;
+
+        let rename = commands.recv().await.expect("rename command");
+        assert_eq!(rename["type"], "set_session_name");
+        assert_eq!(rename["name"], "Investigate parser copy 3");
+        let get_state = commands.recv().await.expect("get state command");
+        assert_eq!(get_state["type"], "get_state");
+        let get_state_command_id = get_state["id"].as_str().expect("get state command id");
+
+        apply_rpc_response(
+            &state,
+            "source",
+            &serde_json::json!({
+                "type": "response",
+                "id": get_state_command_id,
+                "command": "get_state",
+                "success": true,
+                "data": {
+                    "sessionId": "copy",
+                    "sessionFile": "copy.jsonl",
+                    "sessionName": "Investigate parser copy 3"
+                }
+            }),
+        )
+        .await;
+
+        let mut correlated = None;
+        for _ in 0..4 {
+            let event = events.recv().await.expect("fork event");
+            if let ServerMessage::SessionForked { .. } = event {
+                correlated = Some(event);
+                break;
+            }
+        }
+        match correlated.expect("correlated fork event") {
+            ServerMessage::SessionForked {
+                target_connection_id,
+                request_id,
+                source_session_id,
+                session_id,
+            } => {
+                assert_eq!(target_connection_id, Some(41));
+                assert_eq!(request_id, "fork-request");
+                assert_eq!(source_session_id, "source");
+                assert_eq!(session_id, "copy");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert_eq!(
+            state
+                .session_runtime
+                .target_session_id_for_transport("source")
+                .await,
+            "copy"
+        );
+    }
+
+    #[tokio::test]
     async fn prompt_to_source_session_after_fork_is_not_sent_to_fork_transport() {
         let state = test_state(8, None);
         let mut source = test_record();

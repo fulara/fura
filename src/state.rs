@@ -567,6 +567,7 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) plan_execution_carryovers: Arc<RwLock<HashMap<String, PlanExecutionCarryover>>>,
     pub(crate) rpc_protocol_versions: Arc<RwLock<HashMap<String, u8>>>,
     pub(crate) pending_rpc_message_pages: Arc<RwLock<HashMap<String, PendingRpcMessagesPage>>>,
+    pub(crate) pending_session_forks: Arc<RwLock<HashMap<String, PendingSessionFork>>>,
     pub(crate) btw_requests: Arc<RwLock<HashMap<String, BtwRequestRoute>>>,
     pub(crate) pending_btw_commands: Arc<RwLock<HashMap<String, PendingBtwCommand>>>,
     /// `/compact` requests routed through OMP's builtin slash-command handler, keyed by RPC command id.
@@ -579,6 +580,16 @@ pub(crate) struct PendingRpcMessagesPage {
     pub(crate) transport_session_id: String,
     pub(crate) messages: Vec<Value>,
     pub(crate) restart_count: u8,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct PendingSessionFork {
+    pub(crate) target_connection_id: Option<u64>,
+    pub(crate) request_id: String,
+    pub(crate) source_session_id: String,
+    pub(crate) transport_session_id: String,
+    pub(crate) name: String,
+    pub(crate) awaiting_state: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -662,6 +673,7 @@ pub(crate) struct RemovedRpcTransport {
     pub(crate) target_session_id: String,
     pub(crate) btw_requests: Vec<(String, BtwRequestRoute)>,
     pub(crate) rewind_requests: Vec<PendingRewindRpc>,
+    pub(crate) session_forks: Vec<PendingSessionFork>,
 }
 
 impl SessionRuntimeState {
@@ -681,6 +693,7 @@ impl SessionRuntimeState {
             plan_execution_carryovers: Arc::new(RwLock::new(HashMap::new())),
             rpc_protocol_versions: Arc::new(RwLock::new(HashMap::new())),
             pending_rpc_message_pages: Arc::new(RwLock::new(HashMap::new())),
+            pending_session_forks: Arc::new(RwLock::new(HashMap::new())),
             btw_requests: Arc::new(RwLock::new(HashMap::new())),
             pending_btw_commands: Arc::new(RwLock::new(HashMap::new())),
             pending_compaction_commands: Arc::new(RwLock::new(HashMap::new())),
@@ -737,6 +750,17 @@ impl SessionRuntimeState {
             .write()
             .await
             .retain(|_request_id, pending| pending.transport_session_id != transport_session_id);
+        let session_forks = {
+            let mut pending = self.pending_session_forks.write().await;
+            let ids = pending
+                .iter()
+                .filter(|(_id, fork)| fork.transport_session_id == transport_session_id)
+                .map(|(id, _fork)| id.clone())
+                .collect::<Vec<_>>();
+            ids.into_iter()
+                .filter_map(|id| pending.remove(&id))
+                .collect()
+        };
         let btw_requests = {
             let mut requests = self.btw_requests.write().await;
             let ids = requests
@@ -776,6 +800,7 @@ impl SessionRuntimeState {
             target_session_id,
             btw_requests,
             rewind_requests,
+            session_forks,
         })
     }
 
@@ -899,6 +924,66 @@ impl SessionRuntimeState {
             .await
             .retain(|_request_id, pending| pending.transport_session_id != transport_session_id);
     }
+    pub(crate) async fn insert_pending_session_fork(
+        &self,
+        command_id: String,
+        pending_fork: PendingSessionFork,
+    ) -> bool {
+        let mut pending = self.pending_session_forks.write().await;
+        if pending.contains_key(&command_id)
+            || pending.values().any(|fork| {
+                fork.transport_session_id == pending_fork.transport_session_id
+            })
+        {
+            return false;
+        }
+        pending.insert(command_id, pending_fork);
+        true
+    }
+
+    pub(crate) async fn pending_session_fork(
+        &self,
+        command_id: &str,
+    ) -> Option<PendingSessionFork> {
+        self.pending_session_forks
+            .read()
+            .await
+            .get(command_id)
+            .cloned()
+    }
+
+    pub(crate) async fn take_pending_session_fork(
+        &self,
+        command_id: &str,
+    ) -> Option<PendingSessionFork> {
+        self.pending_session_forks.write().await.remove(command_id)
+    }
+
+    pub(crate) async fn transition_session_fork_to_get_state(
+        &self,
+        fork_command_id: &str,
+        get_state_command_id: String,
+    ) -> bool {
+        let mut pending = self.pending_session_forks.write().await;
+        if pending.contains_key(&get_state_command_id) {
+            return false;
+        }
+        let Some(mut fork) = pending.remove(fork_command_id) else {
+            return false;
+        };
+        fork.awaiting_state = true;
+        pending.insert(get_state_command_id, fork);
+        true
+    }
+
+    pub(crate) async fn detach_session_fork_connection(&self, connection_id: u64) {
+        for fork in self.pending_session_forks.write().await.values_mut() {
+            if fork.target_connection_id == Some(connection_id) {
+                fork.target_connection_id = None;
+            }
+        }
+    }
+
     pub(crate) async fn insert_pending_rewind_list(
         &self,
         command_id: String,

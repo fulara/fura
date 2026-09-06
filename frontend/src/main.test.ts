@@ -1709,38 +1709,49 @@ describe("desktop cog options", () => {
     expect(connection.sent).toContainEqual({ type: "state.refresh", sessionId: "live" });
   });
 
-  it("terminalizes active BTW panels and allows retry after reconnect", async () => {
+  it("duplicates from the cog menu and activates only the correlated result", async () => {
     const { connection } = await createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
 
-    const input = document.querySelector<HTMLTextAreaElement>("#promptInput");
-    const btwButton = document.querySelector<HTMLButtonElement>("#btwButton");
-    if (!input || !btwButton) throw new Error("BTW composer missing");
-    input.value = "first side question";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    btwButton.click();
+    expect(document.querySelector("#btwButton")).toBeNull();
+    document.querySelector<HTMLButtonElement>("#workspaceOptionsToggle")?.click();
+    const duplicateButton = document.querySelector<HTMLButtonElement>("#workspaceOptionsMenu #duplicateSessionButton");
+    if (!duplicateButton) throw new Error("duplicate session action missing");
+    duplicateButton.click();
 
-    expect(connection.sent.filter(message => message.type === "session.btw.start")).toHaveLength(1);
-    expect(btwButton.disabled).toBe(true);
+    const request = connection.sent.find(message => message.type === "session.fork");
+    if (!request || request.type !== "session.fork") throw new Error("session fork request missing");
+    expect(request.sessionId).toBe("live");
+    expect(request.requestId).toMatch(/^session-fork-/);
+    expect(duplicateButton.disabled).toBe(true);
+    expect(duplicateButton.textContent).toBe("Duplicating…");
 
-    connection.connected = false;
-    connection.closed = true;
-    connection.options.onClose?.();
+    const copiedSummary = summary("copy", { title: "Session live copy 2" });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), copiedSummary] });
+    connection.emit({
+      type: "session.snapshot",
+      sessionId: "copy",
+      state: projection("copy", { summary: copiedSummary }),
+    });
+    connection.emit({
+      type: "session.forked",
+      requestId: "unrelated-request",
+      sourceSessionId: "live",
+      sessionId: "copy",
+    });
+    expect(document.querySelector("#sessionTitle")?.textContent).toBe("Session live");
 
-    expect(document.body.textContent).toContain("Connection closed; this BTW request was released.");
-    expect(document.body.textContent).toContain("Dismiss");
-    expect(btwButton.disabled).toBe(false);
-
-    connection.connected = true;
-    connection.closed = false;
-    connection.options.onOpen?.();
-    input.value = "second side question";
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    btwButton.click();
-
-    expect(connection.sent.filter(message => message.type === "session.btw.start")).toHaveLength(2);
+    connection.emit({
+      type: "session.forked",
+      requestId: request.requestId,
+      sourceSessionId: "live",
+      sessionId: "copy",
+    });
+    expect(document.querySelector("#sessionTitle")?.textContent).toBe("Session live copy 2");
+    expect(duplicateButton.disabled).toBe(false);
+    expect(duplicateButton.textContent).toBe("Duplicate chat");
   });
 
   it("drops projections and cached notices for sessions absent from a reconnect snapshot", async () => {

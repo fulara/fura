@@ -14,6 +14,8 @@ use crate::*;
 const RECENT_RPC_STDERR_LINE_COUNT: usize = 4;
 const REWIND_IDENTITY_REFRESH_ERROR: &str =
     "OMP changed the conversation, but Fura could not refresh its new session identity";
+const FORK_IDENTITY_REFRESH_ERROR: &str =
+    "OMP duplicated the conversation, but Fura could not resolve the new session identity";
 
 fn is_synthetic_transcript_message_id(id: &str) -> bool {
     id.starts_with("approved-plan:") || id.starts_with("__pending_prompt:")
@@ -136,6 +138,34 @@ pub(crate) async fn fail_removed_btw_requests(
             .await;
     }
 }
+fn pending_session_fork_error(
+    pending: &PendingSessionFork,
+    message: impl Into<String>,
+) -> ServerMessage {
+    ServerMessage::SessionForkError {
+        target_connection_id: pending.target_connection_id,
+        request_id: pending.request_id.clone(),
+        source_session_id: pending.source_session_id.clone(),
+        message: message.into(),
+    }
+}
+
+pub(crate) async fn fail_removed_session_forks(
+    state: &AppState,
+    session_forks: Vec<PendingSessionFork>,
+    message: &str,
+) {
+    for pending in session_forks {
+        if pending.target_connection_id.is_none() {
+            continue;
+        }
+        let _ = state
+            .events
+            .emit(state, pending_session_fork_error(&pending, message))
+            .await;
+    }
+}
+
 pub(crate) async fn fail_removed_rewind_requests(
     state: &AppState,
     rewind_requests: Vec<PendingRewindRpc>,
@@ -179,6 +209,12 @@ async fn stop_transport(state: &AppState, transport_session_id: &str) {
             state,
             removed.rewind_requests,
             "The OMP session closed before the rollback completed.",
+        )
+        .await;
+        fail_removed_session_forks(
+            state,
+            removed.session_forks,
+            "The OMP session closed before duplication completed.",
         )
         .await;
     }
@@ -719,6 +755,12 @@ pub(crate) async fn spawn_rpc_child(
                 &state,
                 removed.rewind_requests,
                 "The OMP session exited before the rollback completed.",
+            )
+            .await;
+            fail_removed_session_forks(
+                &state,
+                removed.session_forks,
+                "The OMP session exited before duplication completed.",
             )
             .await;
         }
@@ -1802,6 +1844,150 @@ async fn apply_omp_session_state(
     target_session_id
 }
 
+async fn handle_pending_session_fork_response(
+    state: &AppState,
+    transport_session_id: &str,
+    current_session_id: &str,
+    command: Option<&str>,
+    status: Option<&str>,
+    success: Option<bool>,
+    frame: &Value,
+) -> bool {
+    let Some(command_id) = value_str(frame, "id") else {
+        return false;
+    };
+    let Some(pending) = state
+        .session_runtime
+        .pending_session_fork(command_id)
+        .await
+    else {
+        return false;
+    };
+    let failed = status == Some("error") || success == Some(false);
+    if !pending.awaiting_state {
+        let data = frame.get("data").or_else(|| frame.get("result"));
+        let cancelled = data
+            .and_then(|data| data.get("cancelled"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if failed || command != Some("fork") || cancelled {
+            state
+                .session_runtime
+                .take_pending_session_fork(command_id)
+                .await;
+            let message = if failed {
+                rpc_error_message(frame)
+            } else if cancelled {
+                "OMP cancelled the duplicate request.".to_string()
+            } else {
+                "OMP returned an unexpected duplicate response.".to_string()
+            };
+            let _ = state
+                .events
+                .emit(state, pending_session_fork_error(&pending, message))
+                .await;
+            return true;
+        }
+
+        if let Err(error) = send_rpc_command(
+            state,
+            transport_session_id,
+            set_session_name_command(next_rpc_id(), pending.name.clone()),
+        )
+        .await
+        {
+            warn!(
+                session_id = %pending.source_session_id,
+                %error,
+                "failed to queue duplicated session name"
+            );
+        }
+
+        let get_state_command_id = next_rpc_id();
+        if !state
+            .session_runtime
+            .transition_session_fork_to_get_state(command_id, get_state_command_id.clone())
+            .await
+        {
+            return true;
+        }
+        if let Err(error) = send_rpc_command(
+            state,
+            transport_session_id,
+            get_state_command(get_state_command_id.clone()),
+        )
+        .await
+            && let Some(pending) = state
+                .session_runtime
+                .take_pending_session_fork(&get_state_command_id)
+                .await
+        {
+            warn!(session_id = %pending.source_session_id, %error, "failed to queue duplicate identity refresh");
+            let _ = state
+                .events
+                .emit(
+                    state,
+                    pending_session_fork_error(&pending, FORK_IDENTITY_REFRESH_ERROR),
+                )
+                .await;
+        }
+        return true;
+    }
+
+    state
+        .session_runtime
+        .take_pending_session_fork(command_id)
+        .await;
+    let data = if !failed && command == Some("get_state") {
+        rpc_response_data_as::<OmpSessionState>(frame)
+    } else {
+        None
+    };
+    let Some(data) = data else {
+        let _ = state
+            .events
+            .emit(
+                state,
+                pending_session_fork_error(&pending, FORK_IDENTITY_REFRESH_ERROR),
+            )
+            .await;
+        return true;
+    };
+    if data.session_id == pending.source_session_id {
+        let _ = state
+            .events
+            .emit(
+                state,
+                pending_session_fork_error(&pending, FORK_IDENTITY_REFRESH_ERROR),
+            )
+            .await;
+        return true;
+    }
+    let target_session_id = apply_omp_session_state(
+        state,
+        transport_session_id,
+        current_session_id.to_string(),
+        data,
+    )
+    .await;
+    if let Err(message) = refresh_rpc_state_tail(state, transport_session_id).await {
+        warn!(session_id = %target_session_id, %message, "post-duplicate refresh failed");
+    }
+    let _ = state
+        .events
+        .emit(
+            state,
+            ServerMessage::SessionForked {
+                target_connection_id: pending.target_connection_id,
+                request_id: pending.request_id,
+                source_session_id: pending.source_session_id,
+                session_id: target_session_id,
+            },
+        )
+        .await;
+    true
+}
+
 async fn handle_pending_rewind_response(
     state: &AppState,
     transport_session_id: &str,
@@ -1980,6 +2166,19 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
     let success = frame.get("success").and_then(|value| value.as_bool());
     let current_session_id = rpc_session_target_id(state, session_id).await;
     let is_controller = is_controller_transport(state, session_id).await;
+    if handle_pending_session_fork_response(
+        state,
+        session_id,
+        &current_session_id,
+        command,
+        status,
+        success,
+        frame,
+    )
+    .await
+    {
+        return;
+    }
     if handle_pending_rewind_response(
         state,
         session_id,

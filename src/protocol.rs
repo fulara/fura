@@ -877,7 +877,10 @@ pub(crate) enum ClientMessage {
         ref_target: DiffCheckoutTarget,
     },
     #[serde(rename = "session.fork")]
-    SessionFork { session_id: String, name: String },
+    SessionFork {
+        request_id: String,
+        session_id: String,
+    },
     #[serde(rename = "session.handoff")]
     SessionHandoff {
         session_id: String,
@@ -1045,6 +1048,22 @@ pub(crate) enum ServerMessage {
         session_id: String,
         text: String,
         images: Option<Vec<PromptImagePayload>>,
+    },
+    #[serde(rename = "session.forked")]
+    SessionForked {
+        #[serde(skip)]
+        target_connection_id: Option<u64>,
+        request_id: String,
+        source_session_id: String,
+        session_id: String,
+    },
+    #[serde(rename = "session.fork.error")]
+    SessionForkError {
+        #[serde(skip)]
+        target_connection_id: Option<u64>,
+        request_id: String,
+        source_session_id: String,
+        message: String,
     },
     #[serde(rename = "session.rewind.points")]
     SessionRewindPoints {

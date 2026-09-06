@@ -17,7 +17,7 @@ export type PromptSubmitAction =
   | { type: "controller.submit" }
   | { type: "openModelPicker"; sessionId: string }
   | { type: "openCwdPicker" }
-  | { type: "openForkPicker" }
+  | { type: "duplicateSession"; sessionId: string }
   | { type: "openHandoffPicker" }
   | { type: "openCommandsPopup"; sessionId: string }
   | { type: "sendPrompt"; sessionId: string };
@@ -43,7 +43,7 @@ export function resolvePromptSubmitAction(input: PromptSubmitDecisionInput): Pro
     return { type: "openModelPicker", sessionId: input.activeSessionId };
   }
   if (input.slashCommandName === "new") return { type: "openCwdPicker" };
-  if (input.slashCommandName === "fork") return { type: "openForkPicker" };
+  if (input.slashCommandName === "fork") return { type: "duplicateSession", sessionId: input.activeSessionId };
   if (input.slashCommandName === "handoff") return { type: "openHandoffPicker" };
   if (input.slashCommandName === "commands" || input.slashCommandName === "help") {
     return { type: "openCommandsPopup", sessionId: input.activeSessionId };

@@ -119,7 +119,7 @@ import {
   renderAskCard,
   type PendingAsk,
 } from "./askCard";
-import { initDesktopDockview, type DesktopDockview, type DesktopEphemeralPanelId } from "./desktopDockview";
+import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { captureDiffFilterFocus, restoreDiffFilterFocus } from "./diffViewDom";
 import { messageText, renderMarkdown, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import { setTextileRedmineRootUrl } from "./textileRendering";
@@ -262,6 +262,7 @@ app.innerHTML = `
                 <button id="activeCategorySave" type="button">Save</button>
               </div>
               <div class="workspace-menu-divider" role="separator"></div>
+              <button id="duplicateSessionButton" class="workspace-option-item" type="button" role="menuitem">Duplicate chat</button>
               <button id="rollbackChatButton" class="workspace-option-item" type="button" role="menuitem">Rollback chat…</button>
               <button id="deleteSessionButton" class="workspace-option-item danger-action" type="button" role="menuitem">Delete session</button>
             </div>
@@ -283,7 +284,6 @@ app.innerHTML = `
           <textarea id="promptInput" rows="4" placeholder="Send a prompt…"></textarea>
         </div>
         <div class="prompt-actions">
-          <button id="btwButton" class="secondary" type="button" title="Ask a side question without interrupting the current turn.">BTW</button>
           <button id="voiceButton" class="voice-button" type="button" aria-pressed="false" title="Hold to dictate. Alt+M starts while held.">Hold mic</button>
           <span id="voiceStatus" class="voice-status" aria-live="polite">voice idle</span>
           <button id="sendButton" type="submit">Send</button>
@@ -549,28 +549,6 @@ app.innerHTML = `
     </section>
   </div>
 
-  <div id="forkPickerOverlay" class="modal-overlay" hidden>
-    <section class="fork-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="forkPickerTitle">
-      <header class="modal-header">
-        <div>
-          <h2 id="forkPickerTitle">Fork session</h2>
-          <p>Name the forked session before branching.</p>
-        </div>
-        <button id="forkPickerClose" class="modal-close" type="button" aria-label="Close">×</button>
-      </header>
-      <div class="cwd-picker-body">
-        <label for="forkPickerNameInput">Session name</label>
-        <input id="forkPickerNameInput" autocomplete="off" spellcheck="false" placeholder="my-fork" />
-      </div>
-      <footer class="modal-footer">
-        <span></span>
-        <div class="modal-actions">
-          <button id="forkPickerCancel" type="button">Cancel</button>
-          <button id="forkPickerCreate" type="button">Fork session</button>
-        </div>
-      </footer>
-    </section>
-  </div>
 
   <div id="handoffPickerOverlay" class="modal-overlay" hidden>
     <section class="handoff-picker modal-panel" role="dialog" aria-modal="true" aria-labelledby="handoffPickerTitle">
@@ -699,6 +677,7 @@ const abortButton = requireElement<HTMLButtonElement>("abortButton");
 const stopButton = requireElement<HTMLButtonElement>("stopButton");
 const deleteSessionButton = requireElement<HTMLButtonElement>("deleteSessionButton");
 const rollbackChatButton = requireElement<HTMLButtonElement>("rollbackChatButton");
+const duplicateSessionButton = requireElement<HTMLButtonElement>("duplicateSessionButton");
 const rollbackChatOverlay = requireElement<HTMLDivElement>("rollbackChatOverlay");
 const rollbackChatClose = requireElement<HTMLButtonElement>("rollbackChatClose");
 const rollbackChatWarning = requireElement<HTMLParagraphElement>("rollbackChatWarning");
@@ -722,7 +701,6 @@ const busyPromptFollowUp = requireElement<HTMLButtonElement>("busyPromptFollowUp
 const voiceButton = requireElement<HTMLButtonElement>("voiceButton");
 const voiceStatus = requireElement<HTMLSpanElement>("voiceStatus");
 const sendButton = requireElement<HTMLButtonElement>("sendButton");
-const btwButton = requireElement<HTMLButtonElement>("btwButton");
 const modelPickerOverlay = requireElement<HTMLDivElement>("modelPickerOverlay");
 const modelPickerClose = requireElement<HTMLButtonElement>("modelPickerClose");
 const modelPickerSearch = requireElement<HTMLInputElement>("modelPickerSearch");
@@ -770,11 +748,6 @@ const deleteSessionWorktree = requireElement<HTMLInputElement>("deleteSessionWor
 const deleteSessionWorktreePath = requireElement<HTMLParagraphElement>("deleteSessionWorktreePath");
 const deleteSessionCancel = requireElement<HTMLButtonElement>("deleteSessionCancel");
 const deleteSessionConfirm = requireElement<HTMLButtonElement>("deleteSessionConfirm");
-const forkPickerOverlay = requireElement<HTMLDivElement>("forkPickerOverlay");
-const forkPickerClose = requireElement<HTMLButtonElement>("forkPickerClose");
-const forkPickerNameInput = requireElement<HTMLInputElement>("forkPickerNameInput");
-const forkPickerCancel = requireElement<HTMLButtonElement>("forkPickerCancel");
-const forkPickerCreate = requireElement<HTMLButtonElement>("forkPickerCreate");
 const handoffPickerOverlay = requireElement<HTMLDivElement>("handoffPickerOverlay");
 const handoffPickerClose = requireElement<HTMLButtonElement>("handoffPickerClose");
 const handoffPickerNameInput = requireElement<HTMLInputElement>("handoffPickerNameInput");
@@ -829,6 +802,7 @@ let activeSessionId: string | null = null;
 let serverConfig: ServerConfig | null = null;
 let pendingCreatedSessionBaseline: Set<string> | null = null;
 let pendingSessionSelectionId: string | null = null;
+let pendingSessionFork: { requestId: string; sourceSessionId: string } | null = null;
 let cwdPickerCreatePending = false;
 let cwdPickerPendingRequestId: string | null = null;
 let cwdPickerMode: "session" | "diff" = "session";
@@ -1249,229 +1223,6 @@ let normalDesktopDockview: DesktopDockview | null = null;
 let diffReviewDesktopDockview: DesktopDockview | null = null;
 let activeDesktopDockviewMode: "normal" | "diffReview" | null = null;
 
-type BtwPanelStatus = "starting" | "running" | "cancelling" | "completed" | "cancelled" | "error" | "promoting";
-type BtwPanelRecord = {
-  requestId: string;
-  sourceSessionId: string;
-  question: string;
-  answer: string;
-  status: BtwPanelStatus;
-  error: string | null;
-  canPromote: boolean;
-  dockview: DesktopDockview;
-};
-const btwPanels = new Map<string, BtwPanelRecord>();
-
-function btwPanelId(requestId: string): DesktopEphemeralPanelId {
-  return `btw:${requestId}`;
-}
-
-function isBtwPanelId(id: string): id is DesktopEphemeralPanelId {
-  return id.startsWith("btw:") && id.length > 4;
-}
-
-function shortBtwTitle(question: string): string {
-  const normalized = question.replace(/\s+/g, " ").trim();
-  return normalized.length <= 42 ? `BTW · ${normalized}` : `BTW · ${normalized.slice(0, 39)}…`;
-}
-
-function runningBtwForSession(sessionId: string | null): BtwPanelRecord | null {
-  if (!sessionId) return null;
-  return [...btwPanels.values()].find(panel =>
-    panel.sourceSessionId === sessionId &&
-    (panel.status === "starting" || panel.status === "running" || panel.status === "cancelling")
-  ) ?? null;
-}
-
-function syncBtwButtonState(): void {
-  const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
-  const unavailable =
-    workspaceMode !== "session" ||
-    !activeSessionId ||
-    Boolean(projection?.compacting) ||
-    pendingImages.length > 0 ||
-    Boolean(runningBtwForSession(activeSessionId));
-  btwButton.disabled = unavailable;
-}
-
-function startBtwFromComposer(): void {
-  if (workspaceMode !== "session" || !activeSessionId || !desktopDockview) return;
-  const existing = runningBtwForSession(activeSessionId);
-  if (existing) {
-    existing.dockview.activatePanel(btwPanelId(existing.requestId));
-    return;
-  }
-  if (pendingImages.length > 0) {
-    appendSessionNotice(activeSessionId, {
-      level: "warning",
-      text: "BTW side questions do not support image attachments. Remove the image before asking.",
-    });
-    render();
-    return;
-  }
-  const question = expandSnippetTokens(promptInput.value.trim());
-  if (!question) {
-    promptInput.focus();
-    return;
-  }
-  const requestId = randomUuid();
-  const dockview = desktopDockview;
-  const record: BtwPanelRecord = {
-    requestId,
-    sourceSessionId: activeSessionId,
-    question,
-    answer: "",
-    status: "starting",
-    error: null,
-    canPromote: false,
-    dockview,
-  };
-  btwPanels.set(requestId, record);
-  const timestamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  dockview.openEphemeralPanel(btwPanelId(requestId), `BTW · ${timestamp}`);
-  renderBtwPanel(record);
-  clearPromptEditor();
-  syncBtwButtonState();
-  send({
-    type: "session.btw.start",
-    clientId: controlClientId,
-    sessionId: record.sourceSessionId,
-    requestId,
-    question,
-  });
-}
-
-function renderBtwPanel(record: BtwPanelRecord): void {
-  record.dockview.withPanel(btwPanelId(record.requestId), container => {
-    setRenderDocument(container.ownerDocument);
-    container.replaceChildren();
-    const root = mkEl("section");
-    root.className = "btw-panel";
-    const question = mkEl("div");
-    question.className = "btw-question";
-    const label = mkEl("span");
-    label.className = "btw-label";
-    label.textContent = "Side question";
-    const questionText = mkEl("p");
-    questionText.textContent = record.question;
-    question.append(label, questionText);
-
-    const answer = mkEl("div");
-    answer.className = "btw-answer";
-    if (record.answer) {
-      answer.append(renderMarkdown(record.answer));
-    } else {
-      const pending = mkEl("p");
-      pending.className = "empty";
-      pending.textContent =
-        record.status === "error" ? (record.error ?? "BTW failed.") :
-        record.status === "cancelled" ? "BTW cancelled." :
-        record.status === "cancelling" ? "Cancelling…" :
-        "Waiting for the side answer…";
-      answer.append(pending);
-    }
-
-    const status = mkEl("p");
-    status.className = `btw-status btw-status-${record.status}`;
-    status.textContent =
-      record.status === "completed" ? (record.canPromote ? "Completed · captured source point is still promotable." : "Completed · source conversation advanced; promotion is unavailable.") :
-      record.status === "promoting" ? "Promoting to a new session…" :
-      record.status === "error" ? (record.error ?? "BTW failed.") :
-      record.status === "cancelled" ? "Cancelled." :
-      record.status === "cancelling" ? "Cancelling…" :
-      "Streaming an ephemeral answer…";
-
-    const actions = mkEl("div");
-    actions.className = "btw-actions";
-    if (record.status === "starting" || record.status === "running") {
-      const cancel = mkEl("button");
-      cancel.type = "button";
-      cancel.textContent = "Cancel";
-      cancel.addEventListener("click", () => {
-        record.status = "cancelling";
-        renderBtwPanel(record);
-        syncBtwButtonState();
-        send({ type: "session.btw.cancel", clientId: controlClientId, requestId: record.requestId });
-      });
-      actions.append(cancel);
-    }
-    if (record.answer) {
-      const copy = mkEl("button");
-      copy.type = "button";
-      copy.textContent = "Copy";
-      copy.addEventListener("click", () => {
-        void navigator.clipboard.writeText(record.answer);
-      });
-      actions.append(copy);
-    }
-    if (record.status === "completed" && record.canPromote) {
-      const promote = mkEl("button");
-      promote.type = "button";
-      promote.textContent = "Promote to session";
-      promote.addEventListener("click", () => {
-        record.status = "promoting";
-        renderBtwPanel(record);
-        send({ type: "session.btw.promote", clientId: controlClientId, requestId: record.requestId });
-      });
-      actions.append(promote);
-    }
-    if (record.status === "completed" || record.status === "cancelled" || record.status === "error") {
-      const askAgain = mkEl("button");
-      askAgain.type = "button";
-      askAgain.textContent = "Ask again";
-      askAgain.addEventListener("click", () => {
-        if (currentSessionSummary(record.sourceSessionId)) activateSession(record.sourceSessionId);
-        promptInput.value = record.question;
-        promptInput.dispatchEvent(new Event("input", { bubbles: true }));
-        promptInput.focus();
-        render();
-      });
-      const dismiss = mkEl("button");
-      dismiss.type = "button";
-      dismiss.textContent = "Dismiss";
-      dismiss.addEventListener("click", () => {
-        record.dockview.closeEphemeralPanel(btwPanelId(record.requestId));
-      });
-      actions.append(askAgain, dismiss);
-    }
-
-    root.append(question, answer, status, actions);
-    container.append(root);
-    container.scrollTop = container.scrollHeight;
-  });
-}
-
-function terminalizeBtwPanelsAfterDisconnect(): void {
-  let changed = false;
-  for (const record of btwPanels.values()) {
-    if (
-      record.status !== "starting" &&
-      record.status !== "running" &&
-      record.status !== "cancelling" &&
-      record.status !== "promoting"
-    ) {
-      continue;
-    }
-    record.status = "error";
-    record.canPromote = false;
-    record.error = "Connection closed; this BTW request was released.";
-    renderBtwPanel(record);
-    changed = true;
-  }
-  if (changed) syncBtwButtonState();
-}
-
-function closeBtwPanel(id: DesktopEphemeralPanelId): void {
-  const requestId = id.slice(4);
-  const record = btwPanels.get(requestId);
-  if (!record) return;
-  btwPanels.delete(requestId);
-  if (record.status === "starting" || record.status === "running" || record.status === "cancelling") {
-    send({ type: "session.btw.cancel", clientId: controlClientId, requestId });
-  }
-  send({ type: "session.btw.release", clientId: controlClientId, requestId });
-  syncBtwButtonState();
-}
 let codePanelDirty = true;
 let codeSessionId: string | null = null;
 let codeWorkspace: CodeWorkspaceSummary | null = null;
@@ -1563,6 +1314,9 @@ workspaceOptionsToggle.addEventListener("click", event => {
 });
 workspaceOptionsMenu.addEventListener("click", event => event.stopPropagation());
 rollbackChatButton.addEventListener("click", openRollbackChat);
+duplicateSessionButton.addEventListener("click", () => {
+  if (activeSessionId) duplicateSession(activeSessionId);
+});
 toolVisibilityToggle.addEventListener("click", () => {
   const nextShowTools = !showToolBubbles;
   if (!send({ type: "config.set", showTools: nextShowTools })) return;
@@ -1623,7 +1377,6 @@ document.addEventListener("click", event => {
   if (activeSessionId) renderDiffsViewIfActive(activeSessionId);
   renderComparePanelIfActive();
 });
-btwButton.addEventListener("click", startBtwFromComposer);
 voiceButton.addEventListener("pointerdown", event => {
   event.preventDefault();
   voiceButton.setPointerCapture(event.pointerId);
@@ -1784,16 +1537,6 @@ cwdPickerWorktreeBranch.addEventListener("keydown", event => {
   if (event.key === "Enter") { event.preventDefault(); submitCwdPicker(); }
   if (event.key === "Escape") { event.preventDefault(); closeCwdPicker(); }
 });
-forkPickerClose.addEventListener("click", closeForkPicker);
-forkPickerCancel.addEventListener("click", closeForkPicker);
-forkPickerCreate.addEventListener("click", submitForkPicker);
-forkPickerOverlay.addEventListener("mousedown", event => {
-  if (event.target === forkPickerOverlay) closeForkPicker();
-});
-forkPickerNameInput.addEventListener("keydown", event => {
-  if (event.key === "Enter") { event.preventDefault(); submitForkPicker(); }
-  if (event.key === "Escape") { event.preventDefault(); closeForkPicker(); }
-});
 handoffPickerClose.addEventListener("click", closeHandoffPicker);
 handoffPickerCancel.addEventListener("click", closeHandoffPicker);
 handoffPickerCreate.addEventListener("click", submitHandoffPicker);
@@ -1878,9 +1621,9 @@ promptForm.addEventListener("submit", event => {
       clearPromptEditor();
       openCwdPicker();
       return;
-    case "openForkPicker":
+    case "duplicateSession":
       clearPromptEditor();
-      openForkPicker();
+      duplicateSession(action.sessionId);
       return;
     case "openHandoffPicker":
       clearPromptEditor();
@@ -2006,7 +1749,8 @@ function connect(token: string): void {
     },
     onClose: () => {
       invalidateRollbackChat();
-      terminalizeBtwPanelsAfterDisconnect();
+      pendingSessionFork = null;
+      renderActiveSession();
       if (cwdPickerCreatePending && cwdPickerPendingRequestId) {
         handleCwdPickerCreateError(
           cwdPickerPendingRequestId,
@@ -2673,41 +2417,25 @@ function handleServerMessage(message: ServerMessage): void {
     case "session.rewind.error":
       handleRollbackChatError(message);
       break;
-    case "session.btw.update": {
-      if (message.targetClientId !== controlClientId) break;
-      const record = btwPanels.get(message.requestId);
-      if (!record || record.sourceSessionId !== message.sourceSessionId) break;
-      if (message.state === "started") {
-        record.status = "running";
-        record.dockview.setPanelTitle(btwPanelId(record.requestId), shortBtwTitle(record.question));
-      } else if (message.state === "streaming") {
-        record.status = "running";
-        record.answer += message.delta ?? "";
-      } else if (message.state === "completed") {
-        record.status = "completed";
-        record.answer = message.answer ?? record.answer;
-        record.canPromote = message.canPromote === true;
-      } else if (message.state === "cancelled") {
-        record.status = "cancelled";
-      } else {
-        record.status = "error";
-        record.error = message.error ?? "BTW failed.";
-      }
-      renderBtwPanel(record);
-      syncBtwButtonState();
+    case "session.forked":
+      if (
+        pendingSessionFork?.requestId !== message.requestId ||
+        pendingSessionFork.sourceSessionId !== message.sourceSessionId
+      ) break;
+      pendingSessionFork = null;
+      activateSession(message.sessionId);
+      render();
       break;
-    }
-    case "session.btw.promoted": {
-      if (message.targetClientId !== controlClientId) break;
-      const record = btwPanels.get(message.requestId);
-      if (!record) break;
-      btwPanels.delete(message.requestId);
-      record.dockview.closeEphemeralPanel(btwPanelId(message.requestId));
-      pendingSessionSelectionId = message.sessionId;
-      send({ type: "session.open", sessionFile: message.sessionFile });
-      syncBtwButtonState();
+    case "session.fork.error":
+      if (
+        pendingSessionFork?.requestId !== message.requestId ||
+        pendingSessionFork.sourceSessionId !== message.sourceSessionId
+      ) break;
+      pendingSessionFork = null;
+      appendSessionNotice(message.sourceSessionId, { level: "error", text: message.message });
+      appendLog(`[${message.sourceSessionId}] error: ${message.message}`);
+      render();
       break;
-    }
     case "model.list":
       if (modelPickerSessionId === message.sessionId) {
         modelPickerModels = message.models;
@@ -4390,6 +4118,21 @@ function setWorkspaceOptionsOpen(open: boolean): void {
   syncWorkspaceOptionsMenu();
 }
 
+function syncDuplicateSessionButton(): void {
+  const summary = activeSessionSummary();
+  const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
+  duplicateSessionButton.textContent = pendingSessionFork ? "Duplicating…" : "Duplicate chat";
+  duplicateSessionButton.disabled = !(
+    workspaceMode === "session" &&
+    activeSessionId &&
+    summary?.kind === "managed" &&
+    summary.status === "idle" &&
+    !projection?.isBusy &&
+    !projection?.compacting &&
+    !pendingSessionFork
+  );
+}
+
 function applyVisibilityPreferences(
   showTools: boolean,
   showEditDiffsNext: boolean,
@@ -4471,7 +4214,7 @@ function renderActiveSession(): void {
     const isWorking = controlStatusState.status === "working";
     promptInput.disabled = isWorking;
     sendButton.disabled = isWorking;
-    syncBtwButtonState();
+    syncDuplicateSessionButton();
     sessionTitle.textContent = "Ask Fura";
     sessionMeta.textContent = "Fura controller session · can find, discuss, and open sessions.";
     promptInput.placeholder = isWorking ? "Ask Fura is working…" : "Ask Fura about sessions…";
@@ -4506,7 +4249,7 @@ function renderActiveSession(): void {
   syncActiveCategoryEditor(projection);
   promptInput.disabled = !activeSessionId || hasBusyDraft || awaitingAsk || compacting || rollbackApplying;
   sendButton.disabled = !activeSessionId || hasBusyDraft || awaitingAsk || compacting || rollbackApplying;
-  syncBtwButtonState();
+  syncDuplicateSessionButton();
 
   if (!activeSessionId || !summary) {
     sessionTitle.textContent = "No session selected";
@@ -7568,11 +7311,6 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
 function initDesktopWorkspace(): void {
   const createDockviewCallbacks = () => ({
     onPanelReady: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
-      if (isBtwPanelId(id)) {
-        const record = btwPanels.get(id.slice(4));
-        if (record) renderBtwPanel(record);
-        return;
-      }
       if (id === "transcript") markTranscriptViewDirty();
       if (id === "goal") return;
       if (id === "tools") markToolsViewDirty();
@@ -7583,11 +7321,6 @@ function initDesktopWorkspace(): void {
     },
     onPanelActivated: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
       const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
-      if (isBtwPanelId(id)) {
-        const record = btwPanels.get(id.slice(4));
-        if (record) renderBtwPanel(record);
-        return;
-      }
       if (id === "transcript") {
         renderTranscriptPanelIfNeeded(projection, true);
         return;
@@ -7614,10 +7347,6 @@ function initDesktopWorkspace(): void {
       }
     },
     onPanelClosed: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
-      if (isBtwPanelId(id)) {
-        closeBtwPanel(id);
-        return;
-      }
       if (id === "sessionChanges") {
         markDiffsViewDirty();
         if (activeSessionUsesDiffReviewWorkspace()) {
@@ -8100,24 +7829,28 @@ function submitCwdPicker(): void {
   }
 }
 
-function openForkPicker(): void {
-  forkPickerNameInput.value = "";
-  forkPickerOverlay.hidden = false;
-  window.setTimeout(() => forkPickerNameInput.focus(), 0);
-}
-
-function closeForkPicker(): void {
-  forkPickerOverlay.hidden = true;
-  promptInput.focus();
-}
-
-function submitForkPicker(): void {
-  if (!activeSessionId) return;
-  const name = forkPickerNameInput.value.trim();
-  if (!name) return;
-  pendingCreatedSessionBaseline = new Set(sessions.map(s => s.sessionId));
-  send({ type: "session.fork", sessionId: activeSessionId, name });
-  closeForkPicker();
+function duplicateSession(sessionId: string): void {
+  if (pendingSessionFork || workspaceMode !== "session" || activeSessionId !== sessionId) return;
+  const summary = currentSessionSummary(sessionId);
+  const projection = projections.get(sessionId);
+  if (
+    summary?.kind !== "managed" ||
+    summary.status !== "idle" ||
+    projection?.isBusy ||
+    projection?.compacting
+  ) return;
+  setWorkspaceOptionsOpen(false);
+  const requestId = nextClientRequestId("session-fork");
+  pendingSessionFork = { requestId, sourceSessionId: sessionId };
+  renderActiveSession();
+  if (!send({ type: "session.fork", requestId, sessionId })) {
+    pendingSessionFork = null;
+    appendSessionNotice(sessionId, {
+      level: "error",
+      text: "Not connected to the Fura bridge.",
+    });
+    render();
+  }
 }
 
 function openHandoffPicker(): void {

@@ -109,8 +109,16 @@ the pinned commit to the latest `fork-stuff` revision and check contract parity:
 
 ```bash
 git submodule update --remote vendor/oh-my-pi
+(
+  cd vendor/oh-my-pi
+  bun install --frozen-lockfile
+  env -u CARGO -u RUSTUP_TOOLCHAIN RUSTC_WRAPPER= bun run build:native
+)
 bun scripts/check-omp-rpc-contract.ts
 ```
+
+Restart existing OMP processes after upgrading; native addons stay loaded for the
+lifetime of each process.
 
 Environment overrides for `run-local-omp.sh`:
 

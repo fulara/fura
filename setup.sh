@@ -39,6 +39,7 @@ persist_default() {
 
 require_command git
 require_command cargo
+require_command ninja
 
 if [[ -f "${ENV_FILE}" ]]; then
   set -a
@@ -92,7 +93,7 @@ log "Installing OMP dependencies"
 log "Building OMP native addon"
 (
   cd "${OMP_ROOT}"
-  env -u RUSTUP_TOOLCHAIN "${BUN_BIN}" run build:native
+  env -u CARGO -u RUSTUP_TOOLCHAIN RUSTC_WRAPPER= "${BUN_BIN}" run build:native
 )
 
 log "Checking OMP CLI"

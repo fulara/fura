@@ -523,8 +523,17 @@ pub(crate) async fn handle_client_message_for_connection(
             state: review_state,
             instructions,
         } => handle_review_agent_review_start(state, session_id, review_state, instructions).await,
-        ClientMessage::SessionFork { session_id, name } => {
-            handle_session_fork(state, session_id, name).await
+        ClientMessage::SessionFork {
+            request_id,
+            session_id,
+        } => {
+            handle_session_fork(
+                state,
+                session_id,
+                request_id,
+                owner_connection_id,
+            )
+            .await
         }
         ClientMessage::SessionHandoff {
             session_id,
@@ -533,6 +542,20 @@ pub(crate) async fn handle_client_message_for_connection(
         } => handle_session_handoff(state, session_id, name, custom_instructions).await,
     }
 }
+fn session_fork_error(
+    target_connection_id: Option<u64>,
+    request_id: String,
+    source_session_id: String,
+    message: impl Into<String>,
+) -> ServerMessage {
+    ServerMessage::SessionForkError {
+        target_connection_id,
+        request_id,
+        source_session_id,
+        message: message.into(),
+    }
+}
+
 fn session_rewind_error(
     target_connection_id: u64,
     request_id: String,
@@ -1727,6 +1750,12 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
                 "The OMP session was stopped before the rollback completed.",
             )
             .await;
+            fail_removed_session_forks(
+                state,
+                removed.session_forks,
+                "The OMP session was stopped before duplication completed.",
+            )
+            .await;
         }
     }
 
@@ -1784,6 +1813,12 @@ pub(crate) async fn delete_session(
                 state,
                 removed.rewind_requests,
                 "The OMP session was deleted before the rollback completed.",
+            )
+            .await;
+            fail_removed_session_forks(
+                state,
+                removed.session_forks,
+                "The OMP session was deleted before duplication completed.",
             )
             .await;
         }
@@ -1986,18 +2021,91 @@ pub(crate) async fn handle_slash_command(
     Some(responses)
 }
 
+fn copy_name_parts(title: &str) -> (&str, u64) {
+    let title = title.trim();
+    if let Some((base, suffix)) = title.rsplit_once(" copy ")
+        && let Ok(number) = suffix.parse::<u64>()
+        && (2..u64::MAX).contains(&number)
+        && !base.trim().is_empty()
+    {
+        return (base.trim(), number + 1);
+    }
+    (title, 2)
+}
+
+async fn next_session_copy_name(state: &AppState, session_id: &str) -> String {
+    let sessions = state.sessions.read().await;
+    let source_title = sessions
+        .get(session_id)
+        .and_then(|record| record.title.as_deref())
+        .unwrap_or("Untitled session");
+    let (base, start) = copy_name_parts(source_title);
+    let base = if base.is_empty() { "Untitled session" } else { base };
+    let existing = sessions
+        .values()
+        .filter_map(|record| record.title.as_deref())
+        .map(|title| title.trim().to_lowercase())
+        .collect::<HashSet<_>>();
+    let mut number = start;
+    loop {
+        let candidate = format!("{base} copy {number}");
+        if !existing.contains(&candidate.to_lowercase()) {
+            return candidate;
+        }
+        number += 1;
+    }
+}
+
 pub(crate) async fn handle_session_fork(
     state: &AppState,
     session_id: String,
-    name: String,
+    request_id: String,
+    owner_connection_id: u64,
 ) -> Vec<ServerMessage> {
-    state
+    let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await else {
+        return vec![session_fork_error(
+            Some(owner_connection_id),
+            request_id,
+            session_id,
+            "Session is not attached to an active OMP process.",
+        )];
+    };
+    let name = next_session_copy_name(state, &session_id).await;
+    let command_id = next_rpc_id();
+    let pending = PendingSessionFork {
+        target_connection_id: Some(owner_connection_id),
+        request_id: request_id.clone(),
+        source_session_id: session_id.clone(),
+        transport_session_id: transport_session_id.clone(),
+        name,
+        awaiting_state: false,
+    };
+    if !state
         .session_runtime
-        .set_pending_session_name(session_id.clone(), name)
-        .await;
-    match send_rpc_command(state, &session_id, fork_command(next_rpc_id())).await {
+        .insert_pending_session_fork(command_id.clone(), pending)
+        .await
+    {
+        return vec![session_fork_error(
+            Some(owner_connection_id),
+            request_id,
+            session_id,
+            "A duplicate request is already in progress for this session.",
+        )];
+    }
+    match send_rpc_command(state, &transport_session_id, fork_command(command_id.clone())).await {
         Ok(()) => Vec::new(),
-        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
+        Err(message) => {
+            state
+                .session_runtime
+                .take_pending_session_fork(&command_id)
+                .await;
+            vec![session_fork_error(
+                Some(owner_connection_id),
+                request_id,
+                session_id,
+                message,
+            )]
+        }
     }
 }
 

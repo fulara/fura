@@ -652,7 +652,6 @@ export type CodeLocation = {
 };
 
 
-export type BtwUpdateState = "started" | "streaming" | "completed" | "cancelled" | "error";
 
 export type ServerMessage =
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
@@ -667,9 +666,9 @@ export type ServerMessage =
   | { type: "prompt.busy"; sessionId: string; text: string; images?: PromptImagePayload[] | null }
   | { type: "session.rewind.points"; requestId: string; sessionId: string; points: SessionRewindPoint[] }
   | { type: "session.rewind.result"; requestId: string; sourceSessionId: string; sessionId: string; text: string; images: PromptImagePayload[]; cancelled: boolean }
+  | { type: "session.forked"; requestId: string; sourceSessionId: string; sessionId: string }
+  | { type: "session.fork.error"; requestId: string; sourceSessionId: string; message: string }
   | { type: "session.rewind.error"; requestId: string; sourceSessionId: string; sessionId: string; message: string }
-  | { type: "session.btw.update"; targetClientId: string; sourceSessionId: string; requestId: string; state: BtwUpdateState; question?: string; delta?: string; answer?: string; canPromote?: boolean; error?: string }
-  | { type: "session.btw.promoted"; targetClientId: string; sourceSessionId: string; requestId: string; sessionId: string; sessionFile: string }
   | { type: "model.list"; sessionId: string; models: ModelSummary[] }
   | { type: "config.modelCatalog.list"; requestId?: string | null; models: ModelSummary[] }
   | { type: "plan.review"; sessionId: string; planFilePath: string; finalPlanFilePath: string; title?: string | null; content: string }
@@ -738,10 +737,6 @@ export type ClientMessage =
       behavior?: "steer" | "followUp";
     }
   | { type: "prompt.abort"; sessionId: string }
-  | { type: "session.btw.start"; clientId: string; sessionId: string; requestId: string; question: string }
-  | { type: "session.btw.cancel"; clientId: string; requestId: string }
-  | { type: "session.btw.release"; clientId: string; requestId: string }
-  | { type: "session.btw.promote"; clientId: string; requestId: string }
   | { type: "goal.start"; sessionId: string; objective: string; tokenBudget?: number | null }
   | { type: "goal.control"; sessionId: string; action: GoalControlAction }
   | { type: "goal.setBudget"; sessionId: string; tokenBudget?: number | null }
@@ -780,7 +775,7 @@ export type ClientMessage =
   | { type: "review.comment.markFlushed"; comments: { id: string; updatedAt: string }[] }
   | { type: "review.comment.delete"; id: string }
   | { type: "review.agentReview.start"; sessionId: string; state: DiffReviewableState; instructions: string }
-  | { type: "session.fork"; sessionId: string; name: string }
+  | { type: "session.fork"; requestId: string; sessionId: string }
   | { type: "control.prompt"; clientId: string; conversationId?: string; text: string; uiSnapshot: FrontendUiSnapshot }
   | { type: "control.abort"; clientId: string; conversationId?: string }
   | { type: "voice.start"; clientId: string; language?: string }
