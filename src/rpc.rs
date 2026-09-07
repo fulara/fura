@@ -1856,11 +1856,7 @@ async fn handle_pending_session_fork_response(
     let Some(command_id) = value_str(frame, "id") else {
         return false;
     };
-    let Some(pending) = state
-        .session_runtime
-        .pending_session_fork(command_id)
-        .await
-    else {
+    let Some(pending) = state.session_runtime.pending_session_fork(command_id).await else {
         return false;
     };
     let failed = status == Some("error") || success == Some(false);

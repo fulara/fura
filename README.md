@@ -171,13 +171,27 @@ Defaults to restarting `./run-local-omp.sh` in the background. Pass a different 
 
 Open: `http://127.0.0.1:38737/`, then enter bridge token `dev` in the auth screen.
 
-Environment overrides for `run-mock-rpc.sh`:
+The mock launcher requires Python 3 on POSIX. It does not load `.env` or inherit
+`FURA_*` configuration. Set `FURA_SMOKE_PORT` to override the default port
+(`38737`); authentication is always the mock-only token `dev`.
 
-| Variable | Default | Description |
-|---|---|---|
-| `FURA_TOKEN` | `dev` | Bridge token entered in the browser auth screen |
-| `FURA_PORT` | `38737` | Listen port for mock smoke runs; intentionally avoids the normal `3737` dev port |
-| `FURA_SKIP_FRONTEND_BUILD` | `0` | Set to `1` to skip rebuilding the frontend |
+Each run builds the frontend and bridge into a private temporary directory and
+uses its own home, session store, XDG directories, process group and session.
+An occupied port fails startup; an existing server is never reused. Cleanup
+checks the retained supervisor identity and ownership record before signalling
+its group. If ownership cannot be verified, it refuses cleanup and leaves the
+temporary directory and ownership record for inspection.
+
+```bash
+FURA_SMOKE_PORT=38888 ./run-mock-rpc.sh
+npm --prefix frontend run smoke
+python3 -m unittest scripts/test_smoke_process.py -v
+```
+
+Use this launcher for mock smoke tests, not a production restart helper. For
+other isolated commands, `scripts/smoke_process.py --state-dir <private-dir>
+--timeout <seconds> -- <command>` provides the same process-group ownership
+guard; callers must separately supply private data/configuration directories.
 
 ## Configuration
 

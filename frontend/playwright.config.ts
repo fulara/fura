@@ -17,7 +17,7 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: `FURA_SKIP_FRONTEND_BUILD=1 FURA_TOKEN=dev FURA_PORT=${port} ./run-mock-rpc.sh`,
+    command: `FURA_SMOKE_PORT=${port} ./run-mock-rpc.sh`,
     cwd: "..",
     url: `${baseURL}/healthz`,
     reuseExistingServer: false,

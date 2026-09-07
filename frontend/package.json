@@ -8,7 +8,7 @@
     "build": "tsc && vite build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "smoke": "npm run build && playwright test --config playwright.config.ts",
+    "smoke": "playwright test --config playwright.config.ts",
     "preview": "vite preview --host 127.0.0.1"
   },
   "devDependencies": {

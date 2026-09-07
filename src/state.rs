@@ -931,9 +931,9 @@ impl SessionRuntimeState {
     ) -> bool {
         let mut pending = self.pending_session_forks.write().await;
         if pending.contains_key(&command_id)
-            || pending.values().any(|fork| {
-                fork.transport_session_id == pending_fork.transport_session_id
-            })
+            || pending
+                .values()
+                .any(|fork| fork.transport_session_id == pending_fork.transport_session_id)
         {
             return false;
         }

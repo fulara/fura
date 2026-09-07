@@ -526,15 +526,7 @@ pub(crate) async fn handle_client_message_for_connection(
         ClientMessage::SessionFork {
             request_id,
             session_id,
-        } => {
-            handle_session_fork(
-                state,
-                session_id,
-                request_id,
-                owner_connection_id,
-            )
-            .await
-        }
+        } => handle_session_fork(state, session_id, request_id, owner_connection_id).await,
         ClientMessage::SessionHandoff {
             session_id,
             name,
@@ -2040,7 +2032,11 @@ async fn next_session_copy_name(state: &AppState, session_id: &str) -> String {
         .and_then(|record| record.title.as_deref())
         .unwrap_or("Untitled session");
     let (base, start) = copy_name_parts(source_title);
-    let base = if base.is_empty() { "Untitled session" } else { base };
+    let base = if base.is_empty() {
+        "Untitled session"
+    } else {
+        base
+    };
     let existing = sessions
         .values()
         .filter_map(|record| record.title.as_deref())
@@ -2092,7 +2088,13 @@ pub(crate) async fn handle_session_fork(
             "A duplicate request is already in progress for this session.",
         )];
     }
-    match send_rpc_command(state, &transport_session_id, fork_command(command_id.clone())).await {
+    match send_rpc_command(
+        state,
+        &transport_session_id,
+        fork_command(command_id.clone()),
+    )
+    .await
+    {
         Ok(()) => Vec::new(),
         Err(message) => {
             state

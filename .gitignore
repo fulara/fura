@@ -5,6 +5,7 @@
 /frontend/playwright-report
 .env
 .DS_Store
+__pycache__/
 
 /bridge-debug*.jsonl
 /fura-events*.jsonl
