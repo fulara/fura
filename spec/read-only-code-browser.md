@@ -46,7 +46,7 @@ npm --prefix frontend run build      # passed; existing Mermaid chunk-size warni
 - Code Refresh preserves an explicitly opened root and reopens the selected file after workspace readiness. The Code header displays the canonical root.
 - Code comments/questions, deletion and preview/flush use canonical root + path + file version. Identical paths in different repositories cannot share notes or prompt context.
 - Historical files use **View committed file**, an immutable read-only dialog backed by `git.file.request`. The dialog identifies repository, commit, blob and path. It does not create/check out a review worktree or use a mutable Code/LSP workspace. Deleted files read their parent version.
-- Binary, non-UTF-8, non-file and over-1-MiB blobs fail explicitly; interrupted reads show a connection error and can be reopened after reconnect.
+- Binary, non-UTF-8, non-file and blobs over 1,000,000 bytes fail explicitly; interrupted reads show a connection error and can be reopened after reconnect.
 
 Regression coverage includes unit tests and real-repository Chromium scenarios in
 `frontend/smoke/git-review.spec.ts`, including repository isolation and unchanged Git bytes.

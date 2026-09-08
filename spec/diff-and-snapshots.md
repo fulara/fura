@@ -117,7 +117,7 @@ questions, deletion and preview/flush are scoped by canonical root, path and fil
 Historical files use **View committed file**, a separate read-only blob view identified by
 repository, full commit OID, blob OID and path. It never creates/checks out a review worktree,
 starts LSP or substitutes today's file. Deleted files read the parent version. Binary,
-non-UTF-8, non-file and over-1-MiB blobs fail explicitly. Today's deleted directories or
+non-UTF-8, non-file and blobs over 1,000,000 bytes fail explicitly. Today's deleted directories or
 external symlink parents do not prevent reading an immutable historical tree.
 Diff panes retain enough width for controls, including restored layouts.
 
