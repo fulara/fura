@@ -49,6 +49,35 @@ class MockLauncherIsolation(unittest.TestCase):
             self.assertNotEqual(child["sid"], os.getsid(0))
             self.assertNotEqual(child["home"], os.environ["HOME"])
 
+    def test_partial_startup_failure_preserves_ownership_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="fura-startup-regression-") as temp:
+            directory = Path(temp) / "retained"
+            directory.mkdir()
+            with socket.socket() as reserve:
+                reserve.bind(("127.0.0.1", 0))
+                port = reserve.getsockname()[1]
+            source = (
+                "import sys\n"
+                "from unittest.mock import patch\n"
+                f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
+                "import run_mock_rpc\n"
+                "def partial_start(*args, **kwargs):\n"
+                " path = run_mock_rpc.Path(args[1]); path.mkdir()\n"
+                " (path / 'process.json').write_text('partial ownership evidence')\n"
+                " raise RuntimeError('ownership handshake failed')\n"
+                f"with patch.object(run_mock_rpc.tempfile, 'mkdtemp', return_value={str(directory)!r}), "
+                "patch.object(run_mock_rpc, 'OwnedProcess', side_effect=partial_start):\n"
+                " run_mock_rpc.main()\n"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", source],
+                env={**os.environ, "FURA_SMOKE_PORT": str(port)},
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual((directory / "process/process.json").read_text(), "partial ownership evidence")
+            self.assertIn(str(directory), result.stderr)
+
 
 class OwnedProcessLifecycle(unittest.TestCase):
     def setUp(self):

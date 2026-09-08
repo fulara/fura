@@ -181,6 +181,10 @@ An occupied port fails startup; an existing server is never reused. Cleanup
 checks the retained supervisor identity and ownership record before signalling
 its group. If ownership cannot be verified, it refuses cleanup and leaves the
 temporary directory and ownership record for inspection.
+If startup fails after spawning but before ownership is established, the
+launcher also retains the temporary directory and reports its path. Inspect
+these resources manually; a PID record alone never authorizes termination.
+
 
 ```bash
 FURA_SMOKE_PORT=38888 ./run-mock-rpc.sh
@@ -192,6 +196,18 @@ Use this launcher for mock smoke tests, not a production restart helper. For
 other isolated commands, `scripts/smoke_process.py --state-dir <private-dir>
 --timeout <seconds> -- <command>` provides the same process-group ownership
 guard; callers must separately supply private data/configuration directories.
+
+For real-OMP maintenance smoke, use a private bridge target, frontend output,
+OMP dependency/native build, home and agent directory. Snapshot SQLite
+credentials with the online backup API rather than copying a live database
+without its WAL. Preserve the configured model/provider and never reuse the
+production session store or an occupied test port.
+
+Build the native addon from the tested fork, not just an upstream release:
+the local lifecycle guards require `Process.identity()` as well as the matching
+version sentinel. A source rebase does not update the addon already loaded by
+running agents. Test the matched source/addon pair beside the live service;
+publication is not deployment and does not restart existing sessions.
 
 ## Configuration
 

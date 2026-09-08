@@ -72,10 +72,14 @@ def main():
     finally:
         for signum in signals:
             signal.signal(signum, signal.SIG_IGN)
-        if owned is not None:
+        if owned is None:
+            # Constructor failure may happen after spawn but before returning
+            # ownership. Keep evidence; never guess which PID to stop.
+            print(f"smoke startup failed; inspect retained resources at {directory}", file=sys.stderr)
+        else:
             owned.cleanup()
-        # A refused cleanup raises before deletion: retain its ownership record.
-        shutil.rmtree(directory)
+            # A refused cleanup raises before deletion: retain its ownership record.
+            shutil.rmtree(directory)
 
 
 if __name__ == "__main__":
