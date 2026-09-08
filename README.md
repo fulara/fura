@@ -15,10 +15,15 @@ Browser  ←→  Fura (Rust/Axum)  ←→  omp --mode rpc (child process, stdio 
 
 ## Git changes
 
-The Git changes panel shows **unstaged**, **staged**, and nonignored **untracked**
-changes for the selected repository. It preserves file filtering, lazy patches,
-context and review comments without staging files or creating Git objects/refs.
-Separate Compare views retain commit/ref and working-tree comparisons.
+The Git changes panel separates **Current changes** (unstaged, staged and nonignored
+untracked files) from **History**. History lists recent commits without typing refs,
+supports older pages and first-parent review, and preserves comments/questions by repository
+and exact version. Repository, branch and HEAD remain visible.
+
+Both views retain file filtering, lazy patches, statistics and wider context without
+staging files or creating Git objects/refs. Historical files open directly from immutable
+blobs, without checkout. **Advanced Compare** remains separate and inherits the selected
+repository. See [the diff contract](spec/diff-and-snapshots.md) for read limits and Git-helper policy.
 
 Repositories come from the session cwd/worktree, declared additional directories,
 initialized submodules and supported tool-path metadata. Add, Hide selected and

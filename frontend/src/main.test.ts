@@ -697,7 +697,7 @@ describe("desktop cog options", () => {
     desktopMockActivePanelIds.add("code");
     connection.emit({
       type: "code.workspace.ready",
-      workspace: { workspaceId: "ws-1", sessionId: "live", root: "/repo", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
+      workspace: { workspaceId: "ws-1", sessionId: null, root: "/repo", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
     });
 
     expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.file.open", workspaceId: "ws-1", path: "src/main.ts" }));
@@ -735,73 +735,140 @@ describe("desktop cog options", () => {
     expect(desktopMockActivePanelIds.has("code")).toBe(false);
     connection.emit({
       type: "code.workspace.ready",
-      workspace: { workspaceId: "ws-1", sessionId: "live", root: "/repo", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
+      workspace: { workspaceId: "ws-1", sessionId: null, root: "/repo", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
     });
 
     // The explicit open must still be honored on the first try.
     expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.file.open", workspaceId: "ws-1", path: "src/main.ts" }));
   });
 
-  it("opens a review-commit diff file in Code through a single worktree open", async () => {
-    // Mount the Code panel (as the real desktop layout does) so renderCodePanelIfNeeded
-    // actually runs — this exercises the review-worktree session-mismatch reset guard.
-    const { connection } = await createHarness({ mountCodePanel: true });
-    const commitOid = "c".repeat(40);
 
-    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
-    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
-    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
-    const request = connection.sent.find(message => message.type === "sessionChanges.request");
-    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
-    const baseState = sessionChangesState("live");
-    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
-    connection.emit({
-      type: "sessionChanges.summary",
-      state: {
-        ...baseState,
-        targetClientId: request.clientId,
-        diffId: request.diffId,
-        request: { scope: "sessionChanges", changeKind: "unstaged", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: commitOid, selectedFile: request.selectedFile, contextLines: request.contextLines ?? 3 },
-        summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: " src/main.ts | 2 +-\n", truncated: false },
-        review: { commits: [{ oid: commitOid, shortOid: "cccccccc", subject: "Add logging", message: "Add logging", committedAt: "now", parentOids: [], isMerge: false }], currentCommitOid: commitOid, currentCommitIndex: 0, previousCommitOid: null },
-      },
-    });
-
-    // Seed the review worktree cache for /repo, as a prior diff.reviewWorktree.state would.
-    connection.emit({
-      type: "diff.reviewWorktree.state",
-      worktree: { id: "wt-1", sourceRepoRoot: "/repo", path: "/wt", checkedOutOid: commitOid, dirty: false, status: "ready", statusMessage: "ready" },
-    });
-
-    document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
-    connection.sent.length = 0;
-
-    const codeButton = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
-      .find(button => button.textContent === "Code");
-    if (!codeButton) throw new Error("Code button missing");
-    codeButton.click();
-
-    // The simplified flow only prepares the worktree; it must not open the workspace directly.
-    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.reviewWorktree.checkout", worktreeId: "wt-1" }));
-    expect(connection.sent.some(message => message.type === "code.workspace.openRoot")).toBe(false);
-
-    // The checkout response is the single trigger that opens the workspace exactly once.
+  function openCommentRepo(connection: FakeConnection, root: string, text: string, version = 1): void {
+    const repos = [
+      { id: "/repo", repoRoot: "/repo", label: "A", source: "cwd" as const, isDefault: true },
+      { id: "/other", repoRoot: "/other", label: "B", source: "manual" as const, isDefault: false },
+    ];
+    const select = document.querySelector<HTMLSelectElement>("#testDiffPanel .diff-repo-select");
+    if (select) {
+      select.value = root;
+      select.dispatchEvent(new Event("change"));
+    }
+    answerGitRequest(connection, `${root}-${version}`, { repos, selectedRepoId: root });
+    document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="same.ts"]')!.click();
+    const beforeOpen = connection.sent.length;
+    clickGitButton("Code");
     desktopMockActivePanelIds.add("code");
+    if (connection.sent.slice(beforeOpen).some(message => message.type === "code.workspace.openRoot")) {
+      connection.emit({
+        type: "code.workspace.ready",
+        workspace: { workspaceId: `ws-${root}`, sessionId: null, root, rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
+      });
+    }
+    connection.emit({ type: "code.tree", workspaceId: `ws-${root}`, path: "", entries: [{ name: "same.ts", path: "same.ts", kind: "file", size: text.length }] });
+    connection.emit({ type: "code.file", workspaceId: `ws-${root}`, file: { path: "same.ts", language: "", text, size: text.length, version } });
+  }
+
+  it("isolates Code comment add/edit/delete/preview/flush across A/same.ts and B/same.ts", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    openCommentRepo(connection, "/repo", "A_WORK\n");
+    const prompt = vi.spyOn(window, "prompt").mockReturnValue("A_ONLY");
+    document.querySelector<HTMLButtonElement>("#testCodePanel .diff-comment-btn")!.click();
+
+    openCommentRepo(connection, "/other", "B_WORK\n");
+    expect(document.querySelector("#testCodePanel")!.textContent).toContain("B_WORK");
+    expect(document.querySelector("#testCodePanel")!.textContent).not.toContain("A_ONLY");
+    expect(document.querySelector<HTMLButtonElement>("#testCodePanel .code-file-actions button")!.disabled).toBe(true);
+    prompt.mockReturnValue("B_ONLY");
+    document.querySelector<HTMLButtonElement>("#testCodePanel .diff-comment-btn")!.click();
+    prompt.mockReturnValue("B_EDITED");
+    document.querySelector<HTMLButtonElement>("#testCodePanel .review-comment-actions button:first-child")!.click();
+    expect(document.querySelector("#testCodePanel .code-comments")!.textContent).toContain("B_EDITED");
+    document.querySelector<HTMLButtonElement>("#testCodePanel .code-file-actions button")!.click();
+    const preview = document.querySelector<HTMLTextAreaElement>("#diffPreviewText")!;
+    expect(preview.value).toContain("Workspace root: /other");
+    expect(preview.value).toContain("Location: /other/same.ts:1");
+    expect(preview.value).toContain("Reviewed version: 1");
+    expect(preview.value).toContain("B_EDITED");
+    expect(preview.value).toContain("B_WORK");
+    expect(preview.value).not.toContain("A_ONLY");
+    expect(preview.value).not.toContain("A_WORK");
+    document.querySelector<HTMLButtonElement>("#diffPreviewClose")!.click();
+    document.querySelector<HTMLButtonElement>("#testCodePanel .review-comment-actions button:last-child")!.click();
+    expect(document.querySelector("#testCodePanel .code-comments")).toBeNull();
+    prompt.mockReturnValue("B_FLUSH");
+    document.querySelector<HTMLButtonElement>("#testCodePanel .diff-comment-btn")!.click();
+    document.querySelectorAll<HTMLButtonElement>("#testCodePanel .code-file-actions button")[1]!.click();
+    document.querySelector<HTMLButtonElement>("#diffPreviewSend")!.click();
+    const sent = connection.sent.find(message => message.type === "prompt.send");
+    if (!sent || sent.type !== "prompt.send") throw new Error("Code comment prompt missing");
+    expect(sent.text).toContain("Workspace root: /other");
+    expect(sent.text).toContain("B_FLUSH");
+    expect(sent.text).not.toContain("A_ONLY");
+    expect(document.querySelector("#testCodePanel .code-comments")).toBeNull();
+    openCommentRepo(connection, "/repo", "A_WORK\n");
+    expect(document.querySelector("#testCodePanel .code-comments")!.textContent).toContain("A_ONLY");
+    expect(document.querySelector("#testCodePanel")!.textContent).not.toContain("B_FLUSH");
+  });
+
+  it("keeps Code comments and an open preview pinned to reviewed content after a same-version file change", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    openCommentRepo(connection, "/repo", "OLD_WORK\n");
+    vi.spyOn(window, "prompt").mockReturnValue("OLD_ONLY");
+    document.querySelector<HTMLButtonElement>("#testCodePanel .diff-comment-btn")!.click();
+    document.querySelector<HTMLButtonElement>("#testCodePanel .code-file-actions button")!.click();
     connection.emit({
-      type: "diff.reviewWorktree.state",
-      worktree: { id: "wt-1", sourceRepoRoot: "/repo", path: "/wt", checkedOutOid: commitOid, dirty: false, status: "ready", statusMessage: "ready" },
+      type: "code.file", workspaceId: "ws-/repo",
+      file: { path: "same.ts", language: "", text: "NEW_WORK\n", size: 9, version: 1 },
     });
+    expect(document.querySelector("#testCodePanel")!.textContent).toContain("NEW_WORK");
+    expect(document.querySelector("#testCodePanel")!.textContent).not.toContain("OLD_ONLY");
+    expect(document.querySelector<HTMLButtonElement>("#testCodePanel .code-file-actions button")!.disabled).toBe(true);
+    const preview = document.querySelector<HTMLTextAreaElement>("#diffPreviewText")!;
+    expect(preview.value).toContain("OLD_ONLY");
+    expect(preview.value).toContain("OLD_WORK");
+    expect(preview.value).not.toContain("NEW_WORK");
+    document.querySelector<HTMLButtonElement>("#diffPreviewSend")!.click();
+    const sent = connection.sent.find(message => message.type === "prompt.send");
+    if (!sent || sent.type !== "prompt.send") throw new Error("Code comment prompt missing");
+    expect(sent.text).toContain("OLD_WORK");
+    expect(sent.text).not.toContain("NEW_WORK");
+  });
 
-    const openRootMessages = connection.sent.filter(message => message.type === "code.workspace.openRoot");
-    expect(openRootMessages).toHaveLength(1);
-    expect(openRootMessages[0]).toEqual(expect.objectContaining({ root: "/wt", source: "reviewWorktree", reviewWorktreeId: "wt-1" }));
-
-    connection.emit({
-      type: "code.workspace.ready",
-      workspace: { workspaceId: "ws-rev", root: "/wt", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "reviewWorktree", reviewWorktreeId: "wt-1" },
-    });
-
-    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.file.open", workspaceId: "ws-rev", path: "src/main.ts" }));
+  it("refreshes external Code root B without returning to session cwd A and retains the file and tree", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    openCommentRepo(connection, "/other", "B_WORK\n");
+    connection.emit({ type: "code.tree", workspaceId: "ws-/other", path: "src", entries: [{ name: "same.ts", path: "src/same.ts", kind: "file" }] });
+    document.querySelector<HTMLButtonElement>("#testCodePanel .code-tree-entry")!.click();
+    connection.emit({ type: "code.file", workspaceId: "ws-/other", file: { path: "src/same.ts", language: "", text: "B_WORK\n", size: 7, version: 1 } });
+    connection.sent.length = 0;
+    document.querySelector<HTMLButtonElement>("#testCodePanel .code-workspace-header button")!.click();
+    expect(connection.sent.some(message => message.type === "code.workspace.open")).toBe(false);
+    const open = connection.sent.find(message => message.type === "code.workspace.openRoot");
+    if (!open || open.type !== "code.workspace.openRoot") throw new Error("Refresh did not reopen a root");
+    expect(open.root).toBe("/other");
+    // A late ready from the session's original workspace must not hijack Refresh.
+    connection.emit({ type: "code.workspace.ready", workspace: { workspaceId: "stale-A", sessionId: "live", root: "/repo", source: "session", status: "filesOnly" } });
+    connection.emit({ type: "code.workspace.ready", workspace: { workspaceId: "refreshed-B", sessionId: null, root: open.root, source: open.source, status: "filesOnly", statusMessage: "Files only." } });
+    expect(connection.sent).toContainEqual({ type: "code.file.open", workspaceId: "refreshed-B", path: "src/same.ts" });
+    expect(connection.sent).toContainEqual({ type: "code.tree.list", workspaceId: "refreshed-B", path: "src" });
+    connection.emit({ type: "code.tree", workspaceId: "refreshed-B", path: "src", entries: [{ name: "same.ts", path: "src/same.ts", kind: "file" }] });
+    connection.emit({ type: "code.file", workspaceId: "refreshed-B", file: { path: "src/same.ts", language: "", text: "B_REFRESHED\n", size: 12, version: 2 } });
+    connection.emit({ type: "code.workspace.ready", workspace: { workspaceId: "stale-A", sessionId: "live", root: "/repo", source: "session", status: "filesOnly" } });
+    connection.emit({ type: "code.file", workspaceId: "stale-A", file: { path: "same.ts", language: "", text: "A_WORK\n", size: 7, version: 1 } });
+    expect(document.querySelector("#testCodePanel .code-workspace-header")!.textContent).toContain("/other");
+    expect(document.querySelector("#testCodePanel .code-file-path")!.textContent).toBe("src/same.ts");
+    expect(document.querySelector("#testCodePanel .code-file-view")!.textContent).toContain("B_REFRESHED");
+    expect(document.querySelector("#testCodePanel .code-file-view")!.textContent).not.toContain("A_WORK");
+    expect(document.querySelector<HTMLSelectElement>("#testDiffPanel .diff-repo-select")!.value).toBe("/other");
   });
 
   async function openCodeFileForNavigation(connection: FakeConnection): Promise<void> {
@@ -1920,59 +1987,6 @@ describe("desktop cog options", () => {
     expect(connection.sent.some(message => message.type === "sessionChanges.request")).toBe(false);
   });
 
-  it("shows commit messages only for explicit single-commit aggregate views", async () => {
-    const { connection } = await createHarness();
-    const commitOid = "b".repeat(40);
-    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
-    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
-    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
-    const request = connection.sent.find(message => message.type === "sessionChanges.request");
-    if (!request || request.type !== "sessionChanges.request") throw new Error("session changes request missing");
-    const baseState = sessionChangesState("live");
-    if (baseState.status !== "ready") throw new Error("ready session changes state missing");
-    const commonState: Extract<SessionChangesSummaryState, { status: "ready" }> = {
-      ...baseState,
-      targetClientId: request.clientId,
-      diffId: request.diffId,
-      request: { scope: "sessionChanges", changeKind: "unstaged", clientId: request.clientId, diffId: request.diffId, sessionId: "live", repoId: request.repoId, detailMode: "filePatch", currentCommitOid: null, selectedFile: null, contextLines: 3 },
-      comparison: { ...baseState.comparison, detailMode: "filePatch", currentCommitOid: null, selectedFile: null, contextLines: 3 },
-      summary: { files: [{ oldPath: null, newPath: "src/main.ts", status: "modified", added: 1, removed: 1 }], stat: null, truncated: false },
-      review: {
-        commits: [{ oid: commitOid, shortOid: "bbbbbbbbbbbb", subject: "Add logging", message: "Add logging\n\nDetailed body.", committedAt: "2026-05-03T00:00:00Z", parentOids: ["a".repeat(40)], isMerge: false }],
-        currentCommitOid: null,
-        currentCommitIndex: null,
-        previousCommitOid: null,
-      },
-    };
-
-    connection.emit({ type: "sessionChanges.summary", state: commonState });
-    expect(document.querySelector("#testDiffPanel .diff-commit-message")).toBeNull();
-
-    connection.emit({
-      type: "sessionChanges.summary",
-      state: {
-        ...commonState,
-        request: { ...commonState.request, currentCommitOid: commitOid },
-        comparison: {
-          ...commonState.comparison,
-          currentCommitOid: commitOid,
-          displayedPatchRange: {
-            base: { kind: "commit", oid: "a".repeat(40), shortOid: "aaaaaaaaaaaa", subject: null },
-            head: { kind: "commit", oid: commitOid, shortOid: "bbbbbbbbbbbb", subject: "Add logging" },
-          },
-        },
-        review: { ...commonState.review, currentCommitOid: commitOid, currentCommitIndex: 0, previousCommitOid: "a".repeat(40) },
-      },
-    });
-    const commitMessage = document.querySelector("#testDiffPanel .diff-commit-message");
-    expect(commitMessage?.textContent).toContain("Detailed body.");
-    expect(commitMessage?.parentElement?.classList.contains("diffs-main-body")).toBe(true);
-    expect(document.querySelector("#testDiffPanel .diff-step-actions")?.contains(commitMessage as Node)).toBe(false);
-    expect(document.querySelector("#testDiffPanel .diffs-summary p")?.textContent).toBe("aaaaaaaaaaaa → bbbbbbbbbbbb — Add logging");
-
-    document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
-    expect(document.querySelector("#testDiffPanel .diff-commit-message")).toBeNull();
-  });
 
 
   it("refreshes Git changes with the current repo, mode, and group", async () => {

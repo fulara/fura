@@ -58,6 +58,8 @@ import {
   resolvedRefLabel,
   summarizeWireDiffFiles,
 } from "./diffState";
+import { acceptGitHistoryResult, beginGitHistoryRequest, createGitHistoryState, gitHeadLabel, renderGitHistoryBrowser, type GitHistoryState, type GitReviewView } from "./gitHistory";
+import { openCommittedFileView } from "./gitFileView";
 import {
   annotationsForDiffLocation,
   checkoutTargetForDiffFile,
@@ -77,6 +79,7 @@ import {
 } from "./diffReview";
 import {
   buildCodeCommentPrompt,
+  codeCommentFileKey,
   codeCommentFlushEditorText,
   codeCommentPreviewStatus,
   createCodeFileComment,
@@ -157,11 +160,9 @@ import type {
   ControlStatusProjection,
   ControlSuggestedAction,
   CompareDiffSummaryState,
-  DiffCheckoutTarget,
   DiffDetailMode,
   DiffLineLocation,
   DiffReviewAnnotation,
-  DiffReviewWorktree,
   DiffReviewableState,
   DiffRow,
   FrontendControlAction,
@@ -816,6 +817,10 @@ const sessionChangesDiffIds = new Map<string, string>();
 const sessionChangesSelectedFiles = new Map<string, string>();
 const staleSessionChanges = new Set<string>();
 let currentSessionChangesRequest: { sessionId: string; diffId: string } | null = null;
+const gitHistoryStates = new Map<string, GitHistoryState>();
+const restoredGitReviewSessions = new Set<string>();
+let pendingGitHistory: { sessionId: string; state: GitHistoryState } | null = null;
+let pendingGitFile: { requestId: string; repoRoot: string; commitOid: string; path: string; loading: boolean; view: ReturnType<typeof openCommittedFileView> } | null = null;
 let compareDiffState: CompareDiffSummaryState | null = null;
 let compareDiffId: string | null = null;
 let compareDiffLoading = false;
@@ -847,7 +852,6 @@ type ActiveReviewCommentComposer =
       body: string;
     };
 let activeReviewCommentComposer: ActiveReviewCommentComposer | null = null;
-const diffReviewWorktrees = new Map<string, DiffReviewWorktree>();
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
@@ -1097,6 +1101,12 @@ function pruneStaleSessionCaches(liveSessionIds: ReadonlySet<string>): void {
     sessionChangesPayloadKinds.delete(sessionId);
     sessionChangesKinds.delete(sessionId);
     sessionChangesRepoIds.delete(sessionId);
+    restoredGitReviewSessions.delete(sessionId);
+    sessionStorage.removeItem(`fura.gitReview.${sessionId}`);
+    for (const key of gitHistoryStates.keys()) {
+      if (JSON.parse(key)[0] === sessionId) gitHistoryStates.delete(key);
+    }
+    if (pendingGitHistory?.sessionId === sessionId) clearPendingGitHistory();
     sessionChangesDiffIds.delete(sessionId);
     sessionChangesSelectedFiles.delete(sessionId);
     staleSessionChanges.delete(sessionId);
@@ -1169,9 +1179,7 @@ for (const level of PROPOSED_THINKING_LEVELS) {
   proposedModelThinkingSelect.append(option);
 }
 
-type CodeOpenRequest =
-  | { source: "sessionWorktree"; sessionId: string; repoRoot: string; path: string }
-  | { source: "reviewCommit"; repoRoot: string; reviewWorktreeId?: string | null; target: DiffCheckoutTarget; path: string };
+type CodeOpenRequest = { source: "sessionWorktree"; sessionId: string; repoRoot: string; path: string };
 
 // --- Desktop workspace state ---
 
@@ -1191,6 +1199,7 @@ let codeLoadingTree = false;
 let codeLoadingFile = false;
 let codeError: string | null = null;
 let pendingCodeOpenRequest: CodeOpenRequest | null = null;
+let pendingCodeRefresh: { workspace: CodeWorkspaceSummary; sessionId: string | null; treePath: string; filePath: string | null } | null = null;
 let codeSearchOpen = false;
 let codeSearchBasePath = "";
 let codeSearchQuery = "";
@@ -1689,11 +1698,21 @@ function connect(token: string): void {
       // every held projection blindly re-requests sessions whose files the bridge has
       // since pruned, producing recurring `unknown session` errors on each reconnect.
       pendingRestoreAfterSessionsSnapshot = true;
+      if (activeSessionId) staleSessionChanges.add(activeSessionId);
       send({ type: "session.list" });
     },
     onClose: () => {
       invalidateRollbackChat();
       pendingSessionFork = null;
+      if (pendingGitFile?.loading) {
+        pendingGitFile.loading = false;
+        pendingGitFile.view.show(null, "Connection closed while reading the committed file. Close and reopen it to retry.");
+      }
+      if (pendingGitHistory) pendingGitHistory.state.error = "Connection closed while reading history. Refresh to retry.";
+      clearPendingGitHistory();
+      for (const sessionId of diffLoadingSessions) staleSessionChanges.add(sessionId);
+      clearCurrentSessionChangesRequest("closed");
+      markDiffsViewDirty();
       renderActiveSession();
       if (cwdPickerCreatePending && cwdPickerPendingRequestId) {
         handleCwdPickerCreateError(
@@ -1756,6 +1775,8 @@ function activateSession(sessionId: string): void {
   const previousSessionId = activeSessionId;
   const sessionChanged = activeSessionId !== sessionId || workspaceMode !== "session";
   if (sessionChanged) {
+    clearPendingGitHistory();
+    pendingGitFile?.view.close();
     if (previousMode === "controller") {
       controllerPromptDraft = promptInput.value;
       promptInput.value = sessionPromptDraft;
@@ -1951,6 +1972,34 @@ function handleServerMessage(message: ServerMessage): void {
       }
       break;
     }
+    case "git.file": {
+      const pending = pendingGitFile;
+      if (message.targetClientId !== diffClientId || !pending || !pending.loading || pending.requestId !== message.requestId) break;
+      if (message.file && (message.file.repoRoot !== pending.repoRoot || message.file.commitOid !== pending.commitOid || message.file.path !== pending.path)) break;
+      pending.view.show(message.file, message.error);
+      pending.loading = false;
+      break;
+    }
+    case "git.history": {
+      if (message.targetClientId !== diffClientId || pendingGitHistory?.sessionId !== message.sessionId) break;
+      const history = pendingGitHistory.state;
+      if (!acceptGitHistoryResult(history, message.requestId, message.page, message.error)) break;
+      pendingGitHistory = null;
+      if (message.page) {
+        const oldKey = gitHistoryStateKey(message.sessionId, "");
+        if (gitHistoryStates.get(oldKey) === history) gitHistoryStates.delete(oldKey);
+        gitHistoryStates.set(gitHistoryStateKey(message.sessionId, history.repoRoot), history);
+        sessionChangesRepoIds.set(message.sessionId, history.repoRoot);
+        persistGitReviewSelection(message.sessionId, history);
+        if (history.view === "history" && !history.selectedOid && history.page?.commits[0]) {
+          selectGitCommit(message.sessionId, history.page.commits[0].oid);
+          break;
+        }
+      }
+      markDiffsViewDirty();
+      if (message.sessionId === activeSessionId) renderDiffsViewIfActive(message.sessionId);
+      break;
+    }
     case "sessionChanges.summary": {
       const state = message.state;
       const currentRequest = currentSessionChangesRequest;
@@ -1967,10 +2016,16 @@ function handleServerMessage(message: ServerMessage): void {
       diffFilePatchErrors.delete(state.sessionId);
       sessionChangesStates.set(state.sessionId, state);
       if (state.status === "ready") {
+        const initialHistoryKey = gitHistoryStateKey(state.sessionId, "");
+        const initialHistory = gitHistoryStates.get(initialHistoryKey);
+        if (initialHistory && !gitHistoryStates.has(gitHistoryStateKey(state.sessionId, state.selectedRepoId))) {
+          initialHistory.repoRoot = state.selectedRepoId;
+          gitHistoryStates.set(gitHistoryStateKey(state.sessionId, state.selectedRepoId), initialHistory);
+          gitHistoryStates.delete(initialHistoryKey);
+        }
         sessionChangesRepoIds.set(state.sessionId, state.selectedRepoId);
         if (state.request.scope === "sessionChanges") sessionChangesKinds.set(state.sessionId, state.request.changeKind);
         sessionChangesPayloadKinds.set(state.sessionId, state.comparison.detailMode);
-        if (state.reviewWorktree) diffReviewWorktrees.set(state.reviewWorktree.sourceRepoRoot, state.reviewWorktree);
         selectedDiffFilePath(state.sessionId, state, state.summary.files.map(file => file.newPath));
       } else {
         sessionChangesSelectedFiles.delete(state.sessionId);
@@ -1991,7 +2046,6 @@ function handleServerMessage(message: ServerMessage): void {
       diffErrors.delete("compareDiff");
       clearPendingDiffFilePatch("compareDiff", state.diffId);
       diffFilePatchErrors.delete("compareDiff");
-      if (state.reviewWorktree) diffReviewWorktrees.set(state.reviewWorktree.sourceRepoRoot, state.reviewWorktree);
       selectedDiffFilePath("compareDiff", state, state.summary.files.map(file => file.newPath));
       const activeDiffReviewSessionId = activeSessionId && projections.get(activeSessionId)?.summary.sessionMode === "diffReview"
         ? activeSessionId
@@ -2137,23 +2191,6 @@ function handleServerMessage(message: ServerMessage): void {
       appendLog(`diff error: ${message.message}`);
       break;
     }
-    case "diff.reviewWorktree.state": {
-      diffReviewWorktrees.set(message.worktree.sourceRepoRoot, message.worktree);
-      if (pendingCodeOpenRequest?.source === "reviewCommit" && pendingCodeOpenRequest.repoRoot === message.worktree.sourceRepoRoot) {
-        pendingCodeOpenRequest = { ...pendingCodeOpenRequest, reviewWorktreeId: message.worktree.id };
-        codeSessionId = null;
-        codeWorkspace = null;
-        codeLoadingWorkspace = true;
-        desktopDockview?.activatePanel("code");
-        send({ type: "code.workspace.openRoot", root: message.worktree.path, source: "reviewWorktree", reviewWorktreeId: message.worktree.id });
-      }
-      const sessionId = activeSessionId;
-      if (sessionId) {
-        markDiffsViewDirty();
-        renderDiffsViewIfActive(sessionId);
-      }
-      break;
-    }
     case "review.comments.snapshot": {
       reviewCommentsLoadInFlight.delete(message.sessionId);
       if (reviewCommentsResyncNeeded.has(message.sessionId)) {
@@ -2197,11 +2234,14 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     }
     case "code.workspace.ready":
+      if (pendingCodeRefresh && (message.workspace.root !== pendingCodeRefresh.workspace.root ||
+        message.workspace.source !== pendingCodeRefresh.workspace.source)) break;
       if (pendingCodeOpenRequest?.source === "sessionWorktree" && message.workspace.root !== pendingCodeOpenRequest.repoRoot) break;
-      if (pendingCodeOpenRequest?.source === "reviewCommit" && message.workspace.reviewWorktreeId !== pendingCodeOpenRequest.reviewWorktreeId) break;
+      if (!pendingCodeOpenRequest && !pendingCodeRefresh && codeWorkspace &&
+        (message.workspace.root !== codeWorkspace.root || message.workspace.source !== codeWorkspace.source)) break;
       codeLoadingWorkspace = false;
       codeWorkspace = message.workspace;
-      codeSessionId = message.workspace.sessionId ?? null;
+      codeSessionId = pendingCodeRefresh?.sessionId ?? message.workspace.sessionId ?? codeSessionId;
       codeTreePath = "";
       codeTreeEntries = [];
       codeFile = null;
@@ -2220,12 +2260,7 @@ function handleServerMessage(message: ServerMessage): void {
       const pending = pendingCodeOpenRequest;
       // Only consume the pending open when THIS ready is the workspace it asked
       // for, so a stale reply for an earlier in-flight open cannot hijack it.
-      const pendingMatchesWorkspace =
-        pending != null &&
-        (pending.source === "reviewCommit"
-          ? pending.reviewWorktreeId != null &&
-            message.workspace.reviewWorktreeId === pending.reviewWorktreeId
-          : message.workspace.source === "session" && message.workspace.root === pending.repoRoot);
+      const pendingMatchesWorkspace = pending != null && message.workspace.source === "session" && message.workspace.root === pending.repoRoot;
       if (pending && pendingMatchesWorkspace) {
         if (pending.source === "sessionWorktree") codeSessionId = pending.sessionId;
         // Honor an explicit "Open in Code" request as soon as its workspace is
@@ -2234,13 +2269,18 @@ function handleServerMessage(message: ServerMessage): void {
         pendingCodeOpenRequest = null;
         requestCodeTree(parentCodePath(pending.path) ?? "");
         requestCodeFile(pending.path);
+      } else if (pendingCodeRefresh) {
+        const refresh = pendingCodeRefresh;
+        pendingCodeRefresh = null;
+        requestCodeTree(refresh.treePath);
+        if (refresh.filePath) requestCodeFile(refresh.filePath);
       } else if (!pending && desktopDockview?.isPanelActive("code")) {
         requestCodeTree("");
       }
       renderCodePanelIfNeeded(true);
       break;
     case "code.tree":
-      if (codeWorkspace?.workspaceId === message.workspaceId) {
+      if (!codeLoadingWorkspace && codeWorkspace?.workspaceId === message.workspaceId) {
         codeLoadingTree = false;
         codeTreePath = message.path;
         codeTreeEntries = message.entries;
@@ -2250,7 +2290,7 @@ function handleServerMessage(message: ServerMessage): void {
       }
       break;
     case "code.file":
-      if (codeWorkspace?.workspaceId === message.workspaceId) {
+      if (!codeLoadingWorkspace && codeWorkspace?.workspaceId === message.workspaceId) {
         codeLoadingFile = false;
         codeFile = message.file;
         codeError = null;
@@ -2271,6 +2311,7 @@ function handleServerMessage(message: ServerMessage): void {
     case "code.error":
       if (!message.workspaceId || codeWorkspace?.workspaceId === message.workspaceId) {
         codeLoadingWorkspace = false;
+        pendingCodeRefresh = null;
         codeLoadingTree = false;
         codeLoadingFile = false;
         codeError = message.path ? `${message.path}: ${message.message}` : message.message;
@@ -4293,6 +4334,7 @@ function resetCodeViewForSession(sessionId: string | null): void {
   codeLoadingFile = false;
   codeError = null;
   pendingCodeOpenRequest = null;
+  pendingCodeRefresh = null;
   codeSearchOpen = false;
   codeSearchBasePath = "";
   codeSearchQuery = "";
@@ -4312,8 +4354,8 @@ function resetCodeViewForSession(sessionId: string | null): void {
 
 function activeCodeViewState(): CodeViewerState {
   const activeCodeComments =
-    workspaceMode === "session" && activeSessionId && codeFile
-      ? selectedCodeComments(sessionCodeComments(activeSessionId).get(codeFile.path) ?? [], codeFile.path)
+    workspaceMode === "session" && activeSessionId && codeWorkspace && codeFile
+      ? selectedCodeComments(sessionCodeComments(activeSessionId).get(codeCommentFileKey(codeWorkspace.root, codeFile.path)) ?? [], codeWorkspace.root, codeFile)
       : [];
   return {
     activeSessionId: workspaceMode === "session" ? activeSessionId : null,
@@ -4381,6 +4423,32 @@ function ensureActiveCodeWorkspace(): void {
   const sessionId = workspaceMode === "session" ? activeSessionId : null;
   if (!sessionId) return;
   requestCodeWorkspaceForSession(sessionId);
+}
+
+function refreshCodeWorkspace(): void {
+  if (!codeWorkspace) {
+    ensureActiveCodeWorkspace();
+    renderCodePanelIfNeeded(true);
+    return;
+  }
+  pendingCodeRefresh = {
+    workspace: codeWorkspace,
+    sessionId: codeSessionId,
+    treePath: codeTreePath,
+    filePath: codeFile?.path ?? null,
+  };
+  codeLoadingWorkspace = true;
+  codeLoadingFile = codeFile !== null;
+  codeError = null;
+  closeCodeContextMenu();
+  send({
+    type: "code.workspace.openRoot",
+    root: codeWorkspace.root,
+    source: codeWorkspace.source,
+    reviewWorktreeId: codeWorkspace.reviewWorktreeId,
+  });
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
 }
 
 function requestCodeTree(path: string): void {
@@ -4624,6 +4692,7 @@ function sessionCodeComments(sessionId: string): SessionCodeComments {
 
 function addCodeComment(
   sessionId: string,
+  root: string,
   file: CodeFileContent,
   lineNumber: number,
   lineText: string,
@@ -4631,15 +4700,17 @@ function addCodeComment(
   const comment = window.prompt("Comment on this code line");
   if (!comment?.trim()) return;
   const commentsByFile = sessionCodeComments(sessionId);
-  const existing = commentsByFile.get(file.path) ?? [];
+  const key = codeCommentFileKey(root, file.path);
+  const existing = commentsByFile.get(key) ?? [];
   existing.push(createCodeFileComment({
-    id: `${Date.now()}-${existing.length}`,
+    id: randomUuid(),
+    root,
     file,
     lineNumber,
     lineText,
     text: comment,
   }));
-  commentsByFile.set(file.path, existing);
+  commentsByFile.set(key, existing);
   markCodeViewDirty();
   renderCodePanelIfNeeded(true);
 }
@@ -4650,10 +4721,11 @@ function editCodeComment(sessionId: string, comment: CodeFileComment): void {
   const trimmed = next.trim();
   if (!trimmed) return;
   const commentsByFile = sessionCodeComments(sessionId);
+  const key = codeCommentFileKey(comment.root, comment.path);
   commentsByFile.set(
-    comment.path,
-    (commentsByFile.get(comment.path) ?? []).map(existing =>
-      existing.id === comment.id ? { ...existing, text: trimmed } : existing,
+    key,
+    (commentsByFile.get(key) ?? []).map(existing =>
+      existing === comment ? { ...existing, text: trimmed } : existing,
     ),
   );
   markCodeViewDirty();
@@ -4662,9 +4734,10 @@ function editCodeComment(sessionId: string, comment: CodeFileComment): void {
 
 function deleteCodeComment(sessionId: string, comment: CodeFileComment): void {
   const commentsByFile = sessionCodeComments(sessionId);
+  const key = codeCommentFileKey(comment.root, comment.path);
   commentsByFile.set(
-    comment.path,
-    (commentsByFile.get(comment.path) ?? []).filter(existing => existing.id !== comment.id),
+    key,
+    (commentsByFile.get(key) ?? []).filter(existing => existing !== comment),
   );
   markCodeViewDirty();
   renderCodePanelIfNeeded(true);
@@ -4681,11 +4754,21 @@ function editablePromptPreviewText(): string | null {
   return text;
 }
 
-function sendCodeComments(sessionId: string, file: CodeFileContent, comments: CodeFileComment[], promptText = buildCodeCommentPrompt(file, comments)): void {
+function focusPromptPreviewStart(): void {
+  diffPreviewText.focus();
+  diffPreviewText.setSelectionRange(0, 0);
+  diffPreviewText.scrollLeft = 0;
+  diffPreviewText.scrollTop = 0;
+}
+
+function sendCodeComments(sessionId: string, root: string, file: CodeFileContent, comments: CodeFileComment[], promptText = buildCodeCommentPrompt(root, file, comments)): void {
   if (comments.length === 0) return;
   const clearFlushedComments = () => {
     const commentsByFile = sessionCodeComments(sessionId);
-    commentsByFile.set(file.path, removeSelectedCodeComments(commentsByFile.get(file.path) ?? [], file.path));
+    const key = codeCommentFileKey(root, file.path);
+    const remaining = removeSelectedCodeComments(commentsByFile.get(key) ?? [], comments);
+    if (remaining.length) commentsByFile.set(key, remaining);
+    else commentsByFile.delete(key);
     markCodeViewDirty();
     renderCodePanelIfNeeded(true);
   };
@@ -4698,10 +4781,10 @@ function sendCodeComments(sessionId: string, file: CodeFileContent, comments: Co
   });
 }
 
-function previewCodeComments(sessionId: string, file: CodeFileContent): void {
-  const comments = selectedCodeComments(sessionCodeComments(sessionId).get(file.path) ?? [], file.path);
+function previewCodeComments(sessionId: string, root: string, file: CodeFileContent): void {
+  const comments = selectedCodeComments(sessionCodeComments(sessionId).get(codeCommentFileKey(root, file.path)) ?? [], root, file);
   if (comments.length === 0) return;
-  codePreviewDraft = { sessionId, file, comments };
+  codePreviewDraft = { sessionId, root, file, comments };
   diffPreviewDraft = null;
   transcriptPreviewDraft = null;
   agentReviewDraft = null;
@@ -4710,15 +4793,14 @@ function previewCodeComments(sessionId: string, file: CodeFileContent): void {
   diffPreviewSend.textContent = "Send comments";
   diffPreviewSend.disabled = false;
   diffPreviewText.readOnly = false;
-  diffPreviewText.value = buildCodeCommentPrompt(file, comments);
+  diffPreviewText.value = buildCodeCommentPrompt(root, file, comments);
   diffPreviewStatus.textContent = codeCommentPreviewStatus(comments.length);
   diffPreviewOverlay.hidden = false;
-  diffPreviewText.scrollTop = 0;
-  diffPreviewText.focus();
+  focusPromptPreviewStart();
 }
 
-function flushCodeComments(sessionId: string, file: CodeFileContent): void {
-  previewCodeComments(sessionId, file);
+function flushCodeComments(sessionId: string, root: string, file: CodeFileContent): void {
+  previewCodeComments(sessionId, root, file);
 }
 function openSearchResultInCode(path: string): void {
   closeCodeSearch();
@@ -4730,54 +4812,48 @@ function openSearchResultInCode(path: string): void {
 function openCodeRequest(request: CodeOpenRequest): void {
   codeError = null;
   markCodeViewDirty();
-  if (request.source === "sessionWorktree") {
-    if (codeSessionId !== request.sessionId || codeWorkspace?.root !== request.repoRoot) resetCodeViewForSession(request.sessionId);
-    pendingCodeOpenRequest = request;
-    if (codeWorkspace && codeSessionId === request.sessionId && codeWorkspace.root === request.repoRoot) {
-      pendingCodeOpenRequest = null;
-      requestCodeTree(parentCodePath(request.path) ?? "");
-      requestCodeFile(request.path);
-    } else {
-      codeLoadingWorkspace = true;
-      send({ type: "code.workspace.openRoot", root: request.repoRoot, source: "session" });
-      renderCodePanelIfNeeded(true);
-    }
-    desktopDockview?.activatePanel("code");
-    return;
-  }
-
-  // Prepare the review worktree at the requested ref; the diff.reviewWorktree.state
-  // handler is the single place that opens the code workspace once it is ready.
+  if (codeSessionId !== request.sessionId || codeWorkspace?.root !== request.repoRoot) resetCodeViewForSession(request.sessionId);
   pendingCodeOpenRequest = request;
-  desktopDockview?.activatePanel("code");
-  const worktree = diffReviewWorktrees.get(request.repoRoot) ?? null;
-  if (worktree) {
-    send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: request.target });
+  if (codeWorkspace && codeSessionId === request.sessionId && codeWorkspace.root === request.repoRoot) {
+    pendingCodeOpenRequest = null;
+    requestCodeTree(parentCodePath(request.path) ?? "");
+    requestCodeFile(request.path);
   } else {
-    send({ type: "diff.reviewWorktree.ensure", sourceRepoRoot: request.repoRoot, target: request.target });
+    codeLoadingWorkspace = true;
+    send({ type: "code.workspace.openRoot", root: request.repoRoot, source: "session" });
+    renderCodePanelIfNeeded(true);
   }
-  renderCodePanelIfNeeded(true);
+  desktopDockview?.activatePanel("code");
 }
 
-function ensureReviewWorktreeThenCheckout(state: DiffReviewableState, target: DiffCheckoutTarget): void {
-  const worktree = diffReviewWorktrees.get(state.comparison.repoRoot) ?? state.reviewWorktree ?? null;
-  if (!worktree) {
-    send({ type: "diff.reviewWorktree.ensure", sourceRepoRoot: state.comparison.repoRoot, target });
+function committedFileTarget(state: DiffReviewableState, filePath: string): { commitOid: string; path: string } | null {
+  const file = state.summary.files.find(file => file.newPath === filePath);
+  const deleted = file?.status === "deleted";
+  const commitOid = deleted ? state.comparison.leftTreeOrCommit : state.comparison.rightTreeOrCommit;
+  return /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/iu.test(commitOid)
+    ? { commitOid, path: deleted ? file.oldPath ?? filePath : filePath }
+    : null;
+}
+
+function openDiffFileInCode(state: DiffReviewableState, filePath: string, owner: Document = document): void {
+  const committed = committedFileTarget(state, filePath);
+  if (committed) {
+    pendingGitFile?.view.close();
+    const requestId = randomUuid();
+    const repoRoot = state.comparison.repoRoot;
+    const view = openCommittedFileView(owner, repoRoot, committed.commitOid, committed.path, () => {
+      if (pendingGitFile?.requestId === requestId) pendingGitFile = null;
+    });
+    pendingGitFile = { requestId, repoRoot, ...committed, loading: true, view };
+    if (!send({ type: "git.file.request", clientId: diffClientId, requestId, repoRoot, ...committed })) {
+      view.show(null, "Not connected to the Fura bridge.");
+    }
     return;
   }
-  send({ type: "diff.reviewWorktree.checkout", worktreeId: worktree.id, ref: target });
-}
-
-function openDiffFileInCode(state: DiffReviewableState, filePath: string): void {
   const target = checkoutTargetForDiffFile(state);
-  if (!target || state.summary.files.find(file => file.newPath === filePath)?.status === "deleted") return;
-  if (target.kind === "workingTree") {
-    const sessionId = activeSessionId;
-    if (!sessionId) return;
-    openCodeRequest({ source: "sessionWorktree", sessionId, repoRoot: state.comparison.repoRoot, path: filePath });
-    return;
-  }
-  openCodeRequest({ source: "reviewCommit", repoRoot: state.comparison.repoRoot, target, path: filePath });
+  if (target?.kind !== "workingTree" || state.summary.files.find(file => file.newPath === filePath)?.status === "deleted") return;
+  const sessionId = activeSessionId;
+  if (sessionId) openCodeRequest({ source: "sessionWorktree", sessionId, repoRoot: state.comparison.repoRoot, path: filePath });
 }
 
 
@@ -4840,17 +4916,13 @@ function renderCodePanelIfNeeded(force = false): void {
   // null by design), so a session mismatch must not reset it — doing so during a
   // review "Open in Code" would wipe the workspace mid-open.
   const viewingReviewWorktree =
-    codeWorkspace?.source === "reviewWorktree" || pendingCodeOpenRequest?.source === "reviewCommit";
+    codeWorkspace?.source === "reviewWorktree";
   const sessionChanged = !viewingReviewWorktree && codeSessionId !== sessionId;
   if (sessionChanged) resetCodeViewForSession(sessionId);
   if (!force && !codePanelDirty && !sessionChanged) return;
   const rendered = desktopDockview.withPanel("code", container => {
     renderCodeViewer(container, activeCodeViewState(), {
-      openWorkspace: () => {
-        resetCodeViewForSession(workspaceMode === "session" ? activeSessionId : null);
-        ensureActiveCodeWorkspace();
-        renderCodePanelIfNeeded(true);
-      },
+      openWorkspace: refreshCodeWorkspace,
       listTree: requestCodeTree,
       refreshTree: () => requestCodeTree(codeTreePath),
       openFile: requestCodeFile,
@@ -4869,8 +4941,8 @@ function renderCodePanelIfNeeded(force = false): void {
       searchFiles: submitCodeSearch,
       openSearchResult: openSearchResultInCode,
       addComment: (lineNumber, lineText) => {
-        if (workspaceMode === "session" && activeSessionId && codeFile) {
-          addCodeComment(activeSessionId, codeFile, lineNumber, lineText);
+        if (workspaceMode === "session" && activeSessionId && codeWorkspace && codeFile) {
+          addCodeComment(activeSessionId, codeWorkspace.root, codeFile, lineNumber, lineText);
         }
       },
       editComment: comment => {
@@ -4880,13 +4952,13 @@ function renderCodePanelIfNeeded(force = false): void {
         if (workspaceMode === "session" && activeSessionId) deleteCodeComment(activeSessionId, comment);
       },
       previewComments: () => {
-        if (workspaceMode === "session" && activeSessionId && codeFile) {
-          previewCodeComments(activeSessionId, codeFile);
+        if (workspaceMode === "session" && activeSessionId && codeWorkspace && codeFile) {
+          previewCodeComments(activeSessionId, codeWorkspace.root, codeFile);
         }
       },
       flushComments: () => {
-        if (workspaceMode === "session" && activeSessionId && codeFile) {
-          flushCodeComments(activeSessionId, codeFile);
+        if (workspaceMode === "session" && activeSessionId && codeWorkspace && codeFile) {
+          flushCodeComments(activeSessionId, codeWorkspace.root, codeFile);
         }
       },
       openContextMenu: openCodeContextMenu,
@@ -5291,15 +5363,111 @@ function renderToolsView(
 
 
 
+function gitHistoryStateKey(sessionId: string, repoRoot: string): string {
+  return JSON.stringify([sessionId, repoRoot]);
+}
+
+function gitReviewFor(sessionId: string, repoRoot?: string | null): GitHistoryState {
+  if (!restoredGitReviewSessions.has(sessionId)) {
+    restoredGitReviewSessions.add(sessionId);
+    try {
+      const saved = JSON.parse(sessionStorage.getItem(`fura.gitReview.${sessionId}`) ?? "null");
+      if (saved && typeof saved.repoRoot === "string" && !saved.repoRoot.includes("\0") && (saved.view === "changes" || saved.view === "history")) {
+        const restored = createGitHistoryState(saved.repoRoot);
+        restored.view = saved.view;
+        restored.selectedOid = typeof saved.selectedOid === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(saved.selectedOid) ? saved.selectedOid : null;
+        gitHistoryStates.set(gitHistoryStateKey(sessionId, saved.repoRoot), restored);
+        sessionChangesRepoIds.set(sessionId, saved.repoRoot);
+      }
+    } catch { /* Ignore an obsolete or malformed browser selection. */ }
+  }
+  const root = repoRoot !== undefined ? repoRoot ?? "" : sessionChangesRepoIds.get(sessionId) ?? "";
+  const key = gitHistoryStateKey(sessionId, root);
+  let history = gitHistoryStates.get(key);
+  if (!history) {
+    history = createGitHistoryState(root);
+    gitHistoryStates.set(key, history);
+  }
+  return history;
+}
+
+function persistGitReviewSelection(sessionId: string, history: GitHistoryState): void {
+  sessionStorage.setItem(`fura.gitReview.${sessionId}`, JSON.stringify({
+    repoRoot: history.repoRoot, view: history.view, selectedOid: history.selectedOid,
+  }));
+}
+
+function clearPendingGitHistory(): void {
+  if (pendingGitHistory) {
+    pendingGitHistory.state.requestId = null;
+    pendingGitHistory.state.loading = false;
+    pendingGitHistory = null;
+  }
+}
+
+function requestGitHistory(sessionId: string, repoRoot?: string | null, cursor: string | null = null): void {
+  const history = gitReviewFor(sessionId, repoRoot);
+  clearPendingGitHistory();
+  const requestId = randomUuid();
+  beginGitHistoryRequest(history, requestId, cursor);
+  pendingGitHistory = { sessionId, state: history };
+  if (!send({ type: "git.history.request", clientId: diffClientId, requestId, sessionId, repoId: history.repoRoot || null, cursor })) {
+    acceptGitHistoryResult(history, requestId, null, "Not connected to the Fura bridge.");
+    pendingGitHistory = null;
+  }
+}
+
+function selectGitCommit(sessionId: string, oid: string): void {
+  const history = gitReviewFor(sessionId);
+  history.view = "history";
+  history.selectedOid = oid;
+  persistGitReviewSelection(sessionId, history);
+  sessionChangesSelectedFiles.delete(sessionId);
+  requestSessionChangesRefresh(sessionId, { refreshHistory: false });
+  desktopDockview?.withPanel("diffs", container => {
+    container.querySelector<HTMLElement>(`.git-history-commit[data-commit-oid="${oid}"]`)?.scrollIntoView?.({ block: "nearest" });
+  });
+}
+
+function selectGitReviewView(sessionId: string, view: GitReviewView): void {
+  const history = gitReviewFor(sessionId);
+  history.view = view;
+  desktopDockview?.setPanelExpanded?.("diffs", view === "history");
+  persistGitReviewSelection(sessionId, history);
+  sessionChangesSelectedFiles.delete(sessionId);
+  if (view === "history" && !history.selectedOid) {
+    const first = history.page?.commits[0];
+    if (first) {
+      selectGitCommit(sessionId, first.oid);
+      return;
+    }
+    if (!history.loading) requestGitHistory(sessionId);
+    markDiffsViewDirty();
+    renderDiffsViewIfActive(sessionId);
+    return;
+  }
+  requestSessionChangesRefresh(sessionId, { refreshHistory: !history.page });
+}
+
+function openAdvancedGitCompare(sessionId: string): void {
+  const history = gitReviewFor(sessionId);
+  openCwdPicker("diff");
+  cwdPickerDiffRepo.value = history.repoRoot;
+  const selected = history.page?.commits.find(commit => commit.oid === history.selectedOid);
+  cwdPickerDiffBase.value = history.view === "history" ? selected?.parentOids[0] ?? "HEAD" : "HEAD";
+  cwdPickerDiffHead.value = history.view === "history" && history.selectedOid ? history.selectedOid : "WORKTREE";
+  cwdPickerDiffAgentSession.checked = false;
+}
+
 function requestSessionChanges(sessionId: string): void {
   requestSessionChangesRefresh(sessionId);
 }
 
 function requestSessionChangesRefresh(
   sessionId: string,
-  options: { repoId?: string | null; payloadKind?: DiffDetailMode | null; changeKind?: GitChangeKind } = {},
+  options: { repoId?: string | null; payloadKind?: DiffDetailMode | null; changeKind?: GitChangeKind; refreshHistory?: boolean } = {},
 ): void {
-  if (diffLoadingSessions.has(sessionId)) return;
+  gitReviewFor(sessionId);
   const previousState = sessionChangesStates.get(sessionId);
   if (previousState?.status === "ready") clearDiffPatchCacheForComparison(previousState.comparison.comparisonKey);
   const repoId = options.repoId !== undefined
@@ -5312,6 +5480,8 @@ function requestSessionChangesRefresh(
   const changeKind = options.changeKind ?? sessionChangesKinds.get(sessionId) ?? "unstaged";
   sessionChangesKinds.set(sessionId, changeKind);
   if (repoId) sessionChangesRepoIds.set(sessionId, repoId);
+  const history = gitReviewFor(sessionId, repoId);
+  if (options.refreshHistory !== false) requestGitHistory(sessionId, repoId);
   staleSessionChanges.delete(sessionId);
   diffErrors.delete(sessionId);
   markDiffsViewDirty();
@@ -5327,7 +5497,7 @@ function requestSessionChangesRefresh(
     repoId,
     detailMode,
     changeKind,
-    currentCommitOid: null,
+    currentCommitOid: history.view === "history" ? history.selectedOid : null,
     selectedFile: null,
   });
   if (!sent) {
@@ -5339,6 +5509,12 @@ function requestSessionChangesRefresh(
 }
 
 function requestSessionChangesRepo(sessionId: string, repoId: string, payloadKind: DiffDetailMode): void {
+  const previous = gitReviewFor(sessionId);
+  const exists = gitHistoryStates.has(gitHistoryStateKey(sessionId, repoId));
+  const next = gitReviewFor(sessionId, repoId);
+  if (!exists) next.view = previous.view;
+  sessionChangesRepoIds.set(sessionId, repoId);
+  persistGitReviewSelection(sessionId, next);
   sessionChangesSelectedFiles.delete(sessionId);
   requestSessionChangesRefresh(sessionId, { repoId, payloadKind });
 }
@@ -5484,6 +5660,7 @@ function markSessionChangesStaleAfterAgentSettles(
 }
 
 function requestActiveDiffState(options: { refreshExisting?: boolean } = {}): void {
+  if (!connection?.isOpen()) return;
   if (!activeSessionId || !isSessionChangesPanelActive()) return;
   const projection = projections.get(activeSessionId);
   if (!projection || diffLoadingSessions.has(activeSessionId)) return;
@@ -5495,12 +5672,17 @@ function requestActiveDiffState(options: { refreshExisting?: boolean } = {}): vo
     return;
   }
   const state = sessionChangesStates.get(activeSessionId);
+  const history = gitReviewFor(activeSessionId);
+  if (!history.page && !history.loading && !history.error) requestGitHistory(activeSessionId);
+  const selectedCommit = history.view === "history" ? history.selectedOid : null;
+  const selectionChanged = state?.status === "ready" &&
+    (state.selectedRepoId !== history.repoRoot || (state.review.currentCommitOid ?? null) !== selectedCommit);
   if (!state) {
     staleSessionChanges.delete(activeSessionId);
     requestSessionChanges(activeSessionId);
     return;
   }
-  if (options.refreshExisting || staleSessionChanges.has(activeSessionId)) {
+  if (selectionChanged || options.refreshExisting || staleSessionChanges.has(activeSessionId)) {
     requestSessionChangesRefresh(
       activeSessionId,
       { ...sessionChangesRefreshOptions(state, sessionChangesPayloadKinds.get(activeSessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE), repoId: sessionChangesRepoIds.get(activeSessionId) ?? null },
@@ -5692,8 +5874,7 @@ function flushTranscriptReviewComments(sessionId: string, message: TranscriptMes
   diffPreviewSend.textContent = "Send comments";
   diffPreviewSend.disabled = false;
   diffPreviewOverlay.hidden = false;
-  diffPreviewText.scrollTop = 0;
-  diffPreviewText.focus();
+  focusPromptPreviewStart();
 }
 
 function sendTranscriptReviewComments(
@@ -5750,8 +5931,7 @@ function flushPlanReviewComments(sessionId: string, review: PendingPlanReview): 
   diffPreviewSend.textContent = "Send refinement";
   diffPreviewSend.disabled = false;
   diffPreviewOverlay.hidden = false;
-  diffPreviewText.scrollTop = 0;
-  diffPreviewText.focus();
+  focusPromptPreviewStart();
 }
 
 function planReviewLineOptions(sessionId: string, review: PendingPlanReview) {
@@ -6151,8 +6331,7 @@ function previewDiffAnnotationList(
     diffPreviewText.value = prompt.prompt;
     diffPreviewStatus.textContent = diffAnnotationPreviewStatus(annotationsToFlush);
     diffPreviewOverlay.hidden = false;
-    diffPreviewText.scrollTop = 0;
-    diffPreviewText.focus();
+    focusPromptPreviewStart();
     return;
   }
   diffPreviewDraft = null;
@@ -6192,8 +6371,7 @@ function previewAgentDiffReview(sessionId: string, state: DiffReviewableState): 
   diffPreviewSend.textContent = "Start review";
   diffPreviewSend.disabled = false;
   diffPreviewOverlay.hidden = false;
-  diffPreviewText.scrollTop = 0;
-  diffPreviewText.focus();
+  focusPromptPreviewStart();
 }
 
 function closeDiffPreview(): void {
@@ -6226,7 +6404,7 @@ function sendPromptPreviewDraft(): void {
     const promptText = editablePromptPreviewText();
     if (!promptText) return;
     closeDiffPreview();
-    sendCodeComments(codeDraft.sessionId, codeDraft.file, codeDraft.comments, promptText);
+    sendCodeComments(codeDraft.sessionId, codeDraft.root, codeDraft.file, codeDraft.comments, promptText);
     return;
   }
   if (diffDraft) {
@@ -6265,6 +6443,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const preservedScroll = sameSessionRerender
     ? (container.querySelector<HTMLElement>(".diffs-sidebar-scroll")?.scrollTop ?? 0)
     : 0;
+  const historyScroll = sameSessionRerender ? container.querySelector<HTMLElement>(".git-history-list")?.scrollTop ?? 0 : 0;
   container.replaceChildren();
 
   const root = mkEl("div");
@@ -6288,6 +6467,8 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   }
   renderSessionChangesView(activeSessionId, sidebarTop, sidebarScroll, main);
   if (preservedScroll > 0) sidebarScroll.scrollTop = preservedScroll;
+  const historyList = container.querySelector<HTMLElement>(".git-history-list");
+  if (historyList && historyScroll > 0) historyList.scrollTop = historyScroll;
 }
 
 function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, sidebar: HTMLElement, main: HTMLElement): void {
@@ -6297,47 +6478,132 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
     return;
   }
   const state = sessionChangesStates.get(sessionId);
-  const error = diffErrors.get(sessionId);
-
-  const header = mkEl("div");
-  header.className = "diffs-toolbar";
-  const title = mkEl("strong");
-  title.textContent = "Git changes";
-  const actions = mkEl("div");
-  actions.className = "diffs-actions";
+  const history = gitReviewFor(sessionId);
+  const root = main.parentElement!;
+  root.classList.add("git-review-view");
+  root.classList.toggle("git-history-mode", history.view === "history");
+  const header = mkEl("header");
+  header.className = "git-review-header";
+  const repository = mkEl("div");
+  repository.className = "git-repository-context";
+  if (state) renderSessionRepoControls(sessionId, state, repository);
+  else {
+    const add = mkEl("button");
+    add.type = "button";
+    add.textContent = "Add repository";
+    add.addEventListener("click", () => {
+      const path = window.prompt("Repository path");
+      if (path?.trim()) updateSessionRepo(sessionId, "add", path.trim());
+    });
+    repository.append(add);
+  }
+  const identity = mkEl("div");
+  identity.className = "git-repository-identity";
+  const branch = mkEl("strong");
+  branch.className = "git-head-label";
+  branch.textContent = history.page ? gitHeadLabel(history.page) : history.loading ? "Reading branch / HEAD…" : "Branch / HEAD unavailable";
+  const path = mkEl("code");
+  path.className = "git-root-path";
+  path.textContent = history.repoRoot || "Select a repository";
+  path.title = history.repoRoot;
+  identity.append(branch, path);
+  repository.append(identity);
+  const navigation = mkEl("nav");
+  navigation.className = "git-review-navigation";
+  navigation.setAttribute("aria-label", "Git review views");
+  for (const [view, label] of [["changes", "Current changes"], ["history", "History"]] as const) {
+    const button = mkEl("button");
+    button.type = "button";
+    button.textContent = label;
+    button.setAttribute("aria-pressed", String(history.view === view));
+    button.addEventListener("click", () => selectGitReviewView(sessionId, view));
+    navigation.append(button);
+  }
   const refresh = mkEl("button");
   refresh.type = "button";
-  refresh.textContent = diffLoadingSessions.has(sessionId) ? "Loading…" : "Refresh";
+  refresh.textContent = "Refresh";
   refresh.disabled = diffLoadingSessions.has(sessionId);
   refresh.addEventListener("click", () => requestSessionChangesRefresh(sessionId));
-  actions.append(refresh);
-  const group = mkEl("select");
-  group.className = "diff-group-select";
-  group.setAttribute("aria-label", "Git change group");
-  for (const kind of ["unstaged", "staged", "untracked"] as const) {
-    const option = mkEl("option");
-    option.value = kind;
-    option.textContent = kind[0].toUpperCase() + kind.slice(1);
-    option.selected = kind === (sessionChangesKinds.get(sessionId) ?? "unstaged");
-    group.append(option);
+  const compare = mkEl("button");
+  compare.type = "button";
+  compare.textContent = "Advanced Compare";
+  compare.disabled = !history.repoRoot;
+  compare.addEventListener("click", () => openAdvancedGitCompare(sessionId));
+  const expand = mkEl("button");
+  expand.type = "button";
+  const expanded = desktopDockview?.isPanelExpanded?.("diffs") ?? false;
+  expand.textContent = expanded ? "Restore layout" : "Expand review";
+  expand.addEventListener("click", () => {
+    desktopDockview?.setPanelExpanded?.("diffs", !expanded);
+    markDiffsViewDirty();
+    renderDiffsViewIfActive(sessionId);
+  });
+  navigation.append(refresh, compare, expand);
+  header.append(repository, navigation);
+  root.prepend(header);
+  if (history.view === "history") {
+    sidebarTop.append(renderGitHistoryBrowser(history, {
+      select: oid => selectGitCommit(sessionId, oid),
+      loadOlder: () => {
+        if (!history.page?.nextCursor || history.loading) return;
+        requestGitHistory(sessionId, history.repoRoot, history.page.nextCursor);
+        markDiffsViewDirty();
+        renderDiffsViewIfActive(sessionId);
+      },
+      refresh: () => {
+        requestGitHistory(sessionId, history.repoRoot);
+        markDiffsViewDirty();
+        renderDiffsViewIfActive(sessionId);
+      },
+    }));
+    const stepping = mkEl("div");
+    stepping.className = "diffs-actions git-commit-navigation";
+    const index = history.page?.commits.findIndex(commit => commit.oid === history.selectedOid) ?? -1;
+    for (const [offset, label] of [[-1, "Newer commit"], [1, "Older commit"]] as const) {
+      const button = mkEl("button");
+      button.type = "button";
+      button.textContent = label;
+      const target = index >= 0 ? history.page?.commits[index + offset] : undefined;
+      button.disabled = !target;
+      button.addEventListener("click", () => { if (target) selectGitCommit(sessionId, target.oid); });
+      stepping.append(button);
+    }
+    main.append(stepping);
+    if (!history.selectedOid) {
+      renderDiffMessage(main, history.loading ? "Loading commit history…" : "Select a commit to review its message, files and hunks.", false);
+      return;
+    }
+  } else {
+    const toolbar = mkEl("div");
+    toolbar.className = "diffs-toolbar";
+    const title = mkEl("strong");
+    title.textContent = "Git changes";
+    const group = mkEl("select");
+    group.className = "diff-group-select";
+    group.setAttribute("aria-label", "Git change group");
+    for (const kind of ["unstaged", "staged", "untracked"] as const) {
+      const option = mkEl("option");
+      option.value = kind;
+      option.textContent = kind[0].toUpperCase() + kind.slice(1);
+      option.selected = kind === (sessionChangesKinds.get(sessionId) ?? "unstaged");
+      group.append(option);
+    }
+    group.addEventListener("change", () => requestSessionChangesRefresh(sessionId, { changeKind: group.value as GitChangeKind, refreshHistory: false }));
+    toolbar.append(title, group);
+    main.append(toolbar);
   }
-  group.disabled = diffLoadingSessions.has(sessionId);
-  group.addEventListener("change", () => requestSessionChangesRefresh(sessionId, { changeKind: group.value as GitChangeKind }));
-  actions.append(group);
-  header.append(title, actions);
-  main.append(header);
-
-  if (!state) {
-    renderDiffMessage(main, error ?? (diffLoadingSessions.has(sessionId) ? "Loading Git changes…" : "Git changes have not been loaded."), Boolean(error));
-    return;
-  }
-  renderSessionRepoControls(sessionId, state, sidebarTop);
+  const error = diffErrors.get(sessionId);
   if (error) {
     renderDiffMessage(main, error, true);
     return;
   }
-  if (state.status === "missingRepo") {
-    renderDiffMessage(main, state.reason, true);
+  if (!state || state.status !== "ready") {
+    renderDiffMessage(main, state?.status === "missingRepo" ? state.reason : "Loading Git review…", state?.status === "missingRepo");
+    return;
+  }
+  const expectedCommit = history.view === "history" ? history.selectedOid : null;
+  if (state.selectedRepoId !== history.repoRoot || (state.review.currentCommitOid ?? null) !== expectedCommit) {
+    renderDiffMessage(main, "Loading selected review…", false);
     return;
   }
   renderReviewableDiff(sessionId, state, sidebarTop, sidebar, main, true, "sessionChanges");
@@ -6383,12 +6649,12 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesSumma
   const select = mkEl("select");
   select.className = "diff-repo-select";
   select.setAttribute("aria-label", "Repository");
-  select.disabled = diffLoadingSessions.has(sessionId) || state.repos.length === 0;
+  select.disabled = state.repos.length === 0;
   for (const repo of state.repos) {
     const option = mkEl("option");
     option.value = repo.id;
     option.textContent = `${repo.label || formatDiffRepoLabel(repo.repoRoot)} · ${repo.source}${repo.isDefault ? " · default" : ""}`;
-    option.selected = state.status === "ready" ? repo.id === state.selectedRepoId : repo.id === sessionChangesRepoIds.get(sessionId);
+    option.selected = repo.id === (sessionChangesRepoIds.get(sessionId) ?? (state.status === "ready" ? state.selectedRepoId : null));
     select.append(option);
   }
   const currentPayload = state.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE;
@@ -6605,7 +6871,7 @@ function renderReviewableDiffMainContent(
   summary.append(comparison);
   if (requestMode === "compareDiff") summary.append(commits);
   main.append(summary);
-  const selectedCommit = selectedFilePath === null && state.review.currentCommitOid
+  const selectedCommit = state.review.currentCommitOid
     ? state.review.commits.find(commit => commit.oid === state.review.currentCommitOid) ?? null
     : null;
 
@@ -6703,25 +6969,19 @@ function renderReviewableDiffMainContent(
     }
   });
   toolbar.append(prev, next);
-  if (state.review.currentCommitOid) {
-    const checkout = mkEl("button");
-    checkout.type = "button";
-    checkout.textContent = "Checkout commit";
-    checkout.addEventListener("click", () => ensureReviewWorktreeThenCheckout(state, { kind: "commit", oid: state.review.currentCommitOid! }));
-    toolbar.append(checkout);
-  }
   }
   if (selectedFilePath) {
     const code = mkEl("button");
     code.type = "button";
-    code.textContent = "Code";
-    code.disabled = !checkoutTargetForDiffFile(state) || state.summary.files.find(file => file.newPath === selectedFilePath)?.status === "deleted";
-    code.title = code.disabled ? "This version exists only in the diff, not as a working-tree file." : `Open ${selectedFilePath} in Code`;
-    code.addEventListener("click", () => openDiffFileInCode(state, selectedFilePath));
+    const committed = committedFileTarget(state, selectedFilePath);
+    code.textContent = committed ? "View committed file" : "Code";
+    code.disabled = !committed && (checkoutTargetForDiffFile(state)?.kind !== "workingTree" || state.summary.files.find(file => file.newPath === selectedFilePath)?.status === "deleted");
+    code.title = committed ? `Read ${committed.path} at ${committed.commitOid.slice(0, 12)} without a checkout` : code.disabled ? "This version exists only in the diff, not as a working-tree file." : `Open ${selectedFilePath} in Code`;
+    code.addEventListener("click", () => openDiffFileInCode(state, selectedFilePath, code.ownerDocument));
     toolbar.append(code);
   }
   if (allowPromptActions) {
-    const promptMode: DiffAnnotationPromptMode = requestMode === "sessionChanges" || annotationKey !== "compareDiff" ? "sessionChanges" : "comparisonReview";
+    const promptMode: DiffAnnotationPromptMode = state.review.currentCommitOid ? "comparisonReview" : requestMode === "sessionChanges" || annotationKey !== "compareDiff" ? "sessionChanges" : "comparisonReview";
     const queuedDraftComments = selectedDiffAnnotations(annotations, key, "comment");
     const queuedPersistedComments = flushableReviewCommentAnnotations(comments, key);
     const queuedComments = [...queuedDraftComments, ...queuedPersistedComments];
@@ -6754,6 +7014,10 @@ function renderReviewableDiffMainContent(
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
+  const totals = mkEl("p");
+  totals.className = "git-diff-totals";
+  totals.textContent = `${state.summary.files.length} changed file${state.summary.files.length === 1 ? "" : "s"} · +${state.summary.files.reduce((sum, file) => sum + file.added, 0)} −${state.summary.files.reduce((sum, file) => sum + file.removed, 0)}`;
+  body.append(totals);
   if (selectedCommit) {
     const messageBlock = mkEl("section");
     messageBlock.className = "diff-commit-message";
@@ -6761,6 +7025,14 @@ function renderReviewableDiffMainContent(
     heading.textContent = "Commit message";
     const messageText = mkEl("pre");
     messageText.textContent = selectedCommit.message || selectedCommit.subject;
+    const metadata = mkEl("p");
+    metadata.className = "git-selected-commit-meta";
+    metadata.textContent = `${selectedCommit.oid} · ${selectedCommit.authorName || "Unknown author"}${selectedCommit.authorEmail ? ` <${selectedCommit.authorEmail}>` : ""} · ${selectedCommit.committedAt}`;
+    const basis = mkEl("p");
+    basis.textContent = selectedCommit.isMerge
+      ? `Merge commit — diff against first parent ${selectedCommit.parentOids[0]}`
+      : selectedCommit.parentOids[0] ? `Diff against parent ${selectedCommit.parentOids[0]}` : "Initial commit — diff against the empty tree";
+    messageBlock.append(metadata, basis);
     messageBlock.append(heading, messageText);
     body.append(messageBlock);
   }
@@ -6857,7 +7129,7 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
   setRenderDocument(root.ownerDocument);
   const selectedFilePath = sessionChangesSelectedFiles.get(annotationKey) ?? null;
   updateDesktopModifiedFileSelection(root, selectedFilePath);
-  const preservedHeader = [...main.children].find((child): child is HTMLElement => child instanceof HTMLElement && child.classList.contains("diffs-toolbar")) ?? null;
+  const preservedHeader = [...main.children].find((child): child is HTMLElement => child.classList.contains("diffs-toolbar") || child.classList.contains("git-commit-navigation")) ?? null;
   main.replaceChildren(...(preservedHeader ? [preservedHeader] : []));
   renderReviewableDiffMainContent(
     annotationKey,
@@ -7024,11 +7296,13 @@ function renderDesktopModifiedFiles(
       const openInCode = mkEl("button");
       openInCode.type = "button";
       openInCode.className = "diffs-file-menu-item";
-      openInCode.textContent = "Open in Code";
+      const committed = committedFileTarget(state, file.filePath);
+      openInCode.textContent = committed ? "View committed file" : "Open in Code";
+      openInCode.disabled = !committed && (checkoutTargetForDiffFile(state)?.kind !== "workingTree" || file.status === "deleted");
       openInCode.addEventListener("click", event => {
         event.stopPropagation();
         openDiffFileMenu = null;
-        openDiffFileInCode(state, file.filePath);
+        openDiffFileInCode(state, file.filePath, openInCode.ownerDocument);
       });
       menu.append(openInCode);
       item.append(menu);
@@ -7112,7 +7386,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
     commentBtn.addEventListener("click", () => startDiffCommentComposer(annotationKey, state, row.location));
     const gutter = mkEl("span");
     gutter.className = "diff-gutter";
-    gutter.textContent = row.location.newLine !== undefined ? String(row.location.newLine) : String(row.location.oldLine ?? "");
+    gutter.textContent = String(row.location.newLine ?? row.location.oldLine ?? "");
     const content = mkEl("div");
     content.className = "diff-line-content";
     const text = mkEl("code");

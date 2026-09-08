@@ -126,6 +126,12 @@ function renderCodeWorkspaceHeader(state: CodeViewerState, actions: CodeViewerAc
   const meta = mkEl("span");
   meta.textContent = workspaceMeta(state);
   title.append(heading, meta);
+  if (state.workspace) {
+    const root = mkEl("code");
+    root.textContent = state.workspace.root;
+    root.title = state.workspace.root;
+    title.append(root);
+  }
 
   const refresh = mkEl("button");
   refresh.type = "button";

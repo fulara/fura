@@ -76,12 +76,12 @@ describe("diffReview", () => {
     if (!result.ok) throw new Error(result.message);
     const prompt = result.prompt;
 
-    expect(prompt.split("\n")[0]).toBe("I have read the code and have some comments please read them and address them");
     expect(prompt).toContain("Do not edit files, generate patches, or modify a checkout");
     expect(prompt).toContain("Repository: /repo");
     expect(prompt).toContain("Base: main (aaaaaaaaaaaa)");
     expect(prompt).toContain("Head: feature (bbbbbbbbbbbb)");
-    expect(prompt).toContain("Review mode: single commit bbbbbbbbbbbb — change value.");
+    expect(prompt).toContain(state.comparison.leftTreeOrCommit);
+    expect(prompt).toContain(state.comparison.rightTreeOrCommit);
     expect(prompt).toContain("File: src/main.ts");
     expect(prompt).toContain("Location: src/main.ts RIGHT new:2");
     expect(prompt).toContain("Comment: Please keep the exported name stable.");

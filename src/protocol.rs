@@ -385,6 +385,27 @@ pub(crate) struct DiffCommitSummary {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct GitHistoryPage {
+    pub(crate) repo_root: String,
+    pub(crate) branch: Option<String>,
+    pub(crate) head_oid: Option<String>,
+    pub(crate) history_head_oid: Option<String>,
+    pub(crate) commits: Vec<DiffCommitSummary>,
+    pub(crate) next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitFileContent {
+    pub(crate) repo_root: String,
+    pub(crate) commit_oid: String,
+    pub(crate) blob_oid: String,
+    pub(crate) path: String,
+    pub(crate) text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DisplayedPatchRange {
     pub(crate) base: DiffEndpoint,
     pub(crate) head: DiffEndpoint,
@@ -823,6 +844,22 @@ pub(crate) enum ClientMessage {
         selected_file: Option<DiffFileSelector>,
         context_lines: Option<u32>,
     },
+    #[serde(rename = "git.history.request")]
+    GitHistoryRequest {
+        client_id: String,
+        request_id: String,
+        session_id: String,
+        repo_id: Option<String>,
+        cursor: Option<String>,
+    },
+    #[serde(rename = "git.file.request")]
+    GitFileRequest {
+        client_id: String,
+        request_id: String,
+        repo_root: String,
+        commit_oid: String,
+        path: String,
+    },
     #[serde(rename = "sessionRepos.update")]
     SessionReposUpdate {
         session_id: String,
@@ -1138,6 +1175,21 @@ pub(crate) enum ServerMessage {
         final_plan_file_path: String,
         title: Option<String>,
         content: String,
+    },
+    #[serde(rename = "git.history")]
+    GitHistory {
+        target_client_id: String,
+        request_id: String,
+        session_id: String,
+        page: Option<GitHistoryPage>,
+        error: Option<String>,
+    },
+    #[serde(rename = "git.file")]
+    GitFile {
+        target_client_id: String,
+        request_id: String,
+        file: Option<GitFileContent>,
+        error: Option<String>,
     },
     #[serde(rename = "sessionChanges.summary")]
     SessionChangesSummary { state: SessionChangesSummaryState },

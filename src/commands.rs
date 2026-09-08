@@ -327,6 +327,42 @@ pub(crate) async fn handle_client_message_for_connection(
             )
             .await
         }
+        ClientMessage::GitHistoryRequest {
+            client_id,
+            request_id,
+            session_id,
+            repo_id,
+            cursor,
+        } => {
+            handle_git_history_request(
+                state,
+                owner_connection_id,
+                client_id,
+                request_id,
+                session_id,
+                repo_id,
+                cursor,
+            )
+            .await
+        }
+        ClientMessage::GitFileRequest {
+            client_id,
+            request_id,
+            repo_root,
+            commit_oid,
+            path,
+        } => {
+            handle_git_file_request(
+                state,
+                owner_connection_id,
+                client_id,
+                request_id,
+                repo_root,
+                commit_oid,
+                path,
+            )
+            .await
+        }
         ClientMessage::SessionReposUpdate {
             session_id,
             action,
@@ -3241,137 +3277,29 @@ fn find_patch_location(
     requested_side: DiffSide,
     requested_line: u32,
 ) -> Option<DiffLineLocation> {
-    let mut old_path: Option<String> = None;
-    let mut new_path = String::new();
-    let mut hunk: Option<String> = None;
-    let mut old_line = 0_u32;
-    let mut new_line = 0_u32;
-    let mut pending_rename_from: Option<String> = None;
-
-    for text in patch.lines() {
-        if let Some(rest) = text.strip_prefix("diff --git ") {
-            let (parsed_old, parsed_new) = parse_diff_git_paths(rest);
-            old_path = parsed_old;
-            new_path = parsed_new.unwrap_or_default();
-            hunk = None;
-            pending_rename_from = None;
-            continue;
-        }
-        if let Some(path) = text.strip_prefix("rename from ") {
-            pending_rename_from = Some(path.to_string());
-            continue;
-        }
-        if let Some(path) = text.strip_prefix("rename to ") {
-            old_path = pending_rename_from.clone();
-            new_path = path.to_string();
-            continue;
-        }
-        if let Some(path) = text.strip_prefix("--- a/") {
-            old_path = Some(path.to_string());
-            continue;
-        }
-        if let Some(path) = text.strip_prefix("+++ b/") {
-            new_path = path.to_string();
-            continue;
-        }
-        if text == "--- /dev/null" {
-            old_path = None;
-            continue;
-        }
-        if text == "+++ /dev/null" {
-            continue;
-        }
-        if let Some((old_start, new_start)) = parse_hunk_header(text) {
-            old_line = old_start;
-            new_line = new_start;
-            hunk = Some(text.to_string());
-            continue;
-        }
-        if text.starts_with('+') && !text.starts_with("+++") {
-            let location = DiffLineLocation {
-                old_path: old_path.clone(),
-                new_path: new_path.clone(),
-                hunk: hunk.clone(),
-                side: DiffSide::Right,
-                kind: DiffLineKind::Add,
-                old_line: None,
-                new_line: Some(new_line),
-                text: text.to_string(),
-            };
-            if requested_side == DiffSide::Right
-                && requested_line == new_line
-                && path_matches(&location, requested_path)
-            {
-                return Some(location);
-            }
-            new_line = new_line.saturating_add(1);
-            continue;
-        }
-        if text.starts_with('-') && !text.starts_with("---") {
-            let location = DiffLineLocation {
-                old_path: old_path.clone(),
-                new_path: new_path.clone(),
-                hunk: hunk.clone(),
-                side: DiffSide::Left,
-                kind: DiffLineKind::Remove,
-                old_line: Some(old_line),
-                new_line: None,
-                text: text.to_string(),
-            };
-            if requested_side == DiffSide::Left
-                && requested_line == old_line
-                && path_matches(&location, requested_path)
-            {
-                return Some(location);
-            }
-            old_line = old_line.saturating_add(1);
-            continue;
-        }
-        if text.starts_with(' ') {
-            let location = DiffLineLocation {
-                old_path: old_path.clone(),
-                new_path: new_path.clone(),
-                hunk: hunk.clone(),
-                side: DiffSide::Right,
-                kind: DiffLineKind::Context,
-                old_line: Some(old_line),
-                new_line: Some(new_line),
-                text: text.to_string(),
-            };
-            let line_matches = match requested_side {
-                DiffSide::Left => requested_line == old_line,
-                DiffSide::Right => requested_line == new_line,
-            };
-            if line_matches && path_matches(&location, requested_path) {
-                return Some(location);
-            }
-            old_line = old_line.saturating_add(1);
-            new_line = new_line.saturating_add(1);
-        }
+    if requested_line == 0 {
+        return None;
     }
-    None
-}
-
-fn path_matches(location: &DiffLineLocation, requested_path: &str) -> bool {
-    location.new_path == requested_path || location.old_path.as_deref() == Some(requested_path)
-}
-
-fn parse_diff_git_paths(rest: &str) -> (Option<String>, Option<String>) {
-    let mut parts = rest.split_whitespace();
-    let old_path = parts.next().and_then(|value| value.strip_prefix("a/"));
-    let new_path = parts.next().and_then(|value| value.strip_prefix("b/"));
-    (old_path.map(str::to_string), new_path.map(str::to_string))
-}
-
-fn parse_hunk_header(line: &str) -> Option<(u32, u32)> {
-    let rest = line.strip_prefix("@@ -")?;
-    let (old_part, rest) = rest.split_once(" +")?;
-    let (new_part, _) = rest.split_once(" @@")?;
-    Some((parse_hunk_start(old_part)?, parse_hunk_start(new_part)?))
-}
-
-fn parse_hunk_start(part: &str) -> Option<u32> {
-    part.split(',').next()?.parse().ok()
+    crate::diff::parse_diff_rows(patch)
+        .into_iter()
+        .find_map(|row| {
+            let DiffRow::Line { mut location, .. } = row else {
+                return None;
+            };
+            let (path, line) = match requested_side {
+                DiffSide::Left => (location.old_path.as_deref(), location.old_line),
+                DiffSide::Right => (Some(location.new_path.as_str()), location.new_line),
+            };
+            if location.hunk.is_some()
+                && path == Some(requested_path)
+                && line == Some(requested_line)
+            {
+                location.side = requested_side;
+                Some(location)
+            } else {
+                None
+            }
+        })
 }
 
 fn review_set_host_tools_command(id: String, tools: Vec<Value>) -> Value {
@@ -3478,8 +3406,14 @@ fn review_prompt(context_id: &str, state: &DiffReviewableState, instructions: &s
         (DiffEndpoint::EmptyTree, DiffEndpoint::WorkingTree) => {
             "Inspect the listed nonignored untracked files as additions; do not stage them."
         }
+        (DiffEndpoint::EmptyTree, _) => {
+            "Inspect the initial commit with git show --root. EMPTY denotes the empty tree, not a Git ref."
+        }
         _ => "Inspect the displayed Git refs and their diff.",
     };
+    let inspection = format!(
+        "{inspection} Use git --no-replace-objects for inspection: Fura reviews stored commit objects, ignoring replacement refs. Disable signature display, external diff and textconv; do not execute configured clean/process filters."
+    );
     format!(
         "You are reviewing the full Fura diff comparison, not just the currently selected file. This is repository state, not proof of changes authored by this session.\n\nReview context id: {context_id}\nRepository: {}\nComparison key: {}\nBase: {}\nHead: {}\nLeft version identity: {}\nRight version identity: {}\nFiles in summary: {}\nCurrent commit: {}\nReview worktree status: {}\nReview instructions:\n{}\n\n{inspection} Version identities may be opaque Fura fingerprints, not Git refs. Do not write files or mutate Git state during this review. When you find an issue, call fura_add_review_comment with this reviewContextId, the repo-relative path, side, line, and comment body. Fura will validate the displayed patch version and resolve the exact diff anchor; do not invent line numbers. If the repository changes, refresh the review rather than reusing old anchors.",
         state.comparison.repo_root,
@@ -3533,10 +3467,171 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
     responses
 }
 
+async fn handle_git_history_request(
+    state: &AppState,
+    connection_id: u64,
+    client_id: String,
+    request_id: String,
+    session_id: String,
+    repo_id: Option<String>,
+    cursor: Option<String>,
+) -> Vec<ServerMessage> {
+    let mut jobs = state.diff_jobs.write().await;
+    if let Some(previous) = jobs.history_jobs.remove(&connection_id) {
+        previous.handle.abort();
+    }
+    jobs.next_token = jobs.next_token.wrapping_add(1);
+    let token = jobs.next_token;
+    let task_state = state.clone();
+    let handle = tokio::spawn(async move {
+        let operation = async {
+            let repos =
+                crate::session_repos::session_repo_candidates(&task_state, &session_id).await?;
+            let selected = match repo_id.as_deref() {
+                Some(id) => repos.iter().find(|repo| repo.id == id),
+                None => repos
+                    .iter()
+                    .find(|repo| repo.is_default)
+                    .or_else(|| repos.first()),
+            }
+            .ok_or_else(|| anyhow!("selected repository is not available in this session"))?;
+            crate::diff::list_git_history(Path::new(&selected.repo_root), cursor.as_deref()).await
+        };
+        let result = tokio::time::timeout(Duration::from_secs(15), operation)
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow!(
+                    "Git history read timed out; try a smaller repository or retry"
+                ))
+            });
+        if task_state
+            .diff_jobs
+            .read()
+            .await
+            .history_jobs
+            .get(&connection_id)
+            .is_none_or(|job| job.token != token)
+        {
+            return;
+        }
+        let (page, error) = match result {
+            Ok(page) => (Some(page), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        task_state
+            .events
+            .emit(
+                &task_state,
+                ServerMessage::GitHistory {
+                    target_client_id: client_id,
+                    request_id,
+                    session_id,
+                    page,
+                    error,
+                },
+            )
+            .await;
+        let mut jobs = task_state.diff_jobs.write().await;
+        if jobs
+            .history_jobs
+            .get(&connection_id)
+            .is_some_and(|job| job.token == token)
+        {
+            jobs.history_jobs.remove(&connection_id);
+        }
+    });
+    jobs.history_jobs
+        .insert(connection_id, DiffFilePatchJob { token, handle });
+    Vec::new()
+}
+
+async fn handle_git_file_request(
+    state: &AppState,
+    connection_id: u64,
+    client_id: String,
+    request_id: String,
+    repo_root: String,
+    commit_oid: String,
+    path: String,
+) -> Vec<ServerMessage> {
+    let mut jobs = state.diff_jobs.write().await;
+    if let Some(previous) = jobs.git_file_jobs.remove(&connection_id) {
+        previous.handle.abort();
+    }
+    jobs.next_token = jobs.next_token.wrapping_add(1);
+    let token = jobs.next_token;
+    let task_state = state.clone();
+    let handle = tokio::spawn(async move {
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            crate::diff::read_git_file(&repo_root, &commit_oid, &path),
+        )
+        .await
+        .unwrap_or_else(|_| Err(anyhow!("Committed file read timed out")));
+        if task_state
+            .diff_jobs
+            .read()
+            .await
+            .git_file_jobs
+            .get(&connection_id)
+            .is_none_or(|job| job.token != token)
+        {
+            return;
+        }
+        let (file, error) = match result {
+            Ok(file) => (Some(file), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
+        task_state
+            .events
+            .emit(
+                &task_state,
+                ServerMessage::GitFile {
+                    target_client_id: client_id,
+                    request_id,
+                    file,
+                    error,
+                },
+            )
+            .await;
+        let mut jobs = task_state.diff_jobs.write().await;
+        if jobs
+            .git_file_jobs
+            .get(&connection_id)
+            .is_some_and(|job| job.token == token)
+        {
+            jobs.git_file_jobs.remove(&connection_id);
+        }
+    });
+    jobs.git_file_jobs
+        .insert(connection_id, DiffFilePatchJob { token, handle });
+    Vec::new()
+}
+
 #[cfg(test)]
 mod review_comment_tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn combined_conflicts_do_not_create_agent_comment_anchors() {
+        let patch = "diff --cc f\nindex c376d89,45cf141..0000000\n--- a/f\n+++ b/f\n@@@ -1,1 -1,1 +1,5 @@@\n++<<<<<<< HEAD\n +right\n++=======\n+ left\n++>>>>>>> left\n";
+        assert!(find_patch_location(patch, "f", DiffSide::Right, 1).is_none());
+        assert!(find_patch_location(patch, "f", DiffSide::Left, 1).is_none());
+    }
+
+    #[test]
+    fn agent_context_anchor_keeps_requested_side_and_literal_renamed_path() {
+        let patch = "diff --git \"a/old name\" \"b/new name\"\n--- \"a/old name\"\n+++ \"b/new name\"\n@@ -1,2 +1,2 @@\n context\n-before\n+after\n";
+        let left = find_patch_location(patch, "old name", DiffSide::Left, 1).expect("left context");
+        assert_eq!(left.side, DiffSide::Left);
+        assert_eq!(left.old_line, Some(1));
+        assert_eq!(left.text, " context");
+        assert!(find_patch_location(patch, "old name", DiffSide::Right, 2).is_none());
+        let right = find_patch_location(patch, "new name", DiffSide::Right, 2).expect("new line");
+        assert_eq!(right.text, "+after");
+        assert!(find_patch_location(patch, "new name", DiffSide::Right, 0).is_none());
+    }
     fn test_session_record(id: &str) -> SessionRecord {
         SessionRecord {
             id: id.to_string(),

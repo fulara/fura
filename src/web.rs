@@ -268,6 +268,8 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::ModelList { .. } => "model.list",
         ClientMessage::ModelSet { .. } => "model.set",
         ClientMessage::SessionChangesRequest { .. } => "sessionChanges.request",
+        ClientMessage::GitHistoryRequest { .. } => "git.history.request",
+        ClientMessage::GitFileRequest { .. } => "git.file.request",
         ClientMessage::SessionReposUpdate { .. } => "sessionRepos.update",
         ClientMessage::CompareDiffRequest { .. } => "compareDiff.request",
         ClientMessage::DiffCancel { .. } => "diff.cancel",
@@ -651,6 +653,24 @@ pub(crate) async fn handle_socket(
     };
 
     run.await;
+    if let Some(job) = state
+        .diff_jobs
+        .write()
+        .await
+        .history_jobs
+        .remove(&connection_id)
+    {
+        job.handle.abort();
+    }
+    if let Some(job) = state
+        .diff_jobs
+        .write()
+        .await
+        .git_file_jobs
+        .remove(&connection_id)
+    {
+        job.handle.abort();
+    }
     release_btw_requests_on_disconnect(&state, connection_id).await;
     state
         .session_runtime
@@ -1216,6 +1236,8 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::ModelChanged { .. } => "model.changed",
         ServerMessage::PlanReview { .. } => "plan.review",
         ServerMessage::SessionChangesSummary { .. } => "sessionChanges.summary",
+        ServerMessage::GitHistory { .. } => "git.history",
+        ServerMessage::GitFile { .. } => "git.file",
         ServerMessage::CompareDiffSummary { .. } => "compareDiff.summary",
         ServerMessage::DiffContent { .. } => "diff.content",
         ServerMessage::DiffComplete { .. } => "diff.complete",
@@ -1434,6 +1456,32 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "plan.review",
             session_id = %session_id,
             bytes = content.len()
+        ),
+        ServerMessage::GitHistory {
+            session_id,
+            request_id,
+            page,
+            error,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "git.history",
+            session_id = %session_id,
+            request_id = %request_id,
+            commit_count = page.as_ref().map_or(0, |page| page.commits.len()),
+            failed = error.is_some(),
+        ),
+        ServerMessage::GitFile {
+            request_id,
+            file,
+            error,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "git.file",
+            request_id = %request_id,
+            bytes = file.as_ref().map_or(0, |file| file.text.len()),
+            failed = error.is_some(),
         ),
         ServerMessage::SessionChangesSummary { state } => info!(
             direction = "bridge_to_client",

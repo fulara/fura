@@ -10,6 +10,8 @@ export type DesktopDockview = {
   panelContains(id: DesktopDockviewPanelId, element: Element): boolean;
   isPanelActive(id: DesktopDockviewPanelId): boolean;
   activatePanel(id: DesktopDockviewPanelId): boolean;
+  setPanelExpanded(id: DesktopDockviewPanelId, expanded: boolean): void;
+  isPanelExpanded(id: DesktopDockviewPanelId): boolean;
   withPanel(id: DesktopDockviewPanelId, render: (container: HTMLElement) => void): boolean;
   ensureSessionChangesPanel(): boolean;
   ensureDiffsPanel(): boolean;
@@ -69,7 +71,13 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
             if (!panel) return;
             void params.containerApi.addPopoutGroup(panel, {
               popoutUrl: "/popout.html",
-              onDidOpen: ({ window: popWin }) => copyStylesToPopout(owner, popWin),
+              onDidOpen: ({ window: popWin }) => {
+                copyStylesToPopout(owner, popWin);
+                popWin.addEventListener("focus", () => {
+                  params.api.setActive();
+                  options.onPanelActivated(panelId);
+                });
+              },
             });
           };
           panelActivators[panelId] = () => {
@@ -130,6 +138,16 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       api.setActivePanel(panel);
       api.focus();
       return true;
+    },
+    setPanelExpanded(id, expanded) {
+      const panel = api.getGroupPanel(id);
+      if (!panel) return;
+      if (expanded) api.maximizeGroup(panel.group);
+      else api.exitMaximizedGroup();
+    },
+    isPanelExpanded(id) {
+      const panel = api.getGroupPanel(id);
+      return Boolean(panel && api.isMaximizedGroup(panel.group));
     },
     withPanel(id, render) {
       const panel = panelEls[id];

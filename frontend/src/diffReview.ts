@@ -194,7 +194,7 @@ function reviewRows(state: DiffReviewableState): DiffRow[] {
 function reviewModeLine(state: DiffReviewableState): string {
   if (state.review.currentCommitOid) {
     const commit = state.review.commits.find(candidate => candidate.oid === state.review.currentCommitOid);
-    return `Review mode: single commit ${commit?.shortOid ?? state.review.currentCommitOid ?? "unknown"}${commit?.subject ? ` — ${commit.subject}` : ""}.`;
+    return `Review mode: single commit ${state.review.currentCommitOid}${commit?.subject ? ` — ${commit.subject}` : ""}.`;
   }
   return "Review mode: full range.";
 }
@@ -205,6 +205,9 @@ function comparisonLines(state: DiffReviewableState): string[] {
     `Repository: ${state.comparison.repoRoot}`,
     `Base: ${resolvedRefLabel(displayedRange?.base ?? state.comparison.base)}`,
     `Head: ${resolvedRefLabel(displayedRange?.head ?? state.comparison.head)}`,
+    `Base version: ${state.comparison.leftTreeOrCommit === "EMPTY" ? "empty tree (initial commit)" : state.comparison.leftTreeOrCommit}`,
+    `Head version: ${state.comparison.rightTreeOrCommit}`,
+    "The shown file versions belong to these exact endpoints; the current checkout may differ.",
     reviewModeLine(state),
     `Comparison key: ${comparisonKey(state)}`,
   ];

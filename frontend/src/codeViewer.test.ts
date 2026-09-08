@@ -141,7 +141,7 @@ describe("code viewer", () => {
           size: 13,
           version: 1,
         },
-        fileComments: [{ id: "c1", path: "src/main.rs", lineNumber: 1, lineText: "fn main() {}", text: "comment" }],
+        fileComments: [{ id: "c1", root: "/repo", fileVersion: 1, fileText: "fn main() {}\n", path: "src/main.rs", lineNumber: 1, lineText: "fn main() {}", text: "comment" }],
       }),
       baseActions({ addComment, editComment, deleteComment, previewComments, flushComments }),
     );
@@ -163,6 +163,20 @@ describe("code viewer", () => {
     expect(flushComments).toHaveBeenCalledOnce();
     expect(editComment).toHaveBeenCalledWith(expect.objectContaining({ id: "c1" }));
     expect(deleteComment).toHaveBeenCalledWith(expect.objectContaining({ id: "c1" }));
+  });
+
+  it("shows the canonical root even when an external workspace has no session id", () => {
+    const container = document.createElement("div");
+    renderCodeViewer(container, baseState({
+      workspace: {
+        workspaceId: "workspace-B", sessionId: null, root: "/repoB",
+        source: "session", status: "filesOnly", statusMessage: "Files only.",
+      },
+      file: { path: "same.ts", text: "B_WORK", language: "", size: 6, version: 1 },
+    }), baseActions());
+    expect(container.querySelector(".code-workspace-header")?.textContent).toContain("/repoB");
+    expect(container.querySelector(".code-file-view")?.textContent).toContain("B_WORK");
+    expect(container.querySelector<HTMLButtonElement>(".code-workspace-header button")?.disabled).toBe(false);
   });
  
 

@@ -874,7 +874,7 @@ async fn prepare_session_changes_diff(
     selected_repo_id: Option<String>,
     change_kind: GitChangeKind,
     detail_mode: DiffDetailMode,
-    _current_commit_oid: Option<String>,
+    current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
     request: DiffRequestIdentity,
     context_lines: Option<u32>,
@@ -905,6 +905,18 @@ async fn prepare_session_changes_diff(
         .ok_or_else(|| anyhow!("Selected repository is not available for this session."))?;
     let repo_root_text = selected.repo_root.clone();
     let repo_root = discover_repo_root(&repo_root_text)?;
+    if let Some(oid) = current_commit_oid {
+        let prepared = prepare_commit_review(
+            state,
+            repo_root,
+            &oid,
+            detail_mode,
+            selected_file,
+            context_lines,
+        )
+        .await?;
+        return Ok((candidates, selected.id, prepared));
+    }
     let (left, right, base, head) = git_change_range(&repo_root, change_kind).await?;
     let prepared = prepare_git_changes(
         state,
@@ -1048,6 +1060,10 @@ fn range_diff_args<'a>(left: &'a str, kind: Option<&str>, right: &'a str) -> Vec
         }
         Some("worktree") => args.push(left),
         Some("untracked") => {}
+        _ if left == "EMPTY" => {
+            args[0] = "diff-tree";
+            args.extend(["--root", "--no-commit-id", "-r", right]);
+        }
         _ => {
             args.push(left);
             args.push(right);
@@ -1064,11 +1080,149 @@ async fn run_range_diff(
     paths: &[&str],
     limit: usize,
 ) -> anyhow::Result<(String, bool)> {
-    let mut args = range_diff_args(left, mutable_kind(right)?, right);
+    let kind = mutable_kind(right)?;
+    let collisions = if kind == Some("worktree") {
+        worktree_restored_paths(repo, left).await?
+    } else {
+        Vec::new()
+    };
+    let mut args = range_diff_args(left, kind, right);
     args.extend_from_slice(options);
     args.push("--");
-    args.extend_from_slice(paths);
-    git_stdout_limited(repo, &args, limit).await
+    let pathspecs: Vec<String> = paths
+        .iter()
+        .map(|path| format!(":(literal){path}"))
+        .chain(
+            collisions
+                .iter()
+                .map(|path| format!(":(exclude,literal){path}")),
+        )
+        .collect();
+    if collisions.is_empty() {
+        args.extend_from_slice(paths);
+    } else {
+        args.insert(0, "--no-literal-pathspecs");
+        args.extend(pathspecs.iter().map(String::as_str));
+    }
+    let (mut output, mut truncated) = git_stdout_limited(repo, &args, limit).await?;
+    if !truncated {
+        for path in collisions {
+            if !paths.is_empty() && !paths.contains(&path.as_str()) {
+                continue;
+            }
+            let (net, limited) =
+                restored_worktree_diff(repo, left, &path, options, limit - output.len()).await?;
+            output.push_str(&net);
+            truncated |= limited;
+            if truncated {
+                break;
+            }
+        }
+    }
+    Ok((output, truncated))
+}
+
+async fn worktree_restored_paths(repo: &Path, base: &str) -> anyhow::Result<Vec<String>> {
+    let untracked = untracked_paths(repo).await?;
+    let repository = Repository::open(repo)?;
+    let tree = repository.revparse_single(base)?.peel_to_tree()?;
+    Ok(untracked
+        .into_iter()
+        .filter(|path| {
+            tree.get_path(Path::new(path))
+                .is_ok_and(|entry| entry.kind() == Some(git2::ObjectType::Blob))
+        })
+        .collect())
+}
+
+// Only reconcile paths Git's index-based diff reports as deleted despite their
+// presence on disk. libgit2's tree-to-workdir operation explicitly ignores the index;
+// its built-in Git normalization applies, but no configured external helper is run.
+async fn restored_worktree_diff(
+    repo: &Path,
+    base: &str,
+    path: &str,
+    options: &[&str],
+    limit: usize,
+) -> anyhow::Result<(String, bool)> {
+    let full = contained_diff_path(repo, path)?;
+    let metadata = fs::symlink_metadata(&full)?;
+    let size: u64 = git_stdout(repo, &["cat-file", "-s", &format!("{base}:{path}")], 128)
+        .await?
+        .trim()
+        .parse()?;
+    if size > MAX_DIFF_FILE_PATCH_BYTES as u64 || metadata.len() > MAX_DIFF_FILE_PATCH_BYTES as u64
+    {
+        bail!(
+            "Restored untracked path {path:?} exceeds the 1 MB net comparison limit; review an immutable commit or restore tracking"
+        );
+    }
+    let repository = Repository::open(repo)?;
+    let tree = repository.revparse_single(base)?.peel_to_tree()?;
+    let mut opts = git2::DiffOptions::new();
+    opts.disable_pathspec_match(true)
+        .pathspec(path)
+        .include_typechange(true);
+    if let Some(context) = options
+        .iter()
+        .find_map(|option| option.strip_prefix("--unified="))
+    {
+        opts.context_lines(context.parse()?);
+    }
+    let diff = repository.diff_tree_to_workdir(Some(&tree), Some(&mut opts))?;
+    let mut output = Vec::new();
+    if options.contains(&"--stat") {
+        output.extend_from_slice(&diff.stats()?.to_buf(git2::DiffStatsFormat::FULL, 80)?);
+    } else if options.contains(&"--numstat") || options.contains(&"--name-status") {
+        for (index, delta) in diff.deltas().enumerate() {
+            if delta.status() == git2::Delta::Unmodified {
+                continue;
+            }
+            if options.contains(&"--numstat") {
+                let patch = git2::Patch::from_diff(&diff, index)?;
+                let counts = match patch {
+                    Some(patch)
+                        if !patch.delta().old_file().is_binary()
+                            && !patch.delta().new_file().is_binary() =>
+                    {
+                        let (_, added, removed) = patch.line_stats()?;
+                        format!("{added}\t{removed}")
+                    }
+                    _ => "-\t-".to_string(),
+                };
+                output.extend_from_slice(format!("{counts}\t{path}\0").as_bytes());
+            } else {
+                let status = match delta.status() {
+                    git2::Delta::Deleted => "D",
+                    git2::Delta::Added => "A",
+                    git2::Delta::Typechange => "T",
+                    _ => "M",
+                };
+                output.extend_from_slice(format!("{status}\0{path}\0").as_bytes());
+            }
+        }
+    } else {
+        let mut truncated = false;
+        let result = diff.print(git2::DiffFormat::Patch, |_, _, line| {
+            let prefix = matches!(line.origin(), '+' | '-' | ' ');
+            if output.len() + line.content().len() + usize::from(prefix) > limit {
+                truncated = true;
+                return false;
+            }
+            if prefix {
+                output.push(line.origin() as u8);
+            }
+            output.extend_from_slice(line.content());
+            true
+        });
+        if !truncated {
+            result?;
+        }
+        return Ok((String::from_utf8_lossy(&output).into_owned(), truncated));
+    }
+    let truncated = output.len() > limit;
+    output.truncate(limit);
+    Ok((String::from_utf8_lossy(&output).into_owned(), truncated))
 }
 
 async fn untracked_paths(repo: &Path) -> anyhow::Result<Vec<String>> {
@@ -1084,7 +1238,79 @@ async fn untracked_paths(repo: &Path) -> anyhow::Result<Vec<String>> {
     .collect())
 }
 
+async fn reject_worktree_filters(repo: &Path, depth: usize) -> anyhow::Result<()> {
+    if depth > 16 {
+        bail!("Submodule nesting exceeds the safe Git read limit");
+    }
+    let config = git_stdout(repo, &["config", "--null", "--list"], MAX_GIT_OUTPUT_BYTES).await?;
+    let active: Vec<&str> = config
+        .split_terminator('\0')
+        .filter_map(|entry| {
+            let (key, value) = entry.split_once('\n')?;
+            if value.is_empty() {
+                return None;
+            }
+            key.strip_prefix("filter.")?
+                .strip_suffix(".clean")
+                .or_else(|| key.strip_prefix("filter.")?.strip_suffix(".process"))
+        })
+        .collect();
+    if !active.is_empty() {
+        let paths = git_stdout(
+            repo,
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+            MAX_GIT_OUTPUT_BYTES,
+        )
+        .await?;
+        let paths: Vec<_> = paths.split_terminator('\0').collect();
+        for chunk in paths.chunks(100) {
+            let mut args = vec!["check-attr", "-z", "filter", "--"];
+            args.extend_from_slice(chunk);
+            let attrs = git_stdout(repo, &args, MAX_GIT_OUTPUT_BYTES).await?;
+            let fields: Vec<_> = attrs.split_terminator('\0').collect();
+            for attr in fields.chunks_exact(3) {
+                if active.contains(&attr[2]) {
+                    bail!(
+                        "Working-tree review refused: {} uses configured clean/process filter {:?} for {:?}. Disable that filter to review working-tree changes, or select an immutable commit in History.",
+                        repo.display(),
+                        attr[2],
+                        attr[0]
+                    );
+                }
+            }
+        }
+    }
+    let index = git_stdout(repo, &["ls-files", "--stage", "-z"], MAX_GIT_OUTPUT_BYTES).await?;
+    for entry in index
+        .split_terminator('\0')
+        .filter(|entry| entry.starts_with("160000 "))
+    {
+        if let Some((_, path)) = entry.split_once('\t') {
+            let sub = contained_diff_path(repo, path)?;
+            if sub.join(".git").exists() {
+                Box::pin(reject_worktree_filters(&sub, depth + 1)).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn mutable_identity(repo: &Path, left: &str, kind: &str) -> anyhow::Result<String> {
+    time::timeout(GIT_TIMEOUT, mutable_identity_inner(repo, left, kind))
+        .await
+        .context("Git change identity timed out; reduce working-tree changes and refresh")?
+}
+
+async fn mutable_identity_inner(repo: &Path, left: &str, kind: &str) -> anyhow::Result<String> {
+    if kind != "staged" {
+        reject_worktree_filters(repo, 0).await?;
+    }
     let mut hash = blake3::Hasher::new();
     hash.update(left.as_bytes());
     hash.update(kind.as_bytes());
@@ -1134,45 +1360,72 @@ async fn mutable_identity(repo: &Path, left: &str, kind: &str) -> anyhow::Result
     }
     paths.sort();
     paths.dedup();
-    let repo = repo.to_path_buf();
-    // Streaming hashing is bounded in memory even for huge changed files; no patches or
-    // synthetic Git objects are materialized during summary preparation.
-    let hash = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let mut buffer = [0u8; 65536];
-        for path in paths {
-            hash.update(&(path.len() as u64).to_le_bytes());
-            hash.update(path.as_bytes());
-            let full = contained_diff_path(&repo, &path)?;
-            match fs::symlink_metadata(&full) {
-                Ok(metadata) if metadata.file_type().is_symlink() => {
-                    hash.update(b"symlink");
-                    hash.update(fs::read_link(&full)?.as_os_str().as_encoded_bytes());
-                }
-                Ok(metadata) if metadata.is_file() => {
-                    hash.update(b"file");
-                    hash.update(&metadata.len().to_le_bytes());
-                    hash.update(untracked_file_mode(&metadata).as_bytes());
-                    let mut file = fs::File::open(&full)?;
-                    loop {
-                        let count = file.read(&mut buffer)?;
-                        if count == 0 {
-                            break;
-                        }
-                        hash.update(&buffer[..count]);
-                    }
-                }
-                Ok(_) => {
-                    hash.update(b"directory");
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    hash.update(b"deleted");
-                }
-                Err(error) => return Err(error.into()),
+    // Yield between bounded chunks: cancellation drops this future, not an uncancellable
+    // spawn_blocking hasher. Refuse oversized reads rather than minting a partial identity.
+    let mut remaining = 64 * 1024 * 1024_u64;
+    let mut buffer = vec![0u8; 65536];
+    for path in paths {
+        tokio::task::yield_now().await;
+        hash.update(&(path.len() as u64).to_le_bytes());
+        hash.update(path.as_bytes());
+        let full = contained_diff_path(repo, &path)?;
+        match fs::symlink_metadata(&full) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                hash.update(b"symlink");
+                let target = fs::read_link(&full)?;
+                let bytes = target.as_os_str().as_encoded_bytes();
+                remaining = remaining
+                    .checked_sub(bytes.len() as u64)
+                    .ok_or_else(|| anyhow!("Git change identity exceeds the 64 MiB read limit"))?;
+                hash.update(bytes);
             }
+            Ok(metadata) if metadata.is_file() => {
+                if metadata.len() > remaining {
+                    bail!(
+                        "Git change identity exceeds the 64 MiB read limit; reduce working-tree changes or review an immutable commit"
+                    );
+                }
+                hash.update(b"file");
+                hash.update(&metadata.len().to_le_bytes());
+                hash.update(untracked_file_mode(&metadata).as_bytes());
+                let mut file = fs::File::open(&full)?;
+                loop {
+                    tokio::task::yield_now().await;
+                    let count = file.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    remaining = remaining.checked_sub(count as u64).ok_or_else(|| {
+                        anyhow!("Git change identity exceeds the 64 MiB read limit")
+                    })?;
+                    hash.update(&buffer[..count]);
+                }
+            }
+            Ok(metadata) if metadata.is_dir() => {
+                hash.update(b"directory");
+                // Raw Git diff uses a zero workdir OID for dirty gitlinks. The short
+                // patch carries the actual checked-out OID and patch-affecting -dirty.
+                let mut args = range_diff_args(left, Some(kind), "");
+                args.extend(["--no-renames", "--", &path]);
+                let patch = git_stdout(repo, &args, MAX_DIFF_FILE_PATCH_BYTES).await?;
+                remaining = remaining
+                    .checked_sub(patch.len() as u64)
+                    .ok_or_else(|| anyhow!("Git change identity exceeds the 64 MiB read limit"))?;
+                hash.update(patch.as_bytes());
+            }
+            Ok(_) => bail!("Unsupported special working-tree file: {path}"),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                hash.update(b"deleted");
+            }
+            Err(error) => return Err(error.into()),
         }
-        Ok(hash.finalize().to_hex().to_string())
-    })
-    .await??;
+    }
+    let hash = hash.finalize().to_hex().to_string();
     Ok(format!("fura:{kind}:{hash}"))
 }
 
@@ -1187,7 +1440,7 @@ async fn validate_mutable_identity(repo: &Path, left: &str, right: &str) -> anyh
     Ok(())
 }
 
-fn contained_diff_path(repo: &Path, path: &str) -> anyhow::Result<PathBuf> {
+fn validate_diff_path(path: &str) -> anyhow::Result<()> {
     if path.is_empty()
         || Path::new(path)
             .components()
@@ -1195,6 +1448,11 @@ fn contained_diff_path(repo: &Path, path: &str) -> anyhow::Result<PathBuf> {
     {
         bail!("invalid repository-relative diff path");
     }
+    Ok(())
+}
+
+fn contained_diff_path(repo: &Path, path: &str) -> anyhow::Result<PathBuf> {
+    validate_diff_path(path)?;
     let full = repo.join(path);
     let root = repo.canonicalize()?;
     let mut parent = full.parent();
@@ -1206,7 +1464,12 @@ fn contained_diff_path(repo: &Path, path: &str) -> anyhow::Result<PathBuf> {
                 }
                 break;
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
                 parent = directory.parent()
             }
             Err(error) => return Err(error.into()),
@@ -1313,7 +1576,12 @@ async fn generate_patch(
         })
         .unwrap_or_default();
     for path in &paths {
-        contained_diff_path(repo, path)?;
+        if kind.is_some() {
+            contained_diff_path(repo, path)?;
+        } else {
+            // Historical trees do not depend on today's directory/symlink layout.
+            validate_diff_path(path)?;
+        }
     }
     let context = format!(
         "--unified={}",
@@ -1325,7 +1593,15 @@ async fn generate_patch(
         run_range_diff(repo, left, right, &[&context], &paths, limit).await?
     };
     if matches!(kind, Some("untracked" | "worktree")) && !truncated {
+        let restored = if kind == Some("worktree") {
+            worktree_restored_paths(repo, left).await?
+        } else {
+            Vec::new()
+        };
         for path in untracked_paths(repo).await? {
+            if restored.contains(&path) {
+                continue;
+            }
             if file.is_some_and(|file| file.new_path != path) {
                 continue;
             }
@@ -1339,8 +1615,67 @@ async fn generate_patch(
             patch.push_str(&addition);
         }
     }
+    if let Some(file) = file {
+        retain_selected_file_patch(&mut patch, file);
+    }
     validate_mutable_identity(repo, left, right).await?;
     Ok((patch, truncated))
+}
+
+// Git pathspecs also match descendants when a file replaces a directory.
+// A lazy file request must return exact file deltas, not that whole subtree.
+fn retain_selected_file_patch(patch: &mut String, file: &DiffFileSelector) {
+    let old_path = file.old_path.as_deref().unwrap_or(&file.new_path);
+    let mut skipped = Vec::new();
+    let mut section_start = 0;
+    let mut offset = 0;
+    let mut keep = false;
+    for line in patch.split_inclusive('\n') {
+        let text = line.trim_end_matches('\n');
+        if text.starts_with("diff --git ")
+            || text.starts_with("diff --cc ")
+            || text.starts_with("diff --combined ")
+        {
+            if !keep && section_start < offset {
+                skipped.push(section_start..offset);
+            }
+            section_start = offset;
+            keep = if let Some(header) = text.strip_prefix("diff --git ") {
+                // Raw filenames may themselves contain " b/"; the known selector
+                // disambiguates the separator without inventing a second path parser.
+                let literal = header
+                    .strip_prefix("a/")
+                    .and_then(|rest| rest.strip_prefix(old_path))
+                    .and_then(|rest| rest.strip_prefix(" b/"))
+                    == Some(file.new_path.as_str());
+                literal
+                    || (header.contains('"')
+                        && parse_diff_git_line(text)
+                            .is_some_and(|(old, new)| old == old_path && new == file.new_path))
+            } else {
+                text.strip_prefix("diff --cc ")
+                    .or_else(|| text.strip_prefix("diff --combined "))
+                    .and_then(decode_diff_path)
+                    .is_some_and(|path| path == file.new_path)
+            };
+        }
+        offset += line.len();
+    }
+    if !keep && section_start < offset {
+        skipped.push(section_start..offset);
+    }
+    if skipped.is_empty() {
+        return;
+    }
+    let removed: usize = skipped.iter().map(|range| range.len()).sum();
+    let mut filtered = String::with_capacity(patch.len() - removed);
+    let mut start = 0;
+    for range in skipped {
+        filtered.push_str(&patch[start..range.start]);
+        start = range.end;
+    }
+    filtered.push_str(&patch[start..]);
+    *patch = filtered;
 }
 
 async fn build_compare_summary(
@@ -1669,7 +2004,11 @@ async fn build_summary_payload(
     right_tree_or_commit: &str,
 ) -> anyhow::Result<DiffSummaryPayload> {
     validate_mutable_identity(repo_root, left_tree_or_commit, right_tree_or_commit).await?;
-    let (stat, truncated) = if mutable_kind(right_tree_or_commit)? == Some("untracked") {
+    let net_worktree = matches!(
+        mutable_kind(right_tree_or_commit)?,
+        Some("untracked" | "worktree")
+    );
+    let (mut stat, mut truncated) = if net_worktree {
         (String::new(), false)
     } else {
         run_range_diff(
@@ -1684,6 +2023,29 @@ async fn build_summary_payload(
     };
     let (files, file_limit_reached) =
         summarize_files_between(repo_root, left_tree_or_commit, right_tree_or_commit).await?;
+    if net_worktree {
+        for file in &files {
+            let counts = if matches!(file.status, DiffFileStatus::Binary) {
+                "Bin".to_string()
+            } else {
+                format!("+{} -{}", file.added, file.removed)
+            };
+            let line = format!(" {} | {counts}\n", serde_json::to_string(&file.new_path)?);
+            if stat.len() + line.len() > MAX_DIFF_BYTES - 256 {
+                truncated = true;
+                break;
+            }
+            stat.push_str(&line);
+        }
+        if !files.is_empty() {
+            stat.push_str(&format!(
+                " {} files changed, {} insertions(+), {} deletions(-)\n",
+                files.len(),
+                files.iter().map(|file| file.added).sum::<u64>(),
+                files.iter().map(|file| file.removed).sum::<u64>()
+            ));
+        }
+    }
     validate_mutable_identity(repo_root, left_tree_or_commit, right_tree_or_commit).await?;
     Ok(DiffSummaryPayload {
         files,
@@ -1807,7 +2169,7 @@ pub(crate) async fn generate_file_patch(
     .await
 }
 
-fn parse_diff_rows(diff_text: &str) -> Vec<DiffRow> {
+pub(crate) fn parse_diff_rows(diff_text: &str) -> Vec<DiffRow> {
     let mut rows = Vec::new();
     let mut old_path: Option<String> = None;
     let mut new_path = String::new();
@@ -2240,46 +2602,190 @@ async fn list_commits(
     .await?;
     let mut commits = Vec::new();
     for oid in revs.lines().filter(|line| !line.trim().is_empty()) {
-        let format = "%H%x00%h%x00%s%x00%an%x00%ae%x00%cI%x00%P%x00%B";
-        let output = git_stdout(
-            repo_root,
-            &["show", "--no-patch", &format!("--format={format}"), oid],
-            MAX_GIT_OUTPUT_BYTES,
-        )
-        .await?;
-        let mut parts = output.trim_end_matches('\n').splitn(8, '\0');
-        let full = parts.next().unwrap_or(oid).to_string();
-        let short = parts.next().unwrap_or(oid).to_string();
-        let subject = parts.next().unwrap_or("").to_string();
-        let author_name = parts
-            .next()
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let author_email = parts
-            .next()
-            .filter(|value| !value.is_empty())
-            .map(str::to_string);
-        let committed_at = parts.next().unwrap_or("").to_string();
-        let parents = parts.next().unwrap_or("");
-        let parent_oids: Vec<String> = parents.split_whitespace().map(str::to_string).collect();
-        let message = parts
-            .next()
-            .filter(|value| !value.is_empty())
-            .unwrap_or(subject.as_str())
-            .to_string();
-        commits.push(DiffCommitSummary {
-            oid: full,
-            short_oid: short,
-            subject,
-            message,
-            author_name,
-            author_email,
-            committed_at,
-            is_merge: parent_oids.len() > 1,
-            parent_oids,
-        });
+        commits.push(read_commit_summary(repo_root, oid).await?);
     }
     Ok(commits)
+}
+
+fn validate_commit_oid(oid: &str) -> anyhow::Result<()> {
+    if !matches!(oid.len(), 40 | 64) || !oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("Expected a full commit object ID");
+    }
+    Ok(())
+}
+
+async fn read_commit_summary(repo: &Path, oid: &str) -> anyhow::Result<DiffCommitSummary> {
+    validate_commit_oid(oid)?;
+    let output = git_stdout(
+        repo,
+        &[
+            "show",
+            "--no-patch",
+            "--no-show-signature",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=%H%x00%h%x00%s%x00%an%x00%ae%x00%cI%x00%P%x00%B",
+            oid,
+            "--",
+        ],
+        65_536,
+    )
+    .await?;
+    let mut parts = output.trim_end_matches('\n').splitn(8, '\0');
+    let full = parts.next().unwrap_or(oid).to_string();
+    let short_oid = parts.next().unwrap_or(oid).to_string();
+    let subject = parts.next().unwrap_or("").to_string();
+    let author_name = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let author_email = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let committed_at = parts.next().unwrap_or("").to_string();
+    let parent_oids: Vec<String> = parts
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    let message = parts
+        .next()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(&subject)
+        .to_string();
+    if !full.eq_ignore_ascii_case(oid) || output.splitn(8, '\0').count() != 8 {
+        bail!("Object is not a commit: {oid}");
+    }
+    Ok(DiffCommitSummary {
+        oid: full,
+        short_oid,
+        subject,
+        message,
+        author_name,
+        author_email,
+        committed_at,
+        is_merge: parent_oids.len() > 1,
+        parent_oids,
+    })
+}
+
+pub(crate) async fn list_git_history(
+    repo: &Path,
+    cursor: Option<&str>,
+) -> anyhow::Result<GitHistoryPage> {
+    time::timeout(GIT_TIMEOUT, async {
+        let repo_root = discover_repo_root(&repo.display().to_string())?;
+        let (branch, head_oid) = {
+            let repository = Repository::open(&repo_root)?;
+            let branch = repository
+                .find_reference("HEAD")?
+                .symbolic_target()
+                .map(|name| name.strip_prefix("refs/heads/").unwrap_or(name).to_string());
+            let head = match repository.head() {
+                Ok(head) => Some(head.peel_to_commit()?.id().to_string()),
+                Err(error) if error.code() == git2::ErrorCode::UnbornBranch => None,
+                Err(error) => return Err(error.into()),
+            };
+            (branch, head)
+        };
+        let (history_head_oid, offset) = if let Some(cursor) = cursor {
+            let fields: Vec<_> = cursor.split(':').collect();
+            if fields.len() != 3 || fields[0] != "v1" {
+                bail!("Invalid Git history cursor; refresh history");
+            }
+            validate_commit_oid(fields[1])?;
+            let offset: usize = fields[2]
+                .parse()
+                .context("Invalid Git history cursor offset")?;
+            if offset == 0 || offset > usize::MAX - 30 || !offset.is_multiple_of(30) {
+                bail!("Invalid Git history cursor offset; refresh history");
+            }
+            (Some(fields[1].to_string()), offset)
+        } else {
+            (head_oid.clone(), 0)
+        };
+        let mut commits = Vec::new();
+        let mut next_cursor = None;
+        if let Some(head) = &history_head_oid {
+            // The cursor's HEAD remains fixed even if the live branch advances or resets.
+            if cursor.is_some() {
+                read_commit_summary(&repo_root, head).await?;
+            }
+            let revs = git_stdout(
+                &repo_root,
+                &[
+                    "rev-list",
+                    "--topo-order",
+                    "--max-count=31",
+                    &format!("--skip={offset}"),
+                    head,
+                    "--",
+                ],
+                4096,
+            )
+            .await?;
+            let oids: Vec<_> = revs.lines().collect();
+            for oid in oids.iter().take(30) {
+                commits.push(read_commit_summary(&repo_root, oid).await?);
+            }
+            if oids.len() > 30 {
+                next_cursor = Some(format!("v1:{head}:{}", offset + 30));
+            }
+        }
+        Ok(GitHistoryPage {
+            repo_root: repo_root.display().to_string(),
+            branch,
+            head_oid,
+            history_head_oid,
+            commits,
+            next_cursor,
+        })
+    })
+    .await
+    .context("Git history request timed out; retry or use a smaller repository")?
+}
+
+async fn prepare_commit_review(
+    state: &AppState,
+    repo_root: PathBuf,
+    oid: &str,
+    detail_mode: DiffDetailMode,
+    selected_file: Option<DiffFileSelector>,
+    context_lines: Option<u32>,
+) -> anyhow::Result<PreparedDiff> {
+    let commit = read_commit_summary(&repo_root, oid).await?;
+    let parent = commit.parent_oids.first().cloned();
+    let base = parent
+        .as_ref()
+        .map_or(DiffEndpoint::EmptyTree, |oid| DiffEndpoint::Commit {
+            oid: oid.clone(),
+            short_oid: oid[..oid.len().min(12)].to_string(),
+            subject: None,
+        });
+    let head = commit_endpoint(&commit);
+    let mut prepared = prepare_git_changes(
+        state,
+        repo_root,
+        parent.clone().unwrap_or_else(|| "EMPTY".to_string()),
+        commit.oid.clone(),
+        base.clone(),
+        head.clone(),
+        detail_mode,
+        selected_file,
+        context_lines,
+    )
+    .await?;
+    prepared.comparison.current_commit_oid = Some(commit.oid.clone());
+    prepared.comparison.displayed_patch_range = Some(DisplayedPatchRange { base, head });
+    prepared.review = CommitStepState {
+        current_commit_oid: Some(commit.oid.clone()),
+        current_commit_index: Some(0),
+        previous_commit_oid: parent,
+        commits: vec![commit],
+    };
+    Ok(prepared)
 }
 
 #[cfg(test)]
@@ -2295,7 +2801,8 @@ async fn generate_diff(
         ResolvedDiffRef::GitRef { oid, .. } => oid.clone(),
     };
     if payload_kind == DiffDetailMode::StatOnly {
-        run_range_diff(repo_root, left, &right, &["--stat"], &[], MAX_DIFF_BYTES).await
+        let summary = build_summary_payload(repo_root, left, &right).await?;
+        Ok((summary.stat.unwrap_or_default(), summary.truncated))
     } else {
         generate_aggregate_patch(repo_root, left, &right, DEFAULT_DIFF_CONTEXT_LINES).await
     }
@@ -2335,7 +2842,15 @@ async fn summarize_files_between(
         )
     };
     if matches!(kind, Some("untracked" | "worktree")) {
+        let restored = if kind == Some("worktree") {
+            worktree_restored_paths(repo_root, base_oid).await?
+        } else {
+            Vec::new()
+        };
         for path in untracked_paths(repo_root).await? {
+            if restored.contains(&path) {
+                continue;
+            }
             let (bytes, limited, _) = read_untracked_preview(repo_root, &path)?;
             let binary = bytes.contains(&0) || (!limited && std::str::from_utf8(&bytes).is_err());
             files.push(DiffFileSummary {
@@ -2559,6 +3074,7 @@ async fn refresh_worktree_dirty(mut worktree: DiffReviewWorktree) -> DiffReviewW
 }
 
 async fn worktree_dirty(path: &Path) -> anyhow::Result<bool> {
+    reject_worktree_filters(path, 0).await?;
     let status = git_stdout(path, &["status", "--porcelain"], MAX_GIT_OUTPUT_BYTES).await?;
     Ok(!status.trim().is_empty())
 }
@@ -2629,10 +3145,36 @@ async fn git_stdout_limited(
         .current_dir(repo_root)
         .arg("--no-optional-locks")
         .arg("--literal-pathspecs")
-        .args(args)
+        .args(["-c", "core.fsmonitor=false", "-c", "core.pager=cat"])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
+    let subcommand = args
+        .iter()
+        .find(|arg| !matches!(**arg, "--no-literal-pathspecs" | "--no-replace-objects"))
+        .copied()
+        .unwrap_or_default();
+    if !matches!(subcommand, "rebase" | "checkout" | "worktree") {
+        // A review's OID must identify stored objects, consistently with libgit2 blob reads.
+        command.env("GIT_NO_REPLACE_OBJECTS", "1");
+    }
+    let diff_index = if matches!(args.first(), Some(&"diff" | &"diff-tree")) {
+        Some(0)
+    } else if args.first() == Some(&"--no-literal-pathspecs")
+        && matches!(args.get(1), Some(&"diff" | &"diff-tree"))
+    {
+        Some(1)
+    } else {
+        None
+    };
+    if let Some(index) = diff_index {
+        command
+            .args(&args[..=index])
+            .args(["--no-ext-diff", "--no-textconv"])
+            .args(&args[index + 1..]);
+    } else {
+        command.args(args);
+    }
     let mut child = command
         .spawn()
         .with_context(|| format!("failed to run git {}", args.join(" ")))?;
@@ -2644,9 +3186,9 @@ async fn git_stdout_limited(
         .stderr
         .take()
         .ok_or_else(|| anyhow!("failed to capture git stderr"))?;
-    let stdout_task = tokio::spawn(async move {
+    let read_stdout = async {
         let mut buffer = Vec::new();
-        let mut chunk = [0_u8; 8192];
+        let mut chunk = vec![0_u8; 8192];
         let mut truncated = false;
         loop {
             let read = stdout.read(&mut chunk).await?;
@@ -2658,22 +3200,31 @@ async fn git_stdout_limited(
             truncated |= read > remaining;
         }
         Ok::<_, std::io::Error>((buffer, truncated))
-    });
-    let stderr_task = tokio::spawn(async move {
+    };
+    let read_stderr = async {
         let mut buffer = Vec::new();
-        stderr.read_to_end(&mut buffer).await?;
+        let mut chunk = vec![0_u8; 8192];
+        loop {
+            let count = stderr.read(&mut chunk).await?;
+            if count == 0 {
+                break;
+            }
+            let remaining = 65_536_usize.saturating_sub(buffer.len());
+            buffer.extend_from_slice(&chunk[..count.min(remaining)]);
+        }
         Ok::<_, std::io::Error>(buffer)
-    });
-
-    let status = match time::timeout(GIT_TIMEOUT, child.wait()).await {
-        Ok(status) => status?,
+    };
+    let (status, (stdout, truncated), stderr) = match time::timeout(GIT_TIMEOUT, async {
+        tokio::try_join!(child.wait(), read_stdout, read_stderr)
+    })
+    .await
+    {
+        Ok(result) => result?,
         Err(_) => {
             let _ = child.kill().await;
             bail!("git command timed out: git {}", args.join(" "));
         }
     };
-    let (stdout, truncated) = stdout_task.await??;
-    let stderr = stderr_task.await??;
     if !status.success() {
         let message = String::from_utf8_lossy(&stderr).trim().to_string();
         bail!(
@@ -2694,6 +3245,44 @@ async fn git_stdout_limited(
         text.push_str("\n... diff output truncated by Fura ...\n");
     }
     Ok((text, truncated))
+}
+
+pub(crate) async fn read_git_file(
+    repo_root: &str,
+    commit_oid: &str,
+    path: &str,
+) -> anyhow::Result<crate::protocol::GitFileContent> {
+    validate_commit_oid(commit_oid)?;
+    validate_diff_path(path)?;
+    let root = discover_repo_root(repo_root)?;
+    let oid = git2::Oid::from_str(commit_oid)?;
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || {
+        let repository = Repository::open(&root)?;
+        let commit = repository.find_commit(oid)?;
+        let tree = commit.tree()?;
+        let entry = tree.get_path(Path::new(&path))?;
+        let blob_oid = entry.id();
+        let (size, kind) = repository.odb()?.read_header(blob_oid)?;
+        if kind != git2::ObjectType::Blob {
+            bail!("This committed path is not a file blob (directories and submodules have no text file view)");
+        }
+        if size > MAX_DIFF_FILE_PATCH_BYTES {
+            bail!("Committed file exceeds the 1 MB text preview limit");
+        }
+        let blob = repository.find_blob(blob_oid)?;
+        if blob.content().contains(&0) {
+            bail!("Committed file is binary; review its metadata in the diff");
+        }
+        let text = std::str::from_utf8(blob.content()).context("Committed file is not UTF-8 text")?.to_owned();
+        Ok(crate::protocol::GitFileContent {
+            repo_root: root.to_string_lossy().into_owned(),
+            commit_oid: oid.to_string(),
+            blob_oid: blob_oid.to_string(),
+            path,
+            text,
+        })
+    }).await?
 }
 
 #[cfg(test)]
@@ -3322,7 +3911,10 @@ mod tests {
     #[test]
     fn parse_name_status_rewrites_preserve_loadable_selectors() {
         let summaries = parse_numstat_name_status(
-            "0\t0\t\0src/old.rs\0src/new.rs\00\t0\t\0src/base.rs\0src/copy.rs\0",
+            concat!(
+                "0\t0\t\0src/old.rs\0src/new.rs\0",
+                "0\t0\t\0src/base.rs\0src/copy.rs\0"
+            ),
             "R100\0src/old.rs\0src/new.rs\0C100\0src/base.rs\0src/copy.rs\0",
         );
         assert_eq!(summaries.len(), 2);
@@ -3765,7 +4357,15 @@ mod tests {
                 } else {
                     files.insert(
                         path.strip_prefix(root).unwrap().to_path_buf(),
-                        fs::read(path).unwrap(),
+                        if entry.file_type().unwrap().is_symlink() {
+                            fs::read_link(&path)
+                                .unwrap()
+                                .as_os_str()
+                                .as_encoded_bytes()
+                                .to_vec()
+                        } else {
+                            fs::read(path).unwrap()
+                        },
                     );
                 }
             }
@@ -3897,5 +4497,681 @@ mod tests {
                 .0
                 .contains("Binary files")
         );
+    }
+
+    #[tokio::test]
+    async fn submodule_checkout_and_dirty_state_invalidate_old_patch_identity() {
+        let (_source_temp, source, first, second) = test_repo();
+        write_file(&source, "src/lib.rs", "third\n");
+        git(&source, &["commit", "-am", "third"]);
+        let third = git_output(&source, &["rev-parse", "HEAD"]);
+        let (_temp, repo, _, _) = test_repo();
+        git(
+            &repo,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                source.to_str().unwrap(),
+                "sub",
+            ],
+        );
+        git(&repo.join("sub"), &["checkout", "--detach", &first]);
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "pin first"]);
+        git(&repo.join("sub"), &["checkout", "--detach", &second]);
+        let (left, right, _, _) = git_change_range(&repo, GitChangeKind::Unstaged)
+            .await
+            .unwrap();
+        let file = DiffFileSelector {
+            old_path: None,
+            new_path: "sub".into(),
+        };
+        let before = generate_file_patch(&repo, &left, &right, &file, 3)
+            .await
+            .unwrap()
+            .0;
+        assert!(before.contains(&format!("+Subproject commit {second}")));
+        git(&repo.join("sub"), &["checkout", "--detach", &third]);
+        assert!(
+            generate_file_patch(&repo, &left, &right, &file, 3)
+                .await
+                .is_err()
+        );
+        let (left, right, _, _) = git_change_range(&repo, GitChangeKind::Unstaged)
+            .await
+            .unwrap();
+        write_file(&repo.join("sub"), "src/lib.rs", "dirty\n");
+        assert!(
+            generate_file_patch(&repo, &left, &right, &file, 3)
+                .await
+                .is_err()
+        );
+        let (left, right, _, _) = git_change_range(&repo, GitChangeKind::Unstaged)
+            .await
+            .unwrap();
+        assert!(
+            generate_file_patch(&repo, &left, &right, &file, 3)
+                .await
+                .unwrap()
+                .0
+                .contains(&format!("{third}-dirty"))
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_compare_reconciles_removed_index_paths_in_patch_summary_and_stat() {
+        let (_temp, repo, _, _) = test_repo();
+        let paths = ["same.txt", "-leading", "line\nname", "quote\"name"];
+        for path in paths {
+            write_file(&repo, path, "base\n");
+        }
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "literal files"]);
+        let base = git_output(&repo, &["rev-parse", "HEAD"]);
+        for path in paths {
+            git(&repo, &["rm", "--cached", "--", path]);
+        }
+        let before = repository_bytes(&repo);
+        let right = mutable_identity(&repo, &base, "worktree").await.unwrap();
+        assert!(
+            generate_aggregate_patch(&repo, &base, &right, 3)
+                .await
+                .unwrap()
+                .0
+                .trim()
+                .is_empty()
+        );
+        let summary = build_summary_payload(&repo, &base, &right).await.unwrap();
+        assert!(summary.files.is_empty());
+        assert!(summary.stat.unwrap().trim().is_empty());
+        assert_eq!(before, repository_bytes(&repo));
+        for path in paths {
+            write_file(&repo, path, "changed\n");
+        }
+        let before = repository_bytes(&repo);
+        let right = mutable_identity(&repo, &base, "worktree").await.unwrap();
+        let summary = build_summary_payload(&repo, &base, &right).await.unwrap();
+        assert_eq!(summary.files.len(), paths.len());
+        for path in paths {
+            let file = summary
+                .files
+                .iter()
+                .find(|file| file.new_path == path)
+                .unwrap();
+            assert_eq!(file.status, DiffFileStatus::Modified);
+            assert_eq!((file.added, file.removed), (1, 1));
+            let patch = generate_file_patch(
+                &repo,
+                &base,
+                &right,
+                &DiffFileSelector {
+                    old_path: file.old_path.clone(),
+                    new_path: path.to_string(),
+                },
+                3,
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(patch.matches("diff --git ").count(), 1);
+            assert!(patch.contains("-base\n") && patch.contains("+changed\n"));
+            assert!(!patch.contains("deleted file mode") && !patch.contains("new file mode"));
+            assert!(parse_diff_rows(&patch).iter().any(|row| matches!(
+                row, DiffRow::Line { location, .. } if location.new_path == path
+            )));
+        }
+        let stat = summary.stat.unwrap();
+        assert!(stat.contains("4 insertions(+)") && stat.contains("4 deletions(-)"));
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn worktree_restored_paths_preserve_symlinks_binary_and_file_modes() {
+        use std::os::unix::{fs::PermissionsExt, fs::symlink};
+        let (_temp, repo, _, _) = test_repo();
+        symlink("old-target", repo.join("link")).unwrap();
+        fs::write(repo.join("binary"), b"old\0data").unwrap();
+        write_file(&repo, "mode", "unchanged\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "special files"]);
+        let base = git_output(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["rm", "--cached", "link", "binary", "mode"]);
+        let right = mutable_identity(&repo, &base, "worktree").await.unwrap();
+        assert!(
+            build_summary_payload(&repo, &base, &right)
+                .await
+                .unwrap()
+                .files
+                .is_empty()
+        );
+        fs::remove_file(repo.join("link")).unwrap();
+        symlink("new-target", repo.join("link")).unwrap();
+        fs::write(repo.join("binary"), b"new\0data").unwrap();
+        fs::set_permissions(repo.join("mode"), fs::Permissions::from_mode(0o755)).unwrap();
+        let before = repository_bytes(&repo);
+        let right = mutable_identity(&repo, &base, "worktree").await.unwrap();
+        let summary = build_summary_payload(&repo, &base, &right).await.unwrap();
+        assert_eq!(summary.files.len(), 3);
+        assert_eq!(
+            summary
+                .files
+                .iter()
+                .find(|file| file.new_path == "binary")
+                .unwrap()
+                .status,
+            DiffFileStatus::Binary
+        );
+        let patch = generate_aggregate_patch(&repo, &base, &right, 3)
+            .await
+            .unwrap()
+            .0;
+        assert!(patch.contains("-old-target") && patch.contains("+new-target"));
+        assert!(patch.contains("old mode 100644") && patch.contains("new mode 100755"));
+        assert!(patch.contains("Binary files"));
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn selected_root_and_merge_commits_review_without_prior_range_or_repository_writes() {
+        let (_temp, repo, root, first_parent) = test_repo();
+        git(&repo, &["checkout", "-b", "side", &root]);
+        write_file(&repo, "side-file", "side\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "side commit"]);
+        let second_parent = git_output(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "main"]);
+        git(
+            &repo,
+            &[
+                "merge",
+                "--no-ff",
+                "side",
+                "-m",
+                "merge subject\n\nMerge body",
+            ],
+        );
+        let merge = git_output(&repo, &["rev-parse", "HEAD"]);
+        let before = repository_bytes(&repo);
+        let state = crate::tests::test_state(8, None);
+        let prepared = prepare_commit_review(
+            &state,
+            repo.clone(),
+            &root,
+            DiffDetailMode::FilePatch,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.left_tree_or_commit, "EMPTY");
+        assert!(matches!(prepared.comparison.base, DiffEndpoint::EmptyTree));
+        assert_eq!(prepared.review.commits[0].oid, root);
+        assert!(prepared.review.previous_commit_oid.is_none());
+        let summary = build_summary_payload(
+            &repo,
+            &prepared.left_tree_or_commit,
+            &prepared.right_tree_or_commit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.files[0].status, DiffFileStatus::Added);
+        let patch = generate_file_patch(
+            &repo,
+            &prepared.left_tree_or_commit,
+            &prepared.right_tree_or_commit,
+            &DiffFileSelector {
+                old_path: None,
+                new_path: "src/lib.rs".into(),
+            },
+            3,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(patch.contains("+pub fn value() -> i32 { 1 }"));
+        let prepared = prepare_commit_review(
+            &state,
+            repo.clone(),
+            &merge,
+            DiffDetailMode::FilePatch,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(prepared.left_tree_or_commit, first_parent);
+        assert_eq!(
+            prepared.review.commits[0].parent_oids,
+            [first_parent, second_parent]
+        );
+        assert!(prepared.review.commits[0].is_merge);
+        assert!(prepared.review.commits[0].message.contains("Merge body"));
+        let summary = build_summary_payload(
+            &repo,
+            &prepared.left_tree_or_commit,
+            &prepared.right_tree_or_commit,
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.files.len(), 1);
+        assert_eq!(summary.files[0].new_path, "side-file");
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn history_pages_pin_merge_traversal_across_refresh_and_detached_head() {
+        let (_temp, repo, root, _) = test_repo();
+        git(&repo, &["checkout", "-b", "side", &root]);
+        git(&repo, &["commit", "--allow-empty", "-m", "side"]);
+        let side = git_output(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "main"]);
+        for index in 0..34 {
+            git(
+                &repo,
+                &["commit", "--allow-empty", "-m", &format!("commit {index}")],
+            );
+        }
+        git(&repo, &["merge", "--no-ff", "side", "-m", "merge"]);
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let expected: Vec<String> = git_output(&repo, &["rev-list", "--topo-order", "HEAD"])
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let before = repository_bytes(&repo);
+        let first = list_git_history(&repo.join("src"), None).await.unwrap();
+        assert_eq!(
+            first.repo_root,
+            repo.canonicalize().unwrap().display().to_string()
+        );
+        assert_eq!(first.branch.as_deref(), Some("main"));
+        assert_eq!(first.head_oid.as_deref(), Some(head.as_str()));
+        assert_eq!(first.commits.len(), 30);
+        assert!(first.commits[0].is_merge);
+        assert_eq!(before, repository_bytes(&repo));
+        git(&repo, &["commit", "--allow-empty", "-m", "new live head"]);
+        let live = git_output(&repo, &["rev-parse", "HEAD"]);
+        let next = list_git_history(&repo, first.next_cursor.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(next.head_oid.as_deref(), Some(live.as_str()));
+        assert_eq!(next.history_head_oid.as_deref(), Some(head.as_str()));
+        assert!(next.next_cursor.is_none());
+        let actual: Vec<_> = first
+            .commits
+            .iter()
+            .chain(&next.commits)
+            .map(|commit| commit.oid.clone())
+            .collect();
+        assert_eq!(actual, expected);
+        assert!(actual.contains(&side));
+        assert_eq!(
+            list_git_history(&repo, None).await.unwrap().commits[0].oid,
+            live
+        );
+        git(&repo, &["checkout", "--detach", &root]);
+        let detached = list_git_history(&repo, None).await.unwrap();
+        assert!(detached.branch.is_none());
+        assert_eq!(detached.commits[0].oid, root);
+        let pinned = list_git_history(&repo, first.next_cursor.as_deref())
+            .await
+            .unwrap();
+        assert_eq!(
+            pinned
+                .commits
+                .iter()
+                .map(|commit| &commit.oid)
+                .collect::<Vec<_>>(),
+            next.commits
+                .iter()
+                .map(|commit| &commit.oid)
+                .collect::<Vec<_>>()
+        );
+        for cursor in [
+            "",
+            "v1:HEAD:30",
+            "v2:bad:30",
+            &format!("v1:{head}:1"),
+            &format!("v1:{head}:18446744073709551615"),
+        ] {
+            assert!(list_git_history(&repo, Some(cursor)).await.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn history_handles_unborn_and_rejects_non_commit_selections() {
+        let temp = TempDir::new().unwrap();
+        git(temp.path(), &["init", "-b", "main"]);
+        let page = list_git_history(temp.path(), None).await.unwrap();
+        assert_eq!(page.branch.as_deref(), Some("main"));
+        assert!(page.head_oid.is_none() && page.history_head_oid.is_none());
+        assert!(page.commits.is_empty() && page.next_cursor.is_none());
+        let (_temp, repo, _, head) = test_repo();
+        let tree = git_output(&repo, &["rev-parse", "HEAD^{tree}"]);
+        let state = crate::tests::test_state(8, None);
+        for oid in ["HEAD", "--all", &tree] {
+            assert!(
+                prepare_commit_review(
+                    &state,
+                    repo.clone(),
+                    oid,
+                    DiffDetailMode::FilePatch,
+                    None,
+                    None
+                )
+                .await
+                .is_err()
+            );
+        }
+        git(&repo, &["tag", "-a", "annotated", "-m", "tag", &head]);
+        let tag = git_output(&repo, &["rev-parse", "annotated"]);
+        assert!(
+            list_git_history(&repo, Some(&format!("v1:{tag}:30")))
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn git_read_safety_refuses_filters_without_running_helpers_and_keeps_history_usable() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, repo, _, head) = test_repo();
+        let helpers = TempDir::new().unwrap();
+        let marker = helpers.path().join("ran");
+        let script = helpers.path().join("probe");
+        fs::write(
+            &script,
+            format!("#!/bin/sh\nprintf ran > '{}'\ncat\n", marker.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            &repo,
+            &["config", "core.fsmonitor", script.to_str().unwrap()],
+        );
+        write_file(&repo, "src/lib.rs", "working\n");
+        git_change_range(&repo, GitChangeKind::Unstaged)
+            .await
+            .unwrap();
+        assert!(!marker.exists());
+        write_file(&repo, ".git/info/attributes", "src/lib.rs filter=probe\n");
+        git(
+            &repo,
+            &["config", "filter.probe.clean", script.to_str().unwrap()],
+        );
+        git(
+            &repo,
+            &["config", "filter.probe.process", script.to_str().unwrap()],
+        );
+        let before = repository_bytes(&repo);
+        assert!(
+            git_change_range(&repo, GitChangeKind::Unstaged)
+                .await
+                .is_err()
+        );
+        assert!(mutable_identity(&repo, &head, "worktree").await.is_err());
+        let page = list_git_history(&repo, None).await.unwrap();
+        assert_eq!(page.commits[0].oid, head);
+        let state = crate::tests::test_state(8, None);
+        let prepared = prepare_commit_review(
+            &state,
+            repo.clone(),
+            &head,
+            DiffDetailMode::FilePatch,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        generate_aggregate_patch(
+            &repo,
+            &prepared.left_tree_or_commit,
+            &prepared.right_tree_or_commit,
+            3,
+        )
+        .await
+        .unwrap();
+        assert!(!marker.exists());
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn mutable_identity_refuses_oversized_total_reads_without_partial_version() {
+        let (_temp, repo, _, head) = test_repo();
+        let file = fs::File::create(repo.join("huge")).unwrap();
+        file.set_len(65 * 1024 * 1024).unwrap();
+        assert!(
+            git_change_range(&repo, GitChangeKind::Untracked)
+                .await
+                .is_err()
+        );
+        assert!(mutable_identity(&repo, &head, "worktree").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn committed_file_reads_exact_blob_even_when_working_file_is_deleted() {
+        let (_temp, repo, base, head) = test_repo();
+        fs::remove_file(repo.join("src/lib.rs")).unwrap();
+        let before = repository_bytes(&repo);
+        let file = read_git_file(repo.to_str().unwrap(), &base, "src/lib.rs")
+            .await
+            .unwrap();
+        assert_eq!(file.text, "pub fn value() -> i32 { 1 }\n");
+        assert_eq!(file.commit_oid, base);
+        assert_eq!(
+            file.blob_oid,
+            git_output(&repo, &["rev-parse", &format!("{base}:src/lib.rs")])
+        );
+        let newer = read_git_file(repo.to_str().unwrap(), &head, "src/lib.rs")
+            .await
+            .unwrap();
+        assert_eq!(newer.text, "pub fn value() -> i32 { 2 }\n");
+        assert!(
+            read_git_file(repo.to_str().unwrap(), &head, "../config")
+                .await
+                .is_err()
+        );
+        assert!(
+            read_git_file(repo.to_str().unwrap(), &head, "src")
+                .await
+                .is_err()
+        );
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn committed_file_refuses_binary_invalid_utf8_and_oversized_blobs() {
+        let (_temp, repo, _, _) = test_repo();
+        fs::write(repo.join("binary"), [0, 1, 2]).unwrap();
+        fs::write(repo.join("invalid"), [255, 254]).unwrap();
+        fs::write(
+            repo.join("large"),
+            vec![b'x'; MAX_DIFF_FILE_PATCH_BYTES + 1],
+        )
+        .unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "blob boundaries"]);
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let before = repository_bytes(&repo);
+        for path in ["binary", "invalid", "large"] {
+            assert!(
+                read_git_file(repo.to_str().unwrap(), &head, path)
+                    .await
+                    .is_err(),
+                "{path}"
+            );
+        }
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn review_issue_signed_history_does_not_execute_verifier() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temp, repo, _, head) = test_repo();
+        let verifier = temp.path().join("verifier.py");
+        let marker = temp.path().join("signature-marker");
+        fs::write(&verifier, "#!/usr/bin/env python3\nfrom pathlib import Path\nPath(__file__).with_name('signature-marker').write_text('ran')\nraise SystemExit(1)\n").unwrap();
+        fs::set_permissions(&verifier, fs::Permissions::from_mode(0o755)).unwrap();
+        let tree = git_output(&repo, &["rev-parse", "HEAD^{tree}"]);
+        let signed = format!(
+            "tree {tree}\nparent {head}\nauthor Review <review@example.invalid> 1700000000 +0000\ncommitter Review <review@example.invalid> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n fake\n -----END PGP SIGNATURE-----\n\nSigned review fixture\n"
+        );
+        let mut process = StdCommand::new("git")
+            .current_dir(&repo)
+            .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(process.stdin.as_mut().unwrap(), signed.as_bytes()).unwrap();
+        let output = process.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let oid = String::from_utf8(output.stdout).unwrap();
+        git(&repo, &["update-ref", "refs/heads/main", oid.trim()]);
+        git(&repo, &["config", "log.showSignature", "true"]);
+        git(
+            &repo,
+            &["config", "gpg.program", verifier.to_str().unwrap()],
+        );
+        let result = list_git_history(&repo, None).await;
+        assert!(!marker.exists(), "history ran configured gpg.program");
+        assert_eq!(result.unwrap().commits[0].subject, "Signed review fixture");
+    }
+
+    #[tokio::test]
+    async fn review_issue_replace_refs_cannot_change_commit_identity_between_views() {
+        let (_temp, repo, base, head) = test_repo();
+        git(&repo, &["checkout", "--detach", &base]);
+        write_file(&repo, "src/lib.rs", "pub fn value() -> i32 { 99 }\n");
+        git(&repo, &["commit", "-am", "Replacement contents"]);
+        let replacement = git_output(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["checkout", "main"]);
+        git(&repo, &["replace", &head, &replacement]);
+        let before = repository_bytes(&repo);
+        let history = list_git_history(&repo, None).await.unwrap();
+        assert_eq!(history.commits[0].subject, "change value");
+        let patch = generate_file_patch(
+            &repo,
+            &base,
+            &head,
+            &DiffFileSelector {
+                old_path: None,
+                new_path: "src/lib.rs".into(),
+            },
+            3,
+        )
+        .await
+        .unwrap()
+        .0;
+        let file = read_git_file(repo.to_str().unwrap(), &head, "src/lib.rs")
+            .await
+            .unwrap();
+        assert!(patch.contains("+pub fn value() -> i32 { 2 }"));
+        assert_eq!(file.text, "pub fn value() -> i32 { 2 }\n");
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn review_issue_removed_index_directory_replaced_by_file_has_exact_paths() {
+        let (_temp, repo, _, _) = test_repo();
+        write_file(&repo, "d/f", "old\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "directory"]);
+        let base = git_output(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["rm", "-r", "--cached", "d"]);
+        fs::remove_file(repo.join("d/f")).unwrap();
+        fs::remove_dir(repo.join("d")).unwrap();
+        write_file(&repo, "d", "replacement\n");
+        let before = repository_bytes(&repo);
+        let right = mutable_identity(&repo, &base, "worktree").await.unwrap();
+        let (files, _) = summarize_files_between(&repo, &base, &right).await.unwrap();
+        assert_eq!(
+            files
+                .iter()
+                .map(|file| file.new_path.as_str())
+                .collect::<HashSet<_>>(),
+            HashSet::from(["d", "d/f"])
+        );
+        assert_eq!(files.len(), 2);
+        let patch = generate_file_patch(
+            &repo,
+            &base,
+            &right,
+            &DiffFileSelector {
+                old_path: None,
+                new_path: "d".into(),
+            },
+            3,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(patch.contains("+replacement"));
+        assert!(
+            !patch.contains("-old"),
+            "selected file must not include another path's deletion"
+        );
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn review_issue_historical_patch_does_not_require_live_parent_containment() {
+        let (_temp, repo, base, head) = test_repo();
+        fs::remove_dir_all(repo.join("src")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), repo.join("src")).unwrap();
+        let before = repository_bytes(&repo);
+        let patch = generate_file_patch(
+            &repo,
+            &base,
+            &head,
+            &DiffFileSelector {
+                old_path: None,
+                new_path: "src/lib.rs".into(),
+            },
+            3,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(patch.contains("+pub fn value() -> i32 { 2 }"));
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn review_issue_literal_b_prefix_path_keeps_exact_lazy_patch() {
+        let (_temp, repo, _, _) = test_repo();
+        fs::create_dir(repo.join("x b")).unwrap();
+        fs::write(repo.join("x b/y"), "before\n").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "literal path base"]);
+        let base = git_output(&repo, &["rev-parse", "HEAD"]);
+        fs::write(repo.join("x b/y"), "after\n").unwrap();
+        git(&repo, &["commit", "-am", "literal path change"]);
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let before = repository_bytes(&repo);
+        let patch = generate_file_patch(
+            &repo,
+            &base,
+            &head,
+            &DiffFileSelector {
+                old_path: None,
+                new_path: "x b/y".to_owned(),
+            },
+            3,
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            patch.contains("-before\n+after\n"),
+            "the selected literal filename must retain its changed lines"
+        );
+        assert_eq!(before, repository_bytes(&repo));
     }
 }

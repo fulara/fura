@@ -1717,6 +1717,8 @@ pub(crate) struct DiffJobRegistry {
     pub(crate) next_token: u64,
     pub(crate) state_generations: HashMap<(String, DiffScope), DiffStateGenerationJob>,
     pub(crate) file_patches: HashMap<(String, DiffScope, String, String), DiffFilePatchJob>,
+    pub(crate) history_jobs: HashMap<u64, DiffFilePatchJob>,
+    pub(crate) git_file_jobs: HashMap<u64, DiffFilePatchJob>,
 }
 
 pub(crate) struct DiffStateGenerationJob {

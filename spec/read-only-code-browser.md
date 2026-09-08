@@ -40,14 +40,16 @@ npm --prefix frontend test          # 28 files, 199 tests passed
 npm --prefix frontend run build      # passed; existing Mermaid chunk-size warning remains
 ```
 
-### Status update: Open in Code (diff → Code) is implemented and fixed
+### Git diff → Code and committed files
 
-"Open in Code" from the diff view already exists (listed under Milestone 5 below). Two fixes landed since:
+- Working-tree files open in Code with the selected repository root, not necessarily the session cwd. The pending file is assigned after resetting the workspace so it survives `code.workspace.ready`.
+- Code Refresh preserves an explicitly opened root and reopens the selected file after workspace readiness. The Code header displays the canonical root.
+- Code comments/questions, deletion and preview/flush use canonical root + path + file version. Identical paths in different repositories cannot share notes or prompt context.
+- Historical files use **View committed file**, an immutable read-only dialog backed by `git.file.request`. The dialog identifies repository, commit, blob and path. It does not create/check out a review worktree or use a mutable Code/LSP workspace. Deleted files read their parent version.
+- Binary, non-UTF-8, non-file and over-1-MiB blobs fail explicitly; interrupted reads show a connection error and can be reopened after reconnect.
 
-- Working-tree path: the requested file was dropped because `resetCodeViewForSession` cleared the pending open before `code.workspace.ready`. The pending request is now assigned after the reset, so the clicked file actually opens.
-- Review-commit path: simplified to a single opener. `openCodeRequest` only prepares the review worktree (checkout if cached, else ensure) and the `diff.reviewWorktree.state` handler is the sole place that sends `code.workspace.openRoot`. This removes a duplicate open and routes the cached-worktree case through a checkout to the correct ref.
-
-Both are covered by regression tests in `frontend/src/main.test.ts`.
+Regression coverage includes unit tests and real-repository Chromium scenarios in
+`frontend/smoke/git-review.spec.ts`, including repository isolation and unchanged Git bytes.
 
 
 ## Core decisions
@@ -452,7 +454,7 @@ Out-of-workspace definition/reference targets are classified as external and sho
 
 Deliverables:
 
-- “Open in Code” from diff file paths — DONE (working-tree + review-commit paths; see status update above),
+- “Open in Code” for working-tree diff paths, and immutable “View committed file” for historical paths — DONE (see status update above),
 - “Open in Code” from relevant tool/read outputs,
 - file-change invalidation,
 - analyzer idle shutdown,

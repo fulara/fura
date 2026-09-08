@@ -959,6 +959,11 @@ h2 {
   gap: 0.25rem;
 }
 
+.code-workspace-title code {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
 .code-workspace-title span,
 .code-tree-entry-meta,
 .code-file-header span,
@@ -1379,6 +1384,130 @@ h2 {
   height: 100%;
   min-height: 0;
   gap: 1rem;
+}
+
+.git-review-view {
+  grid-template-columns: minmax(12rem, 26%) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  container: git-review / inline-size;
+}
+
+.git-review-header {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #303746;
+  background: #151922;
+  min-width: 0;
+}
+
+.git-repository-context {
+  display: grid;
+  grid-template-columns: minmax(14rem, 1fr) minmax(12rem, 1fr);
+  align-items: start;
+  gap: 1rem;
+  min-width: 0;
+}
+
+.git-review-header .diffs-repo-selector {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.git-review-header .diffs-repo-label {
+  flex-basis: 100%;
+}
+
+.git-review-header .diffs-actions {
+  padding: 0;
+  justify-content: flex-start;
+}
+
+.git-repository-identity {
+  display: grid;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+.git-root-path, .git-selected-commit-meta {
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+  color: #b5bed1;
+}
+
+.git-review-navigation, .git-history-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.git-review-navigation button[aria-pressed="true"],
+.git-history-commit[aria-pressed="true"] {
+  border-color: #8794ff;
+  background: #252c45;
+}
+
+.git-review-view .diffs-main {
+  display: flex;
+  flex-direction: column;
+}
+
+.git-review-view .diffs-main > :not(.diffs-main-body) {
+  flex-shrink: 0;
+}
+
+.git-review-view .diffs-main-body {
+  flex: 1;
+  min-height: 0;
+}
+
+.git-history-mode .diffs-sidebar {
+  grid-template-rows: minmax(9rem, 3fr) minmax(7rem, 2fr);
+}
+
+.git-history-mode .diffs-sidebar-top {
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.git-history-browser {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  gap: 0.5rem;
+}
+
+.git-history-heading { justify-content: space-between; }
+.git-history-list { overflow: auto; min-height: 0; }
+
+.git-history-commit {
+  width: 100%;
+  display: grid;
+  gap: 0.3rem;
+  text-align: left;
+  white-space: normal;
+  margin-bottom: 0.35rem;
+  padding: 0.55rem;
+}
+
+.git-history-commit strong { overflow-wrap: anywhere; }
+.git-history-meta { font-size: 0.74rem; color: #abb6cb; }
+.git-history-footer { display: grid; gap: 0.4rem; }
+.git-history-footer small { color: #c7b28b; }
+.git-history-error { color: #ff9d9d; }
+.git-diff-totals { margin: 0; color: #b5bed1; font-size: 0.8rem; }
+.git-commit-navigation { justify-content: flex-start; }
+
+@container git-review (max-width: 700px) {
+  .git-repository-context { grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
+  .git-review-header .diffs-repo-label { flex-basis: auto; }
+  .git-review-header .diff-repo-select { width: auto; flex: 1; min-width: 8rem; }
+  .git-root-path { max-height: 2.5em; overflow: auto; }
 }
 
 .diffs-sidebar,
@@ -4493,3 +4622,21 @@ h2 {
   margin-right: auto;
   border-color: #6d3a3a;
 }
+
+.git-file-dialog {
+  width: min(75rem, 92vw);
+  max-height: 90vh;
+  color: #e2e8f4;
+  background: #141921;
+  border: 1px solid #526079;
+  border-radius: 0.7rem;
+  padding: 1rem;
+}
+
+.git-file-dialog::backdrop { background: #000a; }
+.git-file-dialog header { display: flex; align-items: center; gap: 0.5rem; }
+.git-file-dialog header strong { flex: 1; }
+.git-file-origin { white-space: pre-wrap; overflow-wrap: anywhere; color: #b5bed1; }
+.git-file-content { overflow: auto; max-height: 65vh; padding: 1rem; background: #0c1017; tab-size: 4; }
+
+.diffs-actions.git-commit-navigation { justify-content: flex-start; }

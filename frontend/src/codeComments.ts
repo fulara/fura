@@ -2,6 +2,9 @@ import type { CodeFileContent } from "./protocol";
 
 export type CodeFileComment = {
   id: string;
+  root: string;
+  fileVersion: number;
+  fileText: string;
   path: string;
   lineNumber: number;
   lineText: string;
@@ -10,6 +13,7 @@ export type CodeFileComment = {
 
 export type CodePreviewDraft = {
   sessionId: string;
+  root: string;
   file: CodeFileContent;
   comments: CodeFileComment[];
 };
@@ -18,6 +22,7 @@ const CODE_COMMENT_CONTEXT_RADIUS = 4;
 
 export function createCodeFileComment(input: {
   id: string;
+  root: string;
   file: CodeFileContent;
   lineNumber: number;
   lineText: string;
@@ -25,29 +30,39 @@ export function createCodeFileComment(input: {
 }): CodeFileComment {
   return {
     id: input.id,
+    root: input.root,
+    fileVersion: input.file.version,
+    fileText: input.file.text,
     path: input.file.path,
     lineNumber: input.lineNumber,
-    lineText: input.lineText,
+    lineText: codeFileLines(input.file.text)[input.lineNumber - 1] ?? "",
     text: input.text.trim(),
   };
 }
 
 
-export function selectedCodeComments(comments: CodeFileComment[], path: string): CodeFileComment[] {
-  return comments.filter(comment => comment.path === path);
+export function selectedCodeComments(comments: CodeFileComment[], root: string, file: CodeFileContent): CodeFileComment[] {
+  return comments.filter(comment =>
+    comment.root === root && comment.path === file.path &&
+    comment.fileVersion === file.version && comment.fileText === file.text,
+  );
 }
 
-export function removeSelectedCodeComments(comments: CodeFileComment[], path: string): CodeFileComment[] {
-  return comments.filter(comment => comment.path !== path);
+export function removeSelectedCodeComments(comments: CodeFileComment[], flushed: CodeFileComment[]): CodeFileComment[] {
+  return comments.filter(comment => !flushed.includes(comment));
+}
+
+export function codeCommentFileKey(root: string, path: string): string {
+  return JSON.stringify([root, path]);
 }
 
 export function formatCodeLocation(comment: CodeFileComment): string {
-  return `${comment.path}:${comment.lineNumber}`;
+  return `${comment.root.replace(/\/$/u, "")}/${comment.path}:${comment.lineNumber}`;
 }
 
-export function buildCodeCommentPrompt(file: CodeFileContent, comments: CodeFileComment[]): string {
+export function buildCodeCommentPrompt(root: string, file: CodeFileContent, comments: CodeFileComment[]): string {
   const lines = codeFileLines(file.text);
-  const sortedComments = [...comments].sort((left, right) => left.lineNumber - right.lineNumber);
+  const sortedComments = selectedCodeComments(comments, root, file).sort((left, right) => left.lineNumber - right.lineNumber);
   const commentSections = sortedComments
     .map((comment, index) => [
       `### Comment ${index + 1}`,
@@ -63,12 +78,14 @@ export function buildCodeCommentPrompt(file: CodeFileContent, comments: CodeFile
     .join("\n\n");
 
   return [
-    "I reviewed the current file content in Fura and left comments on specific code lines.",
+    "I reviewed a saved file version in Fura and left comments on specific code lines.",
+    `Workspace root: ${root}`,
     `File: ${file.path}`,
+    `Reviewed version: ${file.version} (filesystem version; context below is the reviewed content, not a fresh disk read)`,
     "",
     commentSections,
     "",
-    "Please address these comments. Use the file path and line number metadata to locate each comment precisely.",
+    "Please address these comments in the specified workspace root, which may differ from your session cwd. Verify the current file against the reviewed context before changing it; line numbers refer to the reviewed version.",
   ].join("\n");
 }
 
