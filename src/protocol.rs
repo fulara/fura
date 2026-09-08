@@ -207,23 +207,32 @@ pub(crate) enum ResolvedDiffRef {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum SessionRepoSource {
     Worktree,
     Cwd,
-    Snapshot,
+    AdditionalDirectory,
+    Tool,
+    Submodule,
+    Manual,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SessionDiffSnapshotSummary {
-    pub(crate) entry_id: String,
-    pub(crate) label: String,
-    pub(crate) created_at: String,
-    pub(crate) ref_name: String,
-    pub(crate) tree: String,
-    pub(crate) commit: String,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GitChangeKind {
+    #[default]
+    Unstaged,
+    Staged,
+    Untracked,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SessionRepoAction {
+    Add,
+    Hide,
+    Default,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -295,8 +304,7 @@ pub(crate) struct SessionRepoCandidate {
     pub(crate) repo_root: String,
     pub(crate) label: String,
     pub(crate) source: SessionRepoSource,
-    pub(crate) has_session_start_snapshot: bool,
-    pub(crate) session_start_snapshot: Option<SessionDiffSnapshotSummary>,
+    pub(crate) is_default: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -306,9 +314,8 @@ pub(crate) struct SessionRepoCandidate {
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum DiffEndpoint {
-    SessionStartSnapshot {
-        snapshot: SessionDiffSnapshotSummary,
-    },
+    Index,
+    EmptyTree,
     WorkingTree,
     GitRef {
         input: String,
@@ -341,6 +348,7 @@ pub(crate) enum DiffFileStatus {
     Renamed,
     Copied,
     Binary,
+    Conflicted,
     Unknown,
 }
 
@@ -410,6 +418,8 @@ pub(crate) enum DiffRequestIdentity {
         diff_id: String,
         session_id: String,
         repo_id: Option<String>,
+        #[serde(default)]
+        change_kind: GitChangeKind,
         detail_mode: DiffDetailMode,
         current_commit_oid: Option<String>,
         selected_file: Option<DiffFileSelector>,
@@ -475,15 +485,6 @@ pub(crate) enum SessionChangesSummaryState {
         review_worktree: Option<DiffReviewWorktree>,
     },
     MissingRepo {
-        target_client_id: String,
-        diff_id: String,
-        request: DiffRequestIdentity,
-        session_id: String,
-        repo_root: Option<String>,
-        reason: String,
-        repos: Vec<SessionRepoCandidate>,
-    },
-    MissingSnapshot {
         target_client_id: String,
         diff_id: String,
         request: DiffRequestIdentity,
@@ -815,25 +816,18 @@ pub(crate) enum ClientMessage {
         diff_id: String,
         session_id: String,
         repo_id: Option<String>,
+        #[serde(default)]
+        change_kind: GitChangeKind,
         detail_mode: DiffDetailMode,
         current_commit_oid: Option<String>,
         selected_file: Option<DiffFileSelector>,
         context_lines: Option<u32>,
     },
-    #[serde(rename = "sessionChanges.snapshot")]
-    SessionChangesSnapshot {
-        client_id: String,
-        diff_id: String,
+    #[serde(rename = "sessionRepos.update")]
+    SessionReposUpdate {
         session_id: String,
-        repo_id: Option<String>,
-        label: Option<String>,
-        repo_root: Option<String>,
-        #[serde(rename = "ref")]
-        ref_name: Option<String>,
-        detail_mode: Option<DiffDetailMode>,
-        current_commit_oid: Option<String>,
-        selected_file: Option<DiffFileSelector>,
-        context_lines: Option<u32>,
+        action: SessionRepoAction,
+        path: String,
     },
     #[serde(rename = "compareDiff.request")]
     CompareDiffRequest {

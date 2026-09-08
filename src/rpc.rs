@@ -2302,15 +2302,6 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 }
             }
         }
-        if command == Some("repo_diff_snapshot") {
-            if let Some(command_id) = value_str(frame, "id") {
-                state
-                    .pending_session_change_snapshots
-                    .write()
-                    .await
-                    .remove(command_id);
-            }
-        }
         if command == Some("compact") {
             set_session_compacting(state, &current_session_id, false).await;
         }
@@ -2399,70 +2390,6 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 state
                     .session_runtime
                     .set_rpc_protocol_version(&transport_session_id, 2)
-                    .await;
-            }
-        }
-        Some("repo_diff_snapshot") => {
-            let pending = if let Some(command_id) = value_str(frame, "id") {
-                state
-                    .pending_session_change_snapshots
-                    .write()
-                    .await
-                    .remove(command_id)
-            } else {
-                None
-            };
-            if let Some(mut pending) = pending {
-                if pending.select_created_snapshot {
-                    if let Some(entry_id) = selected_repo_diff_snapshot_entry_id(frame) {
-                        pending.repo_id = Some(crate::diff::snapshot_candidate_id(&entry_id));
-                    }
-                }
-                let request = DiffRequestIdentity::SessionChanges {
-                    client_id: pending.client_id.clone(),
-                    diff_id: pending.diff_id.clone(),
-                    session_id: pending.session_id.clone(),
-                    repo_id: pending.repo_id.clone(),
-                    detail_mode: pending.detail_mode,
-                    current_commit_oid: pending.current_commit_oid.clone(),
-                    selected_file: pending.selected_file.clone(),
-                    context_lines: pending.context_lines,
-                };
-                start_session_changes_generation_job(
-                    state,
-                    pending.client_id.clone(),
-                    pending.diff_id.clone(),
-                    pending.session_id.clone(),
-                    pending.repo_id,
-                    pending.detail_mode,
-                    pending.current_commit_oid,
-                    pending.selected_file,
-                    request,
-                    pending.context_lines,
-                )
-                .await;
-                let _ = state
-                    .events
-                    .emit(
-                        state,
-                        notice(
-                            pending.session_id,
-                            NoticeLevel::Info,
-                            "Diff snapshot created.",
-                        ),
-                    )
-                    .await;
-            } else {
-                let _ = state
-                    .events
-                    .emit(
-                        state,
-                        notice(
-                            current_session_id.clone(),
-                            NoticeLevel::Info,
-                            "Diff snapshot created.",
-                        ),
-                    )
                     .await;
             }
         }
@@ -3069,14 +2996,6 @@ where
     serde_json::from_value::<OmpRpcResponseFrame>(frame.clone())
         .ok()
         .and_then(|response| response.data_as())
-}
-
-fn selected_repo_diff_snapshot_entry_id(frame: &Value) -> Option<String> {
-    Some(
-        rpc_response_data_as::<OmpRepoDiffResult>(frame)?
-            .selected_snapshot?
-            .entry_id,
-    )
 }
 
 pub(crate) fn tool_async_state(result: &Value) -> Option<&str> {

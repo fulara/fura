@@ -102,23 +102,6 @@ const todoPhases = [
 ];
 const mockImageData =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
-const mockSnapshotCommit = "1111111111111111111111111111111111111111";
-const mockSnapshotHeadCommit = "2222222222222222222222222222222222222222";
-
-
-const diffSnapshots = [
-  {
-    entryId: "snap-session-start",
-    label: "session-start",
-    kind: "session-start",
-    createdAt: "2026-04-29T00:00:00.000Z",
-    repoRoot: "/mock/repo",
-    ref: "refs/omp/diff-snapshots/snap-session-start",
-    sourceRef: "HEAD",
-    commit: mockSnapshotCommit,
-    headCommit: mockSnapshotHeadCommit,
-  },
-];
 
 const availableCommands = [
   { name: "help", aliases: [], description: "Show Fura command help", subcommands: [], source: "builtin" },
@@ -814,50 +797,6 @@ for await (const line of rl) {
     case "abort": {
       success(command);
       write({ type: "agent_end", timestamp: Date.now() });
-      break;
-    }
-    case "repo_diff_get": {
-      const selector = command.selector ?? diffSnapshots.at(-1)?.entryId ?? null;
-      const selectedSnapshot = diffSnapshots.find(snapshot => snapshot.entryId === selector) ?? diffSnapshots.at(-1) ?? null;
-      const headSelector = command.headSelector ?? null;
-      const headSnapshot = headSelector
-        ? diffSnapshots.find(snapshot => snapshot.entryId === headSelector) ?? null
-        : null;
-      const diff = !selectedSnapshot
-        ? ""
-        : headSnapshot
-          ? `diff --git a/mock.ts b/mock.ts\n@@ -1 +1 @@\n-console.log('${selectedSnapshot.label}')\n+console.log('${headSnapshot.label}')\n`
-          : "diff --git a/mock.ts b/mock.ts\n@@ -1 +1 @@\n-console.log('old')\n+console.log('new')\n";
-      success(command, {
-        snapshots: diffSnapshots,
-        selectedSnapshot,
-        headSnapshot,
-        diff,
-        stat: Boolean(command.stat),
-      });
-      break;
-    }
-    case "repo_diff_snapshot": {
-      const snapshotNumber = diffSnapshots.length + 1;
-      const snapshot = {
-        entryId: `snap-${snapshotNumber}`,
-        label: command.label ?? `snapshot-${snapshotNumber}`,
-        kind: "manual",
-        createdAt: new Date().toISOString(),
-        repoRoot: command.repoRoot ?? "/mock/repo",
-        ref: command.ref ?? `refs/omp/diff-snapshots/snap-${snapshotNumber}`,
-        sourceRef: command.sourceRef ?? command.ref ?? "HEAD",
-        commit: mockSnapshotHeadCommit,
-        headCommit: mockSnapshotHeadCommit,
-      };
-      diffSnapshots.push(snapshot);
-      success(command, {
-        snapshots: diffSnapshots,
-        selectedSnapshot: snapshot,
-        headSnapshot: null,
-        diff: "",
-        stat: false,
-      });
       break;
     }
 

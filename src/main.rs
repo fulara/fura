@@ -33,6 +33,7 @@ mod review_comments;
 mod rpc;
 mod rpc_frame;
 mod session;
+mod session_repos;
 mod state;
 mod timestamp;
 mod voice;
@@ -209,7 +210,6 @@ async fn main() -> anyhow::Result<()> {
         session_runtime: session_runtime.clone(),
         sessions: session_runtime.sessions.clone(),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
-        pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
         proposed_models: Arc::new(RwLock::new(proposed_models)),
@@ -1166,7 +1166,6 @@ pub(crate) mod tests {
             session_runtime: session_runtime.clone(),
             sessions: session_runtime.sessions.clone(),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
-            pending_session_change_snapshots: Arc::new(RwLock::new(HashMap::new())),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
             proposed_models: Arc::new(RwLock::new(Vec::new())),
@@ -1619,20 +1618,6 @@ pub(crate) mod tests {
                 None,
                 Some(75000),
             ),
-            "command-repo-diff-get" => OmpRpcCommand::RepoDiffGet {
-                id: "cmd-diff-get-1".to_string(),
-                selector: Some("snap-session-start".to_string()),
-                head_selector: Some("HEAD".to_string()),
-                stat: Some(true),
-            }
-            .into_value(),
-            "command-repo-diff-snapshot" => repo_diff_snapshot_command(
-                "cmd-diff-snapshot-1".to_string(),
-                "manual".to_string(),
-                Some("/tmp/repo".to_string()),
-                Some("refs/omp/diff-snapshots/manual".to_string()),
-            ),
-            "command-repo-diff-snapshot-turn" => return None,
             "command-set-host-uri-schemes" => return None,
             _ => panic!("unexpected command fixture {name}"),
         })
@@ -1899,14 +1884,6 @@ pub(crate) mod tests {
                         assert_eq!(
                             data.get("sessionFile").and_then(Value::as_str),
                             Some("/tmp/omp/session-promoted-1.jsonl")
-                        );
-                    }
-                    "repo_diff_get" | "repo_diff_snapshot" => {
-                        let data: OmpRepoDiffResult =
-                            response.data_as().expect("repo diff data should decode");
-                        assert!(
-                            data.selected_snapshot.is_some(),
-                            "repo diff fixture must carry selectedSnapshot"
                         );
                     }
                     _ if response.is_error() => {

@@ -13,10 +13,6 @@ type RpcMessage = {
   [key: string]: unknown;
 };
 
-type RpcSnapshot = {
-  label?: string;
-  [key: string]: unknown;
-};
 
 type RpcFrame = {
   id?: string;
@@ -25,8 +21,6 @@ type RpcFrame = {
   command?: string;
   data: {
     messages: RpcMessage[];
-    selectedSnapshot: RpcSnapshot;
-    snapshots: RpcSnapshot[];
     sessionId: string;
     sessionFile: string;
     [key: string]: unknown;
@@ -41,23 +35,6 @@ afterEach(() => {
 });
 
 describe("mock OMP RPC fixture", () => {
-  it("returns repo-diff snapshots with the current OMP snapshot fields", async () => {
-    child = await spawnFixture();
-    const frames = createFrameReader(child);
-
-    child.stdin.write(`${JSON.stringify({ id: "diff-get", type: "repo_diff_get" })}\n`);
-    const getResponse = await frames.next("diff-get");
-    expect(getResponse.success).toBe(true);
-    expectSnapshotShape(getResponse.data.selectedSnapshot);
-    expect(getResponse.data.snapshots).toHaveLength(1);
-    expectSnapshotShape(getResponse.data.snapshots[0]);
-
-    child.stdin.write(`${JSON.stringify({ id: "snapshot", type: "repo_diff_snapshot", label: "manual-check" })}\n`);
-    const snapshotResponse = await frames.next("snapshot");
-    expect(snapshotResponse.success).toBe(true);
-    expectSnapshotShape(snapshotResponse.data.selectedSnapshot);
-    expect(snapshotResponse.data.selectedSnapshot.label).toBe("manual-check");
-  });
 
   it("lists branchable prompts and branches without starting an agent turn", async () => {
     child = await spawnFixture();
@@ -199,16 +176,3 @@ function createFrameReader(process: RpcChild) {
   };
 }
 
-function expectSnapshotShape(snapshot: unknown): void {
-  expect(snapshot).toMatchObject({
-    entryId: expect.any(String),
-    label: expect.any(String),
-    kind: expect.any(String),
-    createdAt: expect.any(String),
-    repoRoot: expect.any(String),
-    ref: expect.any(String),
-    commit: expect.stringMatching(/^[0-9a-f]{40}$/),
-    headCommit: expect.stringMatching(/^[0-9a-f]{40}$/),
-  });
-  expect(snapshot).not.toHaveProperty("tree");
-}

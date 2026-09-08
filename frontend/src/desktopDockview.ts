@@ -61,6 +61,9 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       return {
         element: shell.element,
         init(params) {
+          if (panelId === "diffs" || panelId === "sessionChanges" || panelId === "compare") {
+            params.api.group.api.setConstraints({ minimumWidth: 560 });
+          }
           popoutPanel = () => {
             const panel = params.containerApi.getPanel(panelId);
             if (!panel) return;
@@ -273,7 +276,7 @@ function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLa
   api.addPanel({
     id: "diffs",
     component: "diffs",
-    title: "Diffs",
+    title: "Git changes",
     position: { referencePanel: "tools", direction: "below" },
     renderer: "always",
   });
@@ -354,7 +357,7 @@ function ensureDiffsPanel(api: DockviewComponent): void {
   api.addPanel({
     id: "diffs",
     component: "diffs",
-    title: "Diffs",
+    title: "Git changes",
     position: { referencePanel: "tools", direction: "below" },
     renderer: "always",
   });

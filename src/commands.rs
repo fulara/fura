@@ -307,6 +307,7 @@ pub(crate) async fn handle_client_message_for_connection(
             diff_id,
             session_id,
             repo_id,
+            change_kind,
             detail_mode,
             current_commit_oid,
             selected_file,
@@ -318,6 +319,7 @@ pub(crate) async fn handle_client_message_for_connection(
                 diff_id,
                 session_id,
                 repo_id,
+                change_kind,
                 detail_mode,
                 current_commit_oid,
                 selected_file,
@@ -325,35 +327,11 @@ pub(crate) async fn handle_client_message_for_connection(
             )
             .await
         }
-        ClientMessage::SessionChangesSnapshot {
-            client_id,
-            diff_id,
+        ClientMessage::SessionReposUpdate {
             session_id,
-            repo_id,
-            label,
-            repo_root,
-            ref_name,
-            detail_mode,
-            current_commit_oid,
-            selected_file,
-            context_lines,
-        } => {
-            handle_session_changes_snapshot(
-                state,
-                client_id,
-                diff_id,
-                session_id,
-                repo_id,
-                label,
-                repo_root,
-                ref_name,
-                detail_mode.unwrap_or(DiffDetailMode::StatOnly),
-                current_commit_oid,
-                selected_file,
-                context_lines,
-            )
-            .await
-        }
+            action,
+            path,
+        } => crate::session_repos::update_session_repo(state, &session_id, action, &path).await,
         ClientMessage::CompareDiffRequest {
             client_id,
             diff_id,
@@ -1838,18 +1816,8 @@ pub(crate) async fn delete_session(
 
     // Delete session file and sibling artifacts directory.
     if let Some(ref file) = session_file {
-        let snapshot_ref_cleanup =
-            crate::diff::prepare_deleted_session_snapshot_ref_cleanup(Path::new(file));
         match fs::remove_file(file) {
             Ok(()) => {
-                if let Some(snapshot_ref_cleanup) = snapshot_ref_cleanup {
-                    if let Err(error) =
-                        crate::diff::cleanup_deleted_session_snapshot_refs(snapshot_ref_cleanup)
-                            .await
-                    {
-                        warn!(session_id = %session_id, file = %file, %error, "failed to clean up repository diff snapshot refs");
-                    }
-                }
                 info!(session_id = %session_id, file = %file, "deleted session file");
             }
             Err(error) => {
@@ -2243,36 +2211,16 @@ pub(crate) async fn handle_rebase_slash_command(
             }
         }
     };
-    let repo_root = match crate::diff::rebase_session_repo(&cwd, branch).await {
-        Ok(repo_root) => repo_root,
-        Err(error) => {
-            return vec![notice(
-                session_id,
-                NoticeLevel::Error,
-                format!("Rebase onto '{branch}' failed: {error}"),
-            )];
-        }
-    };
-    // Re-baseline: a snapshot pinned at the branch tip becomes the newest snapshot, so the
-    // Diffs view measures the rebased work against `<branch>` without anyone re-selecting a base.
-    let snapshot_command = repo_diff_snapshot_command(
-        next_rpc_id(),
-        format!("rebase onto {branch}"),
-        Some(repo_root.display().to_string()),
-        Some(branch.to_string()),
-    );
-    match send_rpc_command(state, &session_id, snapshot_command).await {
-        Ok(()) => vec![notice(
+    match crate::diff::rebase_session_repo(&cwd, branch).await {
+        Ok(_) => vec![notice(
             session_id,
             NoticeLevel::Info,
-            // The rebase is done (HEAD moved); the snapshot is fire-and-forget over RPC, so we
-            // only claim it was *requested*, not that the base is already in place.
-            format!("Rebased onto '{branch}'. Requested a new diff base snapshot at '{branch}'."),
+            format!("Rebased onto '{branch}'."),
         )],
         Err(error) => vec![notice(
             session_id,
-            NoticeLevel::Warning,
-            format!("Rebased onto '{branch}', but creating the diff snapshot failed: {error}"),
+            NoticeLevel::Error,
+            format!("Rebase onto '{branch}' failed: {error}"),
         )],
     }
 }
@@ -3487,12 +3435,8 @@ fn review_tool_definition() -> Value {
 
 fn review_endpoint_label(endpoint: &DiffEndpoint) -> String {
     match endpoint {
-        DiffEndpoint::SessionStartSnapshot { snapshot } => {
-            format!(
-                "session snapshot {} ({})",
-                snapshot.ref_name, snapshot.commit
-            )
-        }
+        DiffEndpoint::Index => "index".to_string(),
+        DiffEndpoint::EmptyTree => "empty tree".to_string(),
         DiffEndpoint::WorkingTree => "working tree".to_string(),
         DiffEndpoint::GitRef {
             input,
@@ -3526,8 +3470,18 @@ fn review_prompt(context_id: &str, state: &DiffReviewableState, instructions: &s
         .as_ref()
         .map(|worktree| format!("{:?}", worktree.status))
         .unwrap_or_else(|| "none".to_string());
+    let inspection = match (&state.comparison.base, &state.comparison.head) {
+        (_, DiffEndpoint::Index) => "Inspect staged changes with git diff --cached.",
+        (DiffEndpoint::Index, DiffEndpoint::WorkingTree) => {
+            "Inspect unstaged changes with git diff."
+        }
+        (DiffEndpoint::EmptyTree, DiffEndpoint::WorkingTree) => {
+            "Inspect the listed nonignored untracked files as additions; do not stage them."
+        }
+        _ => "Inspect the displayed Git refs and their diff.",
+    };
     format!(
-        "You are reviewing the full Fura diff comparison, not just the currently selected file.\n\nReview context id: {context_id}\nRepository: {}\nComparison key: {}\nBase ref: {}\nHead ref: {}\nLeft tree/commit: {}\nRight tree/commit: {}\nFiles in summary: {}\nCurrent commit: {}\nReview worktree status: {}\nReview instructions:\n{}\n\nInspect the repository and compare the supplied refs/trees yourself before commenting. When you find an issue, call fura_add_review_comment with this reviewContextId, the repo-relative path, side, line, and comment body. Fura will resolve the exact diff anchor from the refs; do not invent line numbers.",
+        "You are reviewing the full Fura diff comparison, not just the currently selected file. This is repository state, not proof of changes authored by this session.\n\nReview context id: {context_id}\nRepository: {}\nComparison key: {}\nBase: {}\nHead: {}\nLeft version identity: {}\nRight version identity: {}\nFiles in summary: {}\nCurrent commit: {}\nReview worktree status: {}\nReview instructions:\n{}\n\n{inspection} Version identities may be opaque Fura fingerprints, not Git refs. Do not write files or mutate Git state during this review. When you find an issue, call fura_add_review_comment with this reviewContextId, the repo-relative path, side, line, and comment body. Fura will validate the displayed patch version and resolve the exact diff anchor; do not invent line numbers. If the repository changes, refresh the review rather than reusing old anchors.",
         state.comparison.repo_root,
         state.comparison.comparison_key,
         review_endpoint_label(&state.comparison.base),
@@ -3812,64 +3766,6 @@ mod review_comment_tests {
                 .expect("listed")
                 .is_empty()
         );
-    }
-
-    #[tokio::test]
-    async fn review_agent_review_start_sets_tools_and_prompts_with_patch() {
-        let state = crate::tests::test_state(8, None);
-        state
-            .sessions
-            .write()
-            .await
-            .insert("s1".to_string(), test_session_record("s1"));
-        let mut stdin_rx = crate::tests::register_test_transport(&state, "s1", "s1", 8).await;
-        let patch = "diff --git a/src/new.ts b/src/new.ts\n--- a/src/new.ts\n+++ b/src/new.ts\n@@ -1,1 +1,2 @@\n const old = true;\n+const next = true;\n";
-
-        let responses = handle_client_message(
-            &state,
-            ClientMessage::ReviewAgentReviewStart {
-                session_id: "s1".to_string(),
-                state: reviewable_state(patch),
-                instructions: "Review this diff carefully.".to_string(),
-            },
-        )
-        .await;
-
-        assert!(responses.is_empty());
-        let set_host_tools = stdin_rx.recv().await.expect("set_host_tools command");
-        assert_eq!(set_host_tools["type"], "set_host_tools");
-        assert_eq!(
-            set_host_tools["tools"][0]["name"],
-            "fura_add_review_comment"
-        );
-        assert_eq!(set_host_tools["tools"][0]["loadMode"], "essential");
-        let prompt = stdin_rx.recv().await.expect("prompt command");
-        assert_eq!(prompt["type"], "prompt");
-        let text = prompt["message"].as_str().expect("prompt text");
-        assert!(text.contains("full Fura diff comparison, not just the currently selected file"));
-        assert!(text.contains("Base ref: working tree"));
-        assert!(text.contains("Left tree/commit: base"));
-        assert!(text.contains("Right tree/commit: head"));
-        assert!(
-            text.contains("Inspect the repository and compare the supplied refs/trees yourself")
-        );
-        assert!(!text.contains("Reviewable full diff patch:"));
-        assert!(!text.contains(patch));
-        assert!(text.contains("Review this diff carefully."));
-        assert_eq!(state.active_review_contexts.read().await.len(), 1);
-        let second = handle_client_message(
-            &state,
-            ClientMessage::ReviewAgentReviewStart {
-                session_id: "s1".to_string(),
-                state: reviewable_state(patch),
-                instructions: "Start a second review".to_string(),
-            },
-        )
-        .await;
-        let [ServerMessage::Error { message, .. }] = second.as_slice() else {
-            panic!("expected busy rejection for second review");
-        };
-        assert!(message.contains("session is busy"));
     }
 
     #[tokio::test]

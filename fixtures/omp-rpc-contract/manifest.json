@@ -80,21 +80,6 @@
     "file": "command-output.json"
   },
   {
-    "name": "command-repo-diff-get",
-    "category": "command",
-    "file": "command-repo-diff-get.json"
-  },
-  {
-    "name": "command-repo-diff-snapshot",
-    "category": "command",
-    "file": "command-repo-diff-snapshot.json"
-  },
-  {
-    "name": "command-repo-diff-snapshot-turn",
-    "category": "command",
-    "file": "command-repo-diff-snapshot-turn.json"
-  },
-  {
     "name": "command-set-active-tools",
     "category": "command",
     "file": "command-set-active-tools.json"
@@ -358,16 +343,6 @@
     "name": "response-negotiate-protocol",
     "category": "response",
     "file": "response-negotiate-protocol.json"
-  },
-  {
-    "name": "response-repo-diff-get",
-    "category": "response",
-    "file": "response-repo-diff-get.json"
-  },
-  {
-    "name": "response-repo-diff-snapshot",
-    "category": "response",
-    "file": "response-repo-diff-snapshot.json"
   },
   {
     "name": "response-set-active-tools",

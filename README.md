@@ -13,6 +13,23 @@ Browser  ←→  Fura (Rust/Axum)  ←→  omp --mode rpc (child process, stdio 
 - **Bridge**: Rust binary (`src/main.rs`) — HTTP + WebSocket server, child process supervision, session projection.
 - **Frontend**: Plain TypeScript + Vite (`frontend/`) — no framework; DOM-only rendering.
 
+## Git changes
+
+The Git changes panel shows **unstaged**, **staged**, and nonignored **untracked**
+changes for the selected repository. It preserves file filtering, lazy patches,
+context and review comments without staging files or creating Git objects/refs.
+Separate Compare views retain commit/ref and working-tree comparisons.
+
+Repositories come from the session cwd/worktree, declared additional directories,
+initialized submodules and supported tool-path metadata. Add, Hide selected and
+Set default persist per session. Discovery is best-effort; repository changes are
+not attributed exclusively to the selected session.
+
+OMP repository snapshot creation and the Snapshot now flow are removed. Existing
+snapshot refs/session entries remain untouched; inline tool diffs and OMP's
+independent context/editor checkpoint mechanisms remain. See the
+[Git diff specification](spec/diff-and-snapshots.md).
+
 ## Requirements
 
 ### Rust toolchain

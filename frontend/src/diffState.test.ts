@@ -3,17 +3,6 @@ import { comparisonKey, DEFAULT_SESSION_CHANGES_DETAIL_MODE, diffRefInputFromTex
 import type { DiffReviewableState, SessionChangesSummaryState } from "./protocol";
 
 
-const sessionStartEndpoint = {
-  kind: "sessionStartSnapshot" as const,
-  snapshot: {
-    entryId: "snapshot-1",
-    label: "session-start",
-    createdAt: "now",
-    refName: "refs/omp/diff-snapshots/start",
-    tree: "a".repeat(40),
-    commit: "a".repeat(40),
-  },
-};
 
 const state = (selectedCommitOid: string | null = null): DiffReviewableState => ({
   comparison: {
@@ -55,14 +44,15 @@ describe("diffState", () => {
         diffId: "diff-1",
         sessionId: "session-1",
         repoId: "repo-2",
+        changeKind: "staged",
         detailMode: "filePatch",
         currentCommitOid: null,
         contextLines: 3,
       },
       comparison: {
         repoRoot: "/repo",
-        base: sessionStartEndpoint,
-        head: { kind: "workingTree" },
+        base: { kind: "emptyTree" },
+        head: { kind: "index" },
         leftTreeOrCommit: "a".repeat(40),
         rightTreeOrCommit: "b".repeat(40),
         detailMode: "filePatch",
@@ -81,8 +71,8 @@ describe("diffState", () => {
     expect(sessionChangesRefreshOptions(readyState, "statOnly")).toEqual({
       repoId: "repo-2",
       payloadKind: "filePatch",
-      currentCommitOid: "d".repeat(40),
+      changeKind: "staged",
     });
-    expect(sessionChangesRefreshOptions(undefined, DEFAULT_SESSION_CHANGES_DETAIL_MODE)).toEqual({ payloadKind: "filePatch" });
+    expect(sessionChangesRefreshOptions(undefined, DEFAULT_SESSION_CHANGES_DETAIL_MODE)).toEqual({ payloadKind: "filePatch", changeKind: "unstaged" });
   });
 });

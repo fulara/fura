@@ -13,12 +13,11 @@ use tokio::{
 use tracing::warn;
 
 use crate::{
-    CodeWorkspaceRegistry, ControlCandidate, DiffDetailMode, DiffFileSelector,
-    DiffReviewWorktreeRegistry, DiffScope, FrontendUiSnapshot, GoalModeProjection,
-    PlanModeProjection, PreparedDiff, PromptImagePayload, ProposedModelConfig, ServerMessage,
-    SessionKind, SessionMode, SessionProjectionDelta, SessionRecord, SessionStatus,
-    ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand,
-    append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
+    CodeWorkspaceRegistry, ControlCandidate, DiffReviewWorktreeRegistry, DiffScope,
+    FrontendUiSnapshot, GoalModeProjection, PlanModeProjection, PreparedDiff, PromptImagePayload,
+    ProposedModelConfig, ServerMessage, SessionKind, SessionMode, SessionProjectionDelta,
+    SessionRecord, SessionStatus, ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection,
+    VoiceCommand, append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -29,8 +28,6 @@ pub(crate) struct AppState {
     pub(crate) sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
-    pub(crate) pending_session_change_snapshots:
-        Arc<RwLock<HashMap<String, PendingSessionChangesSnapshot>>>,
     pub(crate) code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>,
     pub(crate) review_worktrees: Arc<RwLock<DiffReviewWorktreeRegistry>>,
     pub(crate) proposed_models: Arc<RwLock<Vec<ProposedModelConfig>>>,
@@ -1713,19 +1710,6 @@ pub(crate) struct PendingPromptDraft {
     pub(crate) text: String,
     pub(crate) images: Option<Vec<PromptImagePayload>>,
     pub(crate) optimistic_message_id: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PendingSessionChangesSnapshot {
-    pub(crate) client_id: String,
-    pub(crate) diff_id: String,
-    pub(crate) session_id: String,
-    pub(crate) repo_id: Option<String>,
-    pub(crate) select_created_snapshot: bool,
-    pub(crate) detail_mode: DiffDetailMode,
-    pub(crate) current_commit_oid: Option<String>,
-    pub(crate) selected_file: Option<DiffFileSelector>,
-    pub(crate) context_lines: Option<u32>,
 }
 
 #[derive(Default)]

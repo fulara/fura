@@ -268,7 +268,7 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::ModelList { .. } => "model.list",
         ClientMessage::ModelSet { .. } => "model.set",
         ClientMessage::SessionChangesRequest { .. } => "sessionChanges.request",
-        ClientMessage::SessionChangesSnapshot { .. } => "sessionChanges.snapshot",
+        ClientMessage::SessionReposUpdate { .. } => "sessionRepos.update",
         ClientMessage::CompareDiffRequest { .. } => "compareDiff.request",
         ClientMessage::DiffCancel { .. } => "diff.cancel",
         ClientMessage::DiffContentRequest { .. } => "diff.content.request",

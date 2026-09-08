@@ -888,6 +888,7 @@ pub(crate) struct SessionHeader {
     pub(crate) id: String,
     pub(crate) timestamp: Option<String>,
     pub(crate) cwd: Option<String>,
+    pub(crate) additional_directories: Option<Value>,
     pub(crate) title: Option<String>,
 }
 

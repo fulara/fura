@@ -213,9 +213,9 @@ function comparisonLines(state: DiffReviewableState): string[] {
 function reviewHelperInstruction(promptMode: DiffAnnotationPromptMode): string {
   if (promptMode === "sessionChanges") {
     return [
-      "You are helping review and act on changes shown in Fura's Diffs view for the active coding session.",
+      "You are helping review and act on Git changes in the repository identified below. The session provides context, not authorship of these changes.",
       "The user's note may be a question, concern, instruction, or request for an implementation change.",
-      "Use the diff metadata and nearby context to locate the issue. If the note asks for a code change, make the change in the active checkout; otherwise answer or explain the review concern.",
+      "Use the repository root, diff metadata, and nearby context to locate the issue. If the note asks for a code change, make the change in that repository; otherwise answer or explain the review concern.",
     ].join(" ");
   }
 
@@ -282,7 +282,7 @@ export function prepareDiffAnnotationPrompt(
       allComments
         ? "I have read the code and have some comments please read them and address them"
         : promptMode === "sessionChanges"
-          ? "I reviewed changes in Fura's Diffs view and left notes/questions on specific diff lines."
+          ? "I reviewed Git changes in Fura and left notes/questions on specific diff lines."
           : "I reviewed a repository diff in Fura's Diff view and left comments/questions on specific diff lines.",
       reviewHelperInstruction(promptMode),
       ...comparisonLines(state),
@@ -307,17 +307,15 @@ export function diffCommentPreviewStatus(count: number): string {
   return `${count} comment${count === 1 ? "" : "s"} ready to send`;
 }
 
-function checkoutTargetForEndpoint(endpoint: DiffEndpoint): DiffCheckoutTarget {
+function checkoutTargetForEndpoint(endpoint: DiffEndpoint): DiffCheckoutTarget | null {
   if (endpoint.kind === "workingTree") return { kind: "workingTree" };
   if (endpoint.kind === "commit") return { kind: "commit", oid: endpoint.oid };
-  if (endpoint.kind === "sessionStartSnapshot") {
-    return endpoint.snapshot.commit ? { kind: "commit", oid: endpoint.snapshot.commit } : { kind: "gitRef", value: endpoint.snapshot.refName };
-  }
+  if (endpoint.kind === "index" || endpoint.kind === "emptyTree") return null;
   return { kind: "commit", oid: endpoint.oid };
 }
 
 
-export function checkoutTargetForDiffFile(state: DiffReviewableState): DiffCheckoutTarget {
+export function checkoutTargetForDiffFile(state: DiffReviewableState): DiffCheckoutTarget | null {
   if (state.review.currentCommitOid) return { kind: "commit", oid: state.review.currentCommitOid };
   return checkoutTargetForEndpoint(state.comparison.head);
 }

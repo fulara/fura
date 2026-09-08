@@ -260,7 +260,7 @@ fn collect_direct_session_files(path: &Path) -> Vec<DiscoveredSession> {
         .collect()
 }
 
-fn scan_session_header<I>(lines: &mut I) -> Option<(SessionHeader, Option<String>)>
+pub(crate) fn scan_session_header<I>(lines: &mut I) -> Option<(SessionHeader, Option<String>)>
 where
     I: Iterator<Item = std::io::Result<String>>,
 {

@@ -1,5 +1,5 @@
 import { shortPath } from "./format";
-import type { DiffDetailMode, DiffEndpoint, DiffRefInput, DiffReviewAnnotation, DiffReviewableState, ResolvedDiffRef, SessionChangesSummaryState, DiffFileSummary as WireDiffFileSummary } from "./protocol";
+import type { DiffDetailMode, DiffEndpoint, DiffRefInput, DiffReviewAnnotation, DiffReviewableState, GitChangeKind, ResolvedDiffRef, SessionChangesSummaryState, DiffFileSummary as WireDiffFileSummary } from "./protocol";
 
 export const DEFAULT_SESSION_CHANGES_DETAIL_MODE: DiffDetailMode = "filePatch";
 export const WORKING_TREE_DIFF_REF_TEXT = "WORKTREE";
@@ -32,6 +32,7 @@ export type DiffFileSummary = {
   filePath: string;
   oldPath?: string | null;
   added: number;
+  status: WireDiffFileSummary["status"];
   removed: number;
   commentCount: number;
   questionCount: number;
@@ -41,18 +42,18 @@ export type DiffFileSummary = {
 export type SessionChangesRefreshOptions = {
   repoId?: string | null;
   payloadKind?: DiffDetailMode | null;
-  currentCommitOid?: string | null;
+  changeKind?: GitChangeKind;
 };
 
 export function sessionChangesRefreshOptions(
   state: SessionChangesSummaryState | undefined,
   fallbackPayloadKind: DiffDetailMode,
 ): SessionChangesRefreshOptions {
-  if (state?.status !== "ready") return { payloadKind: fallbackPayloadKind };
+  if (state?.status !== "ready") return { payloadKind: fallbackPayloadKind, changeKind: state?.request.scope === "sessionChanges" ? state.request.changeKind : "unstaged" };
   return {
     repoId: state.selectedRepoId,
     payloadKind: state.comparison.detailMode,
-    currentCommitOid: state.review.currentCommitOid ?? null,
+    changeKind: state.request.scope === "sessionChanges" ? state.request.changeKind : "unstaged",
   };
 }
 
@@ -65,7 +66,8 @@ export function formatDiffRepoLabel(repoRoot: string): string {
 export function resolvedRefLabel(ref: DiffEndpoint | ResolvedDiffRef): string {
   if (ref.kind === "workingTree") return "working tree";
   if (ref.kind === "commit") return `${ref.shortOid}${ref.subject ? ` — ${ref.subject}` : ""}`;
-  if (ref.kind === "sessionStartSnapshot") return `${ref.snapshot.label || "session-start"} (${ref.snapshot.refName})`;
+  if (ref.kind === "index") return "index";
+  if (ref.kind === "emptyTree") return "empty tree";
   return `${ref.display} (${ref.oid.slice(0, 12)})`;
 }
 
@@ -85,6 +87,7 @@ export function summarizeWireDiffFiles(
       filePath: file.newPath,
       oldPath: file.oldPath,
       added: file.added,
+      status: file.status,
       removed: file.removed,
       commentCount: 0,
       questionCount: 0,

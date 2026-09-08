@@ -319,32 +319,6 @@ pub(crate) struct OmpSetActiveToolsResponse {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OmpRepoDiffSnapshot {
-    pub(crate) entry_id: String,
-    pub(crate) label: Option<String>,
-    pub(crate) commit: Option<String>,
-    pub(crate) kind: Option<String>,
-    pub(crate) created_at: Option<String>,
-    pub(crate) head_commit: Option<String>,
-    pub(crate) repo_root: Option<String>,
-    #[serde(rename = "ref")]
-    pub(crate) ref_name: Option<String>,
-    pub(crate) source_ref: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OmpRepoDiffResult {
-    pub(crate) snapshots: Vec<OmpRepoDiffSnapshot>,
-    pub(crate) selected_snapshot: Option<OmpRepoDiffSnapshot>,
-    pub(crate) head_snapshot: Option<OmpRepoDiffSnapshot>,
-    pub(crate) diff: Option<String>,
-    pub(crate) stat: Option<bool>,
-}
-#[allow(dead_code)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct OmpMessagesResponse {
     pub(crate) messages: Vec<Value>,
 }
@@ -553,25 +527,6 @@ pub(crate) enum OmpRpcCommand {
         #[serde(rename = "tokenBudget", skip_serializing_if = "Option::is_none")]
         token_budget: Option<u64>,
     },
-    #[serde(rename = "repo_diff_get")]
-    RepoDiffGet {
-        id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        selector: Option<String>,
-        #[serde(rename = "headSelector", skip_serializing_if = "Option::is_none")]
-        head_selector: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        stat: Option<bool>,
-    },
-    #[serde(rename = "repo_diff_snapshot")]
-    RepoDiffSnapshot {
-        id: String,
-        label: String,
-        #[serde(rename = "repoRoot", skip_serializing_if = "Option::is_none")]
-        repo_root: Option<String>,
-        #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
-        ref_name: Option<String>,
-    },
     #[serde(rename = "get_available_commands")]
     GetAvailableCommands { id: String },
 }
@@ -738,21 +693,6 @@ pub(crate) fn approve_plan_mode_command(
         final_plan_file_path,
         preserve_context,
         compact_before_execute,
-    }
-    .into_value()
-}
-
-pub(crate) fn repo_diff_snapshot_command(
-    id: String,
-    label: String,
-    repo_root: Option<String>,
-    ref_name: Option<String>,
-) -> Value {
-    OmpRpcCommand::RepoDiffSnapshot {
-        id,
-        label,
-        repo_root,
-        ref_name,
     }
     .into_value()
 }

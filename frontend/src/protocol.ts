@@ -274,28 +274,21 @@ export type ResolvedDiffRef =
   | { kind: "workingTree" }
   | { kind: "gitRef"; input: string; refKind: DiffRefKind; oid: string; display: string };
 
-export type SessionRepoSource = "worktree" | "cwd" | "snapshot";
-
-export type SessionDiffSnapshotSummary = {
-  entryId: string;
-  label: string;
-  createdAt: string;
-  refName: string;
-  tree: string;
-  commit: string;
-};
+export type GitChangeKind = "unstaged" | "staged" | "untracked";
+export type SessionRepoSource = "worktree" | "cwd" | "additionalDirectory" | "tool" | "submodule" | "manual";
+export type SessionRepoAction = "add" | "hide" | "default";
 
 export type SessionRepoCandidate = {
   id: string;
   repoRoot: string;
   label: string;
   source: SessionRepoSource;
-  hasSessionStartSnapshot: boolean;
-  sessionStartSnapshot?: SessionDiffSnapshotSummary | null;
+  isDefault: boolean;
 };
 
 export type DiffEndpoint =
-  | { kind: "sessionStartSnapshot"; snapshot: SessionDiffSnapshotSummary }
+  | { kind: "index" }
+  | { kind: "emptyTree" }
   | { kind: "workingTree" }
   | { kind: "gitRef"; input: string; refKind: DiffRefKind; oid: string; display: string }
   | { kind: "commit"; oid: string; shortOid: string; subject?: string | null };
@@ -310,7 +303,7 @@ export type GitRefSummary = {
 export type DiffFileSummary = {
   oldPath?: string | null;
   newPath: string;
-  status: "added" | "modified" | "deleted" | "renamed" | "copied" | "binary" | "unknown";
+  status: "added" | "modified" | "deleted" | "renamed" | "copied" | "binary" | "conflicted" | "unknown";
   added: number;
   removed: number;
 };
@@ -366,6 +359,7 @@ export type DiffRequestIdentity =
       diffId: string;
       sessionId: string;
       repoId?: string | null;
+      changeKind: GitChangeKind;
       detailMode: DiffDetailMode;
       currentCommitOid?: string | null;
       selectedFile?: DiffFileSelector | null;
@@ -423,16 +417,6 @@ export type SessionChangesSummaryState =
     }
   | {
       status: "missingRepo";
-      targetClientId: string;
-      diffId: string;
-      request: DiffRequestIdentity;
-      sessionId: string;
-      repoRoot?: string | null;
-      reason: string;
-      repos: SessionRepoCandidate[];
-    }
-  | {
-      status: "missingSnapshot";
       targetClientId: string;
       diffId: string;
       request: DiffRequestIdentity;
@@ -743,8 +727,8 @@ export type ClientMessage =
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }
-  | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
-  | { type: "sessionChanges.snapshot"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; label?: string | null; repoRoot?: string | null; ref?: string | null; detailMode?: DiffDetailMode | null; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
+  | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; changeKind: GitChangeKind; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
+  | { type: "sessionRepos.update"; sessionId: string; action: SessionRepoAction; path: string }
   | { type: "compareDiff.request"; clientId: string; diffId: string; repoRoot: string; base: DiffRefInput; head: DiffRefInput; detailMode: DiffDetailMode; mergeBase?: boolean; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
   | { type: "diff.content.request"; clientId: string; diffId: string; scope: DiffScope; sessionId?: string | null; comparisonKey: string; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
   | { type: "diff.cancel"; clientId: string; diffId: string; scope: DiffScope; reason?: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed" }

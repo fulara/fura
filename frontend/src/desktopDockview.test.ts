@@ -10,7 +10,12 @@ type MockPanel = {
   setActive(): void;
   getWindow(): { focus(): void };
 };
-type MockGroup = { id: string; panels: MockPanel[]; size: number };
+type MockGroup = {
+  id: string;
+  panels: MockPanel[];
+  size: number;
+  api: { setConstraints(value: { minimumWidth: number }): void };
+};
 
 type MockDockviewInstance = {
   panels: MockPanel[];
@@ -40,7 +45,7 @@ const dockviewMock = vi.hoisted(() => {
       const reference = options.position?.referencePanel ? this.getGroupPanel(options.position.referencePanel) : undefined;
       const group: MockGroup = options.position?.direction === "within" && reference
         ? reference.group
-        : { id: `${options.id}-group`, panels: [], size: 0 };
+        : { id: `${options.id}-group`, panels: [], size: 0, api: { setConstraints: vi.fn() } };
       const panel: MockPanel = {
         id: options.id,
         title: options.title ?? options.id,

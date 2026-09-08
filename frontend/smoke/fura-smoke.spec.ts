@@ -1,5 +1,8 @@
 import { expect, type Page, test } from "@playwright/test";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 const bridgeToken = "dev";
 const repoRoot = path.resolve("..");
@@ -154,6 +157,70 @@ test("desktop opens an explicit compare diff against the working tree", async ({
   await expect(page.locator("#cwdPickerOverlay")).toBeHidden();
   await expect(page.locator(".compare-main .diffs-toolbar")).toContainText("Compare diff");
   await expect(page.locator(".compare-main .diffs-summary")).toContainText("working tree");
+});
+
+test("Git groups keep independent patches, refresh, and open files from the selected repository", async ({ page }, testInfo) => {
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "fura-git-smoke-")));
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+  try {
+    git("init", "-b", "main");
+    git("config", "user.name", "Fura smoke");
+    git("config", "user.email", "smoke@example.invalid");
+    writeFileSync(path.join(root, "same.ts"), "export const value = 'base';\n");
+    git("add", "same.ts");
+    git("-c", "commit.gpgsign=false", "commit", "-m", "base");
+    writeFileSync(path.join(root, "same.ts"), "export const value = 'staged';\n");
+    git("add", "same.ts");
+    writeFileSync(path.join(root, "same.ts"), "export const value = 'unstaged';\n");
+    writeFileSync(path.join(root, "new.ts"), "export const added = 'untracked';\n");
+    const index = readFileSync(path.join(root, ".git/index"));
+    const head = git("rev-parse", "HEAD");
+    const refs = git("show-ref");
+    await authenticateDesktop(page);
+    const sessionName = `Git groups ${Date.now()}`;
+    await createDesktopSession(page, sessionName);
+    await page.locator(".dv-tab").filter({ hasText: "Git changes" }).click();
+    const panel = page.locator(".session-changes-view:visible");
+    await expect(panel.getByRole("button", { name: "Add", exact: true })).toBeVisible();
+    page.once("dialog", dialog => dialog.accept(root));
+    await panel.getByRole("button", { name: "Add", exact: true }).click();
+    const repos = panel.getByRole("combobox", { name: "Repository", exact: true });
+    await expect(repos.locator("option", { hasText: path.basename(root) })).toHaveCount(1);
+    await repos.selectOption(root);
+    const group = panel.getByRole("combobox", { name: "Git change group" });
+    await expect(group).toHaveValue("unstaged");
+    await expect(panel.locator(".diffs-main-body")).toContainText("+export const value = 'unstaged';");
+    await panel.locator('[data-diff-file-path="same.ts"].diffs-file-jump').click();
+    await group.selectOption("staged");
+    await expect(panel.locator(".diffs-main-body")).toContainText("+export const value = 'staged';");
+    await expect(panel.locator(".diffs-main-body")).not.toContainText("unstaged");
+    await expect(panel.getByRole("button", { name: "Code", exact: true })).toBeDisabled();
+    await group.selectOption("untracked");
+    await expect(panel.locator(".diffs-main-body")).toContainText("+export const added = 'untracked';");
+    writeFileSync(path.join(root, "new.ts"), "export const added = 'refreshed';\n");
+    await panel.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(group).toHaveValue("untracked");
+    await expect(panel.locator(".diffs-main-body")).toContainText("+export const added = 'refreshed';");
+    await page.screenshot({ path: testInfo.outputPath("git-changes.png") });
+    await panel.locator('[data-diff-file-path="new.ts"].diffs-file-jump').click();
+    await panel.getByRole("button", { name: "Code", exact: true }).click();
+    await expect(page.locator(".code-viewer:visible")).toContainText("refreshed");
+    await page.reload();
+    await expect(page.locator("#connectionStatus")).toHaveText("connected");
+    await page.locator("#sessionsList .session-item").filter({ hasText: sessionName }).locator("button").first().click();
+    await page.locator(".dv-tab").filter({ hasText: "Git changes" }).click();
+    await expect(repos).toHaveValue(root);
+    await group.selectOption("untracked");
+    await panel.getByRole("button", { name: "Refresh", exact: true }).click();
+    await expect(panel.locator(".diffs-main-body")).toContainText("+export const added = 'refreshed';");
+    await page.screenshot({ path: testInfo.outputPath("git-changes-restored.png") });
+    expect(readFileSync(path.join(root, ".git/index"))).toEqual(index);
+    expect(git("rev-parse", "HEAD")).toBe(head);
+    expect(git("show-ref")).toBe(refs);
+    expect(git("symbolic-ref", "--short", "HEAD").trim()).toBe("main");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("desktop surfaces and approves a mock plan review", async ({ page }) => {

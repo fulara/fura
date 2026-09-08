@@ -1,186 +1,121 @@
-# Fura Diffs & Snapshots
+# Fura Git changes and comparisons
 
-## Goal
+## Product contract
 
-Show how an OMP session's code changes accumulate over time, against a stable, re-baseable
-diff base, and let the user re-baseline cheaply after history rewrites (e.g. a rebase) without
-deleting anything.
+The normal Diffs panel is **Git changes**, not an attribution of changes to one session.
+A session selects a set of known repositories; Git reports their current shared state.
+Edits from another agent, editor or person are included. After committing, the basic
+view may be empty. Repository snapshots are no longer created or used as diff bases.
 
-The feature should answer "what has this session changed?" out of the box (zero configuration),
-stay correct after the user rebases or pulls upstream, and never pretend Fura owns the
-snapshots — they are OMP session-log data and Fura is a read-only projection of them.
+The independent inline tool-card diffs still render OMP `result.details.diff`.
+OMP context checkpoint/rewind and native hashline editor snapshots are unrelated and
+remain intact.
 
-## Current implementation status
+## Git groups
 
-Implemented:
+Each request selects one `changeKind`:
 
-- backend `src/diff.rs` for `sessionChanges`/`compareDiff` summaries, scoped lazy `diff.content`
-  per-file patches, tokenized diff jobs (stale results suppressed), repo/base candidate
-  assembly, detached review-worktree create/checkout, and review-comment anchor mapping,
-- the normal `Diffs` panel is independent of `Tools`: `Tools` renders the patch reported by each
-  individual `edit` tool card, while `Diffs` computes the repository-wide snapshot→working-tree
-  Git diff, including committed, staged, unstaged, and untracked session changes,
-- transcript visibility is independent: `Edit diffs: on` keeps tool cards carrying a real diff
-  visible even when `Tools: off`; `Tools` controls the remaining ordinary tool bubbles,
-- repo-diff snapshots are **append-only OMP session-log entries** (`type: "custom"`,
-  `customType: "repo-diff-snapshot"`, `data.version == 1`); OMP creates them, Fura only reads
-  them via `read_session_diff_snapshots`. OMP auto-creates one `session-start` snapshot at
-  session start; the "Snapshot now" UI creates `manual` snapshots, optionally pinned at an
-  explicit Git ref,
-- each snapshot pins a Git tree/commit under `refs/omp/diff-snapshots/<id>` (durable across
-  rebase/GC) and records `tree`, `commit`, `ref`, `createdAt` (ISO-8601 UTC), `repoRoot`,
-  `kind`, `label`; `sessionChanges` diffs `git diff <base-snapshot.tree> <working-tree>`,
-- **default diff base = the newest snapshot by `createdAt` for the repo**
-  (`select_session_repo` / `latest_snapshot_for_repo`). Fura ignores OMP's snapshot `kind`;
-  OMP keeps `kind` and its own selector. A re-baseline therefore just needs a newer snapshot —
-  no deletion, no sticky session-start,
-- base selection is **not persisted**: the repo/base dropdown selection is per-view only;
-  reload recomputes the default (newest). The auto request sends `repoId: null`,
-- while `Diffs` is visible, it refreshes automatically when the active agent turn settles. If
-  the view or session is inactive at that point, the cached session diff is marked stale and
-  refreshed the next time that session's `Diffs` view becomes active,
-- **`/rebase <branch>`** Fura-native slash command (`commands.rs::handle_rebase_slash_command`
-  → `diff::rebase_session_repo`): agent-free `git rebase <branch>` on the session `cwd` repo,
-  followed by a branch-tip snapshot that becomes the newest base.
+- `unstaged`: index to working tree (`git diff`), the default;
+- `staged`: HEAD to index (`git diff --cached`), including repositories without a first commit;
+- `untracked`: nonignored untracked files as additions, without staging them.
 
-Current limitations / accepted residual risks:
+The same path can have different staged and unstaged patches. Group selection is kept
+through refreshes. Binary files and conflicts remain visible; combined conflict patches
+are read-only metadata, without invented two-sided comment anchors. Empty files, file
+modes, renames, deletions and paths containing tabs/newlines are handled explicitly.
+Untracked symlinks show their target text, never the contents of an external target.
 
-- `/rebase` is single-repo (session `cwd`, worktree ignored), no fetch, no `--onto`/flags, and
-  takes exactly one ref argument (extra args are rejected),
-- `/rebase`'s `Busy`/`Starting` guard is a check, not a lock: a prompt arriving on another
-  client mid-rebase can race the working tree, and an abort would discard those edits. Accepted
-  for a single-operator local tool (sub-second window, conflict required) rather than adding a
-  cross-cutting rebase-in-progress dispatch lock,
-- the wire names `SessionRepoCandidate.session_start_snapshot` / `has_session_start_snapshot`
-  and `DiffEndpoint::SessionStartSnapshot` now mean "base / newest snapshot"; a full rename
-  across `protocol.rs` + `protocol.ts` + frontend + tests is intentionally deferred,
-- multi-repo sessions: the default base prefers the newest snapshot in the **active**
-  (cwd/worktree) repo, falling back to the newest snapshot overall only when the active repo
-  has none — so a newer snapshot in an unrelated repo never silently switches which repository
-  the view shows; switch repos via the dropdown,
-- there is **no snapshot deletion** in Fura or OMP (append-only). Stale snapshots stay in the
-  list but are never the default once a newer one exists.
+Read paths never run `git add`, `read-tree`, `write-tree`, `commit-tree` or `update-ref`.
+They do not modify the index, branch, working files, Git objects or existing snapshot refs.
+Git commands use literal pathspecs and disable optional index locks, external diff drivers
+and textconv. Output and previews are bounded; unsupported non-UTF-8 paths fail explicitly.
 
-## Product thesis
+## Repository discovery and manual corrections
 
-Diffs & Snapshots is the session-changes lens, adjacent to session creation, scoped as:
+`src/session_repos.rs` discovers the nearest working-tree root from concrete paths:
 
-- a read-only projection of OMP-owned, append-only snapshots,
-- a zero-config "changes since the session's base" diff, with the base re-baseable on demand,
-- an ergonomic re-baseline path (`/rebase`, or "Snapshot now → ref") for the common
-  post-rebase case,
-- not a second source of truth for snapshots, and not a Git history-management UI.
+1. the session's managed worktree and cwd;
+2. `additionalDirectories` in the known OMP session header, including title-prefixed and legacy logs;
+3. trusted tool metadata: edit paths/move sources, write resolved paths, explicit bash cwd,
+   and recognized eval path/cwd events;
+4. initialized submodules declared by Git, without walking arbitrary directories;
+5. previously discovered and manually added roots.
 
-The base-selection design follows from one fact: a re-baseline is "where the work now starts",
-which is exactly the newest snapshot. Marking that with OMP `kind` would also work, but Fura
-already owns the *selection* (the `repoId` is never persisted in OMP), so picking the newest
-snapshot keeps Fura aligned with OMP's own default selector and needs no OMP change.
+Files, deleted paths and nonexistent child paths resolve through existing ancestors.
+A nested repository is discovered only when a concrete path identifies it. Linked
+worktrees remain distinct by canonical working-directory root, even when Git storage is
+shared. Deleted stored roots do not silently become their parent repository.
 
-## Non-goals
+SQLite tables `session_repositories` and `session_repository_defaults` in the existing
+Fura database retain associations and per-session **Add**, **Hide selected**, and
+**Set default** decisions. Hiding suppresses automatic re-addition; Add restores a hidden
+root. Newly discovered repositories do not replace the established default or an explicit
+view selection. Manual corrections do not write OMP session logs.
 
-- snapshot deletion / tombstones (OMP is append-only; hiding is not worth the divergence),
-- persisting a pinned base across reloads (self-defeating with newest-wins: every new snapshot
-  would have to clear it),
-- interactive rebase, `--onto`, conflict resolution inside `/rebase` (use the shell or recover
-  manually), or fetching as part of `/rebase`,
-- editing OMP's `kind` semantics or removing the field (no benefit to Fura; touches OMP TUI),
-- a hosted terminal/shell (separate feature with its own threat model).
+Discovery is best-effort. It does not infer paths from conversation, shell programs or
+arbitrary eval code. Relative eval paths without explicit cwd evidence are skipped.
+Remote/internal tool URIs are not treated as local paths. Fura does not yet subscribe to
+OMP child-agent operation streams; opaque shell/eval/subagent work can require manual Add.
+Repository association is not proof that an operation modified that repository.
 
-## Snapshot model
+## Patch versions, comments and refresh
 
-- Storage: append-only `custom` entries in the OMP session JSONL. OMP `SessionManager` exposes
-  only `appendCustomEntry` — no delete. Fura must treat snapshots as immutable, ordered facts.
-- Fields Fura reads (`SessionDiffSnapshot` / `SessionDiffSnapshotSummary`): `entryId`, `kind`
-  (`session-start` | `manual`, read but unused for selection), `label`, `repoRoot`, `tree`,
-  `ref` (`refs/omp/diff-snapshots/<id>`), `commit`, `createdAt`.
-- Anchoring: every snapshot writes a durable ref, so the pinned tree/commit survives rebase and
-  GC; the diff against an old snapshot stays computable — "stale" means "no longer the base you
-  want", not "broken".
+Mutable comparisons use opaque BLAKE3 version identities, not synthetic Git trees.
+Their identity includes the Git group, base/index data, relevant Git configuration and
+changed-file contents. Summary and lazy patch generation validate the version before and
+after reading. If state changes, loading/anchoring fails with a request to refresh rather
+than attaching new content to an old comparison key.
 
-## Base selection model
+Comments/questions remain tied to `comparisonKey` and exact line context. Group switches
+and changed versions cannot reuse another patch's comments. Immutable commit comparisons
+keep their resolved object IDs. Agent-review prompts distinguish Git endpoints from opaque
+Fura version IDs and prohibit treating those IDs as Git refs.
 
-- Candidates (`session_repo_candidates`): worktree-path, cwd-path, and one per snapshot;
-  path candidates carrying a snapshot that is also a standalone candidate are hidden to dedupe.
-- Default (`select_session_repo`, no explicit `repoId`): the newest snapshot (greatest
-  `createdAt`) **within the active cwd/worktree repo** (`preferred_repo_roots`, captured before
-  shadowed path candidates are hidden); falls back to the newest snapshot in any repo, then to
-  the prior path-candidate / first-candidate behavior for repos with no snapshots.
-- Fresh session: only the auto `session-start` snapshot exists, so it is the newest and the
-  base — behavior preserved.
-- Override: selecting any snapshot in the dropdown sets `repoId` for that view only.
+The UI retains filtering, file/stat views, lazy per-file patches, hunks, wider context,
+comments and agent questions. It refreshes after a turn settles, on panel re-entry, on
+window focus/visibility return and manually. Inactive views are marked stale. This is not
+a filesystem watcher; manual refresh remains available for external changes.
 
-## `/rebase <branch>` command
+Opening a working-tree diff file in Code uses the selected repository root, not the
+session's original cwd. Indexed and deleted versions do not misleadingly open unrelated
+working-tree content. Diff panes retain enough width for controls, including restored layouts.
 
-Contract:
+## Separate comparisons
 
-1. Parse exactly one ref argument; reject empty or extra args with a usage error (before any
-   session lookup).
-2. Refuse if the session is `Busy`/`Starting`, has no `cwd`, the `cwd` is not a Git repo, the
-   working tree is dirty, or `<branch>` does not resolve — each up front, touching nothing.
-3. Run `git rebase <branch>` in the `cwd` repo (no fetch). On any failure (conflicts included),
-   `git rebase --abort` to restore the original HEAD; escalate to a manual-recovery error only
-   if a rebase is still in progress afterwards (`rebase_in_progress`).
-4. On success, create a snapshot pinned at the branch tip via the existing `repo_diff_snapshot`
-   RPC (`label: "rebase onto <branch>"`). Newest-wins makes it the diff base automatically.
+The existing Compare/ref-review mode supports Git refs, commits, merge-base comparisons,
+WORKTREE and commit stepping. WORKTREE comparisons also include nonignored untracked
+additions without materializing a Git tree. Review worktrees remain an explicit operation,
+not a prerequisite for reading the normal Git changes panel.
 
-The happy path needs no agent and no form; conflicts are delegated to the shell or manual
-recovery, not handled in-command.
+`/rebase <branch>` retains its existing guarded Git behavior but no longer requests a
+snapshot afterward. It still acts on the session cwd repository, without fetching.
 
-## Backend ownership
+## Protocol and ownership
 
-- `src/diff.rs` owns snapshot reading, candidate assembly, base selection, diff generation, the
-  `rebase_session_repo` helper, and review-worktree mechanics.
-- `src/commands.rs` owns the `/rebase` slash dispatch and orchestration (guards, then the
-  snapshot RPC).
-- `src/protocol.rs` + `frontend/src/protocol.ts` carry the DTOs (`SessionRepoCandidate`,
-  `SessionDiffSnapshotSummary`, `DiffEndpoint`, the `sessionChanges*`/`compareDiff`/`diff.*`
-  messages); manually mirrored, no generated schema.
-- OMP is the source of truth for snapshot creation (`repo_diff_snapshot` RPC) and storage.
+- `src/diff.rs`: direct Git groups/comparisons, version validation, lazy patches, jobs,
+  review worktrees and rebase mechanics.
+- `src/session_repos.rs`: repository discovery and durable manual corrections.
+- `src/protocol.rs` / `frontend/src/protocol.ts`: manually mirrored DTOs.
+- `frontend/src/main.ts`, `diffState.ts`, `diffReview.ts`: panel/review behavior.
+- `src/commands.rs`: dispatch, repository updates, rebase and agent review orchestration.
 
-## Protocol sketch
+The `sessionChanges.request` / `sessionChanges.summary` wire names retain session context,
+not authorship semantics. Requests carry `changeKind`; ready summaries include repository
+candidates with `source` and `isDefault`. `sessionRepos.update` takes `sessionId`, `action`
+(`add`, `hide`, `default`) and `path`. Successful updates emit `Git repositories updated:`
+notices, which trigger a fresh repository summary. `compareDiff.*`, `diff.content.*` and
+`diff.cancel` remain separate. Snapshot commands, DTOs and `missingSnapshot` are removed.
 
-Client → bridge:
+## OMP cutover and historical data
 
-- `sessionChanges.request` — summary for a session (optional `repoId`, detail mode, selected
-  file, context lines),
-- `sessionChanges.snapshot` — create a snapshot (optional `label`, `repoRoot`, `ref`),
-- `compareDiff.request` — arbitrary base/head refs,
-- `diff.content.request` — scoped lazy per-file patch,
-- `diff.cancel` — cancel an in-flight diff job,
-- review-worktree ensure/checkout and review-comment messages,
-- `/rebase <branch>` rides the normal slash/prompt path, not a dedicated message.
+Own repo-snapshot patches were removed from the vendored fork stack on the unchanged
+upstream base. Mixed commits retain their unrelated RPC/plan/goal/BTW/process-safety
+changes. There is no new disable switch or replacement snapshot service.
 
-Bridge → client:
+Existing `repo-diff-snapshot` custom entries and `refs/omp/diff-snapshots/*` are historical
+user data: this migration does not delete them. They are ignored by repository discovery
+and normal diff generation. Legacy conversations remain loadable. Ordinary session
+deletions no longer run the removed snapshot-ref cleanup integration.
 
-- `SessionChangesSummary` (state: `repos`, `selectedRepoId`, `comparison` with `base`/`head`
-  `DiffEndpoint`s, `summary`, `review`), `diff.content`, diff error / `missingSnapshot` /
-  `missingRepo` states, and a `session.notice` for `/rebase` outcomes.
-
-## Implementation phases
-
-### Phase 1: snapshot projection + session-changes diff
-
-Status: implemented. Read OMP snapshots, build candidates, diff base→working-tree, lazy
-per-file patches, tokenized jobs.
-
-### Phase 2: compare diffs + review worktrees + review comments
-
-Status: implemented. Arbitrary ref compare, detached review worktrees under
-`.fura/review-worktrees/<uuid>`, agent review comments mapped to anchors.
-
-### Phase 3: newest-snapshot base + `/rebase`
-
-Status: implemented. Default base = newest snapshot by `createdAt` (ignore `kind`); agent-free
-`/rebase <branch>` with guards, abort-on-failure, and branch-tip re-baseline snapshot.
-
-## Open questions
-
-- Is the deferred rename of `sessionStartSnapshot`/`hasSessionStartSnapshot` to base/newest
-  worth a one-shot cross-cutting change, or left until the next diff-view refactor?
-- If `/rebase` grows (form, `--onto`, fetch, conflict routing), does the accepted concurrency
-  race justify a real rebase-in-progress dispatch lock?
-
-## Recommended next step
-
-Leave the subsystem as-is unless `/rebase` grows; if it does, revisit the concurrency lock and
-the wire-name rename together rather than piecemeal.
+Publishing rewritten OMP history and the Fura submodule pointer requires separate approval.
+Publication is not deployment: existing bridge/OMP processes are not restarted automatically.
