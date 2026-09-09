@@ -88,6 +88,7 @@ export function renderCodeViewer(
   const fileKey = state.file ? `${state.workspace?.workspaceId ?? ""}::${state.file.path}` : null;
   const samePath = fileKey != null && lastRenderedCodeFileKey.get(container) === fileKey;
   const preservedScrollTop = samePath && previousLines ? previousLines.scrollTop : null;
+  const preservedScrollLeft = samePath && previousLines ? previousLines.scrollLeft : 0;
 
   container.replaceChildren();
 
@@ -109,7 +110,10 @@ export function renderCodeViewer(
 
   if (preservedScrollTop != null) {
     const nextLines = container.querySelector<HTMLElement>(".code-review-lines");
-    if (nextLines) nextLines.scrollTop = preservedScrollTop;
+    if (nextLines) {
+      nextLines.scrollTop = preservedScrollTop;
+      nextLines.scrollLeft = preservedScrollLeft;
+    }
   }
   if (fileKey != null) lastRenderedCodeFileKey.set(container, fileKey);
   else lastRenderedCodeFileKey.delete(container);

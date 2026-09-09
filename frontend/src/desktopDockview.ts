@@ -48,6 +48,24 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
 
   const api = new DockviewComponent(options.host, {
     theme: themeDark,
+    createRightHeaderActionComponent(group) {
+      const element = createPanelToolbar(owner, () => {
+        const panel = group.activePanel && api.getGroupPanel(group.activePanel.id);
+        const panelId = panel && desktopPanelId(panel.id);
+        if (!panel || !panelId) return;
+        void api.api.addPopoutGroup(panel, {
+          popoutUrl: "/popout.html",
+          onDidOpen: ({ window: popWin }) => {
+            copyStylesToPopout(owner, popWin);
+            popWin.addEventListener("focus", () => {
+              panel.api.setActive();
+              options.onPanelActivated(panelId);
+            });
+          },
+        });
+      });
+      return { element, init() {}, dispose() {} };
+    },
     createComponent(componentOptions) {
       const panelId = desktopPanelId(componentOptions.name);
       if (!panelId) {
@@ -55,10 +73,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
         return { element, init() {} };
       }
 
-      let popoutPanel: (() => void) | null = null;
-      const shell = createDesktopPanelShell(owner, panelId, () => {
-        popoutPanel?.();
-      });
+      const shell = createDesktopPanelShell(owner, panelId);
 
       return {
         element: shell.element,
@@ -66,20 +81,6 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
           if (panelId === "diffs" || panelId === "sessionChanges" || panelId === "compare") {
             params.api.group.api.setConstraints({ minimumWidth: 560 });
           }
-          popoutPanel = () => {
-            const panel = params.containerApi.getPanel(panelId);
-            if (!panel) return;
-            void params.containerApi.addPopoutGroup(panel, {
-              popoutUrl: "/popout.html",
-              onDidOpen: ({ window: popWin }) => {
-                copyStylesToPopout(owner, popWin);
-                popWin.addEventListener("focus", () => {
-                  params.api.setActive();
-                  options.onPanelActivated(panelId);
-                });
-              },
-            });
-          };
           panelActivators[panelId] = () => {
             params.api.setActive();
             params.api.getWindow().focus();
@@ -174,19 +175,15 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   };
 }
 
-export function createDesktopPanelShell(
+function createDesktopPanelShell(
   owner: Document,
   panelId: DesktopDockviewPanelId,
-  onPopout: () => void,
-  showPopout = true,
 ): DesktopPanelShell {
   const element = owner.createElement("div");
   element.className = `panel-content panel-content-${panelId}`;
 
-  const toolbar = showPopout ? createPanelToolbar(owner, onPopout) : null;
   const scroll = owner.createElement("div");
   scroll.className = "panel-scroll";
-  if (toolbar) element.append(toolbar);
   element.append(scroll);
   return { element, scroll };
 }

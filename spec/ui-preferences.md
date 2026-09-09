@@ -38,6 +38,30 @@ how the transcript renders. Current preferences:
   collapsed; `shown`/`hidden` force it. Changing it resets the transcript
   render cache (thinking lives inside message DOM).
 
+### Desktop density
+
+Desktop uses a fixed compact layout, not another persisted display preference:
+208px session sidebar, flat two-line session rows, small proportional titles,
+compact panel headers and a 48px resizable prompt field. Session metadata and
+repository paths ellipsize rather than expanding their rows. Transcript prose
+and code font sizes are unchanged. Keyboard focus remains visible; coarse-pointer
+controls use at least 44px targets. Shared-component density overrides live in
+`desktopDensity.css`, imported only by the desktop entry point; mobile keeps the
+shared form typography and card defaults.
+The prompt field touches the status-bar separator when no images are attached.
+The hidden attachment strip contributes no padding or border; attached images
+remain visible above the prompt.
+
+### Context usage
+
+Both status bars display OMP's authoritative `get_state.contextUsage`: current
+context tokens, model capacity and percentage, not cumulative session token usage.
+Fura refreshes this state after model selection/cycling, builtin `/compact`
+completion (`prompt_result` or local-only prompt response), low-level `compact`
+responses and automatic compaction completion. No further prompt or page reload
+is needed. Unknown usage clears the previous value rather than retaining stale
+numbers; provider-specific token accounting stays in OMP.
+
 ## Adding a new preference
 
 Mirror the existing plumbing end to end: `config.rs` (FuraConfig + disk struct

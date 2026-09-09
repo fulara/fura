@@ -27,12 +27,33 @@ The browser retains a sliding window of at most 300 commits. Latest/Refresh rest
 Older/Newer commit navigation uses the loaded window, with Load older at its boundary.
 The selected commit remains independent of that window. View/repository/commit selection
 is restored per session and repository, including after a browser reload.
+With focus inside History, `n` selects the next loaded row (older commit), and `p`
+the previous row (newer commit), without wrapping at the window boundaries.
+These shortcuts ignore editable fields, selects, modifiers and composition events;
+they work in docked and popped-out panels and retain focus through patch reloads.
 
 Changing selection replaces in-flight requests. Responses are correlated by client,
 request, session and repository; commit summaries additionally match the selected OID.
 Disconnects settle pending history/file reads. Returning to an interrupted selection
 reloads it instead of leaving an indefinite loading view. The pane can be expanded or
 popped out without losing selection or commit navigation.
+
+Desktop chrome is compact: repository selector, branch/HEAD and view navigation share
+one header (two rows in narrow panels). **Review options** is a native disclosure for
+Add/Hide selected/Set default and Advanced Compare. The menu survives background
+summary/history rerenders while open and closes after an action or Escape.
+History and changed files use dense rows with independent scrolling. Long subjects
+and paths truncate visually; tooltips retain their full values.
+
+The selected commit subject, navigation, totals and patch actions share one detail
+toolbar. Expanding the subject reveals the full OID, message, author, timestamp and
+comparison endpoints; merge/initial-commit basis remains visible when collapsed.
+An open description survives patch rerenders for the same comparison only.
+Pop out lives in the Dockview tab header, not in a separate content toolbar.
+
+**Show more context** adds ten context lines to the visible patch, up to 200.
+In All files view it reloads the aggregate patch; with one file selected it reloads
+that file. Expanding context never silently changes the file selection.
 
 ## Git groups
 

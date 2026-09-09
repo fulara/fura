@@ -143,6 +143,30 @@ test("desktop lists and changes the active session model", async ({ page }) => {
   await expect(page.locator("#statusBar .model")).toHaveText("Mock Reasoner");
 });
 
+test("compact updates context usage without another prompt on desktop and mobile", async ({ page }) => {
+  await authenticateDesktop(page);
+  await createDesktopSession(page, `Context smoke ${Date.now()}`);
+  await page.locator("#promptInput").fill("/model local/tiny");
+  await page.locator("#sendButton").click();
+  await expect(page.locator("#statusBar .model")).toHaveText("Tiny Fast Mock");
+  await expect(page.locator("#statusBar .context")).toHaveText("75.0%/32K");
+  await page.locator("#promptInput").fill("/compact");
+  await page.locator("#sendButton").click();
+  await expect(page.locator("#statusBar .context")).toHaveText("12.5%/32K");
+  await expect(page.locator("#promptInput")).toBeEnabled();
+  await expect(page.locator(".message.assistant")).toHaveCount(0);
+
+  await page.goto("/mobile.html");
+  await expect(page.locator("#mobileConnectionStatus")).toHaveText("connected");
+  await createMobileSession(page, `Mobile context smoke ${Date.now()}`);
+  await expect(page.locator("#mobileStatusBar .context")).toHaveText("12.0%/200K");
+  await page.locator("#mobilePromptInput").fill("/compact");
+  await page.locator("#mobileSendButton").click();
+  await expect(page.locator("#mobileStatusBar .context")).toHaveText("2.0%/200K");
+  await expect(page.locator("#mobilePromptInput")).toBeEnabled();
+  await expect(page.locator(".message.assistant")).toHaveCount(0);
+});
+
 test("desktop opens an explicit compare diff against the working tree", async ({ page }) => {
   await authenticateDesktop(page);
 
@@ -181,6 +205,7 @@ test("Git groups keep independent patches, refresh, and open files from the sele
     await createDesktopSession(page, sessionName);
     await page.locator(".dv-tab").filter({ hasText: "Git changes" }).click();
     const panel = page.locator(".session-changes-view:visible");
+    await panel.locator(".git-review-options > summary").click();
     await expect(panel.getByRole("button", { name: "Add", exact: true })).toBeVisible();
     page.once("dialog", dialog => dialog.accept(root));
     await panel.getByRole("button", { name: "Add", exact: true }).click();

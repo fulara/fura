@@ -104,13 +104,14 @@ export function renderGitHistoryBrowser(state: GitHistoryState, actions: {
     row.dataset.commitOid = commit.oid;
     row.setAttribute("aria-pressed", String(commit.oid === state.selectedOid));
     const subject = mkEl("strong");
+    subject.className = "git-history-subject";
     subject.textContent = commit.subject || "(no subject)";
     const meta = mkEl("span");
     meta.className = "git-history-meta";
     const date = new Date(commit.committedAt);
     const time = Number.isNaN(date.getTime()) ? commit.committedAt : date.toLocaleString();
     meta.textContent = `${commit.shortOid} · ${commit.authorName || "Unknown author"} · ${time}${commit.isMerge ? " · Merge" : ""}`;
-    row.title = `${commit.oid}\n${commit.authorName ?? ""}\n${commit.committedAt}`;
+    row.title = `${commit.message || commit.subject || "(no subject)"}\n${commit.oid}\n${commit.authorName ?? ""}\n${commit.committedAt}`;
     row.append(subject, meta);
     row.addEventListener("click", () => actions.select(commit.oid));
     list.append(row);

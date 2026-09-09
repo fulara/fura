@@ -1297,6 +1297,25 @@ describe("desktop cog options", () => {
     expect(connection.sent.filter(message => message.type === "sessionChanges.request")).toHaveLength(count);
   });
 
+  it("keeps repository actions open when the initial Git summary arrives", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const optionsSummary = document.querySelector<HTMLElement>("#testDiffPanel .git-review-options > summary")!;
+    optionsSummary.focus();
+    optionsSummary.click();
+    answerGitRequest(connection, "repo-v1");
+    expect(document.querySelector<HTMLDetailsElement>("#testDiffPanel .git-review-options")?.open).toBe(true);
+    document.activeElement?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    expect(document.querySelector<HTMLDetailsElement>("#testDiffPanel .git-review-options")?.open).toBe(false);
+    document.querySelector<HTMLElement>("#testDiffPanel .git-review-options > summary")!.click();
+    vi.spyOn(window, "prompt").mockReturnValue("/new");
+    clickGitButton("Add");
+    expect(connection.sent).toContainEqual({ type: "sessionRepos.update", sessionId: "live", action: "add", path: "/new" });
+    expect(document.querySelector<HTMLDetailsElement>("#testDiffPanel .git-review-options")?.open).toBe(false);
+  });
+
   it("keeps explicit repository selection when discovery adds a default and reloads durable corrections", async () => {
     const { connection } = await createHarness();
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
@@ -1969,8 +1988,6 @@ describe("desktop cog options", () => {
     expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("single b");
 
     const contextButton = document.querySelector<HTMLButtonElement>("#testDiffPanel .diff-context-more");
-    expect(contextButton?.previousElementSibling?.classList.contains("diff-comment-spacer")).toBe(true);
-    expect(contextButton?.nextElementSibling?.tagName).toBe("CODE");
 
     connection.sent.length = 0;
     contextButton?.click();
@@ -2026,10 +2043,7 @@ describe("desktop cog options", () => {
     });
     connection.sent.length = 0;
 
-    const buttonTexts = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")].map(button => button.textContent);
-    expect(buttonTexts).toContain("Refresh");
-    const refreshButton = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
-      .find(button => button.textContent === "Refresh");
+    const refreshButton = document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]');
     expect(refreshButton?.disabled).toBe(false);
     refreshButton?.click();
 

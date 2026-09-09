@@ -1,4 +1,5 @@
 import "./style.css";
+import "./desktopDensity.css";
 import "highlight.js/styles/github-dark.css";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, fuzzyMatchCommands, isLiveSlashCommandRunnableWhileBusy, SUPPORTED_SLASH_COMMANDS, type CommandPopupSection, type SlashCommandSpec } from "./slashCommands";
@@ -6444,10 +6445,31 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     ? (container.querySelector<HTMLElement>(".diffs-sidebar-scroll")?.scrollTop ?? 0)
     : 0;
   const historyScroll = sameSessionRerender ? container.querySelector<HTMLElement>(".git-history-list")?.scrollTop ?? 0 : 0;
+  const optionsOpen = sameSessionRerender && Boolean(container.querySelector<HTMLDetailsElement>(".git-review-options")?.open);
+  const openCommitKey = sameSessionRerender ? container.querySelector<HTMLElement>(".diff-commit-message[open]")?.dataset.comparisonKey : undefined;
+  const restoreOptionsFocus = optionsOpen && Boolean(container.ownerDocument.activeElement?.closest(".git-review-options"));
+  const restoreReviewFocus = sameSessionRerender && container.contains(container.ownerDocument.activeElement)
+    && !container.ownerDocument.activeElement?.closest("input, textarea, select, [contenteditable]");
   container.replaceChildren();
 
   const root = mkEl("div");
   root.className = "diffs-view session-changes-view";
+  root.tabIndex = 0;
+  root.setAttribute("aria-label", "Git review");
+  root.addEventListener("pointerdown", event => {
+    if (!(event.target as Element).closest("button, a, input, textarea, select, summary, [contenteditable]")) {
+      root.focus({ preventScroll: true });
+    }
+  });
+  root.addEventListener("keydown", event => {
+    if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+    if ((event.target as Element).closest("input, textarea, select, [contenteditable], [role='textbox'], .git-review-options")) return;
+    if (event.key !== "n" && event.key !== "p") return;
+    const button = root.querySelector<HTMLButtonElement>(`.git-commit-navigation button[aria-label="${event.key === "n" ? "Older commit" : "Newer commit"}"]`);
+    if (!button || button.disabled) return;
+    event.preventDefault();
+    button.click();
+  });
   const sidebar = mkEl("aside");
   sidebar.className = "diffs-sidebar";
   const sidebarTop = mkEl("div");
@@ -6469,6 +6491,14 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   if (preservedScroll > 0) sidebarScroll.scrollTop = preservedScroll;
   const historyList = container.querySelector<HTMLElement>(".git-history-list");
   if (historyList && historyScroll > 0) historyList.scrollTop = historyScroll;
+  const options = container.querySelector<HTMLDetailsElement>(".git-review-options");
+  if (options) options.open = optionsOpen;
+  const commit = container.querySelector<HTMLDetailsElement>(".diff-commit-message");
+  if (commit && openCommitKey === commit.dataset.comparisonKey) commit.open = true;
+  if (restoreReviewFocus) {
+    const focusTarget = restoreOptionsFocus ? options?.querySelector<HTMLElement>("summary") : null;
+    (focusTarget ?? root).focus({ preventScroll: true });
+  }
 }
 
 function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, sidebar: HTMLElement, main: HTMLElement): void {
@@ -6484,9 +6514,27 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   root.classList.toggle("git-history-mode", history.view === "history");
   const header = mkEl("header");
   header.className = "git-review-header";
+  const options = mkEl("details");
+  options.className = "git-review-options";
+  const optionsSummary = mkEl("summary");
+  optionsSummary.textContent = "⋯";
+  optionsSummary.setAttribute("aria-label", "Review options");
+  optionsSummary.title = "Review options";
+  const optionsMenu = mkEl("div");
+  optionsMenu.className = "git-review-options-menu";
+  optionsMenu.addEventListener("click", event => {
+    if ((event.target as Element).closest("button")) options.open = false;
+  });
+  options.addEventListener("keydown", event => {
+    if (event.key === "Escape") {
+      options.open = false;
+      optionsSummary.focus();
+    }
+  });
+  options.append(optionsSummary, optionsMenu);
   const repository = mkEl("div");
   repository.className = "git-repository-context";
-  if (state) renderSessionRepoControls(sessionId, state, repository);
+  if (state) renderSessionRepoControls(sessionId, state, repository, optionsMenu);
   else {
     const add = mkEl("button");
     add.type = "button";
@@ -6495,7 +6543,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
       const path = window.prompt("Repository path");
       if (path?.trim()) updateSessionRepo(sessionId, "add", path.trim());
     });
-    repository.append(add);
+    optionsMenu.append(add);
   }
   const identity = mkEl("div");
   identity.className = "git-repository-identity";
@@ -6521,7 +6569,9 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   }
   const refresh = mkEl("button");
   refresh.type = "button";
-  refresh.textContent = "Refresh";
+  refresh.textContent = "↻";
+  refresh.setAttribute("aria-label", "Refresh");
+  refresh.title = "Refresh";
   refresh.disabled = diffLoadingSessions.has(sessionId);
   refresh.addEventListener("click", () => requestSessionChangesRefresh(sessionId));
   const compare = mkEl("button");
@@ -6532,14 +6582,17 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   const expand = mkEl("button");
   expand.type = "button";
   const expanded = desktopDockview?.isPanelExpanded?.("diffs") ?? false;
-  expand.textContent = expanded ? "Restore layout" : "Expand review";
+  expand.textContent = expanded ? "↙" : "⤢";
+  expand.title = expanded ? "Restore layout" : "Expand review";
+  expand.setAttribute("aria-label", expand.title);
   expand.addEventListener("click", () => {
     desktopDockview?.setPanelExpanded?.("diffs", !expanded);
     markDiffsViewDirty();
     renderDiffsViewIfActive(sessionId);
   });
-  navigation.append(refresh, compare, expand);
-  header.append(repository, navigation);
+  navigation.append(refresh, expand);
+  optionsMenu.append(compare);
+  header.append(repository, navigation, options);
   root.prepend(header);
   if (history.view === "history") {
     sidebarTop.append(renderGitHistoryBrowser(history, {
@@ -6562,7 +6615,10 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
     for (const [offset, label] of [[-1, "Newer commit"], [1, "Older commit"]] as const) {
       const button = mkEl("button");
       button.type = "button";
-      button.textContent = label;
+      button.textContent = offset < 0 ? "↑" : "↓";
+      button.setAttribute("aria-label", label);
+      button.title = `${label} (${offset < 0 ? "p" : "n"})`;
+      button.setAttribute("aria-keyshortcuts", offset < 0 ? "p" : "n");
       const target = index >= 0 ? history.page?.commits[index + offset] : undefined;
       button.disabled = !target;
       button.addEventListener("click", () => { if (target) selectGitCommit(sessionId, target.oid); });
@@ -6576,8 +6632,6 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   } else {
     const toolbar = mkEl("div");
     toolbar.className = "diffs-toolbar";
-    const title = mkEl("strong");
-    title.textContent = "Git changes";
     const group = mkEl("select");
     group.className = "diff-group-select";
     group.setAttribute("aria-label", "Git change group");
@@ -6589,7 +6643,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
       group.append(option);
     }
     group.addEventListener("change", () => requestSessionChangesRefresh(sessionId, { changeKind: group.value as GitChangeKind, refreshHistory: false }));
-    toolbar.append(title, group);
+    toolbar.append(group);
     main.append(toolbar);
   }
   const error = diffErrors.get(sessionId);
@@ -6640,12 +6694,9 @@ function renderDiffReviewSessionView(
   renderReviewableDiff(sessionId, compareDiffState, sidebarTop, sidebar, main, true, "compareDiff");
 }
 
-function renderSessionRepoControls(sessionId: string, state: SessionChangesSummaryState, sidebar: HTMLElement): void {
+function renderSessionRepoControls(sessionId: string, state: SessionChangesSummaryState, sidebar: HTMLElement, optionsMenu: HTMLElement): void {
   const section = mkEl("section");
   section.className = "diffs-repo-selector";
-  const label = mkEl("label");
-  label.className = "diffs-repo-label";
-  label.textContent = "Repository";
   const select = mkEl("select");
   select.className = "diff-repo-select";
   select.setAttribute("aria-label", "Repository");
@@ -6653,15 +6704,16 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesSumma
   for (const repo of state.repos) {
     const option = mkEl("option");
     option.value = repo.id;
-    option.textContent = `${repo.label || formatDiffRepoLabel(repo.repoRoot)} · ${repo.source}${repo.isDefault ? " · default" : ""}`;
+    option.textContent = repo.label || formatDiffRepoLabel(repo.repoRoot);
+    option.title = `${repo.repoRoot} · ${repo.source}${repo.isDefault ? " · default" : ""}`;
     option.selected = repo.id === (sessionChangesRepoIds.get(sessionId) ?? (state.status === "ready" ? state.selectedRepoId : null));
     select.append(option);
   }
   const currentPayload = state.status === "ready" ? state.comparison.detailMode : sessionChangesPayloadKinds.get(sessionId) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE;
   select.addEventListener("change", () => requestSessionChangesRepo(sessionId, select.value, currentPayload));
-  section.append(label, select);
+  section.append(select);
   const actions = mkEl("div");
-  actions.className = "diffs-actions";
+  actions.className = "diffs-actions git-repository-actions";
   const add = mkEl("button");
   add.type = "button";
   add.textContent = "Add";
@@ -6671,6 +6723,7 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesSumma
     if (path?.trim()) updateSessionRepo(sessionId, "add", path.trim());
   });
   const selected = state.repos.find(repo => repo.id === select.value);
+  select.title = selected?.repoRoot ?? "Repository";
   for (const [action, text] of [["hide", "Hide selected"], ["default", "Set default"]] as const) {
     const button = mkEl("button");
     button.type = "button";
@@ -6682,7 +6735,7 @@ function renderSessionRepoControls(sessionId: string, state: SessionChangesSumma
     actions.append(button);
   }
   actions.prepend(add);
-  section.append(actions);
+  optionsMenu.append(actions);
   sidebar.append(section);
 }
 
@@ -6821,9 +6874,10 @@ function requestDiffContent(annotationKey: string, state: DiffReviewableState, f
 
 function requestWiderDiffContext(annotationKey: string, state: DiffReviewableState, filePath: string, requestMode: "sessionChanges" | "compareDiff"): void {
   const key = comparisonKey(state);
-  const cached = diffPatchCache.get(diffPatchCacheKey(key, filePath));
+  const scope = sessionChangesSelectedFiles.get(annotationKey) ? filePath : null;
+  const cached = diffPatchCache.get(diffPatchCacheKey(key, scope));
   const currentContext = cached?.contextLines ?? state.comparison.contextLines ?? 3;
-  requestDiffContent(annotationKey, state, filePath, requestMode, Math.min(currentContext + 10, 200));
+  requestDiffContent(annotationKey, state, scope, requestMode, Math.min(currentContext + 10, 200));
 }
 
 
@@ -6861,19 +6915,62 @@ function renderReviewableDiffMainContent(
   const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
   const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
   const aggregatePatch = selectedFilePath ? undefined : diffPatchCache.get(diffPatchCacheKey(key, null));
-  const summary = mkEl("section");
-  summary.className = "diffs-summary";
-  const comparison = mkEl("p");
-  const displayedRange = state.comparison.displayedPatchRange;
-  comparison.textContent = `${resolvedRefLabel(displayedRange?.base ?? state.comparison.base)} → ${resolvedRefLabel(displayedRange?.head ?? state.comparison.head)}`;
-  const commits = mkEl("p");
-  commits.textContent = state.review.currentCommitOid ? `Commit ${(state.review.currentCommitIndex ?? 0) + 1}/${state.review.commits.length}` : `Range · ${state.review.commits.length} commit${state.review.commits.length === 1 ? "" : "s"}`;
-  summary.append(comparison);
-  if (requestMode === "compareDiff") summary.append(commits);
-  main.append(summary);
+  const detailToolbar = mkEl("div");
+  detailToolbar.className = "git-detail-toolbar";
+  const navigation = main.querySelector<HTMLElement>(".diffs-toolbar, .git-commit-navigation");
+  if (navigation) detailToolbar.append(navigation);
   const selectedCommit = state.review.currentCommitOid
     ? state.review.commits.find(commit => commit.oid === state.review.currentCommitOid) ?? null
     : null;
+  const comparison = mkEl("p");
+  const displayedRange = state.comparison.displayedPatchRange;
+  comparison.textContent = `${resolvedRefLabel(displayedRange?.base ?? state.comparison.base)} → ${resolvedRefLabel(displayedRange?.head ?? state.comparison.head)}`;
+  if (selectedCommit) {
+    const messageBlock = mkEl("details");
+    messageBlock.className = "diff-commit-message";
+    messageBlock.dataset.comparisonKey = key;
+    const commitSummary = mkEl("summary");
+    commitSummary.className = "git-commit-summary";
+    commitSummary.title = `${selectedCommit.oid}\n${selectedCommit.message || selectedCommit.subject}`;
+    const subject = mkEl("strong");
+    subject.textContent = selectedCommit.subject || "(no subject)";
+    commitSummary.append(subject);
+    if (requestMode === "compareDiff") {
+      const position = mkEl("span");
+      position.className = "git-commit-position";
+      position.textContent = `Commit ${(state.review.currentCommitIndex ?? 0) + 1}/${state.review.commits.length}`;
+      commitSummary.append(position);
+    }
+    if (selectedCommit.isMerge || !selectedCommit.parentOids.length) {
+      const basisLabel = mkEl("span");
+      basisLabel.className = "git-commit-basis";
+      basisLabel.textContent = selectedCommit.isMerge ? "Merge · first parent" : "Initial · empty tree";
+      commitSummary.append(basisLabel);
+    }
+    const metadata = mkEl("p");
+    metadata.className = "git-selected-commit-meta";
+    metadata.textContent = `${selectedCommit.oid} · ${selectedCommit.authorName || "Unknown author"}${selectedCommit.authorEmail ? ` <${selectedCommit.authorEmail}>` : ""} · ${selectedCommit.committedAt}`;
+    const basis = mkEl("p");
+    basis.textContent = selectedCommit.isMerge
+      ? `Merge commit — diff against first parent ${selectedCommit.parentOids[0]}`
+      : selectedCommit.parentOids[0] ? `Diff against parent ${selectedCommit.parentOids[0]}` : "Initial commit — diff against the empty tree";
+    const heading = mkEl("strong");
+    heading.textContent = "Commit message";
+    const messageText = mkEl("pre");
+    messageText.textContent = selectedCommit.message || selectedCommit.subject;
+    messageBlock.append(commitSummary, metadata, basis, comparison, heading, messageText);
+    detailToolbar.append(messageBlock);
+  } else {
+    const summary = mkEl("section");
+    summary.className = "diffs-summary";
+    summary.append(comparison);
+    if (requestMode === "compareDiff") {
+      const commits = mkEl("span");
+      commits.textContent = `Range · ${state.review.commits.length} commit${state.review.commits.length === 1 ? "" : "s"}`;
+      summary.append(commits);
+    }
+    detailToolbar.append(summary);
+  }
 
   const toolbar = mkEl("div");
   toolbar.className = "diffs-actions diff-step-actions";
@@ -7010,32 +7107,15 @@ function renderReviewableDiffMainContent(
     });
     toolbar.append(review);
   }
-  main.append(toolbar);
+  detailToolbar.append(toolbar);
+  main.append(detailToolbar);
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
   const totals = mkEl("p");
   totals.className = "git-diff-totals";
   totals.textContent = `${state.summary.files.length} changed file${state.summary.files.length === 1 ? "" : "s"} · +${state.summary.files.reduce((sum, file) => sum + file.added, 0)} −${state.summary.files.reduce((sum, file) => sum + file.removed, 0)}`;
-  body.append(totals);
-  if (selectedCommit) {
-    const messageBlock = mkEl("section");
-    messageBlock.className = "diff-commit-message";
-    const heading = mkEl("strong");
-    heading.textContent = "Commit message";
-    const messageText = mkEl("pre");
-    messageText.textContent = selectedCommit.message || selectedCommit.subject;
-    const metadata = mkEl("p");
-    metadata.className = "git-selected-commit-meta";
-    metadata.textContent = `${selectedCommit.oid} · ${selectedCommit.authorName || "Unknown author"}${selectedCommit.authorEmail ? ` <${selectedCommit.authorEmail}>` : ""} · ${selectedCommit.committedAt}`;
-    const basis = mkEl("p");
-    basis.textContent = selectedCommit.isMerge
-      ? `Merge commit — diff against first parent ${selectedCommit.parentOids[0]}`
-      : selectedCommit.parentOids[0] ? `Diff against parent ${selectedCommit.parentOids[0]}` : "Initial commit — diff against the empty tree";
-    messageBlock.append(metadata, basis);
-    messageBlock.append(heading, messageText);
-    body.append(messageBlock);
-  }
+  detailToolbar.insertBefore(totals, toolbar);
   const filePatchError = selectedDiffFilePatchError(annotationKey, selectedFilePath);
   let renderedRows: DiffRow[] = [];
   const activePatch = selectedFilePath ? cachedPatch : aggregatePatch;
@@ -7129,7 +7209,10 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
   setRenderDocument(root.ownerDocument);
   const selectedFilePath = sessionChangesSelectedFiles.get(annotationKey) ?? null;
   updateDesktopModifiedFileSelection(root, selectedFilePath);
-  const preservedHeader = [...main.children].find((child): child is HTMLElement => child.classList.contains("diffs-toolbar") || child.classList.contains("git-commit-navigation")) ?? null;
+  const preservedHeader = main.querySelector<HTMLElement>(".diffs-toolbar, .git-commit-navigation");
+  const openCommitKey = main.querySelector<HTMLElement>(".diff-commit-message[open]")?.dataset.comparisonKey;
+  const restoreReviewFocus = main.contains(root.ownerDocument.activeElement)
+    && !root.ownerDocument.activeElement?.closest("input, textarea, select, [contenteditable]");
   main.replaceChildren(...(preservedHeader ? [preservedHeader] : []));
   renderReviewableDiffMainContent(
     annotationKey,
@@ -7138,6 +7221,9 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
     annotationKey !== "compareDiff",
     diffRequestModeForAnnotationKey(annotationKey),
   );
+  const commit = main.querySelector<HTMLDetailsElement>(".diff-commit-message");
+  if (commit && openCommitKey === commit.dataset.comparisonKey) commit.open = true;
+  if (restoreReviewFocus) root.focus({ preventScroll: true });
   if (annotationKey === "compareDiff") comparePanelDirty = false;
   else diffPanelDirty = false;
   return true;
@@ -7439,7 +7525,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
     more.type = "button";
     more.className = "diff-context-more";
     more.textContent = "Show more context";
-    more.title = "Ask Fura to reload this file with wider git diff context.";
+    more.title = "Reload the visible patch with 10 more lines of context (all files in All files view).";
     more.addEventListener("click", () => requestWiderDiffContext(annotationKey, state, row.filePath, requestMode));
     line.append(spacer, more, text);
   } else {

@@ -13,6 +13,12 @@ Browser  ←→  Fura (Rust/Axum)  ←→  omp --mode rpc (child process, stdio 
 - **Bridge**: Rust binary (`src/main.rs`) — HTTP + WebSocket server, child process supervision, session projection.
 - **Frontend**: Plain TypeScript + Vite (`frontend/`) — no framework; DOM-only rendering.
 
+The desktop uses a compact session list, shared tab-header actions and a resizable
+prompt composer. Git review keeps repository context and navigation above the patch;
+full commit metadata expands on demand. The **⋯ / Review options** menu contains
+repository management and **Advanced Compare**. Touch/pointer-coarse controls retain
+larger targets; the separate mobile layout is unchanged.
+
 ## Git changes
 
 The Git changes panel separates **Current changes** (unstaged, staged and nonignored

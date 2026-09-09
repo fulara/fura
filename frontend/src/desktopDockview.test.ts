@@ -4,7 +4,7 @@ type MockPanel = {
   id: string;
   group: MockGroup;
   title: string;
-  api: { setTitle(title: string): void };
+  api: { setTitle(title: string): void; setActive(): void };
   setActiveCalls: number;
   windowFocusCalls: number;
   setActive(): void;
@@ -14,6 +14,8 @@ type MockGroup = {
   id: string;
   panels: MockPanel[];
   size: number;
+  activePanel?: MockPanel;
+  headerActions?: HTMLElement;
   api: { setConstraints(value: { minimumWidth: number }): void };
 };
 
@@ -29,15 +31,21 @@ const dockviewMock = vi.hoisted(() => {
   class MockDockviewComponent {
     readonly panels: MockPanel[] = [];
     activePanel: MockPanel | undefined;
+    get api(): MockDockviewComponent { return this; }
     private readonly removeListeners: Array<(panel: MockPanel) => void> = [];
     readonly popoutCalls: Array<{ item: MockPanel | MockGroup; options: unknown }> = [];
     private readonly createComponent: (options: { name: string }) => {
       element: HTMLElement;
       init(params: { api: MockPanel; containerApi: MockDockviewComponent }): void;
     };
+    private readonly createRightHeaderActionComponent: (group: MockGroup) => { element: HTMLElement };
 
-    constructor(_host: HTMLElement, options: { createComponent: MockDockviewComponent["createComponent"] }) {
+    constructor(_host: HTMLElement, options: {
+      createComponent: MockDockviewComponent["createComponent"];
+      createRightHeaderActionComponent: MockDockviewComponent["createRightHeaderActionComponent"];
+    }) {
       this.createComponent = options.createComponent;
+      this.createRightHeaderActionComponent = options.createRightHeaderActionComponent;
       instances.push(this);
     }
 
@@ -49,11 +57,14 @@ const dockviewMock = vi.hoisted(() => {
       const panel: MockPanel = {
         id: options.id,
         title: options.title ?? options.id,
-        api: { setTitle: title => { panel.title = title; } },
+        api: {
+          setTitle: title => { panel.title = title; },
+          setActive: () => panel.setActive(),
+        },
         group,
         setActiveCalls: 0,
         windowFocusCalls: 0,
-        setActive: () => { panel.setActiveCalls += 1; this.activePanel = panel; },
+        setActive: () => { panel.setActiveCalls += 1; this.activePanel = panel; group.activePanel = panel; },
         getWindow: () => ({ focus: () => { panel.windowFocusCalls += 1; } }),
       };
       const insertAt = options.position?.direction === "within" && typeof options.position.index === "number"
@@ -61,6 +72,8 @@ const dockviewMock = vi.hoisted(() => {
         : group.panels.length;
       group.panels.splice(insertAt, 0, panel);
       group.size = group.panels.length;
+      group.activePanel ??= panel;
+      group.headerActions ??= this.createRightHeaderActionComponent(group).element;
       this.panels.push(panel);
       this.createComponent({ name: options.component }).init({ api: panel, containerApi: this });
       this.activePanel ??= panel;
@@ -77,6 +90,7 @@ const dockviewMock = vi.hoisted(() => {
 
     setActivePanel(panel: MockPanel): void {
       this.activePanel = panel;
+      panel.group.activePanel = panel;
     }
 
     removePanel(panel: MockPanel): void {
@@ -114,30 +128,8 @@ vi.mock("dockview-core", () => ({
   themeDark: {},
 }));
 
-import { createDesktopPanelShell, initDesktopDockview } from "./desktopDockview";
+import { initDesktopDockview } from "./desktopDockview";
 
-describe("createDesktopPanelShell", () => {
-  it("creates a desktop panel content shell with toolbar and scroll container", () => {
-    const onPopout = vi.fn();
-
-    const shell = createDesktopPanelShell(document, "transcript", onPopout);
-
-    expect(shell.element.className).toBe("panel-content panel-content-transcript");
-    expect(shell.scroll.className).toBe("panel-scroll");
-    expect(shell.element.firstElementChild?.className).toBe("panel-toolbar");
-    expect(shell.element.lastElementChild).toBe(shell.scroll);
-  });
-
-  it("wires the popout button to the provided callback", () => {
-    const onPopout = vi.fn();
-    const shell = createDesktopPanelShell(document, "tools", onPopout);
-
-    shell.element.querySelector<HTMLButtonElement>(".panel-popout-btn")?.click();
-
-    expect(onPopout).toHaveBeenCalledOnce();
-    expect(shell.element.querySelector(".panel-popout-btn")?.textContent).toBe("Pop out");
-  });
-});
 
 describe("initDesktopDockview", () => {
   beforeEach(() => {
@@ -157,16 +149,14 @@ describe("initDesktopDockview", () => {
     });
   }
 
-  it("pops out the clicked panel rather than its whole Dockview group", () => {
-    const readyContainers = new Map<string, HTMLElement>();
-    initTestDockview({
-      onPanelReady: (id, container) => readyContainers.set(id, container),
-    });
+  it("pops out the active panel rather than its whole Dockview group", () => {
+    const desktopDockview = initTestDockview();
     const dockview = dockviewMock.instances[0];
     const codePanel = dockview.panels.find(panel => panel.id === "code");
     const codeGroup = codePanel?.group;
 
-    readyContainers.get("code")?.parentElement?.querySelector<HTMLButtonElement>(".panel-popout-btn")?.click();
+    desktopDockview.activatePanel("code");
+    codeGroup?.headerActions?.querySelector<HTMLButtonElement>(".panel-popout-btn")?.click();
 
     expect(dockview.popoutCalls).toHaveLength(1);
     expect(dockview.popoutCalls[0].item).toBe(codePanel);
@@ -174,20 +164,18 @@ describe("initDesktopDockview", () => {
   });
 
   it("activates and focuses a popped-out panel through its panel API", () => {
-    const readyContainers = new Map<string, HTMLElement>();
-    const desktopDockview = initTestDockview({
-      onPanelReady: (id, container) => readyContainers.set(id, container),
-    });
+    const desktopDockview = initTestDockview();
     const dockview = dockviewMock.instances[0];
     const codePanel = dockview.panels.find(panel => panel.id === "code");
     expect(codePanel).toBeDefined();
-    readyContainers.get("code")?.parentElement?.querySelector<HTMLButtonElement>(".panel-popout-btn")?.click();
+    desktopDockview.activatePanel("code");
+    codePanel?.group.headerActions?.querySelector<HTMLButtonElement>(".panel-popout-btn")?.click();
 
     const activated = desktopDockview.activatePanel("code");
 
     expect(activated).toBe(true);
-    expect(codePanel?.setActiveCalls).toBe(1);
-    expect(codePanel?.windowFocusCalls).toBe(1);
+    expect(codePanel?.setActiveCalls).toBe(2);
+    expect(codePanel?.windowFocusCalls).toBe(2);
     expect(dockview.activePanel).toBe(codePanel);
   });
 

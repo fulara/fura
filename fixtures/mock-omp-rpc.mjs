@@ -74,6 +74,7 @@ const sessionHistories = new Map([[currentSessionId, messages]]);
 let planExecutionCount = 0;
 let planMode = null;
 let isCompacting = false;
+let contextTokens = 24000;
 let goalMode = {
   enabled: true,
   mode: "active",
@@ -185,6 +186,11 @@ for await (const line of rl) {
         goalMode,
         todoPhases,
         isCompacting,
+        contextUsage: {
+          tokens: contextTokens,
+          contextWindow: currentModel.contextWindow,
+          percent: contextTokens / currentModel.contextWindow * 100,
+        },
       });
       break;
     }
@@ -381,7 +387,18 @@ for await (const line of rl) {
       if (slashMessage.startsWith("/")) {
         // Server-side slash execution: echo a command_output frame, no model turn.
         success(command);
+        if (/^\/compact(?:\s|$)/.test(slashMessage)) {
+          isCompacting = true;
+          setTimeout(() => {
+            isCompacting = false;
+            contextTokens = 4000;
+            write({ type: "command_output", text: "Mock compaction complete." });
+            write({ type: "prompt_result", id: command.id, agentInvoked: false });
+          }, 150);
+          break;
+        }
         write({ type: "command_output", text: `Mock command output for ${slashMessage.trim()}` });
+        write({ type: "prompt_result", id: command.id, agentInvoked: false });
         break;
       }
       if (String(command.message ?? "").includes("Fura Controller")) {

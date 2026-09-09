@@ -19,6 +19,8 @@ pub(crate) enum OmpRpcFrame {
         #[serde(rename = "isTerminal")]
         is_terminal: Option<bool>,
     },
+    #[serde(rename = "auto_compaction_end")]
+    AutoCompactionEnd,
     #[serde(rename = "plan_review")]
     PlanReview {
         #[serde(rename = "planFilePath")]

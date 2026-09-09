@@ -484,14 +484,17 @@ describe("code viewer", () => {
     const file = { path: "src/scroll.rs", language: "rust", text: "a\nb\nc\nd\n", size: 8, version: 1 };
     renderCodeViewer(container, baseState({ file }), baseActions());
     container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop = 120;
+    container.querySelector<HTMLElement>(".code-review-lines")!.scrollLeft = 240;
 
     // Same file, a status-update re-render preserves the scroll position.
     renderCodeViewer(container, baseState({ file, analyzerStatus: "indexing" }), baseActions());
     expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(120);
+    expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollLeft).toBe(240);
 
     // A different file starts at the top.
     const other = { path: "src/other.rs", language: "rust", text: "x\ny\n", size: 4, version: 1 };
     renderCodeViewer(container, baseState({ file: other }), baseActions());
     expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(0);
+    expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollLeft).toBe(0);
   });
 });

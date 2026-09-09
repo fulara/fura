@@ -1010,6 +1010,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             | OmpRpcFrame::SessionInfoUpdate { .. }
             | OmpRpcFrame::ConfigUpdate { .. }
             | OmpRpcFrame::PromptResult { .. }
+            | OmpRpcFrame::AutoCompactionEnd
             | OmpRpcFrame::Unknown => {}
         }
         return;
@@ -1066,6 +1067,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 if let Err(message) = refresh_rpc_state(state, &target_session_id).await {
                     warn!(session_id = %target_session_id, %message, "post-agent state refresh failed");
                 }
+            }
+        }
+        OmpRpcFrame::AutoCompactionEnd => {
+            if let Err(message) = refresh_rpc_state(state, &target_session_id).await {
+                warn!(session_id = %target_session_id, %message, "post-auto-compaction state refresh failed");
             }
         }
         OmpRpcFrame::PlanReview {
@@ -1690,6 +1696,11 @@ pub(crate) async fn apply_model_change_response(
             },
         )
         .await;
+    if let Err(message) =
+        send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await
+    {
+        warn!(session_id = %session_id, %message, "post-model context refresh failed");
+    }
 }
 
 pub(crate) async fn apply_thinking_level_response(
@@ -2791,6 +2802,13 @@ pub(crate) async fn settle_local_only_prompt_result(
         .await;
     if was_compacting && snapshot_sent {
         broadcast_sessions_snapshot(state).await;
+    }
+    if was_compacting {
+        // Builtin /compact settles as a local-only prompt, not a compact RPC
+        // response or an agent turn. Its context usage must be refreshed here.
+        if let Err(message) = refresh_rpc_state(state, session_id).await {
+            warn!(session_id = %session_id, %message, "post-slash-compaction state refresh failed");
+        }
     }
 }
 

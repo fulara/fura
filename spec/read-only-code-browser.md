@@ -19,6 +19,8 @@ The browser should support:
 Implemented in commit `e3a446c Add read-only code viewer`:
 
 - Desktop Dockview tab/panel named **Code**.
+- Compact source rows preserve whitespace and scroll horizontally instead of wrapping long lines into tall rows; syntax highlighting does not add per-line box padding. The file sidebar scales with panel width and file actions wrap when space is limited.
+- Same-file updates preserve both vertical and horizontal source scroll; changing the file or workspace resets the position.
 - Filesystem-only read-only browser; rust-analyzer is not started yet.
 - Bridge protocol messages: `code.workspace.open`, `code.tree.list`, `code.file.open`, `code.file.close`, `code.workspace.ready`, `code.tree`, `code.file`, and `code.error`.
 - Backend module `src/code.rs` owns workspace resolution, path validation, tree listing, file reads, file limits, binary detection, and `Cargo.toml` discovery.

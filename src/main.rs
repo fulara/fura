@@ -4257,6 +4257,71 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_completion_refreshes_projected_context_without_an_agent_turn() {
+        for completion in ["prompt_result", "response", "auto_compaction_end"] {
+            let state = test_state(32, None);
+            let mut record = test_record();
+            record.context_tokens = Some(180_000);
+            record.context_window = Some(200_000);
+            record.context_percent = Some(90.0);
+            state
+                .sessions
+                .write()
+                .await
+                .insert("s1".to_string(), record);
+            let mut commands = register_test_transport(&state, "transport-1", "s1", 16).await;
+
+            let mut frame = serde_json::json!({ "type": completion });
+            if completion != "auto_compaction_end" {
+                send_prompt(&state, "s1".to_string(), "/compact".to_string(), None, None).await;
+                let command = commands.recv().await.expect("compact prompt");
+                frame["id"] = command["id"].clone();
+                if completion == "response" {
+                    frame["command"] = serde_json::json!("prompt");
+                    frame["success"] = serde_json::json!(true);
+                    frame["data"] = serde_json::json!({ "agentInvoked": false });
+                } else {
+                    frame["agentInvoked"] = serde_json::json!(false);
+                }
+            }
+            apply_rpc_frame(&state, "transport-1", &frame).await;
+
+            // A provider reports a smaller active context after compaction. Only
+            // answer refresh requests actually sent by the bridge.
+            while let Ok(command) = commands.try_recv() {
+                if command["type"] == "get_state" {
+                    apply_rpc_response(
+                        &state,
+                        "transport-1",
+                        &serde_json::json!({
+                            "type": "response",
+                            "command": "get_state",
+                            "success": true,
+                            "data": {
+                                "sessionId": "s1",
+                                "model": { "provider": "openai", "id": "gpt-5" },
+                                "isStreaming": false,
+                                "isCompacting": false,
+                                "contextUsage": {
+                                    "tokens": 20_000,
+                                    "contextWindow": 200_000,
+                                    "percent": 10.0
+                                }
+                            }
+                        }),
+                    )
+                    .await;
+                }
+            }
+            let sessions = state.sessions.read().await;
+            let projection = sessions.get("s1").expect("session").projection();
+            assert_eq!(projection.context_percent, Some(10.0), "{completion}");
+            assert_eq!(projection.context_tokens, Some(20_000), "{completion}");
+            assert!(!projection.compacting, "{completion}");
+        }
+    }
+
+    #[tokio::test]
     async fn slash_compact_error_unlocks_the_session() {
         let state = test_state(8, None);
         state

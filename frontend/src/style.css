@@ -37,9 +37,7 @@ body {
   margin: 0;
   min-width: 960px;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at top left, rgba(89, 117, 255, 0.16), transparent 34rem),
-    #111318;
+  background: #111318;
 }
 
 button,
@@ -106,7 +104,7 @@ textarea:focus {
 
 .shell {
   display: grid;
-  grid-template-columns: 280px minmax(420px, 1fr);
+  grid-template-columns: 208px minmax(420px, 1fr);
   width: 100vw;
   height: 100vh;
   overflow: hidden;
@@ -114,8 +112,8 @@ textarea:focus {
 
 .sidebar {
   border-right: 1px solid #252a35;
-  background: rgba(16, 19, 26, 0.82);
-  padding: 0.75rem;
+  background: #111318;
+  padding: 0.4rem 0.25rem;
   overflow: auto;
 }
 
@@ -123,12 +121,12 @@ textarea:focus {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 0.75rem;
+  gap: 0.4rem;
+  margin: 0 0.25rem 0.4rem;
 }
 
 .brand h1 {
-  font-size: 1.15rem;
+  font-size: 0.875rem;
 }
 
 h1,
@@ -188,20 +186,20 @@ h2 {
 .sidebar-actions {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
-  gap: 0.5rem;
-  margin-bottom: 0.75rem;
+  gap: 0.25rem;
+  margin: 0 0.25rem 0.4rem;
 }
 
 .sidebar-actions button {
-  padding: 0.35rem 0.8rem;
+  padding: 0.2rem 0.45rem;
 }
 
 .sidebar-actions select {
   min-width: 0;
-  padding: 0.35rem 0.55rem;
+  padding: 0.2rem 0.3rem;
   background: #151922;
   color: #eef1f8;
-  font-size: 0.85rem;
+  font-size: 0.75rem;
 }
 
 .control-candidate {
@@ -230,7 +228,7 @@ h2 {
 
 .sessions {
   display: grid;
-  gap: 0.4rem;
+  gap: 0;
 }
 
 .session {
@@ -429,7 +427,8 @@ h2 {
 
 .workspace {
   display: grid;
-  grid-template-rows: auto 1fr auto auto;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
   min-width: 0;
   overflow: hidden;
 }
@@ -438,21 +437,21 @@ h2 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 1rem;
+  gap: 0.5rem;
   border-bottom: 1px solid #252a35;
-  padding: 0.45rem 0.75rem;
-  min-height: 2.75rem;
+  padding: 0.2rem 0.5rem;
+  min-height: 34px;
 }
 
 .workspace-title {
   display: flex;
   align-items: baseline;
-  gap: 0.6rem;
+  gap: 0.4rem;
   min-width: 0;
 }
 
 .workspace-title h2 {
-  font-size: 0.95rem;
+  font-size: 0.8125rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -463,12 +462,12 @@ h2 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
 }
 
 .workspace-actions button {
-  padding: 0.3rem 0.6rem;
-  font-size: 0.8rem;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.75rem;
 }
 
 .workspace-menu-divider {
@@ -494,11 +493,11 @@ h2 {
 
 .goal-mode-card {
   display: grid;
-  gap: 0.55rem;
+  gap: 0.4rem;
   border: 1px solid rgba(21, 183, 255, 0.28);
-  border-radius: 0.9rem;
-  background: linear-gradient(135deg, rgba(21, 183, 255, 0.12), rgba(127, 140, 255, 0.08));
-  padding: 0.75rem 0.85rem;
+  border-radius: 0.2rem;
+  background: transparent;
+  padding: 0.5rem;
 }
 
 .goal-mode-card[data-status=\"budget-limited\"] {
@@ -522,7 +521,7 @@ h2 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.75rem;
+  gap: 0.4rem;
 }
 
 .goal-mode-card-header strong {
@@ -531,10 +530,10 @@ h2 {
 
 .goal-mode-badge {
   flex: 0 0 auto;
-  border-radius: 999px;
+  border-radius: 0.2rem;
   background: rgba(21, 183, 255, 0.16);
   color: #9edbff;
-  padding: 0.16rem 0.5rem;
+  padding: 0.1rem 0.3rem;
   font-size: 0.72rem;
   font-weight: 700;
 }
@@ -553,7 +552,7 @@ h2 {
 .goal-mode-controls {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.5rem;
+  gap: 0.3rem;
   align-items: center;
 }
 
@@ -588,11 +587,11 @@ h2 {
 .goal-mode-budget-input {
   min-width: 10rem;
   border: 1px solid #303646;
-  border-radius: 0.65rem;
-  background: rgba(6, 8, 13, 0.74);
+  border-radius: 0.2rem;
+  background: #151922;
   color: #f4f7fb;
-  font: inherit;
-  padding: 0.45rem 0.55rem;
+  font-size: 0.8125rem;
+  padding: 0.2rem 0.4rem;
 }
 
 .goal-mode-objective-input {
@@ -606,12 +605,11 @@ h2 {
 
 .goal-mode-controls button {
   border: 1px solid rgba(21, 183, 255, 0.38);
-  border-radius: 999px;
-  background: rgba(21, 183, 255, 0.12);
+  border-radius: 0.2rem;
+  background: transparent;
   color: #dff3ff;
   cursor: pointer;
-  font: inherit;
-  padding: 0.45rem 0.75rem;
+  padding: 0.2rem 0.45rem;
 }
 
 .goal-mode-controls button:hover:not(:disabled),
@@ -637,9 +635,10 @@ h2 {
 .workspace-actions {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  flex-shrink: 0;
   justify-content: flex-end;
-  gap: 0.5rem;
+  gap: 0.3rem;
 }
 
 .category-editor {
@@ -701,7 +700,7 @@ h2 {
   gap: 0.25rem;
   padding: 0.4rem;
   border: 1px solid #343a46;
-  border-radius: 0.7rem;
+  border-radius: 0.25rem;
   background: #151922;
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
 }
@@ -812,6 +811,7 @@ h2 {
 .workspace-panel-stack {
   position: relative;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -823,13 +823,16 @@ h2 {
   visibility: hidden;
   pointer-events: none;
   z-index: 0;
+}
+
+.workspace-panel-host .dockview-theme-dark {
   /* Match Fura dark theme via dockview CSS variables */
   --dv-group-view-background-color: #111318;
   --dv-tabs-and-actions-container-background-color: #151922;
   --dv-activegroup-visiblepanel-tab-background-color: #111318;
-  --dv-activegroup-hiddenpanel-tab-background-color: #1b2030;
+  --dv-activegroup-hiddenpanel-tab-background-color: #151922;
   --dv-inactivegroup-visiblepanel-tab-background-color: #111318;
-  --dv-inactivegroup-hiddenpanel-tab-background-color: #1b2030;
+  --dv-inactivegroup-hiddenpanel-tab-background-color: #151922;
   --dv-activegroup-visiblepanel-tab-color: #eef1f8;
   --dv-activegroup-hiddenpanel-tab-color: #7a8496;
   --dv-inactivegroup-visiblepanel-tab-color: #7a8496;
@@ -838,8 +841,8 @@ h2 {
   --dv-tab-divider-color: #252a35;
   --dv-sash-color: #252a35;
   --dv-active-sash-color: #6d7cff;
-  --dv-tabs-and-actions-container-height: 32px;
-  --dv-tabs-and-actions-container-font-size: 0.82rem;
+  --dv-tabs-and-actions-container-height: 26px;
+  --dv-tabs-and-actions-container-font-size: 0.75rem;
 }
 
 .workspace-panel-host-active {
@@ -848,7 +851,7 @@ h2 {
   z-index: 1;
 }
 
-/* Panel content wrapper — fills the panel area, stacks toolbar + scroll */
+/* Panel content fills the area below Dockview's tab and action header. */
 .panel-content {
   display: flex;
   flex-direction: column;
@@ -858,23 +861,21 @@ h2 {
   background: #111318;
 }
 
-/* Minimal per-panel toolbar (pop-out button etc.) */
+/* Pop-out action shares Dockview's tab header rather than a content row. */
 .panel-toolbar {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 0.4rem;
-  padding: 0.2rem 0.5rem;
-  border-bottom: 1px solid #1e2330;
-  background: #111318;
-  flex: 0 0 auto;
+  height: 100%;
+  padding: 0 0.2rem;
 }
 
 .panel-popout-btn {
-  font-size: 0.72rem;
-  padding: 0.15rem 0.45rem;
-  border-radius: 0.35rem;
-  color: #5e6a7e;
+  min-height: 24px;
+  font-size: 0.6875rem;
+  padding: 0.1rem 0.3rem;
+  border-radius: 0.2rem;
+  color: #9ba4b5;
   background: transparent;
   border-color: transparent;
 }
@@ -918,7 +919,7 @@ h2 {
 .code-viewer {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(13rem, 18rem) minmax(0, 1fr);
+  grid-template-columns: clamp(8rem, 26%, 13rem) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   gap: 0;
@@ -935,13 +936,13 @@ h2 {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   border-right: 1px solid #252a35;
-  background: #121620;
+  background: #111318;
 }
 
 .code-workspace-header {
   display: grid;
-  gap: 0.55rem;
-  padding: 0.85rem;
+  gap: 0.3rem;
+  padding: 0.4rem 0.5rem;
   border-bottom: 1px solid #252a35;
 }
 
@@ -949,19 +950,22 @@ h2 {
 .code-tree-toolbar button,
 .code-file-header button {
   justify-self: start;
-  border-radius: 0.4rem;
-  padding: 0.25rem 0.55rem;
-  font-size: 0.78rem;
+  border-radius: 0.2rem;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.75rem;
 }
 
 .code-workspace-title {
   display: grid;
-  gap: 0.25rem;
+  gap: 0.15rem;
 }
 
 .code-workspace-title code {
-  overflow-wrap: anywhere;
   min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
 }
 
 .code-workspace-title span,
@@ -969,7 +973,7 @@ h2 {
 .code-file-header span,
 .code-empty {
   color: #8b95a7;
-  font-size: 0.8rem;
+  font-size: 0.6875rem;
 }
 
 .code-hotkey-hint {
@@ -994,8 +998,8 @@ h2 {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.65rem 0.85rem;
+  gap: 0.3rem;
+  padding: 0.25rem 0.5rem;
   border-bottom: 1px solid #1f2530;
 }
 
@@ -1018,8 +1022,8 @@ h2 {
   overflow-y: auto;
   display: grid;
   align-content: start;
-  gap: 0.2rem;
-  padding: 0.45rem;
+  gap: 0;
+  padding: 0.2rem;
 }
 
 .code-tree-entry {
@@ -1032,8 +1036,8 @@ h2 {
   background: transparent;
   color: #d7dce8;
   text-align: left;
-  padding: 0.42rem 0.5rem;
-  border-radius: 0.4rem;
+  padding: 0.15rem 0.35rem;
+  border-radius: 0;
 }
 
 .code-tree-entry:hover:not(:disabled),
@@ -1067,10 +1071,11 @@ h2 {
 
 .code-file-header {
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
-  gap: 1rem;
-  padding: 0.75rem 1rem;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
   border-bottom: 1px solid #252a35;
 }
 
@@ -1092,10 +1097,10 @@ h2 {
 
 .code-file-actions {
   display: flex;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
   flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 0.45rem;
+  justify-content: flex-start;
+  gap: 0.25rem;
 }
 
 .code-review-lines {
@@ -1103,8 +1108,8 @@ h2 {
   overflow: auto;
   display: grid;
   align-content: start;
-  gap: 0.2rem;
-  padding: 0.75rem 1rem 1rem;
+  gap: 0;
+  padding: 0.35rem 0.5rem 0.5rem;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.82rem;
 }
@@ -1118,10 +1123,9 @@ h2 {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
   align-items: start;
-  gap: 0.5rem;
-  padding: 0.2rem 0.4rem;
-  border-radius: 0.35rem;
-  background: rgba(255, 255, 255, 0.02);
+  gap: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0;
 }
 
 .code-line-content {
@@ -1129,10 +1133,13 @@ h2 {
   cursor: text;
 }
 
-.code-line-content code {
+.code-line-content code,
+.code-line-content code.hljs {
   display: block;
-  white-space: pre-wrap;
-  word-break: break-word;
+  white-space: pre;
+  padding: 0;
+  background: transparent;
+  font: inherit;
 }
 
 .code-inline-comments {
@@ -1380,15 +1387,15 @@ h2 {
 .diffs-view,
 .compare-view {
   display: grid;
-  grid-template-columns: minmax(14rem, 20rem) minmax(0, 1fr);
+  grid-template-columns: minmax(12rem, 17rem) minmax(0, 1fr);
   height: 100%;
   min-height: 0;
-  gap: 1rem;
+  gap: 0;
 }
 
 .git-review-view {
-  grid-template-columns: minmax(12rem, 26%) minmax(0, 1fr);
-  grid-template-rows: auto minmax(20rem, 1fr);
+  grid-template-columns: clamp(12rem, 23%, 18rem) minmax(0, 1fr);
+  grid-template-rows: auto minmax(14rem, 1fr);
   overflow: auto;
   container: git-review / inline-size;
 }
@@ -1396,30 +1403,26 @@ h2 {
 .git-review-header {
   grid-column: 1 / -1;
   display: grid;
-  gap: 0.65rem;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #303746;
-  background: #151922;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.3rem 0.5rem;
+  border-bottom: 1px solid #252a35;
+  background: #11151c;
   min-width: 0;
 }
 
 .git-repository-context {
   display: grid;
-  grid-template-columns: minmax(14rem, 1fr) minmax(12rem, 1fr);
-  align-items: start;
-  gap: 1rem;
+  grid-template-columns: minmax(7rem, 11rem) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem;
   min-width: 0;
 }
 
 .git-review-header .diffs-repo-selector {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.git-review-header .diffs-repo-label {
-  flex-basis: 100%;
+  display: block;
+  min-width: 0;
 }
 
 .git-review-header .diffs-actions {
@@ -1429,27 +1432,80 @@ h2 {
 
 .git-repository-identity {
   display: grid;
-  gap: 0.4rem;
+  gap: 0;
   min-width: 0;
 }
 
 .git-root-path, .git-selected-commit-meta {
-  overflow-wrap: anywhere;
-  font-size: 0.78rem;
-  color: #b5bed1;
+  font-size: 0.68rem;
+  color: #9ba4b5;
 }
+
+.git-root-path, .git-head-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-head-label { font-size: 0.75rem; font-weight: 500; }
+.git-selected-commit-meta { overflow-wrap: anywhere; }
+
+.git-review-options { position: relative; }
+.git-review-options > summary {
+  cursor: pointer;
+  list-style: none;
+  text-align: center;
+  min-width: 26px;
+  min-height: 26px;
+  border-radius: 3px;
+  padding: 0 0.35rem;
+  font-size: 1.1rem;
+}
+.git-review-options > summary::-webkit-details-marker { display: none; }
+.git-review-options > summary:hover,
+.git-review-options[open] > summary { background: #252c3b; }
+.git-review-options summary:focus-visible,
+.git-commit-summary:focus-visible { outline: 2px solid #8794ff; outline-offset: -2px; }
+.git-review-options-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 0.35rem);
+  z-index: 10;
+  width: 11rem;
+  padding: 0.3rem;
+  border: 1px solid #343a46;
+  border-radius: 4px;
+  background: #191e28;
+  box-shadow: 0 6px 20px #0006;
+}
+.git-review-options-menu .git-repository-actions { display: grid; gap: 0.15rem; }
+.git-review-options-menu button {
+  width: 100%;
+  text-align: left;
+  border-color: transparent;
+  background: transparent;
+}
+.git-review-options-menu > button { margin-top: 0.25rem; border-top-color: #343a46; }
 
 .git-review-navigation, .git-history-heading {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.2rem;
 }
 
-.git-review-navigation button[aria-pressed="true"],
+.git-review-navigation button {
+  border-color: transparent;
+  background: transparent;
+  white-space: nowrap;
+}
+.git-review-navigation button[aria-pressed="true"] {
+  color: #c6cdff;
+  background: #232a3d;
+}
 .git-history-commit[aria-pressed="true"] {
-  border-color: #8794ff;
-  background: #252c45;
+  border-left-color: #8794ff;
+  background: #20273a;
 }
 
 .git-review-view .diffs-main {
@@ -1461,13 +1517,32 @@ h2 {
   flex-shrink: 0;
 }
 
+.git-detail-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-bottom: 1px solid #252a35;
+  min-width: 0;
+  max-height: 45%;
+  overflow: auto;
+}
+.git-detail-toolbar .diffs-actions,
+.git-detail-toolbar .diffs-toolbar { padding: 0; gap: 0.25rem; }
+.git-detail-toolbar > .diff-commit-message,
+.git-detail-toolbar > .diffs-summary { flex: 1 1 12rem; min-width: 0; }
+.git-detail-toolbar > .diff-commit-message[open] { flex-basis: calc(100% - 5rem); }
+.git-detail-toolbar > .diff-step-actions { flex: 1 0 100%; }
+.git-detail-toolbar > .diffs-summary { font-size: 0.72rem; overflow-wrap: anywhere; }
+
 .git-review-view .diffs-main-body {
   flex: 1;
   min-height: 0;
 }
 
 .git-history-mode .diffs-sidebar {
-  grid-template-rows: minmax(9rem, 3fr) minmax(7rem, 2fr);
+  grid-template-rows: minmax(8rem, 3fr) minmax(6rem, 2fr);
 }
 
 .git-history-mode .diffs-sidebar-top {
@@ -1480,35 +1555,49 @@ h2 {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 0;
-  gap: 0.5rem;
+  gap: 0.15rem;
 }
 
-.git-history-heading { justify-content: space-between; }
-.git-history-list { overflow: auto; min-height: 0; }
+.git-history-heading { justify-content: space-between; padding: 0 0.25rem; font-size: 0.7rem; }
+.git-history-heading button { background: transparent; border-color: transparent; }
+.git-history-list { overflow: auto; min-height: 0; scrollbar-width: thin; }
 
 .git-history-commit {
   width: 100%;
   display: grid;
-  gap: 0.3rem;
+  gap: 0;
   text-align: left;
-  white-space: normal;
-  margin-bottom: 0.35rem;
-  padding: 0.55rem;
+  margin: 0;
+  padding: 0.25rem 0.4rem;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  font-size: 0.75rem;
+  line-height: 1.35;
 }
 
-.git-history-commit strong { overflow-wrap: anywhere; }
-.git-history-meta { font-size: 0.74rem; color: #abb6cb; }
-.git-history-footer { display: grid; gap: 0.4rem; }
+.git-history-subject, .git-history-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.git-history-subject { font-weight: 500; }
+.git-history-meta { font-size: 0.65rem; color: #939eb2; }
+.git-history-footer { display: grid; gap: 0.2rem; }
+.git-history-footer button { background: transparent; border-color: transparent; font-size: 0.68rem; }
 .git-history-footer small { color: #c7b28b; }
 .git-history-error { color: #ff9d9d; }
-.git-diff-totals { margin: 0; color: #b5bed1; font-size: 0.8rem; }
+.git-diff-totals { margin: 0; color: #9ba4b5; font-size: 0.68rem; white-space: nowrap; }
 .git-commit-navigation { justify-content: flex-start; }
+.git-commit-navigation button { min-width: 26px; }
 
-@container git-review (max-width: 700px) {
-  .git-repository-context { grid-template-columns: minmax(0, 1fr); gap: 0.5rem; }
-  .git-review-header .diffs-repo-label { flex-basis: auto; }
-  .git-review-header .diff-repo-select { width: auto; flex: 1; min-width: 8rem; }
-  .git-root-path { max-height: 2.5em; overflow: auto; }
+@container git-review (max-width: 760px) {
+  .git-review-header { grid-template-columns: minmax(0, 1fr) auto; gap: 0.25rem; }
+  .git-repository-context { grid-column: 1 / -1; padding-right: 1.5rem; }
+  .git-review-options { grid-column: 2; grid-row: 2; }
+  .git-review-navigation { grid-column: 1; grid-row: 2; }
+  .git-detail-toolbar > .git-diff-totals { flex-basis: 100%; }
 }
 
 .diffs-sidebar,
@@ -1518,22 +1607,24 @@ h2 {
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  gap: 0.75rem;
+  gap: 0.35rem;
 }
 
 .diffs-sidebar {
   grid-template-rows: auto minmax(0, 1fr);
+  border-right: 1px solid #252a35;
 }
 
 .diffs-main {
-  align-content: start;
+  display: flex;
+  flex-direction: column;
 }
 
 .diffs-sidebar-top {
   display: grid;
   align-content: start;
-  gap: 0.75rem;
-  padding: 0 1rem;
+  gap: 0.3rem;
+  padding: 0.35rem 0.35rem 0;
 }
 
 .diffs-sidebar-scroll,
@@ -1542,9 +1633,13 @@ h2 {
   overflow-y: auto;
   display: grid;
   align-content: start;
-  gap: 1rem;
-  padding: 0 1rem 1rem;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem 0.5rem;
+  scrollbar-width: thin;
 }
+
+.diffs-main-body { flex: 1; }
+.diffs-sidebar-scroll { border-top: 1px solid #252a35; }
 
 .diffs-toolbar,
 .diffs-actions {
@@ -1552,8 +1647,8 @@ h2 {
   align-items: center;
   flex-wrap: wrap;
   justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0 1rem;
+  gap: 0.3rem;
+  padding: 0 0.5rem;
 }
 
 .diffs-files,
@@ -1562,7 +1657,7 @@ h2 {
   display: grid;
   align-content: start;
   min-width: 0;
-  gap: 0.75rem;
+  gap: 0.3rem;
 }
 
 
@@ -1594,14 +1689,28 @@ h2 {
 }
 
 .diff-commit-message {
-  display: grid;
-  gap: 0.5rem;
   margin: 0;
-  padding: 0.75rem;
-  border: 1px solid #252a35;
-  border-radius: 0.65rem;
-  background: #0f131b;
+  min-width: 0;
+  font-size: 0.75rem;
 }
+.git-commit-summary {
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0.2rem 0;
+}
+.git-commit-summary strong { font-weight: 500; }
+.git-commit-basis, .git-commit-position {
+  margin-left: 0.5rem;
+  font-size: 0.68rem;
+  color: #a5adc0;
+}
+.diff-commit-message > :not(summary) {
+  margin-top: 0.35rem;
+  overflow-wrap: anywhere;
+}
+.diff-commit-message[open] { padding-bottom: 0.4rem; }
 
 .diff-commit-message pre {
   margin: 0;
@@ -1613,7 +1722,15 @@ h2 {
 
 .diffs-file-filter {
   display: grid;
-  gap: 0.35rem;
+  gap: 0;
+}
+
+.diffs-file-filter > label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
 }
 
 .diff-filter-input {
@@ -1622,7 +1739,7 @@ h2 {
   border: 1px solid #343a46;
   background: #111318;
   color: #d7dae4;
-  padding: 0.45rem 0.6rem;
+  padding: 0.25rem 0.4rem;
 }
 
 .diff-filter-input::placeholder {
@@ -1636,7 +1753,7 @@ h2 {
 }
 .diffs-file-list {
   display: grid;
-  gap: 0.45rem;
+  gap: 0;
 }
 
 .diffs-file-item {
@@ -1649,13 +1766,14 @@ h2 {
 
 .diffs-file-jump {
   display: grid;
-  gap: 0.15rem;
+  gap: 0;
   min-width: 0;
   text-align: left;
-  padding: 0.55rem 0.65rem;
-  border-radius: 0.5rem;
-  border: 1px solid #252a35;
-  background: #111318;
+  padding: 0.25rem 0.35rem;
+  border-radius: 0;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
   color: #d7dae4;
 }
 
@@ -1663,8 +1781,8 @@ h2 {
 
 .diffs-file-jump:hover:not(:disabled),
 .diffs-file-jump.active {
-  border-color: #6d7cff;
-  background: #1a1f2a;
+  border-left-color: #8794ff;
+  background: #20273a;
 }
 
 .diffs-file-menu {
@@ -1700,13 +1818,15 @@ h2 {
 
 .diffs-file-jump span {
   color: #8b95a7;
-  font-size: 0.78rem;
+  font-size: 0.65rem;
 }
 
 .diffs-file-jump code {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
 }
 
 
@@ -1717,7 +1837,7 @@ h2 {
   border: 1px solid #343a46;
   background: #111318;
   color: #d7dae4;
-  padding: 0.35rem 0.5rem;
+  padding: 0.2rem 0.4rem;
 }
 
 .diffs-repo-label {
@@ -1729,7 +1849,7 @@ h2 {
   border: 1px solid #343a46;
   background: #111318;
   color: #d7dae4;
-  padding: 0.35rem 0.5rem;
+  padding: 0.2rem 0.4rem;
 }
 
 
@@ -1741,7 +1861,7 @@ h2 {
 .diff-lines {
   display: grid;
   align-content: start;
-  gap: 0.15rem;
+  gap: 0;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.82rem;
 }
@@ -1751,13 +1871,15 @@ h2 {
   gap: 0.2rem;
 }
 
+.diff-comment-btn, .diff-question-btn { min-height: 18px; }
+
 .diff-line {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) auto;
   align-items: start;
-  gap: 0.5rem;
-  padding: 0.2rem 0.4rem;
-  border-radius: 0.35rem;
+  gap: 0.35rem;
+  padding: 0.05rem 0.35rem;
+  border-radius: 0;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -2045,16 +2167,17 @@ h2 {
 .status-bar {
   display: flex;
   align-items: center;
-  gap: 0.45rem;
+  gap: 0.35rem;
   border-top: 1px solid #252a35;
   background: #11151d;
   color: #bac3d4;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
-  font-size: 0.78rem;
-  min-height: 2rem;
-  padding: 0.35rem 0.75rem;
+  font-size: 0.6875rem;
+  min-height: 24px;
+  padding: 0.15rem 0.5rem;
   white-space: nowrap;
   overflow-x: auto;
+  scrollbar-width: thin;
 }
 
 .status-part {
@@ -2464,12 +2587,12 @@ h2 {
 
 .plan-review-card {
   display: grid;
-  gap: 0.85rem;
+  gap: 0.5rem;
   border: 1px solid rgba(255, 196, 87, 0.42);
-  border-radius: 1rem;
-  background: linear-gradient(180deg, rgba(255, 196, 87, 0.10), rgba(23, 27, 36, 0.94));
+  border-radius: 0.25rem;
+  background: rgba(255, 196, 87, 0.05);
   box-shadow: 0 1rem 2rem rgba(0, 0, 0, 0.18);
-  padding: 0.9rem;
+  padding: 0.6rem;
 }
 
 .plan-review-card header {
@@ -2509,13 +2632,13 @@ h2 {
 
 .plan-review-body details {
   border: 1px solid #303646;
-  border-radius: 0.75rem;
+  border-radius: 0.2rem;
   background: rgba(10, 13, 20, 0.52);
 }
 
 .plan-review-body summary {
   cursor: pointer;
-  padding: 0.65rem 0.75rem;
+  padding: 0.35rem 0.5rem;
   color: #f0d79a;
   font-weight: 700;
 }
@@ -2662,27 +2785,30 @@ h2 {
 .prompt-form {
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 0.75rem;
+  gap: 0.5rem;
   border-top: 1px solid #252a35;
-  padding: 1rem;
+  padding: 0 0.5rem 0.4rem;
 }
 
 .prompt-form textarea {
   resize: vertical;
-  min-height: 5rem;
+  display: block;
+  height: 48px;
+  min-height: 48px;
   max-height: 18rem;
 }
 
 .prompt-actions {
-  align-self: end;
+  align-self: start;
   display: grid;
-  gap: 0.45rem;
+  grid-template-columns: auto auto;
+  gap: 0.2rem 0.3rem;
   justify-items: stretch;
-  min-width: 7rem;
 }
 
 .prompt-form button {
-  min-width: 5.5rem;
+  grid-row: 1;
+  min-width: 3.5rem;
 }
 
 .voice-button {
@@ -2698,6 +2824,8 @@ h2 {
 }
 
 .voice-status {
+  grid-column: 1 / -1;
+  grid-row: 2;
   color: #8f9bb0;
   font-size: 0.72rem;
   line-height: 1.2;
@@ -3744,6 +3872,10 @@ h2 {
   border-bottom: 1px solid #252a35;
 }
 
+.image-previews[hidden] {
+  display: none;
+}
+
 .image-thumb {
   position: relative;
   display: inline-flex;
@@ -3833,7 +3965,7 @@ h2 {
   padding: 0.18rem 0.45rem;
 }
 
-/* Tool cards — one-line chips with a status bar on the left edge. */
+/* Compact tool rows retain a status accent on the left edge. */
 .tool-card {
   border-left: 2px solid #2f3646;
   border-radius: 0.3rem;

@@ -70,6 +70,7 @@ async function createSession(page: Page, repo: string, name: string) {
 }
 function panel(page: Page) { return page.locator(".session-changes-view:visible"); }
 async function addRepo(page: Page, repo: string) {
+  await panel(page).locator(".git-review-options > summary").click();
   page.once("dialog", dialog => dialog.accept(repo));
   await panel(page).getByRole("button", { name: "Add", exact: true }).click();
   const selector = panel(page).getByRole("combobox", { name: "Repository", exact: true });
@@ -109,10 +110,17 @@ test("F2 Code comments and prompts remain isolated between repositories", async 
 test("F5 Code Refresh retains the external repository and selected file", async ({ page }, info) => {
   const a = fixture("refresh-A"), b = fixture("refresh-B");
   try {
+    writeFileSync(path.join(b.repo, "same.ts"), b.contents("refresh-B_WORKTREE_ONLY") + `// ${"long source line ".repeat(80)}\n`);
     await authenticate(page); await createSession(page, a.repo, `Code refresh ${Date.now()}`);
     await addRepo(page, b.repo); await openWorkingFile(page, "refresh-B_WORKTREE_ONLY");
     const code = page.locator(".code-viewer:visible");
     await expect(code).toContainText("refresh-B_WORKTREE_ONLY");
+    const lines = code.locator(".code-review-lines");
+    await lines.evaluate(element => { element.scrollLeft = 240; });
+    await expect.poll(() => lines.evaluate(element => element.scrollLeft)).toBe(240);
+    await code.getByRole("button", { name: "Refresh tree", exact: true }).click();
+    await expect(code.locator(".code-tree-entry").filter({ hasText: "same.ts" })).toBeVisible();
+    await expect.poll(() => lines.evaluate(element => element.scrollLeft)).toBe(240);
     await code.getByRole("button", { name: "Refresh", exact: true }).click();
     await code.locator(".code-tree-entry").filter({ hasText: "same.ts" }).click();
     await expect(code).toContainText("refresh-B_WORKTREE_ONLY");
@@ -138,6 +146,10 @@ test("review commits without refs, retain notes, load older history and read imm
     await page.screenshot({ path: info.outputPath("history-merge.png") });
     await view.locator(`[data-commit-oid="${a.commits[34]}"]`).click();
     await expect(view.locator(".diff-commit-message")).toContainText("Detailed review context for history-A 34.");
+    await expect(view.locator(".diffs-main-body")).not.toContainText("context_1 = 1");
+    await view.getByRole("button", { name: "Show more context", exact: true }).click();
+    await expect(view.locator(".diffs-main-body")).toContainText("context_1 = 1");
+    await expect(view.locator(".diffs-all-files-jump")).toHaveClass(/active/);
     await view.locator('.diffs-file-jump[data-diff-file-path="same.ts"]').click();
     await expect(view.locator(".diff-commit-message")).toContainText(a.commits[34]);
     await expect(view.locator(".diffs-main-body")).toContainText("history-A_34");
@@ -162,6 +174,7 @@ test("review commits without refs, retain notes, load older history and read imm
     await expect(view).not.toContainText("NOTE_ONLY_FOR_COMMIT_34");
     await view.getByRole("button", { name: "Newer commit", exact: true }).click();
     await expect(view).toContainText("NOTE_ONLY_FOR_COMMIT_34");
+    await view.locator(".git-review-options > summary").click();
     await view.getByRole("button", { name: "Advanced Compare", exact: true }).click();
     await expect(page.locator("#cwdPickerDiffRepo")).toHaveValue(a.repo);
     await expect(page.locator("#cwdPickerDiffHead")).toHaveValue(a.commits[34]);
@@ -330,7 +343,7 @@ test("popout review keeps commit navigation after patch rerenders", async ({ pag
     await panel(page).getByRole("button", { name: "History", exact: true }).click();
     await expect(panel(page).locator(".diff-commit-message")).toContainText(a.head);
     const opened = page.waitForEvent("popup");
-    await page.locator(".panel-content-diffs > .panel-toolbar .panel-popout-btn").click();
+    await page.locator(".dv-groupview").filter({ has: page.locator(".dv-tab").filter({ hasText: "Git changes" }) }).locator(".panel-popout-btn").click();
     popout = await opened;
     await expect(panel(popout).locator(".diff-commit-message")).toContainText(a.head);
     await panel(popout).getByRole("button", { name: "Refresh", exact: true }).click();
@@ -338,6 +351,42 @@ test("popout review keeps commit navigation after patch rerenders", async ({ pag
     await expect(panel(popout).locator(".diff-line-add")).toContainText("popout_1");
     await expect(panel(popout).getByRole("button", { name: "Newer commit", exact: true })).toBeVisible();
     await expect(panel(popout).getByRole("button", { name: "Older commit", exact: true })).toBeVisible();
+    await panel(popout).locator(".git-history-heading strong").click();
+    await popout.keyboard.press("n");
+    await expect(panel(popout).locator(".diff-commit-message")).toContainText(a.initial);
+    await popout.keyboard.press("p");
+    await expect(panel(popout).locator(".diff-commit-message")).toContainText(a.head);
     await popout.screenshot({ path: info.outputPath("popout-review.png") });
   } finally { await popout?.close(); a.cleanup(); }
+});
+
+test("commit shortcuts stay in the focused review and survive asynchronous rerenders", async ({ page }) => {
+  const a = fixture("keyboard", 3);
+  try {
+    await authenticate(page); await createSession(page, a.repo, `Keyboard ${Date.now()}`);
+    const view = panel(page);
+    await view.getByRole("button", { name: "History", exact: true }).click();
+    await expect(view.locator(".diff-commit-message")).toContainText(a.head);
+    await view.locator(".git-history-heading strong").click();
+    await page.keyboard.press("n");
+    await expect(view.locator(".diff-commit-message")).toContainText(a.commits[2]);
+    await expect(view.locator(".diff-line-add")).toContainText("keyboard_2");
+    await page.keyboard.press("n");
+    await expect(view.locator(".diff-commit-message")).toContainText(a.commits[1]);
+    await page.keyboard.press("p");
+    await expect(view.locator(".diff-commit-message")).toContainText(a.commits[2]);
+    await view.locator(".diff-filter-input").click();
+    await page.keyboard.type("n");
+    await expect(view.locator(".diff-commit-message")).toContainText(a.commits[2]);
+    await page.locator("#promptInput").click();
+    await page.keyboard.type("p");
+    await expect(view.locator(".diff-commit-message")).toContainText(a.commits[2]);
+    await view.locator(".git-history-heading strong").click();
+    await page.keyboard.press("Control+n");
+    await expect(view.locator(".diff-commit-message")).toContainText(a.commits[2]);
+    await page.keyboard.press("p");
+    await expect(view.locator(".diff-commit-message")).toContainText(a.head);
+    await page.keyboard.press("p");
+    await expect(view.locator(".diff-commit-message")).toContainText(a.head);
+  } finally { a.cleanup(); }
 });

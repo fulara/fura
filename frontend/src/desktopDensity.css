@@ -1,0 +1,261 @@
+/* Desktop density for shared components. Mobile keeps the shared defaults. */
+:root {
+  --gap-transcript: 0.3rem;
+  --pad-transcript: 0.5rem;
+  --radius-card: 0.2rem;
+}
+
+button {
+  border-radius: 0.2rem;
+  background: #171b23;
+  min-height: 26px;
+  padding: 0.2rem 0.45rem;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+input,
+select,
+textarea {
+  border-radius: 0.2rem;
+  padding: 0.2rem 0.45rem;
+}
+
+input,
+select {
+  min-height: 26px;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.session-meta {
+  grid-column: 1;
+  grid-row: 2;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.65625rem;
+  line-height: 12px;
+}
+
+.status {
+  text-transform: initial;
+  border-radius: 0.2rem;
+  font-size: 0.625rem;
+  padding: 0.12rem 0.25rem;
+}
+
+.session {
+  gap: initial;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 0.3rem;
+  row-gap: 0;
+  min-height: 34px;
+  padding: 3px 27px 3px 6px;
+  border: 0;
+  border-bottom: 1px solid #1d222c;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+}
+
+.session.active {
+  border-color: #1d222c;
+  border-left-color: #7f8cff;
+  background: rgba(127, 140, 255, 0.1);
+}
+
+.session-delete {
+  top: 4px;
+  right: 1px;
+  width: 26px;
+  height: 26px;
+  border-radius: 0.2rem;
+}
+
+.session-item:hover .session-delete,
+.session-item:focus-within .session-delete {
+  opacity: 1;
+}
+
+.session-title-row {
+  grid-column: 1 / -1;
+  gap: 0.3rem;
+  line-height: 14px;
+}
+
+.session-id {
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.session-status {
+  border: 0;
+  border-radius: 0;
+  padding: 0;
+  font-size: 0.5625rem;
+}
+
+.session-goal-badge {
+  grid-column: 2;
+  grid-row: 2;
+  align-self: center;
+  justify-self: end;
+  max-width: 4.5rem;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
+  font-size: 0.625rem;
+  line-height: 12px;
+  font-weight: 500;
+}
+
+.session-status::before {
+  width: 5px;
+  height: 5px;
+  margin-right: 0.2rem;
+}
+
+.session-status-idle {
+  border-color: initial;
+  background: initial;
+}
+
+.session-status-idle::before {
+  box-shadow: initial;
+}
+
+.session-status-busy,
+.session-status-starting {
+  border-color: initial;
+  background: initial;
+}
+
+.session-status-busy::before,
+.session-status-starting::before {
+  box-shadow: initial;
+}
+
+.session-status-ask {
+  border-color: initial;
+  background: initial;
+}
+
+.session-status-ask::before {
+  box-shadow: initial;
+}
+
+.session-status-available {
+  border-color: initial;
+  background: initial;
+}
+
+.session-status-exited {
+  border-color: initial;
+  background: initial;
+}
+
+.session-status-error {
+  border-color: initial;
+  background: initial;
+}
+
+.session-status-error::before {
+  box-shadow: initial;
+}
+
+.message header {
+  padding: 0.2rem 0.6rem 0;
+}
+
+.ask-card {
+  gap: 0.5rem;
+  border-radius: 0.25rem;
+  background: rgba(38, 30, 14, 0.35);
+  padding: 0.6rem;
+  margin: 0.4rem 0;
+}
+
+.empty {
+  border-radius: 0.2rem;
+  padding: 0.65rem;
+}
+
+.thinking-label {
+  padding: 0.3rem 0.6rem;
+}
+
+.code-block-header {
+  padding: 0.1rem 0.6rem;
+}
+
+.plan-review-card {
+  box-shadow: none;
+}
+
+.tool-card {
+  border-radius: 0;
+}
+
+.tool-card:not(.todo-write-card) {
+  background: transparent;
+}
+
+.tool-header {
+  gap: 0.35rem;
+  padding: 0.1rem 0.45rem;
+}
+
+.task-card {
+  background: transparent;
+}
+
+.task-progress {
+  padding: 0.35rem 0.6rem;
+}
+
+.task-total {
+  padding: 0.3rem 0.6rem;
+}
+
+.review-card {
+  box-shadow: initial;
+  border-radius: 0.25rem;
+  background: #111318;
+}
+
+.review-header {
+  padding: 0.35rem 0.6rem;
+}
+
+@media (pointer: coarse) {
+  :root body :is(button, input, select, summary) {
+    min-height: 44px;
+  }
+
+  body button {
+    min-width: 44px;
+  }
+
+  .session {
+    min-height: 48px;
+    padding-right: 48px;
+  }
+
+  .session-delete {
+    top: 2px;
+    opacity: 1;
+  }
+
+  .workspace-panel-host .dockview-theme-dark {
+    --dv-tabs-and-actions-container-height: 44px;
+  }
+
+  .message-actions,
+  .tool-copy {
+    opacity: 1;
+  }
+}
