@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { formatCodeFileSize, parentCodePath, renderCodeContextMenu, renderCodeViewer, utf16ColumnWithin, type CodeViewerState } from "./codeViewer";
+import { formatCodeFileSize, parentCodePath, renderCodeContextMenu, renderCodeViewer, renderRevisionCodeViewer, utf16ColumnWithin, type CodeRevisionState, type CodeViewerState } from "./codeViewer";
+import { DIFF_HIGHLIGHT_LIMITS } from "./diffHighlight";
 import type { CodeLocation } from "./protocol";
 
 function baseState(overrides: Partial<CodeViewerState> = {}): CodeViewerState {
@@ -496,5 +497,189 @@ describe("code viewer", () => {
     renderCodeViewer(container, baseState({ file: other }), baseActions());
     expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(0);
     expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollLeft).toBe(0);
+  });
+});
+
+function revisionState(overrides: Partial<CodeRevisionState> = {}): CodeRevisionState {
+  const state: CodeRevisionState = {
+    requestId: "revision-1",
+    sessionId: "session-1",
+    repoRoot: "/repo",
+    commitOid: "0123456789abcdef0123456789abcdef01234567",
+    path: "src/main.rs",
+    side: "head",
+    file: null,
+    loading: false,
+    error: null,
+    ...overrides,
+  };
+  if (!("file" in overrides)) {
+    state.file = {
+      repoRoot: state.repoRoot,
+      commitOid: state.commitOid,
+      blobOid: "abcdef0123456789abcdef0123456789abcdef01",
+      path: state.path,
+      text: "pub fn main() {}\n",
+    };
+  }
+  return state;
+}
+
+describe("historical revision Code viewer", () => {
+  it("preserves keyboard focus when a revision read completes", () => {
+    const container = document.createElement("div");
+    document.body.append(container);
+    const state = revisionState();
+    try {
+      renderRevisionCodeViewer(container, { ...state, loading: true }, vi.fn());
+      container.querySelector<HTMLButtonElement>(".code-revision-back")!.focus();
+      renderRevisionCodeViewer(container, state, vi.fn());
+      expect(document.activeElement).toBe(container.querySelector(".code-revision-back"));
+    } finally { container.remove(); }
+  });
+
+  it("identifies the immutable source, highlights Rust and exposes only copy and return actions", () => {
+    const container = document.createElement("div");
+    const onReturn = vi.fn();
+    const state = revisionState({ sessionId: null });
+    state.file!.text = "/* historical comment\npub fn not_code() {}\n*/\npub fn main() {}\n";
+    renderRevisionCodeViewer(container, state, onReturn);
+
+    expect(container.querySelector(".code-revision-view.code-viewer")).not.toBeNull();
+    expect(container.querySelector(".code-file-path")?.textContent).toBe(state.path);
+    expect(container.querySelector(".code-revision-origin")?.textContent).toContain(state.repoRoot);
+    expect(container.querySelector<HTMLElement>(".code-revision-commit")?.title).toBe(state.commitOid);
+    expect(container.querySelector(".code-revision-commit")?.textContent).toBe(state.commitOid.slice(0, 12));
+    const rows = [...container.querySelectorAll(".code-line-content")];
+    expect(rows.map(row => row.textContent)).toEqual(["/* historical comment", "pub fn not_code() {}", "*/", "pub fn main() {}"]);
+    expect(rows[1].querySelector(".hljs-comment")?.textContent).toBe("pub fn not_code() {}");
+    expect(rows[3].querySelector(".hljs-keyword")?.textContent).toBe("pub");
+    expect([...container.querySelectorAll(".diff-gutter")].map(gutter => gutter.textContent)).toEqual(["1", "2", "3", "4"]);
+    expect(container.textContent).toContain("Historical revision");
+    expect(container.textContent).toContain("not the working tree");
+    expect(container.textContent).toContain("Comments and LSP navigation are unavailable");
+    expect([...container.querySelectorAll("button")].map(button => button.textContent)).toEqual(["Back to working-tree Code", "Copy"]);
+    expect(container.querySelector("textarea, input, [contenteditable], .diff-comment-btn")).toBeNull();
+    const contextMenu = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+    rows[3].dispatchEvent(contextMenu);
+    expect(contextMenu.defaultPrevented).toBe(false);
+    container.querySelector<HTMLButtonElement>(".code-revision-back")!.click();
+    expect(onReturn).toHaveBeenCalledOnce();
+  });
+
+  it("renders hostile source and origin as text, retaining Unicode and blank lines", () => {
+    const container = document.createElement("div");
+    const state = revisionState({ repoRoot: '/repo/<img src=x onerror="boom()">', path: "<script>boom()</script>.rs", side: "base" });
+    const source = ['let text = r#"<img src=x onerror="boom()">"#;', "", "// Zażółć 🦀 <script>boom()</script>"];
+    state.file!.text = source.join("\n") + "\n";
+    renderRevisionCodeViewer(container, state, vi.fn());
+
+    expect([...container.querySelectorAll(".code-line-content")].map(row => row.textContent)).toEqual(source);
+    expect(container.querySelector("script, img, [onerror]")).toBeNull();
+    expect(container.querySelector(".code-file-path")?.textContent).toBe(state.path);
+    expect(container.textContent).toContain(state.repoRoot);
+    expect(container.textContent).toContain("Comparison base · before deletion");
+  });
+
+  it("copies original full Unicode content, including CRLF and trailing newlines", async () => {
+    const previousClipboard = navigator.clipboard;
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    vi.useFakeTimers();
+    try {
+      const container = document.createElement("div");
+      const state = revisionState();
+      const source = '// Zażółć 🦀 e\u0301\r\n\tlet raw = "<script>";\r\n\r\n';
+      state.file!.text = source;
+      renderRevisionCodeViewer(container, state, vi.fn());
+      const copy = [...container.querySelectorAll("button")].find(button => button.textContent === "Copy")!;
+      copy.click();
+      await vi.waitFor(() => expect(copy.textContent).toBe("Copied"));
+      expect(writeText).toHaveBeenCalledOnce();
+      expect(writeText).toHaveBeenCalledWith(source);
+      vi.runAllTimers();
+    } finally {
+      vi.useRealTimers();
+      Object.assign(navigator, { clipboard: previousClipboard });
+    }
+  });
+
+  it("replaces ready content with explicit loading, failure and unavailable states without a working-tree fallback", () => {
+    const container = document.createElement("div");
+    const state = revisionState();
+    renderRevisionCodeViewer(container, state, vi.fn());
+    renderRevisionCodeViewer(container, { ...state, loading: true }, vi.fn());
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Loading historical revision");
+    expect(container.querySelector(".code-line-content")).toBeNull();
+    expect(container.textContent).not.toContain("pub fn main");
+    expect([...container.querySelectorAll("button")].map(button => button.textContent)).toEqual(["Back to working-tree Code"]);
+
+    renderRevisionCodeViewer(container, { ...state, error: "Binary Git blob cannot be displayed." }, vi.fn());
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe("Binary Git blob cannot be displayed.");
+    expect(container.querySelector(".code-line-content")).toBeNull();
+    expect(container.querySelector(".code-file-path")?.textContent).toBe(state.path);
+    renderRevisionCodeViewer(container, { ...state, file: null }, vi.fn());
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("unavailable");
+    expect(container.querySelector(".code-line-content")).toBeNull();
+  });
+
+  it("keeps every line when large-file syntax falls back to plain text", () => {
+    const container = document.createElement("div");
+    const state = revisionState();
+    const texts = Array.from({ length: DIFF_HIGHLIGHT_LIMITS.maxRows + 1 }, (_, index) => `pub fn revision_${index}() {}`);
+    texts.push(`// ${"🦀".repeat(DIFF_HIGHLIGHT_LIMITS.maxTextCodeUnits)}`);
+    state.file!.text = texts.join("\n");
+    renderRevisionCodeViewer(container, state, vi.fn());
+    expect(container.querySelectorAll(".code-line-content")).toHaveLength(DIFF_HIGHLIGHT_LIMITS.maxRows);
+    const more = container.querySelector<HTMLButtonElement>(".code-revision-more");
+    expect(more).not.toBeNull();
+    more!.click();
+    expect([...container.querySelectorAll(".code-line-content")].map(row => row.textContent)).toEqual(texts);
+    expect(container.querySelector(".hljs-keyword")).toBeNull();
+    expect(container.textContent).toContain("large or complex files remain complete plain text");
+    expect(container.querySelector(".code-line:last-child .diff-gutter")?.textContent).toBe(String(texts.length));
+  });
+
+  it("shows an empty Git blob as an empty file rather than missing content", () => {
+    const container = document.createElement("div");
+    const state = revisionState();
+    state.file!.text = "";
+    renderRevisionCodeViewer(container, state, vi.fn());
+    expect(container.textContent).toContain("empty file");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect([...container.querySelectorAll("button")].some(button => button.textContent === "Copy")).toBe(true);
+  });
+
+  it("preserves both scroll axes only for the same repository, revision and path", () => {
+    const container = document.createElement("div");
+    const state = revisionState();
+    renderRevisionCodeViewer(container, state, vi.fn());
+    container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop = 120;
+    container.querySelector<HTMLElement>(".code-review-lines")!.scrollLeft = 240;
+    renderRevisionCodeViewer(container, { ...state, requestId: "revision-2" }, vi.fn());
+    expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(120);
+    expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollLeft).toBe(240);
+
+    for (const change of [{ repoRoot: "/other" }, { commitOid: "fedcba9876543210fedcba9876543210fedcba98" }, { path: "src/other.rs" }]) {
+      renderRevisionCodeViewer(container, state, vi.fn());
+      container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop = 120;
+      container.querySelector<HTMLElement>(".code-review-lines")!.scrollLeft = 240;
+      renderRevisionCodeViewer(container, revisionState(change), vi.fn());
+      expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(0);
+      expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollLeft).toBe(0);
+    }
+  });
+
+  it("does not transfer historical scroll into the working-tree viewer or back", () => {
+    const container = document.createElement("div");
+    const working = baseState({ file: { path: "src/main.rs", language: "rust", text: "pub fn working() {}\n", size: 20, version: 1 } });
+    renderCodeViewer(container, working, baseActions());
+    renderRevisionCodeViewer(container, revisionState(), vi.fn());
+    container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop = 120;
+    renderCodeViewer(container, working, baseActions());
+    expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(0);
+    container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop = 240;
+    renderRevisionCodeViewer(container, revisionState(), vi.fn());
+    expect(container.querySelector<HTMLElement>(".code-review-lines")!.scrollTop).toBe(0);
   });
 });

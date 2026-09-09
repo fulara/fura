@@ -31,6 +31,11 @@ staging files or creating Git objects/refs. Historical files open directly from 
 blobs, without checkout. **Advanced Compare** remains separate and inherits the selected
 repository. See [the diff contract](spec/diff-and-snapshots.md) for read limits and Git-helper policy.
 
+In a historical file's context menu, **View committed file** keeps the existing modal;
+**View this revision in Code** opens the full revision in Fura's read-only Code panel.
+Repository, path and SHA remain explicit. **Back to working-tree Code** restores ordinary
+browsing; historical content never becomes a working file.
+
 Repositories come from the session cwd/worktree, declared additional directories,
 initialized submodules and supported tool-path metadata. Add, Hide selected and
 Set default persist per session. Discovery is best-effort; repository changes are

@@ -165,11 +165,14 @@ Opening a working-tree diff file in Code uses the selected canonical repository 
 the session's original cwd. Code Refresh retains that root and selected file. Code notes,
 questions, deletion and preview/flush are scoped by canonical root, path and file version.
 
-Historical files use **View committed file**, a separate read-only blob view identified by
-repository, full commit OID, blob OID and path. It never creates/checks out a review worktree,
-starts LSP or substitutes today's file. Deleted files read the parent version. Binary,
-non-UTF-8, non-file and blobs over 1,000,000 bytes fail explicitly. Today's deleted directories or
-external symlink parents do not prevent reading an immutable historical tree.
+Historical file menus offer two separate actions: **View committed file** retains the
+read-only modal; **View this revision in Code** opens a distinct immutable source in
+the Code panel. Both use the existing blob reader without checkout, LSP or today's-file
+fallback. Deleted files read the actual comparison base and old path, not a guessed parent;
+renames read the head-side path. Binary, non-UTF-8, non-file and blobs over 1,000,000 bytes
+fail explicitly. Today's deleted directories or external symlink parents do not prevent
+reading an immutable historical tree. See the [Code contract](read-only-code-browser.md#git-diff--code-and-committed-files)
+for identity, pending-read isolation, chunking and return behavior.
 Diff panes retain enough width for controls, including restored layouts.
 Short docked panes scroll the review surface instead of collapsing the file list
 and patch area behind the session status bar.

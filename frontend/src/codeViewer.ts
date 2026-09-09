@@ -1,7 +1,8 @@
 import hljs from "highlight.js/lib/common";
 import { setRenderDocument, mkEl, copyTextToClipboard } from "./dom";
 import type { CodeFileComment } from "./codeComments";
-import type { CodeFileContent, CodeLocation, CodeStatus, CodeWorkspaceSummary } from "./protocol";
+import type { CodeFileContent, CodeLocation, CodeStatus, CodeWorkspaceSummary, GitFileContent } from "./protocol";
+import { createDiffHighlighter, DIFF_HIGHLIGHT_LIMITS, diffLanguage } from "./diffHighlight";
 
 export type CodeReferencesState = {
   path: string;
@@ -32,6 +33,18 @@ export type CodeViewerState = {
   pendingScrollLine: number | null;
 };
 
+export type CodeRevisionState = {
+  requestId: string;
+  sessionId: string | null;
+  repoRoot: string;
+  commitOid: string;
+  path: string;
+  side: "base" | "head";
+  file: GitFileContent | null;
+  loading: boolean;
+  error: string | null;
+};
+
 export type CodeViewerActions = {
   openWorkspace(): void;
   listTree(path: string): void;
@@ -59,6 +72,7 @@ export type CodeViewerActions = {
 // renderCodeViewer preserves scroll only across re-renders of the same file in
 // the same viewer — never across workspace switches or other containers.
 const lastRenderedCodeFileKey = new WeakMap<HTMLElement, string>();
+const lastRenderedRevisionKey = new WeakMap<HTMLElement, string>();
 
 export function parentCodePath(path: string): string | null {
   const normalized = normalizeCodePath(path);
@@ -117,6 +131,162 @@ export function renderCodeViewer(
   }
   if (fileKey != null) lastRenderedCodeFileKey.set(container, fileKey);
   else lastRenderedCodeFileKey.delete(container);
+}
+
+export function renderRevisionCodeViewer(
+  container: HTMLElement,
+  state: CodeRevisionState,
+  onReturn: () => void,
+): void {
+  setRenderDocument(container.ownerDocument);
+  const revisionKey = JSON.stringify([state.repoRoot, state.commitOid, state.path]);
+  const previousLines = container.querySelector<HTMLElement>(".code-revision-view .code-review-lines");
+  const sameRevision = lastRenderedRevisionKey.get(container) === revisionKey;
+  const scrollTop = sameRevision ? previousLines?.scrollTop ?? 0 : 0;
+  const scrollLeft = sameRevision ? previousLines?.scrollLeft ?? 0 : 0;
+  const previousCount = sameRevision ? previousLines?.childElementCount ?? 0 : 0;
+  const active = container.ownerDocument.activeElement;
+  const focusSelector = sameRevision && active && container.contains(active)
+    ? active.classList.contains("code-revision-back") ? ".code-revision-back"
+      : active.classList.contains("code-revision-copy") ? ".code-revision-copy"
+      : active === previousLines ? ".code-review-lines" : null
+    : null;
+  lastRenderedCodeFileKey.delete(container);
+  lastRenderedRevisionKey.set(container, revisionKey);
+
+  const root = mkEl("section");
+  root.className = "code-viewer code-revision-view";
+  const main = mkEl("main");
+  main.className = "code-main";
+  const view = mkEl("section");
+  view.className = "code-file-view";
+  const header = mkEl("header");
+  header.className = "code-file-header";
+  const title = mkEl("div");
+  title.className = "code-file-title";
+  const path = mkEl("code");
+  path.className = "code-file-path";
+  path.textContent = state.path;
+  path.title = state.path;
+  const origin = mkEl("span");
+  origin.className = "code-revision-origin";
+  const repo = mkEl("code");
+  repo.textContent = state.repoRoot;
+  repo.title = state.repoRoot;
+  const revision = mkEl("code");
+  revision.className = "code-revision-commit";
+  revision.textContent = state.commitOid.slice(0, 12);
+  revision.title = state.commitOid;
+  origin.append(repo, " · ", revision);
+  const label = mkEl("span");
+  label.textContent = state.side === "base" ? "Comparison base · before deletion" : "Historical revision";
+  const limitations = mkEl("span");
+  limitations.className = "code-revision-limitations";
+  limitations.textContent = "Read-only Git content, not the working tree. Comments and LSP navigation are unavailable for historical revisions. Syntax highlighting is best-effort; large or complex files remain complete plain text.";
+  title.append(path, origin, label, limitations);
+
+  const actions = mkEl("div");
+  actions.className = "code-file-actions";
+  const back = mkEl("button");
+  back.type = "button";
+  back.className = "code-revision-back";
+  back.textContent = "Back to working-tree Code";
+  back.addEventListener("click", onReturn);
+  actions.append(back);
+
+  const file = !state.loading && !state.error ? state.file : null;
+  if (file) {
+    const copy = mkEl("button");
+    copy.type = "button";
+    copy.className = "code-revision-copy";
+    copy.textContent = "Copy";
+    copy.addEventListener("click", async () => {
+      const owner = copy.ownerDocument;
+      const copied = await copyTextToClipboard(file.text, owner);
+      copy.textContent = copied ? "Copied" : "Copy failed";
+      (owner.defaultView ?? window).setTimeout(() => { copy.textContent = "Copy"; }, 900);
+    });
+    actions.append(copy);
+  }
+  header.append(title, actions);
+  view.append(header);
+
+  if (state.loading) {
+    const status = renderEmptyMain("Loading historical revision…");
+    status.setAttribute("role", "status");
+    view.append(status);
+  } else if (state.error || !file) {
+    const error = renderEmptyMain(state.error || "Historical revision content is unavailable.");
+    error.setAttribute("role", "alert");
+    view.append(error);
+  } else {
+    const lines = mkEl("div");
+    lines.className = "code-review-lines";
+    lines.tabIndex = 0;
+    lines.setAttribute("aria-label", "Historical file contents");
+    const texts = codeFileLines(file.text);
+    // Reuse bounded, multiline-aware syntax without manufacturing a workspace
+    // or spending decoration memory on files above the highlighter's limits.
+    const highlighter = texts.length <= DIFF_HIGHLIGHT_LIMITS.maxRows && file.text.length <= DIFF_HIGHLIGHT_LIMITS.maxTextCodeUnits
+      ? createDiffHighlighter(texts.map(text => ({
+        text, kind: "context" as const, prefixLength: 0, oldPath: file.path, newPath: file.path,
+      })), container.ownerDocument)
+      : null;
+    const language = diffLanguage(file.path);
+    const more = texts.length > DIFF_HIGHLIGHT_LIMITS.maxRows ? mkEl("button") : null;
+    let rendered = 0;
+    const appendLines = (count: number) => {
+      const end = Math.min(texts.length, rendered + count);
+      const chunk = container.ownerDocument.createDocumentFragment();
+      for (; rendered < end; rendered++) {
+        const line = mkEl("div");
+        line.className = "code-line";
+        const gutter = mkEl("span");
+        gutter.className = "diff-gutter";
+        gutter.textContent = String(rendered + 1);
+        const content = mkEl("div");
+        content.className = "code-line-content";
+        const code = mkEl("code");
+        if (language) code.className = `hljs language-${language}`;
+        if (highlighter) highlighter.renderLine(rendered, code);
+        else code.textContent = texts[rendered];
+        content.append(code);
+        line.append(gutter, content);
+        chunk.append(line);
+      }
+      lines.append(chunk);
+      if (more) {
+        more.textContent = `Show next ${Math.min(DIFF_HIGHLIGHT_LIMITS.maxRows, texts.length - rendered)} lines (${rendered} of ${texts.length} shown)`;
+        if (rendered === texts.length) {
+          const focused = more.ownerDocument.activeElement === more;
+          more.remove();
+          if (focused) lines.focus({ preventScroll: true });
+        }
+      }
+    };
+    appendLines(Math.max(DIFF_HIGHLIGHT_LIMITS.maxRows, previousCount));
+    if (more) {
+      more.type = "button";
+      more.className = "code-revision-more";
+      more.addEventListener("click", () => {
+        setRenderDocument(container.ownerDocument);
+        appendLines(DIFF_HIGHLIGHT_LIMITS.maxRows);
+      });
+    }
+    if (texts.length === 0) lines.append(renderEmptyMain("This revision contains an empty file."));
+    view.append(lines);
+    if (more && rendered < texts.length) view.append(more);
+  }
+
+  main.append(view);
+  root.append(main);
+  container.replaceChildren(root);
+  const nextLines = root.querySelector<HTMLElement>(".code-review-lines");
+  if (nextLines) {
+    nextLines.scrollTop = scrollTop;
+    nextLines.scrollLeft = scrollLeft;
+  }
+  if (focusSelector) root.querySelector<HTMLElement>(focusSelector)?.focus({ preventScroll: true });
 }
 
 function renderCodeWorkspaceHeader(state: CodeViewerState, actions: CodeViewerActions): HTMLElement {

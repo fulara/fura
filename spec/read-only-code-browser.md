@@ -47,11 +47,20 @@ npm --prefix frontend run build      # passed; existing Mermaid chunk-size warni
 - Working-tree files open in Code with the selected repository root, not necessarily the session cwd. The pending file is assigned after resetting the workspace so it survives `code.workspace.ready`.
 - Code Refresh preserves an explicitly opened root and reopens the selected file after workspace readiness. The Code header displays the canonical root.
 - Code comments/questions, deletion and preview/flush use canonical root + path + file version. Identical paths in different repositories cannot share notes or prompt context.
-- Historical files use **View committed file**, an immutable read-only dialog backed by `git.file.request`. The dialog identifies repository, commit, blob and path. It does not create/check out a review worktree or use a mutable Code/LSP workspace. Deleted files read their parent version.
+- Historical files retain **View committed file**, the immutable read-only dialog backed by `git.file.request`. The dialog still identifies repository, commit, blob and path.
+- The adjacent file-menu action **View this revision in Code** activates Fura's Code panel with a separate historical source: repository, immutable SHA, path and comparison side. It never manufactures a mutable Code workspace, checks out a revision or writes a working file.
+- Deleted files use the actual comparison base and its old path, labelled **Comparison base · before deletion**. This is not necessarily the deletion commit's parent. Renames open the head-side path; initial commits open their head, not the empty-tree base.
+- Historical Code shows numbered source with bounded shared syntax highlighting, including Rust, and copies the original complete blob. It creates at most 2,000 lines initially; larger files expose explicit next-line chunks, without dropping content. Unknown/large/complex syntax falls back to plain text.
+- Comments, file search and LSP navigation are unavailable for historical content, with a visible explanation. **Back to working-tree Code** restores the suspended working source. Ctrl+F remains browser text search in a revision; the file menu supports Shift+F10/ContextMenu and Escape, with keyboard focus transferred into and back out of Code.
+- Loaded revisions remain explicitly pinned while Git selection changes. Pending reads are invalidated when their originating comparison changes; session/controller changes or returning to working Code discard the revision. Client/request/repo/SHA/path checks reject unrelated replies. Suspended working-tree and LSP replies cannot replace historical content or resume obsolete navigation after return.
+- Modal and Code have independent state. Their reads are serialized because the existing bridge allows one Git blob job per connection; completion, close or invalidation advances the other destination.
 - Binary, non-UTF-8, non-file and blobs over 1,000,000 bytes fail explicitly; interrupted reads show a connection error and can be reopened after reconnect.
 
 Regression coverage includes unit tests and real-repository Chromium scenarios in
-`frontend/smoke/git-review.spec.ts`, including repository isolation and unchanged Git bytes.
+`frontend/smoke/git-review.spec.ts` and `frontend/smoke/revision-code.spec.ts`, including
+repository isolation, explicit comparison bases, unchanged Git/working-tree bytes and
+the independently preserved modal. This feature remains in the desktop interface;
+the separate mobile shell is unchanged.
 
 
 ## Core decisions

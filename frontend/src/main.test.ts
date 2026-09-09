@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection } from "./connection";
-import type { ClientMessage, DiffRow, PendingAskProjection, ReviewComment, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
+import type { ClientMessage, CodeLocation, DiffFileSummary, DiffRow, GitFileContent, PendingAskProjection, ReviewComment, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
 
 class FakeConnection implements FuraConnection {
   sent: ClientMessage[] = [];
@@ -162,6 +162,7 @@ function simpleDiffRows(patch: string): DiffRow[] {
 let connections: FakeConnection[] = [];
 let fakeConnectionAutoOpen = true;
 let desktopMockActivePanelIds = new Set(["diffs"]);
+const desktopMockActivatePanel = vi.fn(() => true);
 // The Code panel is opt-in per harness so its rendering does not perturb tests
 // that only assert on sent messages.
 let desktopMockMountCodePanel = false;
@@ -201,7 +202,7 @@ function installMocks(): void {
         panelMounted: (id: string) => Boolean(panels[id]),
         panelContains: (id: string, element: Element) => Boolean(panels[id]?.contains(element)),
         isPanelActive: (id: string) => desktopMockActivePanelIds.has(id),
-        activatePanel: () => true,
+        activatePanel: desktopMockActivatePanel,
         withPanel: (id: string, render: (container: HTMLElement) => void) => {
           const panel = panels[id];
           if (!panel) return false;
@@ -238,8 +239,15 @@ function installMocks(): void {
 async function createHarness(options: { preserveLocalStorage?: boolean; mountCodePanel?: boolean } = {}) {
   vi.resetModules();
   vi.restoreAllMocks();
+  // jsdom does not implement the native dialog lifecycle used by the real modal.
+  HTMLDialogElement.prototype.showModal = function () { this.open = true; };
+  HTMLDialogElement.prototype.close = function () {
+    this.open = false;
+    this.dispatchEvent(new Event("close"));
+  };
   connections = [];
   desktopMockActivePanelIds = new Set(["diffs"]);
+  desktopMockActivatePanel.mockClear();
   desktopMockMountCodePanel = options.mountCodePanel ?? false;
   fakeConnectionAutoOpen = true;
   document.body.innerHTML = `<div id="app"></div>`;
@@ -686,9 +694,10 @@ describe("desktop cog options", () => {
     document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="src/main.ts"]')?.click();
     connection.sent.length = 0;
 
-    const codeButton = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
-      .find(button => button.textContent === "Code");
-    if (!codeButton) throw new Error("Code button missing");
+    const menu = openGitFileMenu("src/main.ts");
+    expect(menu.some(button => button.textContent === "View this revision in Code")).toBe(false);
+    const codeButton = menu.find(button => button.textContent === "Open in Code");
+    if (!codeButton) throw new Error("Open in Code menu action missing");
     codeButton.click();
 
     expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.workspace.openRoot", root: "/repo", source: "session" }));
@@ -1250,6 +1259,236 @@ describe("desktop cog options", () => {
     if (!button) throw new Error(`${text} button missing`);
     button.click();
   }
+
+  function answerRevisionComparison(
+    connection: FakeConnection,
+    file: DiffFileSummary = { newPath: "src/history.rs", status: "modified", added: 1, removed: 1 },
+    baseOid: string | null = "a".repeat(40),
+    headOid = "b".repeat(40),
+  ): void {
+    const base = sessionChangesState("live");
+    if (base.status !== "ready") throw new Error("Git fixture missing");
+    answerGitRequest(connection, `revision-${baseOid}-${headOid}`, {
+      comparison: {
+        ...base.comparison,
+        base: baseOid ? { kind: "commit", oid: baseOid, shortOid: baseOid.slice(0, 12) } : { kind: "emptyTree" },
+        head: { kind: "commit", oid: headOid, shortOid: headOid.slice(0, 12) },
+        leftTreeOrCommit: baseOid ?? "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+        rightTreeOrCommit: headOid,
+        comparisonKey: `revision-${baseOid}-${headOid}`,
+      },
+      summary: { files: [file], truncated: false },
+    });
+  }
+
+  function openGitFileMenu(path = "src/history.rs"): HTMLButtonElement[] {
+    const file = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel .diffs-file-jump")]
+      .find(button => button.dataset.diffFilePath === path);
+    if (!file) throw new Error(`Git file ${path} missing`);
+    file.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+    return [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel .diffs-file-menu button")];
+  }
+
+  function requestGitFileFromMenu(connection: FakeConnection, label = "View this revision in Code", path = "src/history.rs") {
+    const action = openGitFileMenu(path).find(button => button.textContent === label);
+    if (!action) throw new Error(`${label} menu action missing`);
+    action.click();
+    const request = [...connection.sent].reverse().find(message => message.type === "git.file.request");
+    if (!request || request.type !== "git.file.request") throw new Error("Git file request missing");
+    return request;
+  }
+
+  function gitFileReply(request: Extract<ClientMessage, { type: "git.file.request" }>, text: string): Extract<ServerMessage, { type: "git.file" }> {
+    return {
+      type: "git.file",
+      targetClientId: request.clientId,
+      requestId: request.requestId,
+      file: { repoRoot: request.repoRoot, commitOid: request.commitOid, path: request.path, blobOid: "c".repeat(40), text },
+      error: null,
+    };
+  }
+
+  function revisionText(): string {
+    return [...document.querySelectorAll("#testCodePanel .code-revision-view .code-line-content")]
+      .map(line => line.textContent).join("\n");
+  }
+
+  function returnToWorkingCode(): void {
+    const button = [...document.querySelectorAll<HTMLButtonElement>("#testCodePanel .code-revision-view button")]
+      .find(candidate => candidate.textContent === "Back to working-tree Code");
+    if (!button) throw new Error("Return to working-tree Code button missing");
+    button.click();
+  }
+
+  it("opens adjacent modal and revision Code actions independently without checking out or opening a workspace", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    openCommentRepo(connection, "/repo", "WORKING_TREE\n");
+    answerRevisionComparison(connection);
+    const menu = openGitFileMenu();
+    const modalIndex = menu.findIndex(button => button.textContent === "View committed file");
+    expect(modalIndex).toBeGreaterThanOrEqual(0);
+    expect(menu[modalIndex + 1]?.textContent).toBe("View this revision in Code");
+
+    connection.sent.length = 0;
+    desktopMockActivatePanel.mockClear();
+    const revisionRequest = requestGitFileFromMenu(connection);
+    expect(document.activeElement).toBe(document.querySelector("#testCodePanel .code-revision-back"));
+    expect(desktopMockActivatePanel).toHaveBeenCalledWith("code");
+    expect(document.querySelector(".git-file-dialog")).toBeNull();
+    expect(document.querySelector("#testCodePanel .code-revision-view")).not.toBeNull();
+    expect(connection.sent).toEqual([revisionRequest]);
+    expect(revisionRequest).toMatchObject({ repoRoot: "/repo", commitOid: "b".repeat(40), path: "src/history.rs" });
+
+    const modalAction = openGitFileMenu().find(button => button.textContent === "View committed file")!;
+    modalAction.click();
+    expect(document.querySelector(".git-file-dialog")).not.toBeNull();
+
+    const historical = "// Outside the selected diff hunk\nfn historical() {\n    let original = \"<not-html>\";\n}\n// End of complete file";
+    connection.emit(gitFileReply(revisionRequest, historical));
+    expect(revisionText()).toBe(historical);
+    const modalRequest = [...connection.sent].reverse().find(message => message.type === "git.file.request");
+    if (!modalRequest || modalRequest.type !== "git.file.request") throw new Error("Queued modal request missing");
+    expect(modalRequest.requestId).not.toBe(revisionRequest.requestId);
+    connection.emit(gitFileReply(modalRequest, "MODAL_ONLY\n"));
+    expect(document.querySelector(".git-file-content")?.textContent).toBe("MODAL_ONLY\n");
+    expect(revisionText()).toBe(historical);
+    expect(document.querySelector("#testCodePanel .code-file-path")?.textContent).toBe("src/history.rs");
+    const revision = document.querySelector("#testCodePanel .code-revision-view")!;
+    expect(revision.textContent).toContain("/repo");
+    expect(revision.textContent).toContain("b".repeat(12));
+    expect([...revision.querySelectorAll("[title]")].some(element => element.getAttribute("title")?.includes("b".repeat(40)))).toBe(true);
+    connection.emit({ type: "code.file", workspaceId: "ws-/repo", file: { path: "same.ts", language: "", text: "LATE_WORKING_TREE\n", size: 18, version: 2 } });
+    connection.emit({ type: "code.workspace.ready", workspace: { workspaceId: "ws-/repo", sessionId: null, root: "/repo", source: "session", status: "filesOnly" } });
+    expect(revisionText()).toBe(historical);
+    expect(document.querySelector(".git-file-content")?.textContent).toBe("MODAL_ONLY\n");
+  });
+
+  it("rejects unrelated revision replies and ignores a pending reply after returning to working-tree Code", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    openCommentRepo(connection, "/repo", "WORKING_TREE\n");
+    answerRevisionComparison(connection);
+    const request = requestGitFileFromMenu(connection);
+    const reply = gitFileReply(request, "WRONG_REVISION");
+    const file = reply.file as GitFileContent;
+    const unrelated: Extract<ServerMessage, { type: "git.file" }>[] = [
+      { ...reply, targetClientId: "another-client" },
+      { ...reply, requestId: "another-request" },
+      { ...reply, file: { ...file, repoRoot: "/other" } },
+      { ...reply, file: { ...file, commitOid: "d".repeat(40) } },
+      { ...reply, file: { ...file, path: "src/other.rs" } },
+    ];
+    for (const message of unrelated) {
+      connection.emit(message);
+      expect(revisionText()).not.toContain("WRONG_REVISION");
+    }
+    connection.emit(gitFileReply(request, "CORRELATED_REVISION"));
+    expect(revisionText()).toBe("CORRELATED_REVISION");
+    const pending = requestGitFileFromMenu(connection);
+    expect(pending.requestId).not.toBe(request.requestId);
+    returnToWorkingCode();
+    expect(document.querySelector("#testCodePanel .code-revision-view")).toBeNull();
+    expect(document.querySelector("#testCodePanel .code-file-path")?.textContent).toBe("same.ts");
+    expect(document.querySelector("#testCodePanel")?.textContent).toContain("WORKING_TREE");
+    connection.emit(gitFileReply(pending, "LATE_REVISION"));
+    expect(document.querySelector("#testCodePanel .code-revision-view")).toBeNull();
+    expect(document.querySelector("#testCodePanel")?.textContent).not.toContain("LATE_REVISION");
+    expect(document.querySelector(".git-file-dialog")).toBeNull();
+  });
+
+  it("does not resume stale working-tree navigation after returning from a revision", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    await openCodeFileForNavigation(connection);
+    triggerNavAction("Go to definition");
+    const definitionId = sentRequestId(connection, "code.definition");
+    triggerNavAction("Find references");
+    const referencesId = sentRequestId(connection, "code.references");
+    answerRevisionComparison(connection);
+    requestGitFileFromMenu(connection);
+    returnToWorkingCode();
+    connection.sent.length = 0;
+    const locations: CodeLocation[] = [{ kind: "local", path: "src/stale.rs", range: { start: { line: 0, character: 0 }, end: { line: 0, character: 1 } } }];
+    connection.emit({ type: "code.definition", workspaceId: "ws-1", requestId: definitionId, path: "src/main.rs", locations });
+    connection.emit({ type: "code.references", workspaceId: "ws-1", requestId: referencesId, path: "src/main.rs", locations });
+    expect(connection.sent.some(message => message.type === "code.file.open")).toBe(false);
+    expect(document.querySelector("#testCodePanel")?.textContent).not.toContain("src/stale.rs");
+    expect(document.querySelector("#testCodePanel")?.contains(document.activeElement)).toBe(true);
+  });
+
+  it("invalidates a pending revision in a compare-backed diff-review session", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    const a = "a".repeat(40), b = "b".repeat(40);
+    const review = summary("live", { sessionMode: "diffReview", title: `diff: ${a}..${b}` });
+    connection.emit({ type: "sessions.snapshot", sessions: [review] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { summary: review }) });
+    const request = [...connection.sent].reverse().find(message => message.type === "compareDiff.request");
+    if (!request || request.type !== "compareDiff.request") throw new Error("Compare-backed review request missing");
+    const base = sessionChangesState("live");
+    if (base.status !== "ready") throw new Error("Diff fixture missing");
+    const state: Extract<ServerMessage, { type: "compareDiff.summary" }>["state"] = {
+      ...base, targetClientId: request.clientId, diffId: request.diffId, refs: [],
+      request: { scope: "compareDiff", clientId: request.clientId, diffId: request.diffId, repoRoot: "/repo", base: request.base, head: request.head, detailMode: "filePatch", mergeBase: false, currentCommitOid: null, selectedFile: null, contextLines: 3 },
+      comparison: { ...base.comparison, base: { kind: "commit", oid: a, shortOid: a.slice(0, 12) }, head: { kind: "commit", oid: b, shortOid: b.slice(0, 12) }, leftTreeOrCommit: a, rightTreeOrCommit: b, detailMode: "filePatch" },
+      summary: { files: [{ newPath: "src/history.rs", status: "modified", added: 1, removed: 1 }], truncated: false },
+    };
+    connection.emit({ type: "compareDiff.summary", state });
+    const pending = requestGitFileFromMenu(connection);
+    expect(document.querySelector(".code-revision-view")).not.toBeNull();
+    connection.emit({ type: "compareDiff.summary", state: { ...state, comparison: { ...state.comparison, rightTreeOrCommit: "c".repeat(40) } } });
+    connection.emit(gitFileReply(pending, "SUPERSEDED_REVIEW_SESSION"));
+    expect(document.querySelector(".code-revision-view")?.textContent).not.toContain("SUPERSEDED_REVIEW_SESSION");
+  });
+
+  it("invalidates a pending revision when its originating comparison or session changes", async () => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    answerRevisionComparison(connection);
+    const superseded = requestGitFileFromMenu(connection);
+    desktopMockActivePanelIds.add("code");
+    answerRevisionComparison(connection, undefined, "a".repeat(40), "d".repeat(40));
+    connection.emit(gitFileReply(superseded, "SUPERSEDED_REVISION"));
+    expect(document.querySelector("#testCodePanel")?.textContent).not.toContain("SUPERSEDED_REVISION");
+
+    const pending = requestGitFileFromMenu(connection);
+    const other = [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")]
+      .find(button => button.textContent?.includes("Session other"));
+    if (!other) throw new Error("Other session button missing");
+    other.click();
+    connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+    connection.emit(gitFileReply(pending, "PREVIOUS_SESSION_REVISION"));
+    expect(document.querySelector("#testCodePanel .code-revision-view")).toBeNull();
+    expect(document.querySelector("#testCodePanel")?.textContent).not.toContain("PREVIOUS_SESSION_REVISION");
+  });
+
+  it.each([
+    { name: "deletion base", file: { oldPath: "src/deleted.rs", newPath: "src/deleted.rs", status: "deleted", added: 0, removed: 2 }, base: "a".repeat(40), expectedOid: "a".repeat(40), expectedPath: "src/deleted.rs" },
+    { name: "renamed head path", file: { oldPath: "src/old.rs", newPath: "src/renamed.rs", status: "renamed", added: 1, removed: 1 }, base: "a".repeat(40), expectedOid: "b".repeat(40), expectedPath: "src/renamed.rs" },
+    { name: "initial commit head", file: { newPath: "src/initial.rs", status: "added", added: 2, removed: 0 }, base: null, expectedOid: "b".repeat(40), expectedPath: "src/initial.rs" },
+  ] satisfies { name: string; file: DiffFileSummary; base: string | null; expectedOid: string; expectedPath: string }[])("opens the $name as a historical file without a checkout", async ({ file, base, expectedOid, expectedPath }) => {
+    const { connection } = await createHarness({ mountCodePanel: true });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    answerRevisionComparison(connection, file, base);
+    connection.sent.length = 0;
+    const request = requestGitFileFromMenu(connection, "View this revision in Code", file.newPath);
+    expect(request).toMatchObject({ repoRoot: "/repo", commitOid: expectedOid, path: expectedPath });
+    expect(connection.sent).toEqual([request]);
+    desktopMockActivePanelIds.add("code");
+    connection.emit(gitFileReply(request, `fn preserved() {}\n// ${expectedPath}`));
+    expect(revisionText()).toBe(`fn preserved() {}\n// ${expectedPath}`);
+    expect(document.querySelector("#testCodePanel .code-file-path")?.textContent).toBe(expectedPath);
+    expect(document.querySelector("#testCodePanel .code-revision-view")?.textContent).toContain(expectedOid.slice(0, 12));
+    expect(document.querySelector(".git-file-dialog")).toBeNull();
+  });
 
   it("keeps group patches and comments separate and refreshes the chosen group without loops", async () => {
     const { connection } = await createHarness();

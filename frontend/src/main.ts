@@ -148,6 +148,8 @@ import {
   parentCodePath,
   renderCodeContextMenu,
   renderCodeViewer,
+  renderRevisionCodeViewer,
+  type CodeRevisionState,
   type CodeContextMenuViewState,
   type CodeReferencesState,
   type CodeViewerState,
@@ -823,7 +825,7 @@ let currentSessionChangesRequest: { sessionId: string; diffId: string } | null =
 const gitHistoryStates = new Map<string, GitHistoryState>();
 const restoredGitReviewSessions = new Set<string>();
 let pendingGitHistory: { sessionId: string; state: GitHistoryState } | null = null;
-let pendingGitFile: { requestId: string; repoRoot: string; commitOid: string; path: string; loading: boolean; view: ReturnType<typeof openCommittedFileView> } | null = null;
+let pendingGitFile: { requestId: string; repoRoot: string; commitOid: string; path: string; loading: boolean; sent: boolean; view: ReturnType<typeof openCommittedFileView> } | null = null;
 let compareDiffState: CompareDiffSummaryState | null = null;
 let compareDiffId: string | null = null;
 let compareDiffLoading = false;
@@ -1197,6 +1199,7 @@ let codeWorkspace: CodeWorkspaceSummary | null = null;
 let codeTreePath = "";
 let codeTreeEntries: CodeTreeEntry[] = [];
 let codeFile: CodeFileContent | null = null;
+let codeRevision: (CodeRevisionState & { sent: boolean; originKey: string; originComparison: string }) | null = null;
 let codeLoadingWorkspace = false;
 let codeLoadingTree = false;
 let codeLoadingFile = false;
@@ -1360,7 +1363,7 @@ voiceButton.addEventListener("pointercancel", () => { void stopVoiceRecording();
 voiceButton.addEventListener("lostpointercapture", () => { void stopVoiceRecording(); });
 voiceButton.addEventListener("contextmenu", event => event.preventDefault());
 window.addEventListener("keydown", event => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && desktopDockview?.isPanelActive("code")) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && desktopDockview?.isPanelActive("code") && !codeRevision) {
     event.preventDefault();
     openCodeSearch();
     return;
@@ -1711,6 +1714,12 @@ function connect(token: string): void {
         pendingGitFile.loading = false;
         pendingGitFile.view.show(null, "Connection closed while reading the committed file. Close and reopen it to retry.");
       }
+      if (codeRevision?.loading) {
+        codeRevision.loading = false;
+        codeRevision.error = "Connection closed while reading the revision. Reopen it from the file menu to retry.";
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+      }
       if (pendingGitHistory) pendingGitHistory.state.error = "Connection closed while reading history. Refresh to retry.";
       clearPendingGitHistory();
       for (const sessionId of diffLoadingSessions) staleSessionChanges.add(sessionId);
@@ -1755,6 +1764,8 @@ function activeWorkspaceKey(): string | null {
 function activateControllerWorkspace(): void {
   invalidateRollbackChat();
   if (workspaceMode !== "controller") {
+    pendingGitFile?.view.close();
+    clearCodeRevision();
     sessionPromptDraft = promptInput.value;
     promptInput.value = controllerPromptDraft;
     workspaceMode = "controller";
@@ -1780,6 +1791,7 @@ function activateSession(sessionId: string): void {
   if (sessionChanged) {
     clearPendingGitHistory();
     pendingGitFile?.view.close();
+    clearCodeRevision();
     if (previousMode === "controller") {
       controllerPromptDraft = promptInput.value;
       promptInput.value = sessionPromptDraft;
@@ -1817,6 +1829,8 @@ function shouldActivateSnapshot(sessionId: string): boolean {
 }
 
 function handleServerMessage(message: ServerMessage): void {
+  // Working-tree replies belong to the suspended workspace, never to a revision.
+  if (codeRevision && message.type.startsWith("code.")) return;
   switch (message.type) {
     case "hello":
       appendLog(`Connected to fura ${message.serverVersion} protocol ${message.protocolVersion}`);
@@ -1976,11 +1990,24 @@ function handleServerMessage(message: ServerMessage): void {
       break;
     }
     case "git.file": {
+      if (message.targetClientId !== diffClientId) break;
+      const revision = codeRevision;
+      if (revision?.loading && revision.sent && revision.requestId === message.requestId) {
+        if (message.file && (message.file.repoRoot !== revision.repoRoot || message.file.commitOid !== revision.commitOid || message.file.path !== revision.path)) break;
+        revision.file = message.file;
+        revision.error = message.error ?? (message.file ? null : "Historical revision is unavailable.");
+        revision.loading = false;
+        markCodeViewDirty();
+        renderCodePanelIfNeeded(true);
+        dispatchGitFileRead();
+        break;
+      }
       const pending = pendingGitFile;
-      if (message.targetClientId !== diffClientId || !pending || !pending.loading || pending.requestId !== message.requestId) break;
+      if (!pending || !pending.loading || !pending.sent || pending.requestId !== message.requestId) break;
       if (message.file && (message.file.repoRoot !== pending.repoRoot || message.file.commitOid !== pending.commitOid || message.file.path !== pending.path)) break;
       pending.view.show(message.file, message.error);
       pending.loading = false;
+      dispatchGitFileRead();
       break;
     }
     case "git.history": {
@@ -2018,6 +2045,7 @@ function handleServerMessage(message: ServerMessage): void {
       clearPendingDiffFilePatch(state.sessionId, state.diffId);
       diffFilePatchErrors.delete(state.sessionId);
       sessionChangesStates.set(state.sessionId, state);
+      invalidatePendingCodeRevision(state.sessionId, state.status === "ready" ? state : null);
       if (state.status === "ready") {
         const initialHistoryKey = gitHistoryStateKey(state.sessionId, "");
         const initialHistory = gitHistoryStates.get(initialHistoryKey);
@@ -2045,6 +2073,7 @@ function handleServerMessage(message: ServerMessage): void {
       const state = message.state;
       if (state.targetClientId !== diffClientId || compareDiffId !== state.diffId) break;
       compareDiffState = state;
+      invalidatePendingCodeRevision("compareDiff", state);
       compareDiffLoading = false;
       diffErrors.delete("compareDiff");
       clearPendingDiffFilePatch("compareDiff", state.diffId);
@@ -4327,6 +4356,7 @@ function markCodeViewDirty(): void {
 
 
 function resetCodeViewForSession(sessionId: string | null): void {
+  clearCodeRevision();
   codeSessionId = sessionId;
   codeWorkspace = null;
   codeTreePath = "";
@@ -4421,6 +4451,7 @@ function requestCodeWorkspaceForSession(sessionId: string): void {
 }
 
 function ensureActiveCodeWorkspace(): void {
+  if (codeRevision) return;
   if (pendingCodeOpenRequest) return;
   if (!desktopDockview?.isPanelActive("code")) return;
   const sessionId = workspaceMode === "session" ? activeSessionId : null;
@@ -4429,6 +4460,7 @@ function ensureActiveCodeWorkspace(): void {
 }
 
 function refreshCodeWorkspace(): void {
+  if (codeRevision) return;
   if (!codeWorkspace) {
     ensureActiveCodeWorkspace();
     renderCodePanelIfNeeded(true);
@@ -4455,6 +4487,7 @@ function refreshCodeWorkspace(): void {
 }
 
 function requestCodeTree(path: string): void {
+  if (codeRevision) return;
   if (!codeWorkspace) return;
   codeTreePath = path;
   codeLoadingTree = true;
@@ -4465,6 +4498,7 @@ function requestCodeTree(path: string): void {
 }
 
 function requestCodeFile(path: string): void {
+  if (codeRevision) return;
   if (!codeWorkspace) return;
   codeLoadingFile = true;
   closeCodeContextMenu();
@@ -4479,6 +4513,7 @@ function requestCodeFile(path: string): void {
 }
 
 function requestCodeDefinition(line: number, character: number): void {
+  if (codeRevision) return;
   if (!codeWorkspace || !codeFile) return;
   codeAnalyzerStatus = "starting";
   codeAnalyzerMessage = null;
@@ -4492,6 +4527,7 @@ function requestCodeDefinition(line: number, character: number): void {
 }
 
 function requestCodeReferences(line: number, character: number): void {
+  if (codeRevision) return;
   if (!codeWorkspace || !codeFile) return;
   codeAnalyzerStatus = "starting";
   codeAnalyzerMessage = null;
@@ -4513,6 +4549,7 @@ function requestCodeHover(line: number, character: number): string {
 }
 
 function openCodeContextMenu(line: number, character: number, x: number, y: number): void {
+  if (codeRevision) return;
   if (!codeWorkspace || !codeFile) return;
   const requestId = requestCodeHover(line, character);
   codeContextMenu = { line, character, x, y, requestId, hover: { status: "loading", contents: null } };
@@ -4652,6 +4689,7 @@ function openReferenceLocation(location: CodeLocation): void {
 }
 
 function openCodeSearch(): void {
+  if (codeRevision) return;
   if (!desktopDockview?.isPanelActive("code")) return;
   if (!codeWorkspace && !codeLoadingWorkspace) ensureActiveCodeWorkspace();
   codeSearchOpen = true;
@@ -4813,6 +4851,7 @@ function openSearchResultInCode(path: string): void {
 
 
 function openCodeRequest(request: CodeOpenRequest): void {
+  clearCodeRevision();
   codeError = null;
   markCodeViewDirty();
   if (codeSessionId !== request.sessionId || codeWorkspace?.root !== request.repoRoot) resetCodeViewForSession(request.sessionId);
@@ -4827,6 +4866,96 @@ function openCodeRequest(request: CodeOpenRequest): void {
     renderCodePanelIfNeeded(true);
   }
   desktopDockview?.activatePanel("code");
+}
+
+function clearCodeRevision(): void {
+  if (!codeRevision) return;
+  codeRevision = null;
+  markCodeViewDirty();
+  dispatchGitFileRead();
+}
+
+function revisionComparisonIdentity(state: DiffReviewableState): string {
+  return JSON.stringify([state.comparison.repoRoot, state.comparison.leftTreeOrCommit, state.comparison.rightTreeOrCommit]);
+}
+
+function invalidatePendingCodeRevision(originKey: string, state: DiffReviewableState | null): void {
+  if (!codeRevision?.loading || codeRevision.originKey !== originKey) return;
+  if (state && codeRevision.originComparison === revisionComparisonIdentity(state)) return;
+  codeRevision.loading = false;
+  codeRevision.error = "Comparison changed while reading the revision. Reopen it from the file menu.";
+  markCodeViewDirty();
+  renderCodePanelIfNeeded(true);
+  dispatchGitFileRead();
+}
+
+// The bridge permits one Git blob job per connection. Serialize the two UI
+// destinations so opening the modal cannot silently cancel a Code-panel read.
+function dispatchGitFileRead(): void {
+  if ((pendingGitFile?.loading && pendingGitFile.sent) || (codeRevision?.loading && codeRevision.sent)) return;
+  const pending = pendingGitFile?.loading ? pendingGitFile : codeRevision?.loading ? codeRevision : null;
+  if (!pending) return;
+  pending.sent = true;
+  if (send({ type: "git.file.request", clientId: diffClientId, requestId: pending.requestId, repoRoot: pending.repoRoot, commitOid: pending.commitOid, path: pending.path })) return;
+  pending.loading = false;
+  const error = "Not connected to the Fura bridge.";
+  if ("view" in pending) pending.view.show(null, error);
+  else {
+    pending.error = error;
+    markCodeViewDirty();
+    renderCodePanelIfNeeded(true);
+  }
+  dispatchGitFileRead();
+}
+
+function openDiffRevisionInCode(state: DiffReviewableState, filePath: string, originKey: string): void {
+  const committed = committedFileTarget(state, filePath);
+  if (!committed) return;
+  closeCodeContextMenu();
+  clearPendingCodeSearchRequest();
+  codeDefinitionRequestId = codeReferencesRequestId = null;
+  codeReferences = null;
+  codePendingScrollLine = null;
+  codeAnalyzerStatus = null;
+  codeAnalyzerMessage = null;
+  codeSearchOpen = false;
+  pendingCodeOpenRequest = null;
+  pendingCodeRefresh = null;
+  codeLoadingWorkspace = codeLoadingTree = codeLoadingFile = false;
+  codeRevision = {
+    requestId: randomUuid(), sessionId: workspaceMode === "session" ? activeSessionId : null,
+    repoRoot: state.comparison.repoRoot, ...committed,
+    side: state.summary.files.find(file => file.newPath === filePath)?.status === "deleted" ? "base" : "head",
+    file: null, loading: true, error: null, sent: false,
+    originKey: diffRequestModeForAnnotationKey(originKey) === "compareDiff" ? "compareDiff" : originKey,
+    originComparison: revisionComparisonIdentity(state),
+  };
+  markCodeViewDirty();
+  desktopDockview?.activatePanel("code");
+  renderCodePanelIfNeeded(true);
+  focusCodePanel(".code-revision-back");
+  dispatchGitFileRead();
+}
+
+function focusCodePanel(selector: string): void {
+  const dockview = desktopDockview;
+  const sessionId = activeSessionId;
+  const revisionId = codeRevision?.requestId;
+  dockview?.withPanel("code", container => {
+    const focus = () => {
+      const target = container.querySelector<HTMLElement>(selector) ?? container;
+      if (target === container) target.tabIndex = -1;
+      target.focus({ preventScroll: true });
+    };
+    focus();
+    // Dockview can reparent the newly activated panel during layout, dropping
+    // native focus to body. Repair that handoff, but never steal a later focus.
+    const owner = container.ownerDocument;
+    owner.defaultView?.requestAnimationFrame(() => {
+      if (!container.isConnected || dockview !== desktopDockview || sessionId !== activeSessionId || revisionId !== codeRevision?.requestId) return;
+      if (owner.activeElement === owner.body || owner.activeElement === container) focus();
+    });
+  });
 }
 
 function committedFileTarget(state: DiffReviewableState, filePath: string): { commitOid: string; path: string } | null {
@@ -4845,12 +4974,13 @@ function openDiffFileInCode(state: DiffReviewableState, filePath: string, owner:
     const requestId = randomUuid();
     const repoRoot = state.comparison.repoRoot;
     const view = openCommittedFileView(owner, repoRoot, committed.commitOid, committed.path, () => {
-      if (pendingGitFile?.requestId === requestId) pendingGitFile = null;
+      if (pendingGitFile?.requestId === requestId) {
+        pendingGitFile = null;
+        dispatchGitFileRead();
+      }
     });
-    pendingGitFile = { requestId, repoRoot, ...committed, loading: true, view };
-    if (!send({ type: "git.file.request", clientId: diffClientId, requestId, repoRoot, ...committed })) {
-      view.show(null, "Not connected to the Fura bridge.");
-    }
+    pendingGitFile = { requestId, repoRoot, ...committed, loading: true, sent: false, view };
+    dispatchGitFileRead();
     return;
   }
   const target = checkoutTargetForDiffFile(state);
@@ -4915,6 +5045,18 @@ function renderToolsPanelIfNeeded(projection: SessionProjection | undefined, for
 function renderCodePanelIfNeeded(force = false): void {
   if (!desktopDockview?.panelMounted("code")) return;
   const sessionId = workspaceMode === "session" ? activeSessionId : null;
+  if (codeRevision && codeRevision.sessionId !== sessionId) clearCodeRevision();
+  if (codeRevision) {
+    if (!force && !codePanelDirty) return;
+    const revision = codeRevision;
+    if (desktopDockview.withPanel("code", container => renderRevisionCodeViewer(container, revision, () => {
+      clearCodeRevision();
+      ensureActiveCodeWorkspace();
+      renderCodePanelIfNeeded(true);
+      focusCodePanel(".code-workspace-header button:not(:disabled)");
+    }))) codePanelDirty = false;
+    return;
+  }
   // A review-worktree code workspace is not session-bound (its codeSessionId is
   // null by design), so a session mismatch must not reset it — doing so during a
   // review "Open in Code" would wipe the workspace mid-open.
@@ -7356,6 +7498,7 @@ function renderDesktopModifiedFiles(
     jump.className = `diffs-file-jump${file.filePath === selectedFilePath ? " active" : ""}`;
     jump.title = "Click to select. Right-click for file actions.";
     jump.dataset.diffFilePath = file.filePath;
+    jump.setAttribute("aria-haspopup", "true");
     jump.append(name, meta);
     jump.addEventListener("click", () => {
       openDiffFileMenu = null;
@@ -7377,6 +7520,13 @@ function renderDesktopModifiedFiles(
       if (annotationKey === "compareDiff") renderComparePanelIfActive();
       else renderDiffsViewIfActive(annotationKey);
     });
+    jump.addEventListener("keydown", event => {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+      event.preventDefault();
+      const owner = jump.ownerDocument;
+      jump.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      owner.querySelector<HTMLButtonElement>(".diffs-file-menu button")?.focus();
+    });
     item.append(jump);
     if (openDiffFileMenu?.annotationKey === annotationKey && openDiffFileMenu.filePath === file.filePath) {
       const menu = mkEl("div");
@@ -7393,6 +7543,28 @@ function renderDesktopModifiedFiles(
         openDiffFileInCode(state, file.filePath, openInCode.ownerDocument);
       });
       menu.append(openInCode);
+      if (committed) {
+        const revision = mkEl("button");
+        revision.type = "button";
+        revision.className = "diffs-file-menu-item";
+        revision.textContent = "View this revision in Code";
+        revision.title = `Read ${committed.path} at ${committed.commitOid.slice(0, 12)} in Fura's Code panel`;
+        revision.addEventListener("click", event => {
+          event.stopPropagation();
+          openDiffFileMenu = null;
+          menu.remove();
+          openDiffRevisionInCode(state, file.filePath, annotationKey);
+        });
+        menu.append(revision);
+      }
+      menu.addEventListener("keydown", event => {
+        if (event.key !== "Escape") return;
+        event.preventDefault();
+        event.stopPropagation();
+        openDiffFileMenu = null;
+        menu.remove();
+        jump.focus();
+      });
       item.append(menu);
     }
     filesList.append(item);
