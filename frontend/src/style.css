@@ -1388,7 +1388,8 @@ h2 {
 
 .git-review-view {
   grid-template-columns: minmax(12rem, 26%) minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(20rem, 1fr);
+  overflow: auto;
   container: git-review / inline-size;
 }
 

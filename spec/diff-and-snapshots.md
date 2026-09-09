@@ -120,6 +120,8 @@ starts LSP or substitutes today's file. Deleted files read the parent version. B
 non-UTF-8, non-file and blobs over 1,000,000 bytes fail explicitly. Today's deleted directories or
 external symlink parents do not prevent reading an immutable historical tree.
 Diff panes retain enough width for controls, including restored layouts.
+Short docked panes scroll the review surface instead of collapsing the file list
+and patch area behind the session status bar.
 
 ## Separate comparisons
 
