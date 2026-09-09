@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatDuration,
   isCompactReadCard,
@@ -6,6 +6,7 @@ import {
   renderReadToolCard,
   renderReadToolGroup,
   renderToolCard,
+  shouldRenderToolInTranscript,
   toolResultText,
   toolResultImages,
   truncate,
@@ -43,15 +44,6 @@ describe("renderToolCard", () => {
     expect(node.querySelector(".tool-result-text")?.textContent).toBe("ok");
   });
 
-  it("renders file type icons for generic file tools", () => {
-    const node = renderToolCard(tool({
-      toolName: "write",
-      args: { path: "/home/aleksander/repos/fura/frontend/src/main.ts" },
-      result: { text: "wrote file" },
-    }));
-
-    expect(node.querySelector(".tool-args-summary")?.textContent).toBe("🟦 …/src/main.ts");
-  });
 
   it("marks active and error tools", () => {
     const node = renderToolCard(tool({ isActive: true, isError: true }));
@@ -230,15 +222,30 @@ describe("edit tool cards", () => {
     }), { showEditDiffs: false });
 
     expect(node.querySelector(".edit-diff-preview")).toBeNull();
-    expect(node.className).toContain("tool-compact");
   });
 
-  it("summarizes multi-file edits and renders errors with the result body", () => {
-    const multi = renderToolCard(tool({
+  it("keeps multi-file paths and their patches separate, including duplicate basenames", () => {
+    const node = renderToolCard(tool({
       toolName: "edit",
-      result: { details: { diff, perFileResults: [{ path: "a.rs", diff }, { path: "b.rs", diff }] } },
+      result: { details: {
+        diff: "-oldA\n+newA\n-oldB\n+newB\n",
+        perFileResults: [
+          { path: "/repo-a/src/config.ts", diff: "-oldA\n+newA\n" },
+          { path: "/repo-b/src/config.ts", diff: "-oldB\n+newB\n" },
+        ],
+      } },
     }));
-    expect(multi.querySelector(".tool-args-summary")?.textContent).toBe("2 files");
+    const files = [...node.querySelectorAll<HTMLDetailsElement>(".edit-file")];
+    expect(files.map(file => file.querySelector(".edit-file-path")?.textContent)).toEqual(["/repo-a/src/config.ts", "/repo-b/src/config.ts"]);
+    expect(files.every(file => !file.open)).toBe(true);
+    expect(node.querySelector(".edit-diff-preview")).toBeNull();
+    files[1].querySelector<HTMLElement>("summary")!.click();
+    expect(files[1].textContent).toContain("+newB");
+    expect(files[1].textContent).not.toContain("+newA");
+    expect(files[0].open).toBe(false);
+  });
+
+  it("keeps whole-call errors visible without claiming all files were untouched", () => {
 
     const error = renderToolCard(tool({
       toolName: "edit",
@@ -246,21 +253,149 @@ describe("edit tool cards", () => {
       args: { path: "a.rs" },
       result: { text: "hashline mismatch" },
     }));
-    expect(error.querySelector(".edit-diff-preview")).toBeNull();
     expect(error.querySelector(".tool-result-text")?.textContent).toBe("hashline mismatch");
     expect(error.querySelector<HTMLDetailsElement>(".tool-result-details")?.open).toBe(true);
+    expect(error.querySelector(".edit-file-status")?.textContent).toBe("Outcome unknown");
+    expect(error.querySelector(".edit-tool-notice")?.textContent).toContain("may already have changed");
   });
 
-  it("caps very long diffs with a more-lines marker", () => {
-    const longDiff = ["@@ -1 +1 @@", ...Array.from({ length: 200 }, (_, i) => `+line ${i}`)].join("\n");
+  it("defers long patches and allows every line to be revealed in bounded chunks", () => {
+    const longDiff = ["@@ -1 +1 @@", ...Array.from({ length: 250 }, (_, i) => `+line ${i}`)].join("\n");
     const node = renderToolCard(tool({
       toolName: "edit",
       args: { path: "big.rs" },
       result: { details: { diff: longDiff } },
     }));
+    const file = node.querySelector<HTMLDetailsElement>(".edit-file")!;
+    expect(file.open).toBe(false);
+    expect(node.querySelector(".edit-diff-preview")).toBeNull();
+    file.querySelector<HTMLElement>("summary")!.click();
+    expect(node.textContent).toContain("+line 0");
+    expect(node.textContent).not.toContain("+line 249");
+    const more = node.querySelector<HTMLButtonElement>(".edit-diff-more")!;
+    more.click();
+    more.click();
+    expect(node.textContent).toContain("+line 249");
+    expect(more.hidden).toBe(true);
+    file.querySelector<HTMLElement>("summary")!.click();
+    expect(file.open).toBe(false);
+    expect(file.querySelector(".edit-file-path")?.textContent).toBe("big.rs");
+  });
 
-    expect(node.querySelectorAll(".diff-line").length).toBe(120);
-    expect(node.querySelector(".edit-diff-more")?.textContent).toContain("81 lines more");
+  it("shows create, delete and rename metadata even without content changes or snapshots", () => {
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { perFileResults: [
+      { path: "new.txt", op: "create", diff: "+1|new", snapshotsPruned: true },
+      { path: "old.txt", op: "delete", diff: "-1|old" },
+      { path: "next/name.rs", sourcePath: "old/name.rs", move: "next/name.rs", op: "update", diff: "" },
+    ] } } }));
+    expect([...node.querySelectorAll(".edit-file-operation")].map(el => el.textContent)).toEqual(["Create", "Delete", "Rename"]);
+    expect(node.textContent).toContain("old/name.rs → next/name.rs");
+    expect([...node.querySelectorAll(".edit-file-status")].map(el => el.textContent)).toEqual(["Completed", "Completed", "Completed"]);
+    expect(node.querySelector(".edit-tool-header .edit-diff-stats")?.textContent).toBe("+1 -1");
+  });
+
+  it("does not assign an old combined diff to any of the requested files", () => {
+    const node = renderToolCard(tool({
+      toolName: "edit",
+      args: { input: "*** Begin Patch\n[a.yaml#A1B2]\nPUT 1.=1:\n+yaml\n[b.rs#C3D4]\nPUT 2.=2:\n+rust\n*** End Patch" },
+      result: { details: { diff: "-76|old yaml\n+76|new yaml\n-261|old rust\n+261|new rust" } },
+    }));
+    const files = [...node.querySelectorAll<HTMLDetailsElement>(".edit-file")];
+    expect(files.map(file => file.querySelector(".edit-file-path")?.textContent)).toEqual(["a.yaml", "b.rs", "Unattributed combined diff"]);
+    expect(files[0].querySelector(".edit-diff-stats")).toBeNull();
+    expect(files[1].querySelector(".edit-diff-stats")).toBeNull();
+    files[2].querySelector<HTMLElement>("summary")!.click();
+    expect(files[2].textContent).toContain("without guessing");
+    expect(files[2].textContent).toContain("+261|new rust");
+  });
+
+  it("retains a pathless historical patch without inventing a filename", () => {
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { diff } } }));
+    expect(node.textContent).toContain("File paths unavailable");
+    const file = node.querySelector<HTMLDetailsElement>(".edit-file")!;
+    expect(file.querySelector(".edit-file-path")?.textContent).toBe("Unattributed combined diff");
+    file.querySelector<HTMLElement>("summary")!.click();
+    expect(file.textContent).toContain("+let x = 2;");
+  });
+
+  it("distinguishes reported partial failures from missing outcomes", () => {
+    const node = renderToolCard(tool({
+      toolName: "edit", isError: true,
+      args: { input: "*** Begin Patch\n*** Update File: a.rs\n@@\n-a\n+b\n*** Update File: b.rs\n@@\n-a\n+b\n*** Update File: c.rs\n@@\n-a\n+b\n*** End Patch" },
+      result: { text: "Could not finish all writes", details: { perFileResults: [
+        { path: "a.rs", diff: "-a\n+b", isError: false },
+        { path: "b.rs", diff: "", isError: true, displayErrorText: "Permission denied" },
+      ] } },
+    }));
+    const files = [...node.querySelectorAll<HTMLDetailsElement>(".edit-file")];
+    expect(files.map(file => file.querySelector(".edit-file-status")?.textContent)).toEqual(["Completed", "Failed", "Outcome unknown"]);
+    files[1].querySelector<HTMLElement>("summary")!.click();
+    expect(files[1].textContent).toContain("Permission denied");
+  });
+
+  it("shows requested hashline operations while running without exposing patch bodies as filenames", () => {
+    const card = tool({
+      toolName: "edit", isActive: true,
+      args: { input: "*** Begin Patch\n[old.rs#A1B2]\nPUT 1.=1:\n+[fake.rs#FFFF]\nMV new.rs\n[obsolete.rs#C3D4]\nREM\n*** End Patch" },
+    });
+    const node = renderToolCard(card);
+    expect([...node.querySelectorAll(".edit-file-path")].map(el => el.textContent)).toEqual(["old.rs → new.rs", "obsolete.rs"]);
+    expect([...node.querySelectorAll(".edit-file-status")].map(el => el.textContent)).toEqual(["Running", "Running"]);
+    expect(shouldRenderToolInTranscript(card, false, true)).toBe(true);
+    expect(shouldRenderToolInTranscript(card, false, false)).toBe(false);
+  });
+
+  it("retains combined output when per-file records omit their patches", () => {
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: {
+      diff: "-oldA\n+newA\n-oldB\n+newB",
+      perFileResults: [{ path: "a.rs", diff: "-oldA\n+newA" }, { path: "b.rs" }],
+    } } }));
+    const combined = [...node.querySelectorAll<HTMLDetailsElement>(".edit-file")]
+      .find(file => file.querySelector(".edit-file-path")?.textContent === "Unattributed combined diff");
+    expect(combined).toBeDefined();
+    combined!.querySelector<HTMLElement>("summary")!.click();
+    expect(combined!.textContent).toContain("+newB");
+    expect(node.querySelector('[data-edit-path="b.rs"] .edit-diff-stats')).toBeNull();
+  });
+
+  it("normalizes quoted CRLF hashline paths and retains rename disclosure on completion", () => {
+    const options = { sessionId: "quoted-edit-session", cwd: "/repo" };
+    const args = { input: "[\"old name.rs\"#A1B2]  \r\nMV 'new name.rs'\r\n[b.rs#C3D4]\t\r\nPUT 1.=1:\r\n+B\r\n" };
+    const pending = renderToolCard(tool({ toolName: "edit", isActive: true, args }), options);
+    expect([...pending.querySelectorAll(".edit-file-path")].map(el => el.textContent)).toEqual(["old name.rs → new name.rs", "b.rs"]);
+    pending.querySelector<HTMLElement>(".edit-file summary")!.click();
+    const complete = renderToolCard(tool({ toolName: "edit", args, result: { details: { perFileResults: [
+      { path: "/repo/new name.rs", sourcePath: "/repo/old name.rs", move: "/repo/new name.rs", diff: "" },
+      { path: "/repo/b.rs", diff: "-b\n+B" },
+    ] } } }), options);
+    expect(complete.querySelector<HTMLDetailsElement>('[data-edit-path="/repo/new name.rs"]')?.open).toBe(true);
+  });
+
+  it("preserves file choices across stream completion, reordering, session switches and reload", async () => {
+    const options = { sessionId: "edit-disclosure-session", cwd: "/repo" };
+    const running = tool({ toolName: "edit", isActive: true, args: { input: "*** Begin Patch\n[a.rs#A1B2]\nPUT 1.=1:\n+a\n[b.rs#C3D4]\nPUT 1.=1:\n+b\n*** End Patch" } });
+    const pending = renderToolCard(running, options);
+    pending.querySelector<HTMLElement>(".edit-file summary")!.click();
+    const complete = tool({ toolName: "edit", result: { details: { perFileResults: [
+      { path: "/repo/b.rs", diff: "-b\n+B" },
+      { path: "/repo/a.rs", diff: "-a\n+A" },
+    ] } } });
+    const updated = renderToolCard(complete, options);
+    expect(updated.querySelector<HTMLDetailsElement>('[data-edit-path="/repo/a.rs"]')?.open).toBe(true);
+    expect(updated.querySelector<HTMLDetailsElement>('[data-edit-path="/repo/b.rs"]')?.open).toBe(false);
+    const other = renderToolCard(complete, { ...options, sessionId: "different-session" });
+    expect([...other.querySelectorAll<HTMLDetailsElement>(".edit-file")].every(file => !file.open)).toBe(true);
+    updated.querySelector<HTMLElement>('[data-edit-path="/repo/a.rs"] summary')!.click();
+    updated.querySelector<HTMLElement>('[data-edit-path="/repo/b.rs"] summary')!.click();
+    vi.resetModules();
+    // Reload the module to exercise restoration from sessionStorage, not its memory cache.
+    const reloaded = (await import("./toolCards")).renderToolCard(complete, options);
+    expect(reloaded.querySelector<HTMLDetailsElement>('[data-edit-path="/repo/a.rs"]')?.open).toBe(false);
+    expect(reloaded.querySelector<HTMLDetailsElement>('[data-edit-path="/repo/b.rs"]')?.open).toBe(true);
+    const single = (await import("./toolCards")).renderToolCard(tool({
+      toolName: "edit", result: { details: { path: "/repo/a.rs", diff: "-a\n+A" } },
+    }), options);
+    expect(single.querySelector<HTMLDetailsElement>(".edit-file")?.open).toBe(false);
   });
 });
 

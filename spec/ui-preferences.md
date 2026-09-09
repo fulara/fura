@@ -28,15 +28,54 @@ how the transcript renders. Current preferences:
 ## Rendering contract
 
 - `show-tools` — hides/shows tool cards inline in the transcript. The Tools
-  panel always shows them regardless.
-- `show-edit-diffs` — hides/shows the inline unified-diff preview on
-  edit-family tool cards (`edit`, `ast_edit`, `write`, plus any tool whose
-  result carries `details.diff`). The preference is part of the tool-card
-  render cache key (`d1`/`d0` prefix), so flipping it re-renders tool cards
-  without invalidating cached message DOM.
+  panel always shows them regardless. Edit-family cards remain in the transcript
+  while `show-edit-diffs` is enabled, including running operations and errors.
+- `show-edit-diffs` — hides/shows recorded patch previews on edit-family cards
+  (`edit`, `ast_edit`, `write`, plus tools with `details.diff` or per-file diffs).
+  File headers remain visible when tool cards themselves are shown. The value
+  participates in the tool-card render cache key, so flipping it re-renders tool
+  cards without invalidating cached message DOM.
 - `thinking-visibility` — `auto` shows live thinking expanded and historical
   collapsed; `shown`/`hidden` force it. Changing it resets the transcript
   render cache (thinking lives inside message DOM).
+
+### Edit-file cards
+
+Desktop transcript, Tools and mobile share the same edit renderer:
+
+- Every reported file has a keyboard-operable disclosure with its path, operation,
+  completion state and recorded patch counts. Paths within the session cwd retain
+  their directories; outside paths remain absolute. Tooltips retain original paths.
+  Rename headers show source and destination, not just the destination basename.
+- One short patch (at most 120 lines) opens by default. Multiple files, unknown
+  combined patches and long patches start closed. File headers stay visible.
+- Patch DOM is created only when opened. Long patches reveal another 120 lines
+  per action inside a bounded scroll area; no recorded lines are permanently
+  discarded. Copy copies that file's entire reported patch.
+- Manual disclosure choices are keyed by session, tool call and file identity,
+  not render hash or list position. Up to 500 recent choices live in tab-local
+  sessionStorage, surviving page reload and history reconstruction. Storage failure
+  leaves an in-memory fallback. Relative/absolute paths are reconciled lexically
+  against cwd; the browser does not guess symlink, suffix-recovery or URI aliases.
+- Completed `details.perFileResults` and single-file `details.path` are authoritative.
+  Running cards show requested paths from structured arguments or OMP's freeform
+  grammar headers. Native speculative `tool_stream_update` previews are not treated
+  as executed changes, and this feature does not add a preview RPC projection.
+- A failed tool call is not proof of rollback. Explicit per-file errors are shown;
+  missing individual outcomes are unknown because earlier writes may have succeeded.
+  AST proposals remain labelled Proposed instead of Completed.
+- Legacy/incomplete results retain an explicitly unattributed combined patch.
+  Freeform header counts and hunk/line numbers never determine patch attribution.
+  Only a known single-target argument can identify an old single-file patch.
+- Counts describe reported tool patch lines, not the current Git working tree or
+  a commit. Snapshot pruning does not imply create/delete. Later formatting or
+  auto-repair may change disk content beyond the tool's recorded patch; original
+  tool output remains accessible beneath the file disclosures.
+
+Interaction inspiration: Codex CLI's [path-separated file summaries and counts](https://github.com/openai/codex/blob/9e868bd9dc007c05e84a98e0b1f4e31dc98c5e6a/codex-rs/tui/src/snapshots/codex_tui__diff_render__tests__apply_multiple_files_block.snap),
+and the [official app documentation's per-file expand/collapse interaction](https://learn.chatgpt.com/docs/code-review?surface=app).
+No Codex implementation code is copied; CLI snapshots and app documentation are
+separate evidence, not a claim that the app's internal behavior was inspected.
 
 ### Desktop density
 

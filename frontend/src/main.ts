@@ -5206,7 +5206,7 @@ function buildTranscriptRenderItems(projection: SessionProjection): PanelRenderI
     items.push({
       key: `tool:${showEditDiffs ? "d1" : "d0"}:${toolCardRenderKey(entry)}`,
       cacheable: true,
-      render: () => renderToolCard(entry, { showEditDiffs }),
+      render: () => renderToolCard(entry, { showEditDiffs, sessionId: projection.summary.sessionId, cwd: projection.summary.worktree?.path ?? projection.summary.cwd }),
     });
   }
   const currentTodos = nonEmptyTodoPhases(projection.todoPhases ?? []);
@@ -5246,7 +5246,7 @@ function respondToAsk(ask: PendingAsk, response: Record<string, unknown>): void 
   send({ type: "dialog.respond", sessionId: ask.sessionId, dialogId: ask.id, response });
 }
 
-function buildToolsRenderItems(tools: Array<{ kind: "tool" } & ToolCard>): PanelRenderItem[] {
+function buildToolsRenderItems(tools: Array<{ kind: "tool" } & ToolCard>, projection: SessionProjection): PanelRenderItem[] {
   const items: PanelRenderItem[] = [];
   for (let i = 0; i < tools.length; i++) {
     const entry = tools[i];
@@ -5265,9 +5265,9 @@ function buildToolsRenderItems(tools: Array<{ kind: "tool" } & ToolCard>): Panel
     }
 
     items.push({
-      key: `tool:${showEditDiffs ? "d1" : "d0"}:${toolCardRenderKey(entry)}`,
+      key: `tool:${JSON.stringify([projection.summary.sessionId, showEditDiffs, toolCardRenderKey(entry)])}`,
       cacheable: true,
-      render: () => renderToolCard(entry, { showEditDiffs }),
+      render: () => renderToolCard(entry, { showEditDiffs, sessionId: projection.summary.sessionId, cwd: projection.summary.worktree?.path ?? projection.summary.cwd }),
     });
   }
   return items;
@@ -5359,7 +5359,7 @@ function renderToolsView(
     return;
   }
 
-  renderCachedPanelItems(container, cache, buildToolsRenderItems(tools), 0);
+  renderCachedPanelItems(container, cache, buildToolsRenderItems(tools, projection), 0);
 }
 
 

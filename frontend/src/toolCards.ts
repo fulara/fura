@@ -3,6 +3,8 @@ import { copyTextToClipboard, mkEl } from "./dom";
 import { filePathWithIcon } from "./fileTypeIcons";
 import { formatTokens, shortPath } from "./format";
 import { renderImageAttachment, type RenderableImage } from "./imageRendering";
+import { editDiffStats, editFiles, editPathIdentity, editResultSource, hasEditDiff } from "./editToolResult";
+import type { EditFile } from "./editToolResult";
 import type {
   AgentProgress,
   TaskResult,
@@ -15,6 +17,8 @@ import type {
 
 export type ToolCardRenderOptions = {
   showEditDiffs?: boolean;
+  sessionId?: string;
+  cwd?: string | null;
 };
 
 export function renderToolCard(card: ToolCard, options: ToolCardRenderOptions = {}): HTMLElement {
@@ -286,27 +290,19 @@ function toolCopyButton(text: string): HTMLElement {
   return button;
 }
 
-// Edit-family tool cards render an inline unified-diff preview (Codex-style)
-// whenever OMP's result details carry a `diff` string. The name set only picks
-// the renderer for diff-less cases (errors, in-flight); any tool whose result
-// carries `details.diff` gets the preview regardless of name.
+// Edit cards show recorded tool operations, not current working-tree changes.
 const EDIT_TOOL_NAMES = new Set(["edit", "ast_edit", "write"]);
 
 function isEditToolCard(card: ToolCard): boolean {
-  return EDIT_TOOL_NAMES.has(card.toolName) || Boolean(editDiffText(card));
+  return EDIT_TOOL_NAMES.has(card.toolName) || hasEditDiff(card);
 }
 
-export function editDiffText(card: ToolCard): string {
-  const details = resultDetails(card.partialResult ?? card.result);
-  const diff = details?.diff;
-  return typeof diff === "string" && diff.trim() ? diff : "";
-}
 export function shouldRenderToolInTranscript(
   card: ToolCard,
   showTools: boolean,
   showEditDiffs: boolean,
 ): boolean {
-  return showTools || (showEditDiffs && !card.isError && Boolean(editDiffText(card)));
+  return showTools || (showEditDiffs && isEditToolCard(card));
 }
 
 
@@ -319,61 +315,178 @@ function editToolLabel(toolName: string): string {
   }
 }
 
-function editArgSummary(card: ToolCard): string {
-  const details = resultDetails(card.partialResult ?? card.result);
-  const perFile = details?.perFileResults;
-  if (Array.isArray(perFile) && perFile.length > 1) return `${perFile.length} files`;
-  const path = stringDetail(details, "path")
-    ?? stringArg(card.args, "path")
-    ?? stringArg(card.args, "file_path")
-    ?? pathScopeArg(card.args);
-  return path ? filePathWithIcon(path, shortPath) : "…";
-}
-
 export function renderEditToolCard(card: ToolCard, options: ToolCardRenderOptions = {}): HTMLElement {
-  const diff = editDiffText(card);
-  const diffLines = diff ? diff.replace(/\n$/, "").split("\n") : [];
-  const showDiff = options.showEditDiffs !== false && diffLines.length > 0 && !card.isError;
+  const { files, unassignedDiff } = editFiles(card, options.cwd);
+  const showDiffs = options.showEditDiffs !== false;
   const wrapper = mkEl("section");
-  wrapper.className = `tool-card edit-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""} ${showDiff || card.isError ? "" : "tool-compact"}`;
+  wrapper.className = `tool-card edit-tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = card.toolName;
-
   const header = mkEl("div");
   header.className = "tool-header edit-tool-header";
+  header.title = options.cwd ? `Recorded tool operation in ${options.cwd}; not a current Git diff` : "Recorded tool operation; not a current Git diff";
   header.append(
     toolStatusIcon(card),
     toolHeaderText(editToolLabel(card.toolName), "tool-name"),
-    toolHeaderText(editArgSummary(card), "tool-args-summary"),
+    toolHeaderText(files.length ? formatCount("file", files.length) : "File paths unavailable", "tool-args-summary"),
   );
-  const stats = diffStats(diffLines);
-  if (stats) header.append(toolHeaderText(stats, "edit-diff-stats"));
   appendEventTimestamp(header, card.timestamp);
-  if (diff) header.append(toolCopyButton(diff));
   wrapper.append(header);
 
-  if (card.isError) {
-    appendToolResultBody(wrapper, toolResultText(card.partialResult ?? card.result), true);
-    return wrapper;
+  const stats = files.map(file => editDiffStats(file.diff));
+  const total = stats.reduce((sum, file) => ({ added: sum.added + file.added, removed: sum.removed + file.removed }), { added: 0, removed: 0 });
+  if (files.some(file => file.diff)) {
+    const summary = toolHeaderText(`+${total.added} -${total.removed}`, "edit-diff-stats");
+    summary.title = "Recorded tool patch lines; not a current Git diff. Files without a reported patch are excluded.";
+    header.insertBefore(summary, header.querySelector("time"));
   }
-  if (showDiff) wrapper.append(renderDiffPreview(diffLines));
-
+  if (card.isError) {
+    const warning = mkEl("p");
+    warning.className = "edit-tool-notice";
+    warning.textContent = "The edit failed. Files with unknown outcomes may already have changed; OMP did not report their individual results.";
+    wrapper.append(warning);
+  }
+  const occurrences = new Map<string, number>();
+  files.forEach((file, index) => {
+    const identity = JSON.stringify([editPathIdentity(file.sourcePath ?? file.path, options.cwd), editPathIdentity(file.path, options.cwd)]);
+    const occurrence = occurrences.get(identity) ?? 0;
+    occurrences.set(identity, occurrence + 1);
+    const key = options.sessionId ? JSON.stringify([options.sessionId, card.toolCallId, identity, occurrence]) : undefined;
+    const path = file.sourcePath ? `${editDisplayPath(file.sourcePath, options.cwd)} → ${editDisplayPath(file.path, options.cwd)}` : editDisplayPath(file.path, options.cwd);
+    const details = renderEditFileDisclosure({
+      path, file, key, showDiffs,
+      defaultOpen: files.length === 1 && !unassignedDiff && Boolean(file.diff) && stats[index].lines <= DIFF_PREVIEW_MAX_LINES,
+    });
+    wrapper.append(details);
+  });
+  if (unassignedDiff) {
+    wrapper.append(renderEditFileDisclosure({
+      path: "Unattributed combined diff",
+      file: { path: null, operation: "Legacy output", status: "unknown", diff: unassignedDiff },
+      key: options.sessionId ? JSON.stringify([options.sessionId, card.toolCallId, "unattributed"]) : undefined,
+      defaultOpen: false, showDiffs,
+      note: "This result has incomplete per-file patch metadata. The combined patch is shown once, without guessing which file owns each hunk; it may include patches also listed above.",
+    }));
+  } else if (!files.length) {
+    const unknown = mkEl("p");
+    unknown.className = "edit-tool-notice";
+    unknown.textContent = "OMP did not provide file paths for this operation.";
+    wrapper.append(unknown);
+  }
+  appendToolResultBody(wrapper, toolResultText(editResultSource(card)), card.isError);
   return wrapper;
 }
 
-const DIFF_PREVIEW_MAX_LINES = 120;
+function editDisplayPath(path: string | null, cwd?: string | null): string {
+  if (!path) return "File path unavailable";
+  const root = cwd?.replace(/\/+$/, "");
+  return root && path.startsWith(`${root}/`) ? path.slice(root.length + 1) : path;
+}
 
-function diffStats(lines: string[]): string {
-  let added = 0;
-  let removed = 0;
-  for (const line of lines) {
-    if (line.startsWith("+") && !line.startsWith("+++ ")) added++;
-    else if (line.startsWith("-") && !line.startsWith("--- ")) removed++;
+const DIFF_PREVIEW_MAX_LINES = 120;
+const EDIT_DISCLOSURES_KEY = "fura.editDisclosures";
+const MAX_EDIT_DISCLOSURES = 500;
+let editDisclosures: Map<string, boolean> | undefined;
+
+function editDisclosureChoices(): Map<string, boolean> {
+  if (!editDisclosures) {
+    editDisclosures = new Map();
+    try {
+      const saved: unknown = JSON.parse(sessionStorage.getItem(EDIT_DISCLOSURES_KEY) ?? "null");
+      if (Array.isArray(saved)) {
+        for (const row of saved.slice(-MAX_EDIT_DISCLOSURES)) {
+          if (Array.isArray(row) && row.length === 2 && typeof row[0] === "string" && typeof row[1] === "boolean") editDisclosures.set(row[0], row[1]);
+        }
+      }
+    } catch { /* Storage can be disabled; in-memory choices still work. */ }
   }
-  if (added === 0 && removed === 0) return "";
-  const parts: string[] = [];
-  if (added > 0) parts.push(`+${added}`);
-  if (removed > 0) parts.push(`-${removed}`);
-  return parts.join(" ");
+  return editDisclosures;
+}
+
+function rememberEditDisclosure(key: string | undefined, open: boolean): void {
+  if (!key) return;
+  const choices = editDisclosureChoices();
+  choices.delete(key);
+  choices.set(key, open);
+  while (choices.size > MAX_EDIT_DISCLOSURES) choices.delete(choices.keys().next().value!);
+  try { sessionStorage.setItem(EDIT_DISCLOSURES_KEY, JSON.stringify([...choices])); } catch { /* Keep the in-memory choice. */ }
+}
+
+function renderEditFileDisclosure(options: {
+  path: string; file: EditFile; key?: string; defaultOpen: boolean; showDiffs: boolean; note?: string;
+}): HTMLDetailsElement {
+  const { file } = options;
+  const details = mkEl("details");
+  details.className = "edit-file";
+  details.dataset.editPath = file.path ?? "";
+  if (options.key) details.dataset.editDisclosureKey = options.key;
+  details.open = options.key ? editDisclosureChoices().get(options.key) ?? options.defaultOpen : options.defaultOpen;
+  const summary = mkEl("summary");
+  summary.className = "edit-file-summary";
+  const previousFocus = details.ownerDocument.activeElement;
+  if (options.key && previousFocus?.classList.contains("edit-file-summary")
+    && (previousFocus.parentElement as HTMLElement | null)?.dataset.editDisclosureKey === options.key) {
+    queueMicrotask(() => {
+      if (details.isConnected && !previousFocus.isConnected && details.ownerDocument.activeElement === details.ownerDocument.body) {
+        summary.focus({ preventScroll: true });
+      }
+    });
+  }
+  const path = mkEl("span");
+  path.className = "edit-file-path";
+  path.textContent = options.path;
+  path.title = file.sourcePath ? `${file.sourcePath} → ${file.path}` : file.path ?? options.path;
+  summary.append(toolHeaderText(file.operation, "edit-file-operation"), path);
+  if (file.diff) {
+    const stats = editDiffStats(file.diff);
+    const counts = toolHeaderText(`+${stats.added} -${stats.removed}`, "edit-diff-stats");
+    counts.title = "Added/removed lines in the recorded tool patch";
+    summary.append(counts);
+  }
+  const status = toolHeaderText({
+    running: "Running", completed: "Completed", failed: "Failed", unknown: "Outcome unknown", preview: "Proposed",
+  }[file.status], `edit-file-status edit-file-status-${file.status}`);
+  summary.append(status);
+  details.append(summary);
+  let body: HTMLElement | undefined;
+  const showBody = () => {
+    if (body || !details.open) return;
+    body = mkEl("div");
+    body.className = "edit-file-body";
+    const note = options.note ?? file.error ?? (file.diff ? undefined
+      : file.status === "running" ? "Waiting for the tool result. Requested file; no change is confirmed yet."
+      : file.status === "unknown" ? "No per-file outcome or patch was reported."
+      : "No patch was reported. This may be an unchanged file, a rename without content changes, or a result without diff metadata.");
+    if (note) {
+      const message = mkEl("p");
+      message.className = "edit-tool-notice";
+      message.textContent = note;
+      body.append(message);
+    }
+    if (file.diff && options.showDiffs) body.append(renderDiffPreview(file.diff));
+    else if (file.diff) {
+      const hidden = mkEl("p");
+      hidden.className = "edit-tool-notice";
+      hidden.textContent = "Diff previews are hidden by your display preference.";
+      body.append(hidden);
+    }
+    details.append(body);
+  };
+  showBody();
+  let lastOpen = details.open;
+  const changed = () => {
+    if (details.open !== lastOpen) rememberEditDisclosure(options.key, details.open);
+    lastOpen = details.open;
+    showBody();
+  };
+  // Native summary keyboard activation generates click too. Save synchronously,
+  // before a streaming update can replace this node ahead of the toggle event.
+  summary.addEventListener("click", event => {
+    event.preventDefault();
+    details.open = !details.open;
+    changed();
+  });
+  details.addEventListener("toggle", changed);
+  return details;
 }
 
 function diffLineClass(line: string): string {
@@ -386,25 +499,41 @@ function diffLineClass(line: string): string {
   return "diff-line-context";
 }
 
-function renderDiffPreview(lines: string[]): HTMLElement {
+function renderDiffPreview(diff: string): HTMLElement {
   const body = mkEl("div");
   body.className = "edit-diff-preview";
-  const visible = lines.slice(0, DIFF_PREVIEW_MAX_LINES);
+  const actions = mkEl("div");
+  actions.className = "edit-diff-actions";
+  const copy = toolCopyButton(diff);
+  copy.title = "Copy this file's recorded patch";
+  actions.append(copy);
   const pre = mkEl("pre");
   pre.className = "edit-diff-lines";
-  for (const line of visible) {
-    const el = mkEl("span");
-    el.className = `diff-line ${diffLineClass(line)}`;
-    el.textContent = line.length > 0 ? line : " ";
-    pre.append(el);
-  }
-  body.append(pre);
-  if (lines.length > visible.length) {
-    const more = mkEl("div");
-    more.className = "edit-diff-more";
-    more.textContent = `… ${formatCount("line", lines.length - visible.length)} more`;
-    body.append(more);
-  }
+  pre.tabIndex = 0;
+  pre.setAttribute("aria-label", "Recorded tool patch");
+  const more = mkEl("button");
+  more.type = "button";
+  more.className = "edit-diff-more";
+  let offset = 0;
+  const appendChunk = () => {
+    for (let count = 0; count < DIFF_PREVIEW_MAX_LINES && offset < diff.length; count++) {
+      const newline = diff.indexOf("\n", offset);
+      const line = diff.slice(offset, newline < 0 ? diff.length : newline);
+      offset = newline < 0 ? diff.length : newline + 1;
+      const el = mkEl("span");
+      el.className = `diff-line ${diffLineClass(line)}`;
+      el.textContent = line || " ";
+      pre.append(el);
+    }
+    more.hidden = offset >= diff.length;
+    more.textContent = `Show next ${DIFF_PREVIEW_MAX_LINES} lines`;
+  };
+  more.addEventListener("click", () => {
+    appendChunk();
+    if (more.hidden) pre.focus({ preventScroll: true });
+  });
+  appendChunk();
+  body.append(actions, pre, more);
   return body;
 }
 

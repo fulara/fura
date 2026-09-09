@@ -2606,11 +2606,11 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           nextNodes.set(key, node);
           desiredNodes.push(node);
         } else {
-          const key = `tool:${showEditDiffs ? "d1" : "d0"}:${mobileToolCardRenderKey(entry)}`;
+          const key = `tool:${JSON.stringify([projection.summary.sessionId, showEditDiffs, mobileToolCardRenderKey(entry)])}`;
           const cachedNode = transcriptRenderCache.nodes.get(key);
           const node = cachedNode?.ownerDocument === transcript.ownerDocument
             ? cachedNode
-            : renderToolCard(entry, { showEditDiffs });
+            : renderToolCard(entry, { showEditDiffs, sessionId: projection.summary.sessionId, cwd: projection.summary.worktree?.path ?? projection.summary.cwd });
           nextNodes.set(key, node);
           desiredNodes.push(node);
         }

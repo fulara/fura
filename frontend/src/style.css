@@ -4034,11 +4034,66 @@ h2 {
   color: #8d98ad;
 }
 
-/* Inline edit diff preview (Codex-style) */
+/* Recorded edit operations: stable file headers, independently disclosed patches. */
 .edit-diff-stats {
   flex: 0 0 auto;
   color: #7c879b;
   font-size: 0.74rem;
+}
+
+.edit-file {
+  border-top: 1px solid #252a35;
+  min-width: 0;
+}
+
+.edit-file-summary {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto;
+  align-items: baseline;
+  gap: 0.45rem;
+  padding: 0.45rem 0.6rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.edit-file-summary::-webkit-details-marker { display: none; }
+.edit-file-summary::before { content: "▸"; color: #9ba4b5; }
+.edit-file[open] > .edit-file-summary::before { content: "▾"; }
+.edit-file-summary:hover { background: rgba(127, 140, 255, 0.07); }
+.edit-file-summary:focus-visible, .edit-diff-lines:focus-visible {
+  outline: 2px solid #7f8cff;
+  outline-offset: -2px;
+}
+
+.edit-file-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  color: #e2e8f4;
+  font-weight: 600;
+}
+
+.edit-file-operation, .edit-file-status {
+  color: #9ba4b5;
+  font-size: 0.72rem;
+}
+.edit-file-status-running { color: #15b7ff; }
+.edit-file-status-completed { color: #8fe3ae; }
+.edit-file-status-failed { color: #ff9d9d; }
+.edit-file-status-unknown, .edit-file-status-preview { color: #ffd681; }
+.edit-tool-notice { margin: 0; padding: 0.4rem 0.6rem; color: #b6bdcb; overflow-wrap: anywhere; }
+.edit-diff-actions { display: flex; justify-content: flex-end; padding: 0.2rem 0.6rem; }
+.edit-diff-actions .tool-copy { opacity: 1; }
+.edit-diff-more[hidden] { display: none; }
+
+@media (max-width: 600px) {
+  .edit-file-summary { grid-template-columns: auto auto minmax(0, 1fr); }
+  .edit-file-summary .edit-diff-stats { grid-column: 3; }
+  .edit-file-status { grid-column: 3; }
+}
+
+@media (pointer: coarse) {
+  .edit-file-summary { min-height: 44px; }
 }
 
 .edit-diff-preview {
@@ -4049,7 +4104,8 @@ h2 {
   display: grid;
   margin: 0;
   padding: 0.35rem 0;
-  overflow-x: auto;
+  overflow: auto;
+  max-height: 24rem;
   font-size: 0.78rem;
   line-height: 1.45;
 }
@@ -4088,7 +4144,7 @@ h2 {
 
 .edit-diff-more {
   padding: 0.15rem 0.6rem 0.4rem;
-  color: #5e6a7e;
+  color: #b9c0ff;
   font-size: 0.74rem;
 }
 
