@@ -7,6 +7,7 @@ import socket
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import time
 
 from scripts.smoke_process import OwnedProcess, OwnershipError, identity, process_table
@@ -161,15 +162,55 @@ class OwnedProcessLifecycle(unittest.TestCase):
         self.assertEqual(self.owned.wait(timeout=5), 127)
         self.assertIsNotNone(supervisor.returncode)
 
-    def test_foreign_and_stale_pid_files_refuse_cleanup(self):
+    def test_cleanup_signal_before_supervisor_bootstrap_preserves_anchor(self):
+        ready = self.directory / "bootstrap-ready"
+        release = self.directory / "bootstrap-release"
+        bootstrap = (
+            "import pathlib, runpy, sys, time\n"
+            f"pathlib.Path({str(ready)!r}).touch()\n"
+            f"while not pathlib.Path({str(release)!r}).exists(): time.sleep(0.01)\n"
+            "sys.argv.pop(0)\n"
+            "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+        )
+        popen = subprocess.Popen
+
+        def delayed_supervisor(command, **kwargs):
+            if "--supervisor" in command:
+                command = [sys.executable, "-c", bootstrap, *command[1:]]
+            return popen(command, **kwargs)
+
+        with patch("scripts.smoke_process.subprocess.Popen", side_effect=delayed_supervisor):
+            self.owned = OwnedProcess(
+                [sys.executable, "-c", "pass"], self.directory / "process",
+            )
+        deadline = time.monotonic() + 5
+        try:
+            while not ready.exists():
+                if time.monotonic() >= deadline:
+                    self.fail("supervisor did not reach its bootstrap handshake")
+                time.sleep(0.01)
+            # Signal only the tracked dummy child, never a discovered PID/group.
+            self.owned.process.send_signal(signal.SIGTERM)
+            time.sleep(0.05)
+            self.assertIsNone(self.owned.process.poll(), "supervisor must survive before handlers exist")
+        finally:
+            release.touch()
+        self.assertEqual(self.owned.wait(timeout=5), 0)
+
+    def test_missing_invalid_foreign_and_stale_pid_files_refuse_cleanup(self):
         pids = self.start()
         original = self.owned.pid_file.read_text()
         try:
             for replacement in (
-                {**self.owned.record, "leader": self.sentinel_identity},
-                {**self.owned.record, "leader": {**self.owned.record["leader"], "started": "old"}},
+                None,
+                "invalid ownership record",
+                json.dumps({**self.owned.record, "leader": self.sentinel_identity}),
+                json.dumps({**self.owned.record, "leader": {**self.owned.record["leader"], "started": "old"}}),
             ):
-                self.owned.pid_file.write_text(json.dumps(replacement))
+                if replacement is None:
+                    self.owned.pid_file.unlink()
+                else:
+                    self.owned.pid_file.write_text(replacement)
                 with self.assertRaises(OwnershipError):
                     self.owned.cleanup()
                 self.assertIsNone(self.owned.process.poll())

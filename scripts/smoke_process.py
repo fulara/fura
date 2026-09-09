@@ -44,11 +44,19 @@ class OwnedProcess:
         self.closed = False
         # Keep this session leader alive until cleanup. Its unreaped Popen and
         # live supervisor pin the PID/PGID while children exit or ignore TERM.
-        self.process = subprocess.Popen(
-            [sys.executable, str(Path(__file__).resolve()), "--supervisor",
-             str(self.result_file), uuid.uuid4().hex, "--", *command],
-            cwd=cwd, env=env, start_new_session=True,
+        # The child inherits this mask until supervise installs its handlers.
+        # Direct OwnedProcess callers need the same startup protection as CLI users.
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK, (signal.SIGTERM, signal.SIGINT, signal.SIGHUP),
         )
+        try:
+            self.process = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), "--supervisor",
+                 str(self.result_file), uuid.uuid4().hex, "--", *command],
+                cwd=cwd, env=env, start_new_session=True,
+            )
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         row = process_table().get(self.process.pid)
         if row is None:
             raise OwnershipError("supervisor disappeared before ownership was established")

@@ -203,6 +203,8 @@ An occupied port fails startup; an existing server is never reused. Cleanup
 checks the retained supervisor identity and ownership record before signalling
 its group. If ownership cannot be verified, it refuses cleanup and leaves the
 temporary directory and ownership record for inspection.
+The supervisor inherits blocked cleanup signals until its handlers are installed,
+so immediate cleanup is safe even for direct `OwnedProcess` callers.
 If startup fails after spawning but before ownership is established, the
 launcher also retains the temporary directory and reports its path. Inspect
 these resources manually; a PID record alone never authorizes termination.
