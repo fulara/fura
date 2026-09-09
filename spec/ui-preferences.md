@@ -52,6 +52,10 @@ Desktop transcript, Tools and mobile share the same edit renderer:
 - Patch DOM is created only when opened. Long patches reveal another 120 lines
   per action inside a bounded scroll area; no recorded lines are permanently
   discarded. Copy copies that file's entire reported patch.
+- Open, settled patches use the shared [diff highlighting](diff-and-snapshots.md#diff-highlighting)
+  renderer: muted syntax plus conservative changed-word emphasis. Growing tool results
+  stay plain; collapsed files are not tokenized. Unknown paths/languages and excessive
+  inputs retain their original text and existing chunk controls.
 - Manual disclosure choices are keyed by session, tool call and file identity,
   not render hash or list position. Up to 500 recent choices live in tab-local
   sessionStorage, surviving page reload and history reconstruction. Storage failure

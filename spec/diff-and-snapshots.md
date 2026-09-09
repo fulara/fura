@@ -55,6 +55,36 @@ Pop out lives in the Dockview tab header, not in a separate content toolbar.
 In All files view it reloads the aggregate patch; with one file selected it reloads
 that file. Expanding context never silently changes the file selection.
 
+## Diff highlighting
+
+Git/commit rows and recorded edit-card patches share a presentation-only tokenizer,
+with separate adapters rather than a shared UI component. Existing `highlight.js/common`
+provides explicit path-based languages, including `.rs` → Rust; missing grammars and
+unknown paths stay plain. No language autodetection or current-file content is fetched.
+
+Line backgrounds remain subtle; syntax owns the foreground. Intraline emphasis applies
+only to a single removed/added pair within one contiguous fragment, with an unambiguous
+word-level alignment and at least half of the longer line unchanged. Whole blocks are
+never paired by index. Words/whitespace runs are atomic; grapheme boundaries preserve
+Unicode and the original UTF-16 source offsets.
+
+Old/new sides have independent multiline context. Hunks, path/language changes, elisions
+and unproven numbered gaps reset it. Expanding context changes the complete-text cache
+key. A fragment beginning inside a comment/string without its opener cannot be recognized
+reliably; historical diffs never borrow today's file to conceal missing context.
+
+Limits: 2,000 rows and 100,000 UTF-16 units per renderer; 500 rows / 16,000 units per
+fragment; 4,096 units per source line/path; 4,096 syntax ranges and 64 nesting levels.
+The text/range-only LRU charges a 2 MiB budget. Intraline allows 2,048 units / 256 graphemes
+per side and 65,536 DP cells. A measured 12 ms work budget prevents further expensive
+work, but cannot preempt a synchronous highlight.js call or DOM work. Exceeding limits
+falls back to the original line diff, not truncated or hidden content.
+
+Only controlled highlighter HTML enters an inert template, with exact-text validation
+and span/class allowlisting. Visible DOM is built from original text slices. Raw patches,
+copy, selections, line numbers, Git identities and review anchors remain authoritative;
+highlighted DOM is never used as their data source.
+
 ## Git groups
 
 Each request selects one `changeKind`:

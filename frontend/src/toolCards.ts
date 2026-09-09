@@ -5,6 +5,7 @@ import { formatTokens, shortPath } from "./format";
 import { renderImageAttachment, type RenderableImage } from "./imageRendering";
 import { editDiffStats, editFiles, editPathIdentity, editResultSource, hasEditDiff } from "./editToolResult";
 import type { EditFile } from "./editToolResult";
+import { createEditDiffHighlighter } from "./editDiffHighlight";
 import type {
   AgentProgress,
   TaskResult,
@@ -353,7 +354,7 @@ export function renderEditToolCard(card: ToolCard, options: ToolCardRenderOption
     const key = options.sessionId ? JSON.stringify([options.sessionId, card.toolCallId, identity, occurrence]) : undefined;
     const path = file.sourcePath ? `${editDisplayPath(file.sourcePath, options.cwd)} → ${editDisplayPath(file.path, options.cwd)}` : editDisplayPath(file.path, options.cwd);
     const details = renderEditFileDisclosure({
-      path, file, key, showDiffs,
+      path, file, key, showDiffs, isActive: card.isActive,
       defaultOpen: files.length === 1 && !unassignedDiff && Boolean(file.diff) && stats[index].lines <= DIFF_PREVIEW_MAX_LINES,
     });
     wrapper.append(details);
@@ -363,7 +364,7 @@ export function renderEditToolCard(card: ToolCard, options: ToolCardRenderOption
       path: "Unattributed combined diff",
       file: { path: null, operation: "Legacy output", status: "unknown", diff: unassignedDiff },
       key: options.sessionId ? JSON.stringify([options.sessionId, card.toolCallId, "unattributed"]) : undefined,
-      defaultOpen: false, showDiffs,
+      defaultOpen: false, showDiffs, isActive: card.isActive,
       note: "This result has incomplete per-file patch metadata. The combined patch is shown once, without guessing which file owns each hunk; it may include patches also listed above.",
     }));
   } else if (!files.length) {
@@ -412,7 +413,7 @@ function rememberEditDisclosure(key: string | undefined, open: boolean): void {
 }
 
 function renderEditFileDisclosure(options: {
-  path: string; file: EditFile; key?: string; defaultOpen: boolean; showDiffs: boolean; note?: string;
+  path: string; file: EditFile; key?: string; defaultOpen: boolean; showDiffs: boolean; isActive: boolean; note?: string;
 }): HTMLDetailsElement {
   const { file } = options;
   const details = mkEl("details");
@@ -462,7 +463,7 @@ function renderEditFileDisclosure(options: {
       message.textContent = note;
       body.append(message);
     }
-    if (file.diff && options.showDiffs) body.append(renderDiffPreview(file.diff));
+    if (file.diff && options.showDiffs) body.append(renderDiffPreview(file, options.isActive));
     else if (file.diff) {
       const hidden = mkEl("p");
       hidden.className = "edit-tool-notice";
@@ -499,7 +500,8 @@ function diffLineClass(line: string): string {
   return "diff-line-context";
 }
 
-function renderDiffPreview(diff: string): HTMLElement {
+function renderDiffPreview(file: EditFile, isActive: boolean): HTMLElement {
+  const diff = file.diff;
   const body = mkEl("div");
   body.className = "edit-diff-preview";
   const actions = mkEl("div");
@@ -511,10 +513,12 @@ function renderDiffPreview(diff: string): HTMLElement {
   pre.className = "edit-diff-lines";
   pre.tabIndex = 0;
   pre.setAttribute("aria-label", "Recorded tool patch");
+  const highlighter = isActive ? undefined : createEditDiffHighlighter(file, pre.ownerDocument);
   const more = mkEl("button");
   more.type = "button";
   more.className = "edit-diff-more";
   let offset = 0;
+  let lineIndex = 0;
   const appendChunk = () => {
     for (let count = 0; count < DIFF_PREVIEW_MAX_LINES && offset < diff.length; count++) {
       const newline = diff.indexOf("\n", offset);
@@ -522,7 +526,9 @@ function renderDiffPreview(diff: string): HTMLElement {
       offset = newline < 0 ? diff.length : newline + 1;
       const el = mkEl("span");
       el.className = `diff-line ${diffLineClass(line)}`;
-      el.textContent = line || " ";
+      if (highlighter) highlighter.renderLine(lineIndex, el);
+      else el.textContent = line;
+      lineIndex++;
       pre.append(el);
     }
     more.hidden = offset >= diff.length;

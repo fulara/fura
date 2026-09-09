@@ -12,6 +12,7 @@ import {
   truncate,
 } from "./toolCards";
 import type { TodoPhase, ToolCard, TranscriptEntry } from "./protocol";
+import { DIFF_HIGHLIGHT_LIMITS } from "./diffHighlight";
 
 function tool(overrides: Partial<ToolCard> = {}): ToolCard {
   return {
@@ -212,6 +213,216 @@ describe("edit tool cards", () => {
     expect(node.querySelector(".diff-line-add")?.textContent).toBe("+let x = 2;");
     expect(node.querySelector(".diff-line-del")?.textContent).toBe("-let x = 1;");
     expect(node.querySelector(".diff-line-hunk")?.textContent).toBe("@@ -1,2 +1,2 @@");
+  });
+
+  it("highlights Rust syntax without changing recorded patch text", () => {
+    const lines = [
+      "@@ -1,5 +1,5 @@",
+      " #[derive(Debug)]",
+      " pub fn answer<'a>(value: &'a str) -> Option<u32> {",
+      "     println!(\"<img src=x onerror=alert(1)>\");",
+      "-    let result = Some(41);",
+      "+    let result = Some(42);",
+      " }",
+    ];
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "src/lib.rs", diff: lines.join("\n") } } }));
+    expect([...node.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(lines);
+    expect([...node.querySelectorAll(".hljs-keyword")].map(token => token.textContent)).toContain("pub");
+    expect([...node.querySelectorAll(".hljs-type")].map(token => token.textContent)).toContain("Option");
+    expect(node.querySelector(".hljs-string")?.textContent).toContain("<img");
+    expect(node.querySelector("img")).toBeNull();
+  });
+
+  it("emphasizes only the changed string in a small replacement pair", () => {
+    const node = renderToolCard(tool({
+      toolName: "edit",
+      result: { details: { path: "src/lib.rs", diff: '@@ -1 +1 @@\n-let name = "old";\n+let name = "new";' } },
+    }));
+    expect(node.querySelector(".diff-intraline-remove")?.textContent).toBe("old");
+    expect(node.querySelector(".diff-intraline-add")?.textContent).toBe("new");
+    expect(node.querySelector(".diff-line-add")?.textContent).toBe('+let name = "new";');
+  });
+
+  it("excludes OMP numbered and hash-tag prefixes from syntax and copies exact raw text", async () => {
+    const lines = [
+      " 10#A1B2|pub fn main() {",
+      '-11#A1B2|    let name = "old";',
+      '+11#C3D4|    let name = "<img src=x>";',
+      " 12|}",
+    ];
+    const raw = `${lines.join("\n")}\n`;
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const previousClipboard = navigator.clipboard;
+    Object.assign(navigator, { clipboard: { writeText } });
+    vi.useFakeTimers();
+    try {
+      const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: raw } } }));
+      expect([...node.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(lines);
+      expect(node.querySelector(".hljs-keyword")?.textContent).toBe("pub");
+      for (const row of node.querySelectorAll(".diff-line")) {
+        expect(row.querySelector(".diff-syntax")?.textContent).toBe(row.textContent!.slice(row.textContent!.indexOf("|") + 1));
+      }
+      expect(node.querySelector("img")).toBeNull();
+      node.querySelector<HTMLButtonElement>(".edit-diff-actions button")!.click();
+      await Promise.resolve();
+      expect(writeText).toHaveBeenCalledWith(raw);
+      vi.runAllTimers();
+    } finally {
+      vi.useRealTimers();
+      Object.assign(navigator, { clipboard: previousClipboard });
+    }
+  });
+
+  it("highlights only the opened file using its own language", () => {
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { perFileResults: [
+      { path: "lib.rs", diff: "-let answer = 41;\n+let answer = 42;" },
+      { path: "data.json", diff: '-{"answer": 41}\n+{"answer": 42}' },
+    ] } } }));
+    const files = [...node.querySelectorAll<HTMLDetailsElement>(".edit-file")];
+    expect(node.querySelector(".diff-syntax")).toBeNull();
+    files[1].querySelector<HTMLElement>("summary")!.click();
+    expect(files[1].querySelector(".hljs-attr")?.textContent).toBe('"answer"');
+    expect(files[0].querySelector(".edit-file-body")).toBeNull();
+    files[0].querySelector<HTMLElement>("summary")!.click();
+    expect(files[0].querySelector(".hljs-keyword")?.textContent).toBe("let");
+  });
+
+  it("uses sourcePath for removed code when a rename changes language", () => {
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: {
+      path: "after.json", sourcePath: "before.rs", diff: '-let answer = 41;\n+{"answer": 42}',
+    } } }));
+    expect(node.querySelector(".diff-line-del .hljs-keyword")?.textContent).toBe("let");
+    expect(node.querySelector(".diff-line-add .hljs-attr")?.textContent).toBe('"answer"');
+    expect(node.querySelector(".diff-intraline-add, .diff-intraline-remove")).toBeNull();
+  });
+
+  it("keeps growing patches plain and highlights the final result without losing disclosure or focus", async () => {
+    const options = { sessionId: "syntax-final-session" };
+    const partialResult = { details: { path: "lib.rs", diff: '-let name = "old";\n+let name = "partial";' } };
+    const pending = renderToolCard(tool({ toolName: "edit", isActive: true, partialResult }), options);
+    document.body.append(pending);
+    const summary = pending.querySelector<HTMLElement>(".edit-file summary")!;
+    expect(pending.querySelector(".diff-syntax")).toBeNull();
+    summary.click();
+    summary.click();
+    summary.focus();
+    const finalLines = ['-let name = "old";', '+let name = "new";'];
+    const complete = renderToolCard(tool({
+      toolName: "edit", partialResult, result: { details: { path: "lib.rs", diff: finalLines.join("\n") } },
+    }), options);
+    pending.replaceWith(complete);
+    await Promise.resolve();
+    expect(complete.querySelector<HTMLDetailsElement>(".edit-file")!.open).toBe(true);
+    expect(document.activeElement).toBe(complete.querySelector(".edit-file summary"));
+    expect([...complete.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(finalLines);
+    expect(complete.querySelector(".hljs-keyword")?.textContent).toBe("let");
+    expect(complete.querySelector(".diff-intraline-add")?.textContent).toBe("new");
+    complete.remove();
+  });
+
+  it("retains multiline syntax through blank context and Show next chunk boundaries", () => {
+    const lines = [
+      "@@ -1,123 +1,123 @@", " /*",
+      ...Array.from({ length: 117 }, () => " comment"),
+      " ", " still a comment", " */", "-let value = 1;", "+let value = 2;",
+    ];
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: lines.join("\n") } } }));
+    node.querySelector<HTMLElement>(".edit-file summary")!.click();
+    expect(node.querySelectorAll(".diff-line")).toHaveLength(120);
+    node.querySelector<HTMLButtonElement>(".edit-diff-more")!.click();
+    const rendered = [...node.querySelectorAll(".diff-line")];
+    expect(rendered.map(line => line.textContent)).toEqual(lines);
+    expect(rendered[120].querySelector(".hljs-comment")?.textContent).toBe("still a comment");
+    expect(rendered[123].querySelector(".hljs-keyword")?.textContent).toBe("let");
+  });
+
+  it("tracks old context numbers after insertions shift the new side", () => {
+    const lines = ["-1|/*", "+1|/*", "+2|inserted comment", " 2|still a comment", " 3|*/", " 4|let after = 1;"];
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: lines.join("\n") } } }));
+    const rendered = [...node.querySelectorAll(".diff-line")];
+    expect(rendered.map(line => line.textContent)).toEqual(lines);
+    expect(rendered[3].querySelector(".hljs-comment")?.textContent).toBe("still a comment");
+    expect(rendered[5].querySelector(".hljs-keyword")?.textContent).toBe("let");
+  });
+
+  it("keeps numeric bitwise expressions as source inside unified hunks", () => {
+    const lines = ["@@ -1 +1 @@", "-0|value", "+1|value"];
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: lines.join("\n") } } }));
+    expect([...node.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(lines);
+    expect(node.querySelector(".diff-line-add .diff-syntax")?.textContent).toBe("1|value");
+    expect(node.querySelector(".diff-line-add .hljs-number")?.textContent).toBe("1");
+  });
+
+  it("tracks replacement positions after old-only deletions", () => {
+    const lines = ["-1|let deleted = 0;", " 2|/*", "-3|let x = 1;", "+2|let x = 2;", " 4|*/"];
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: lines.join("\n") } } }));
+    expect([...node.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(lines);
+    expect(node.querySelector(".diff-intraline-add")?.textContent).toBe("2");
+    expect(node.querySelector(".diff-intraline-remove")?.textContent).toBe("1");
+    expect(node.querySelector(".diff-line-add .hljs-keyword")).toBeNull();
+    expect([...node.querySelectorAll(".diff-line-add .hljs-comment")].map(node => node.textContent).join("")).toBe("let x = 2;");
+  });
+
+  it("treats triple plus content inside a unified hunk as code, not a file header", () => {
+    const lines = ["@@ -1,3 +1,4 @@", ' let raw = r#"', "+++ literal content", " pub fn inside_raw() {}", ' "#;'];
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: lines.join("\n") } } }));
+    const rendered = [...node.querySelectorAll(".diff-line")];
+    expect(rendered.map(line => line.textContent)).toEqual(lines);
+    expect(rendered[2].querySelector(".hljs-string")?.textContent).toBe("++ literal content");
+    expect(rendered[3].querySelector(".hljs-string")?.textContent).toBe("pub fn inside_raw() {}");
+    expect(rendered[3].querySelector(".hljs-keyword")).toBeNull();
+  });
+
+  it.each([
+    { label: "hunk", lines: ["@@ -1 +1 @@", " /*", "@@ -90 +90 @@", " let after = 1;"] },
+    { label: "elision", lines: [" 1|/*", " …", " 90|let after = 1;"] },
+    { label: "blank gap", lines: [" 1|/*", "", " 90|let after = 1;"] },
+    { label: "number discontinuity", lines: [" 1|/*", " 90|let after = 1;"] },
+    { label: "bare numbered context", lines: ["1#A1B2|/*", "90#C3D4|let after = 1;"] },
+    { label: "unknown old position after additions", lines: ["+1|/*", " 90|let after = 1;"] },
+  ])("does not carry multiline syntax across a $label", ({ lines }) => {
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: lines.join("\n") } } }));
+    const rendered = [...node.querySelectorAll(".diff-line")];
+    expect(rendered.map(line => line.textContent)).toEqual(lines);
+    expect(rendered.at(-1)!.querySelector(".hljs-keyword")?.textContent).toBe("let");
+    expect(rendered.at(-1)!.querySelector(".hljs-comment")).toBeNull();
+  });
+
+  it("does not pair disconnected numbered replacements or malformed numbered rows", () => {
+    const lines = ['-1|let name = "old";', '+90|let name = "new";', '+91#BAD!|let broken = true;'];
+    const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: lines.join("\n") } } }));
+    expect([...node.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(lines);
+    expect(node.querySelector(".diff-intraline-add, .diff-intraline-remove")).toBeNull();
+    expect(node.querySelectorAll(".diff-line")[2].querySelector(".diff-syntax")).toBeNull();
+  });
+
+  it("leaves anonymous and unknown-language patches plain without inferring header filenames", () => {
+    for (const path of [undefined, "data.unknown-extension"]) {
+      const lines = ["--- a/lib.rs", "+++ b/lib.rs", '@@ -1 +1 @@', '-let name = "old";', '+let name = "new";'];
+      const node = renderToolCard(tool({ toolName: "edit", result: { details: { path, diff: lines.join("\n") } } }));
+      const disclosure = node.querySelector<HTMLDetailsElement>(".edit-file")!;
+      if (!disclosure.open) disclosure.querySelector<HTMLElement>("summary")!.click();
+      expect([...node.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(lines);
+      expect(node.querySelector(".hljs-keyword, .diff-intraline-add, .diff-intraline-remove")).toBeNull();
+    }
+  });
+
+  it("keeps over-budget patches on the plain 120-line chunk path", () => {
+    const patches = [
+      Array.from({ length: DIFF_HIGHLIGHT_LIMITS.maxRows + 1 }, () => "+let value = 1;").join("\n"),
+      `+let value = "${"x".repeat(DIFF_HIGHLIGHT_LIMITS.maxTextCodeUnits)}";`,
+    ];
+    for (const patch of patches) {
+      const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: patch } } }));
+      const disclosure = node.querySelector<HTMLDetailsElement>(".edit-file")!;
+      if (!disclosure.open) disclosure.querySelector<HTMLElement>("summary")!.click();
+      const lines = patch.split("\n");
+      expect(node.querySelectorAll(".diff-line")).toHaveLength(Math.min(120, lines.length));
+      const more = node.querySelector<HTMLButtonElement>(".edit-diff-more")!;
+      while (!more.hidden) more.click();
+      expect([...node.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(lines);
+      expect(node.querySelector(".diff-syntax")).toBeNull();
+    }
   });
 
   it("hides the diff preview when showEditDiffs is false", () => {

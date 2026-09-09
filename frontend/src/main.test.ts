@@ -2182,6 +2182,7 @@ describe("desktop cog options", () => {
     const addedLine = [...document.querySelectorAll<HTMLElement>("#testDiffPanel .diff-line-wrap")]
       .find(line => line.textContent?.includes("+console.log('new')"));
     if (!addedLine) throw new Error("added diff line missing");
+    expect(addedLine.querySelector(".hljs-string.diff-intraline-add")?.textContent).toBe("new");
     addedLine.querySelector<HTMLButtonElement>(".diff-comment-btn")?.click();
     const composer = document.querySelector<HTMLFormElement>("#testDiffPanel .review-comment-composer-create");
     const textarea = composer?.querySelector<HTMLTextAreaElement>("textarea");

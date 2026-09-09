@@ -5,7 +5,6 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 
 const bridgeToken = "dev";
-const repoRoot = path.resolve("..");
 const tinyPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 
@@ -167,20 +166,31 @@ test("compact updates context usage without another prompt on desktop and mobile
   await expect(page.locator(".message.assistant")).toHaveCount(0);
 });
 
-test("desktop opens an explicit compare diff against the working tree", async ({ page }) => {
-  await authenticateDesktop(page);
-
-  await page.locator("#createSessionButton").click();
-  await page.locator("#cwdPickerDiffTab").click();
-  await page.locator("#cwdPickerDiffRepo").fill(repoRoot);
-  await page.locator("#cwdPickerDiffBase").fill("HEAD");
-  await page.locator("#cwdPickerDiffHead").fill("WORKTREE");
-  await page.locator("#cwdPickerDiffAgentSession").uncheck();
-  await page.locator("#cwdPickerCreate").click();
-
-  await expect(page.locator("#cwdPickerOverlay")).toBeHidden();
-  await expect(page.locator(".compare-main .diffs-toolbar")).toContainText("Compare diff");
-  await expect(page.locator(".compare-main .diffs-summary")).toContainText("working tree");
+test("desktop explicit compare reads HEAD and working-tree content", async ({ page }) => {
+  const root = realpathSync(mkdtempSync(path.join(tmpdir(), "fura-compare-smoke-")));
+  const git = (...args: string[]) => execFileSync("git", ["-c", `core.hooksPath=${path.join(root, ".no-hooks")}`, "-C", root, ...args]);
+  try {
+    git("init", "-b", "main");
+    git("config", "user.name", "Fura smoke");
+    git("config", "user.email", "smoke@example.invalid");
+    writeFileSync(path.join(root, "value.ts"), "export const value = 'COMPARE_BASE';\n");
+    git("add", "value.ts");
+    git("-c", "commit.gpgsign=false", "commit", "-m", "base");
+    writeFileSync(path.join(root, "value.ts"), "export const value = 'COMPARE_WORKTREE';\n");
+    await authenticateDesktop(page);
+    await page.locator("#createSessionButton").click();
+    await page.locator("#cwdPickerDiffTab").click();
+    await page.locator("#cwdPickerDiffRepo").fill(root);
+    await page.locator("#cwdPickerDiffBase").fill("HEAD");
+    await page.locator("#cwdPickerDiffHead").fill("WORKTREE");
+    await page.locator("#cwdPickerDiffAgentSession").uncheck();
+    await page.locator("#cwdPickerCreate").click();
+    await expect(page.locator("#cwdPickerOverlay")).toBeHidden();
+    await expect(page.locator(".compare-main .diff-line-remove")).toContainText("COMPARE_BASE");
+    await expect(page.locator(".compare-main .diff-line-add")).toContainText("COMPARE_WORKTREE");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Git groups keep independent patches, refresh, and open files from the selected repository", async ({ page }, testInfo) => {

@@ -518,6 +518,49 @@ for await (const line of rl) {
         write({ type: "agent_end", timestamp: now + 4 });
         break;
       }
+      if (promptText.toLowerCase().includes("mock highlight")) {
+        const toolCallId = `mock-highlight-${now}`;
+        const args = { input: "*** Begin Patch\n[src/lib.rs#A1B2]\nPUT 3.=3:\n+    let message = \"new\";\n[config.yaml#C3D4]\nPUT 1.=1:\n+port: 3001\n*** End Patch" };
+        const rustDiff = [
+          " 1|#[derive(Debug)]",
+          " 2|pub fn answer<'a>(label: &'a str) -> Option<u32> {",
+          '-3|    let message = "old";',
+          '+3|    let message = "new";',
+          ' 4|    println!("<img src=x onerror=alert(1)>");',
+          " 5|    Some(42)",
+          " 6|}",
+        ].join("\n");
+        const result = {
+          content: [{ type: "text", text: "Edited src/lib.rs and config.yaml" }],
+          details: { perFileResults: [
+            { path: "src/lib.rs", op: "update", diff: rustDiff },
+            { path: "config.yaml", op: "update", diff: "-1|port: 3000\n+1|port: 3001" },
+          ] },
+        };
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({ type: "tool_execution_start", toolCallId, toolName: "edit", args, timestamp: now + 1 });
+        // Growing partial output must remain plain, even after its disclosure opens.
+        setTimeout(() => write({
+          type: "tool_execution_update", toolCallId, toolName: "edit",
+          partialResult: { ...result, details: { perFileResults: [
+            { path: "src/lib.rs", diff: rustDiff.slice(0, 150) },
+            { path: "config.yaml", diff: "-1|port: 3000" },
+          ] } },
+        }), 50);
+        setTimeout(() => write({ type: "tool_execution_update", toolCallId, toolName: "edit", partialResult: result }), 200);
+        setTimeout(() => {
+          const assistant = { id: `assistant-highlight-${now}`, role: "assistant", content: [{ type: "text", text: "Highlight fixture complete." }], timestamp: now + 4 };
+          messages.push(user,
+            { role: "assistant", content: [{ type: "toolCall", id: toolCallId, name: "edit", arguments: args }], timestamp: now + 1 },
+            { role: "toolResult", toolCallId, toolName: "edit", ...result, timestamp: now + 2 },
+            assistant);
+          write({ type: "tool_execution_end", toolCallId, toolName: "edit", result, isError: false, timestamp: now + 2 });
+          write({ type: "message_end", message: assistant, timestamp: now + 4 });
+          write({ type: "agent_end", timestamp: now + 5 });
+        }, 1000);
+        break;
+      }
       if (promptText.toLowerCase().includes("mock edit")) {
         const editToolCallId = `mock-edit-${now}`;
         const bashToolCallId = `mock-bash-${now}`;

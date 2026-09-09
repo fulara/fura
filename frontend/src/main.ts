@@ -7,6 +7,8 @@ import { formatContextUsage, formatCost, formatTokens, shortId, shortPath } from
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
 import { mkEl, reconcileChildren, requireElement, setRenderDocument } from "./dom";
+import { createGitDiffHighlighter } from "./gitDiffHighlight";
+import type { DiffHighlighter } from "./diffHighlight";
 import {
   isCompactReadCard,
   renderCurrentTodoCard,
@@ -7447,15 +7449,16 @@ function renderReviewCommentsSection(
 function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: DiffRow[], annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff"): void {
   const diff = mkEl("div");
   diff.className = "diff-lines";
-  const fragment = document.createDocumentFragment();
-  for (const row of rows) {
-    appendDiffRow(fragment, row, annotationKey, state, annotations, comments, key, allowPromptActions, requestMode);
+  const fragment = diff.ownerDocument.createDocumentFragment();
+  const highlighter = createGitDiffHighlighter(rows, diff.ownerDocument);
+  for (let index = 0; index < rows.length; index++) {
+    appendDiffRow(fragment, rows[index], annotationKey, state, annotations, comments, key, allowPromptActions, requestMode, highlighter, index);
   }
   diff.append(fragment);
   container.append(diff);
 }
 
-function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff"): void {
+function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff", highlighter: DiffHighlighter, index: number): void {
   if (row.type === "line") {
     const lineComments = reviewCommentsForDiffLocation(comments, key, row.location);
     const lineQuestions = annotationsForDiffLocation(annotations, key, row.location).filter(annotation => annotation.kind === "question");
@@ -7476,7 +7479,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
     const content = mkEl("div");
     content.className = "diff-line-content";
     const text = mkEl("code");
-    text.textContent = row.location.text;
+    highlighter.renderLine(index, text);
     content.append(text);
     const questionBtn = mkEl("button");
     questionBtn.type = "button";
