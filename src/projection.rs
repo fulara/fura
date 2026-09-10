@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, Write},
 };
 
@@ -26,7 +26,27 @@ fn hash_json<T: Serialize>(hasher: &mut blake3::Hasher, value: &T) {
         .expect("projected message id JSON serialization cannot fail");
 }
 
+pub(crate) fn omp_submission_client_message_id(value: &Value) -> Option<&str> {
+    match value.get("role").and_then(Value::as_str) {
+        Some("user") => value.get("clientMessageId").and_then(Value::as_str),
+        Some("custom")
+            if value.get("customType").and_then(Value::as_str) == Some("skill-prompt")
+                && value.get("attribution").and_then(Value::as_str) == Some("user")
+                && value.get("display").and_then(Value::as_bool) == Some(true) =>
+        {
+            value
+                .get("details")?
+                .get("clientMessageId")
+                .and_then(Value::as_str)
+        }
+        _ => None,
+    }
+}
+
 fn upstream_message_id(value: &Value) -> String {
+    if let Some(id) = omp_submission_client_message_id(value) {
+        return format!("prompt:{id}");
+    }
     value
         .get("id")
         .and_then(Value::as_str)
@@ -197,8 +217,14 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
         (String, Option<String>, Value, usize, Option<Timestamp>),
     > = HashMap::new();
     let mut visible_message_count = 0_usize;
+    let mut client_message_ids = HashSet::new();
 
     for value in values {
+        if let Some(id) = omp_submission_client_message_id(value)
+            && !client_message_ids.insert(id)
+        {
+            continue;
+        }
         if let Some(mut message) = map_omp_message(value) {
             assign_projected_message_id(&mut message, value, visible_message_count);
             message.is_new = false;
@@ -566,7 +592,7 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
         return None;
     };
 
-    let blocks = if blocks.is_empty() {
+    let blocks = if blocks.is_empty() && omp_submission_client_message_id(value).is_none() {
         // If the message stopped with an error, synthesize a visible error notice block.
         if let Some(err) = value.get("errorMessage").and_then(|v| v.as_str()) {
             if !err.is_empty() {

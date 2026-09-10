@@ -117,6 +117,18 @@ Drafts are retired after an explicit session-delete request and its removal from
 the catalog, never just because a session is temporarily absent from a snapshot.
 This feature does not add per-session drafts to the mobile composer.
 
+### Submitted prompt status
+
+The transcript's `sending` marker is separate from the unsent composer draft and
+is not an authoritative OMP queue projection. Each submission has a bridge-generated
+UUID, sent as RPC `clientMessageId`. A matching consumed message or authoritative
+history entry replaces only its optimistic row; unrelated pending rows remain.
+Visible, user-attributed skill prompts retain correlation in `details.clientMessageId`.
+Content, image normalization, whitespace, queue counts, activity and RPC acknowledgements
+are not consumption receipts. Definitive rejection or local-only completion settles
+only that submission. Browser reconnect preserves unresolved rows; later consumption
+removes them without waiting for the whole run to end.
+
 ### Context usage
 
 Both status bars display OMP's authoritative `get_state.contextUsage`: current

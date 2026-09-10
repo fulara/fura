@@ -1,4 +1,4 @@
-use std::process::Stdio;
+use std::{collections::HashSet, process::Stdio};
 
 use serde_json::Value;
 use tokio::{
@@ -29,15 +29,19 @@ fn projected_message_ordinal_for_append(record: &SessionRecord) -> usize {
         .count()
 }
 
-fn projected_message_ordinal_for_pending_prompt(record: &SessionRecord) -> usize {
-    record
-        .messages
-        .iter()
-        .rev()
-        .skip(1)
-        .filter(|message| !is_synthetic_transcript_message_id(&message.id))
-        .count()
+pub(crate) fn remove_record_message(record: &mut SessionRecord, index: usize) {
+    record.messages.remove(index);
+    for card in record
+        .tool_cards
+        .iter_mut()
+        .chain(record.active_tool_calls.iter_mut())
+    {
+        if card.insert_after_count > index {
+            card.insert_after_count -= 1;
+        }
+    }
 }
+
 const RECENT_RPC_STDERR_LINE_BYTES: usize = 4096;
 const RPC_MESSAGES_PAGE_LIMIT: u16 = 256;
 
@@ -1154,43 +1158,66 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 let delta_sent = state
                     .events
                     .mutate_session_delta(state, &target_session_id, |record| {
-                        record.streaming_message = None;
-                        let replaces_pending_prompt =
-                            matches!(transcript_message.role, MessageRole::User)
-                                && record.messages.last().is_some_and(|existing| {
-                                    existing.id.starts_with("__pending_prompt:")
-                                });
+                        if matches!(transcript_message.role, MessageRole::Assistant)
+                            && omp_submission_client_message_id(&source_message).is_none()
+                        {
+                            record.streaming_message = None;
+                        }
                         if transcript_message.id.is_empty() {
-                            let visible_ordinal = if replaces_pending_prompt {
-                                projected_message_ordinal_for_pending_prompt(record)
-                            } else {
-                                projected_message_ordinal_for_append(record)
-                            };
                             assign_projected_message_id(
                                 &mut transcript_message,
                                 &source_message,
-                                visible_ordinal,
+                                projected_message_ordinal_for_append(record),
                             );
+                        }
+                        let mut changed_message_index = record.messages.len();
+                        if let Some(id) = omp_submission_client_message_id(&source_message) {
+                            let pending_id = format!("__pending_prompt:{id}");
+                            if let Some(index) = record
+                                .messages
+                                .iter()
+                                .position(|existing| existing.id == pending_id)
+                            {
+                                remove_record_message(record, index);
+                                changed_message_index = index;
+                            }
                         }
                         transcript_message.refresh_render_hash();
                         record
                             .live_message_ids
                             .insert(transcript_message.id.clone());
-                        if let Some(existing) = record
+                        if let Some(index) = record
                             .messages
-                            .iter_mut()
-                            .find(|existing| existing.id == transcript_message.id)
+                            .iter()
+                            .position(|existing| existing.id == transcript_message.id)
                         {
-                            *existing = transcript_message;
-                        } else if replaces_pending_prompt {
-                            *record.messages.last_mut().expect("last message exists") =
-                                transcript_message;
+                            changed_message_index = changed_message_index.min(index);
+                            if value_timestamp(&source_message).is_none() {
+                                transcript_message.timestamp = record.messages[index].timestamp;
+                                transcript_message.refresh_render_hash();
+                            }
+                            record.messages[index] = transcript_message;
                         } else {
                             record.messages.push(transcript_message);
                         }
                         record.updated_at = Timestamp::now();
                         let projection = record.projection();
-                        let replace_from = projection.transcript.len().saturating_sub(1);
+                        // Include cards at the changed message boundary, not just the final
+                        // entry: consuming a queued prompt can remove an earlier bubble.
+                        let mut message_count = 0;
+                        let replace_from = projection
+                            .transcript
+                            .iter()
+                            .take_while(|entry| {
+                                if message_count == changed_message_index {
+                                    return false;
+                                }
+                                if matches!(entry, TranscriptEntry::Message(_)) {
+                                    message_count += 1;
+                                }
+                                true
+                            })
+                            .count();
                         Some(SessionProjectionDelta::from_projection_replace_tail(
                             replace_from,
                             &projection,
@@ -2797,20 +2824,15 @@ pub(crate) async fn settle_local_only_prompt_result(
         .events
         .mutate_session_and_emit(state, session_id, |record| {
             let before = record.messages.len();
-            record.messages.retain(|message| {
-                if message.id == command_notice_message_id
+            while let Some(index) = record.messages.iter().position(|message| {
+                message.id == command_notice_message_id
                     || message.id == pending_prompt_message_id
-                {
-                    return false;
-                }
-                if draft_message_id
-                    .as_ref()
-                    .is_some_and(|draft_id| message.id == *draft_id)
-                {
-                    return false;
-                }
-                true
-            });
+                    || draft_message_id
+                        .as_ref()
+                        .is_some_and(|draft_id| message.id == *draft_id)
+            }) {
+                remove_record_message(record, index);
+            }
             if had_draft {
                 record.status = SessionStatus::Idle;
                 record.streaming_message = None;
@@ -2897,24 +2919,86 @@ async fn mark_pending_continuation_and_broadcast(state: &AppState, session_id: &
 
 pub(crate) fn replace_record_transcript(
     record: &mut SessionRecord,
-    messages: Vec<TranscriptMessage>,
-    tool_cards: Vec<ToolCard>,
+    mut messages: Vec<TranscriptMessage>,
+    mut tool_cards: Vec<ToolCard>,
 ) -> bool {
-    if messages.len() < record.messages.len() {
+    let authoritative_count = record
+        .messages
+        .iter()
+        .filter(|message| !message.id.starts_with("__pending_prompt:"))
+        .count();
+    if messages.len() < authoritative_count {
         return false;
     }
-    // Preserve is_new for messages that arrived live during this session.
-    let reconciled = messages
-        .into_iter()
-        .map(|mut msg| {
-            if record.live_message_ids.contains(&msg.id) {
-                msg.is_new = true;
-                msg.refresh_render_hash();
+    let consumed: HashSet<_> = messages
+        .iter()
+        .filter_map(|message| message.id.strip_prefix("prompt:"))
+        .map(str::to_owned)
+        .collect();
+    let mut boundary = 0;
+    let mut retained = 0;
+    for message in &record.messages {
+        if let Some(id) = message.id.strip_prefix("__pending_prompt:") {
+            if consumed.contains(id) {
+                record.live_message_ids.insert(format!("prompt:{id}"));
+                continue;
             }
-            msg
+            let index = (boundary + retained).min(messages.len());
+            messages.insert(index, message.clone());
+            retained += 1;
+            for card in &mut tool_cards {
+                if card.insert_after_count > index {
+                    card.insert_after_count += 1;
+                }
+            }
+        } else {
+            boundary += 1;
+        }
+    }
+    // Preserve known tool boundaries on either side of optimistic entries.
+    // A historical message count alone cannot distinguish those positions.
+    let positions: HashMap<_, _> = messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.id.as_str(), index + 1))
+        .collect();
+    let mut boundaries = Vec::with_capacity(record.messages.len() + 1);
+    boundaries.push(0);
+    for message in &record.messages {
+        boundaries.push(
+            positions
+                .get(message.id.as_str())
+                .copied()
+                .unwrap_or(*boundaries.last().unwrap()),
+        );
+    }
+    let known_card_boundaries: HashMap<_, _> = record
+        .tool_cards
+        .iter()
+        .chain(record.active_tool_calls.iter())
+        .map(|card| {
+            (
+                card.tool_call_id.as_str(),
+                boundaries[card.insert_after_count.min(record.messages.len())],
+            )
         })
         .collect();
-    record.messages = reconciled;
+    for card in &mut tool_cards {
+        if let Some(boundary) = known_card_boundaries.get(card.tool_call_id.as_str()) {
+            card.insert_after_count = *boundary;
+        }
+    }
+    for card in &mut record.active_tool_calls {
+        card.insert_after_count = boundaries[card.insert_after_count.min(record.messages.len())];
+    }
+    // Preserve is_new for messages that arrived live during this session.
+    for message in &mut messages {
+        if record.live_message_ids.contains(&message.id) {
+            message.is_new = true;
+            message.refresh_render_hash();
+        }
+    }
+    record.messages = messages;
     record.tool_cards = tool_cards;
     true
 }

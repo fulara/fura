@@ -382,6 +382,8 @@ for await (const line of rl) {
       // The deterministic mock does not need tool results to continue; real OMP does.
       break;
     }
+    case "steer":
+    case "follow_up":
     case "prompt": {
       const slashMessage = String(command.message ?? "");
       if (slashMessage.startsWith("/")) {
@@ -460,9 +462,11 @@ for await (const line of rl) {
         id: `user-${userEntryId}`,
         entryId: userEntryId,
         role: "user",
+        ...(typeof command.clientMessageId === "string" ? { clientMessageId: command.clientMessageId } : {}),
         content: userContent,
         timestamp: now,
       };
+      write({ type: "message_end", timestamp: now, message: user });
       if (planMode?.enabled && promptText.toLowerCase().includes("smoke plan")) {
         messages.push(user);
         success(command);

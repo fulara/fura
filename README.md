@@ -25,6 +25,11 @@ Fura keeps the composer locked until authoritative state reports that compaction
 has ended, refreshing after command output or cancellation. Success and failure
 restore controls without a browser reload; output text is not parsed as lifecycle state.
 
+Queued Steer and Follow-up prompts keep a `sending` marker until OMP accepts that
+exact submission into the conversation. This is optimistic transcript state, not
+an OMP queue listing. Fura reconciles by `clientMessageId`, including skill expansion
+and history refresh; an RPC acknowledgement or queue count alone does not clear it.
+
 ## Git changes
 
 The Git changes panel separates **Current changes** (unstaged, staged and nonignored
@@ -91,6 +96,8 @@ These are only required for the native window binary. The default bridge binary 
 The bridge spawns an installed `omp --mode rpc-ui` by default. The local development
 launchers use the `vendor/oh-my-pi` submodule, pinned to Fura's compatible OMP commit
 and configured to track the `fork-stuff` branch.
+Prompt consumption tracking requires the pinned fork's `clientMessageId` extension;
+update the bridge and its pinned OMP together rather than mixing it with an older RPC runtime.
 
 ### Bun
 

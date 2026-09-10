@@ -2010,6 +2010,7 @@ pub(crate) mod tests {
             ),
             serde_json::json!({
                 "id": "rpc-2",
+                "clientMessageId": "rpc-2",
                 "type": "prompt",
                 "message": "hello",
                 "streamingBehavior": "followUp"
@@ -6814,6 +6815,7 @@ pub(crate) mod tests {
                 "type": "message_end",
                 "message": {
                     "id": "user-1",
+                    "clientMessageId": "test",
                     "role": "user",
                     "content": [{ "type": "text", "text": "hello there" }]
                 }
@@ -6824,8 +6826,602 @@ pub(crate) mod tests {
         let sessions = state.sessions.read().await;
         let record = sessions.get("s1").expect("record remains");
         assert_eq!(record.messages.len(), 1);
-        assert_eq!(record.messages[0].id, "user-1");
+        assert_eq!(record.messages[0].id, "prompt:test");
         assert_eq!(record.messages[0].role, MessageRole::User);
+    }
+
+    #[tokio::test]
+    async fn consumed_steer_clears_non_tail_pending_while_busy() {
+        let state = test_state(8, None);
+        let mut record = test_record();
+        record.status = SessionStatus::Busy;
+        record.messages.push(TranscriptMessage::new(
+            "__pending_prompt:steer-1".to_string(),
+            MessageRole::User,
+            vec![ContentBlock::Text {
+                text: "use the new instruction".to_string(),
+            }],
+            Some(Timestamp::now()),
+            true,
+        ));
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        for message in [
+            serde_json::json!({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "finishing the preceding generation"}]
+            }),
+            serde_json::json!({
+                "role": "user",
+                "clientMessageId": "steer-1",
+                "steering": true,
+                "content": [{"type": "text", "text": "use the new instruction"}]
+            }),
+        ] {
+            apply_rpc_frame(
+                &state,
+                "s1",
+                &serde_json::json!({
+                    "type": "message_end", "message": message
+                }),
+            )
+            .await;
+        }
+        let sessions = state.sessions.read().await;
+        let projection = sessions.get("s1").unwrap().projection();
+        assert!(projection.is_busy);
+        assert!(
+            !projection.transcript.iter().any(|entry| {
+                matches!(entry, TranscriptEntry::Message(message)
+                if message.id.starts_with("__pending_prompt:"))
+            }),
+            "a consumed steer must no longer render as sending"
+        );
+        assert_eq!(projection.transcript.iter().filter(|entry| {
+            matches!(entry, TranscriptEntry::Message(message) if message.role == MessageRole::User)
+        }).count(), 1, "the browser must see the steer exactly once");
+    }
+    #[tokio::test]
+    async fn queued_prompt_identity_preserves_order_replays_and_unconsumed_items() {
+        let state = test_state(64, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "s1", "s1", 64).await;
+        let mut ids = Vec::new();
+        for behavior in [
+            PromptBehavior::FollowUp,
+            PromptBehavior::Steer,
+            PromptBehavior::Steer,
+        ] {
+            assert!(
+                send_prompt(
+                    &state,
+                    "s1".into(),
+                    "  identical instruction  ".into(),
+                    Some(vec![
+                        serde_json::from_value(serde_json::json!({
+                            "type": "image", "data": "AA==", "mimeType": "image/png"
+                        }))
+                        .unwrap()
+                    ]),
+                    Some(behavior)
+                )
+                .await
+                .is_empty()
+            );
+            let command = commands.recv().await.unwrap();
+            ids.push(command["clientMessageId"].as_str().unwrap().to_owned());
+        }
+        let pending = |index: usize| format!("__pending_prompt:{}", ids[index]);
+        let canonical = |index: usize| format!("prompt:{}", ids[index]);
+        let mut other = test_record();
+        other.id = "s2".into();
+        other.messages = state.sessions.read().await["s1"].messages.clone();
+        state.sessions.write().await.insert("s2".into(), other);
+        // Queue acceptance, unrelated activity and anonymous users cannot consume anything.
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "response", "command": "prompt", "id": ids[1], "success": true
+            }),
+        )
+        .await;
+        for message in [
+            serde_json::json!({"id":"preceding", "role":"assistant", "content":"old generation"}),
+            serde_json::json!({"id":"anonymous", "role":"user", "content":"  identical instruction  "}),
+            serde_json::json!({"id":"developer", "role":"developer", "clientMessageId":ids[1], "content":"companion"}),
+            serde_json::json!({"id":"unrelated", "role":"user", "clientMessageId":"elsewhere", "content":"identical instruction"}),
+        ] {
+            apply_rpc_frame(
+                &state,
+                "s1",
+                &serde_json::json!({"type":"message_end", "message":message}),
+            )
+            .await;
+        }
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .messages
+                .iter()
+                .filter(|message| message.id.starts_with("__pending_prompt:"))
+                .count(),
+            3
+        );
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"tool_execution_start", "toolCallId":"holding", "toolName":"bash", "args":{}
+            }),
+        )
+        .await;
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"message_update", "message":{"role":"assistant","content":"still streaming"}
+            }),
+        )
+        .await;
+        state
+            .events
+            .emit_current_session_snapshot(&state, "s1")
+            .await;
+        let before = state.sessions.read().await["s1"].projection().transcript;
+        let mut events = state.events.subscribe();
+        let consumed = serde_json::json!({
+            "type":"message_end", "message":{
+                "id":"upstream-steer", "role":"user", "clientMessageId":ids[1],
+                "content":[{"type":"text","text":"rewritten instruction"}]
+            }
+        });
+        apply_rpc_frame(&state, "s1", &consumed).await;
+        state
+            .events
+            .emit_current_session_snapshot(&state, "s1")
+            .await;
+        let mut browser_transcript = before;
+        let delta = loop {
+            if let ServerMessage::SessionDelta { state, .. } = events.recv().await.unwrap() {
+                break state;
+            }
+        };
+        assert!(delta.transcript_replace_from <= 1);
+        browser_transcript.truncate(delta.transcript_replace_from);
+        browser_transcript.extend(delta.transcript_append);
+        {
+            let sessions = state.sessions.read().await;
+            let record = &sessions["s1"];
+            assert_eq!(browser_transcript, record.projection().transcript);
+            assert_eq!(
+                record
+                    .messages
+                    .iter()
+                    .map(|message| message.id.clone())
+                    .collect::<Vec<_>>(),
+                vec![
+                    pending(0),
+                    pending(2),
+                    "preceding".into(),
+                    "anonymous".into(),
+                    "developer".into(),
+                    "prompt:elsewhere".into(),
+                    canonical(1)
+                ]
+            );
+            assert_eq!(record.active_tool_calls[0].insert_after_count, 6);
+            assert_eq!(
+                record.streaming_message.as_ref().unwrap().id,
+                "__streaming__"
+            );
+            assert_eq!(
+                sessions["s2"]
+                    .messages
+                    .iter()
+                    .map(|message| message.id.clone())
+                    .collect::<Vec<_>>(),
+                vec![pending(0), pending(1), pending(2)]
+            );
+        }
+        let once = state.sessions.read().await["s1"].messages.clone();
+        apply_rpc_frame(&state, "s1", &consumed).await;
+        assert_eq!(state.sessions.read().await["s1"].messages, once);
+        // OMP can consume a steer ahead of an older follow-up. Text and images are not keys.
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"message_end", "message":{
+                    "role":"user", "clientMessageId":ids[0], "content":" \n\t "
+                }
+            }),
+        )
+        .await;
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"response", "command":"prompt", "id":ids[0], "success":true
+            }),
+        )
+        .await;
+        for frame in [
+            serde_json::json!({"type":"agent_end", "isTerminal":true}),
+            serde_json::json!({"type":"response", "command":"get_state", "success":true,
+                "data":{"sessionId":"s1","isStreaming":false,"queuedMessageCount":0}}),
+            serde_json::json!({"type":"agent_start"}),
+        ] {
+            apply_rpc_frame(&state, "s1", &frame).await;
+        }
+        let sessions = state.sessions.read().await;
+        assert_eq!(
+            sessions["s1"]
+                .messages
+                .iter()
+                .filter(|message| message.id.starts_with("__pending_prompt:"))
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>(),
+            vec![pending(2)]
+        );
+        assert_eq!(sessions["s1"].messages.last().unwrap().id, canonical(0));
+    }
+
+    #[test]
+    fn authoritative_prompt_refresh_retains_queue_and_reanchors_tools() {
+        let user = |id: &str, content: &str| {
+            let raw = serde_json::json!({
+                "id":"different-source-id", "role":"user", "clientMessageId":id, "content":content
+            });
+            let (mut messages, _) = project_omp_transcript(&[raw.clone(), raw]);
+            assert_eq!(
+                messages.len(),
+                1,
+                "source replay must not duplicate a consumed prompt"
+            );
+            messages.remove(0)
+        };
+        for consumed in [false, true] {
+            let mut record = test_record();
+            record.messages = vec![
+                text_message("approved-plan:carryover", "plan"),
+                text_message("__pending_prompt:steer", "same"),
+                text_message("old", "preceding generation"),
+                text_message("__pending_prompt:follow", "same"),
+            ];
+            record.active_tool_calls.push(ToolCard::new(
+                "active".into(),
+                None,
+                "bash".into(),
+                None,
+                serde_json::json!({}),
+                true,
+                false,
+                None,
+                None,
+                3,
+            ));
+            let mut incoming = vec![
+                text_message("approved-plan:carryover", "plan"),
+                text_message("old", "preceding generation"),
+            ];
+            if consumed {
+                incoming.push(user("steer", "different text"));
+            }
+            let cards = vec![ToolCard::new(
+                "done".into(),
+                None,
+                "bash".into(),
+                None,
+                serde_json::json!({}),
+                false,
+                false,
+                None,
+                None,
+                2,
+            )];
+            assert!(replace_record_transcript(
+                &mut record,
+                incoming.clone(),
+                cards.clone()
+            ));
+            let expected = if consumed {
+                vec![
+                    "approved-plan:carryover",
+                    "old",
+                    "__pending_prompt:follow",
+                    "prompt:steer",
+                ]
+            } else {
+                vec![
+                    "approved-plan:carryover",
+                    "__pending_prompt:steer",
+                    "old",
+                    "__pending_prompt:follow",
+                ]
+            };
+            assert_eq!(
+                record
+                    .messages
+                    .iter()
+                    .map(|message| message.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                record.active_tool_calls[0].insert_after_count,
+                if consumed { 2 } else { 3 }
+            );
+            assert_eq!(
+                record.tool_cards[0].insert_after_count,
+                if consumed { 2 } else { 3 }
+            );
+            let once = record.projection().transcript;
+            assert!(replace_record_transcript(&mut record, incoming, cards));
+            assert_eq!(
+                record.projection().transcript,
+                once,
+                "reconnect replay must be idempotent"
+            );
+            assert!(!replace_record_messages(
+                &mut record,
+                vec![user("follow", "same")]
+            ));
+            assert_eq!(
+                record.projection().transcript,
+                once,
+                "stale history cannot replace live history"
+            );
+        }
+    }
+
+    #[test]
+    fn authoritative_refresh_preserves_completed_tools_before_and_after_pending() {
+        for old_boundary in [1, 2] {
+            let mut record = test_record();
+            record.messages = vec![
+                text_message("user", "first"),
+                text_message("__pending_prompt:queued", "waiting"),
+            ];
+            let mut card = ToolCard::new(
+                "known".into(),
+                None,
+                "bash".into(),
+                None,
+                serde_json::json!({}),
+                false,
+                false,
+                None,
+                None,
+                old_boundary,
+            );
+            record.tool_cards.push(card.clone());
+            let before = record.projection().transcript;
+            // Both live positions collapse to the same authoritative boundary.
+            card.insert_after_count = 1;
+            for _ in 0..2 {
+                assert!(replace_record_transcript(
+                    &mut record,
+                    vec![text_message("user", "first")],
+                    vec![card.clone()]
+                ));
+                assert_eq!(record.projection().transcript, before);
+                assert_eq!(record.tool_cards[0].insert_after_count, old_boundary);
+            }
+            let unknown = ToolCard::new(
+                "unknown".into(),
+                None,
+                "bash".into(),
+                None,
+                serde_json::json!({}),
+                false,
+                false,
+                None,
+                None,
+                1,
+            );
+            assert!(replace_record_transcript(
+                &mut record,
+                vec![text_message("user", "first")],
+                vec![card, unknown]
+            ));
+            assert_eq!(record.tool_cards[0].insert_after_count, old_boundary);
+            assert_eq!(
+                record.tool_cards[1].insert_after_count, 1,
+                "unknown historical tools must not move after the pending prompt"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn skill_submission_identity_reconciles_delta_and_reconnect_without_widening_custom_identity()
+     {
+        let state = test_state(64, None);
+        let mut initial = test_record();
+        initial.messages = vec![
+            text_message("__pending_prompt:skill", "fix /skill:foo"),
+            text_message("__pending_prompt:other", "waiting"),
+            text_message("prior", "preceding generation"),
+        ];
+        initial.streaming_message = Some(text_message("__streaming__", "in flight"));
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), initial.clone());
+        let mut other = initial.clone();
+        other.id = "s2".into();
+        state.sessions.write().await.insert("s2".into(), other);
+        let skill = serde_json::json!({
+            "id":"upstream-skill", "role":"custom", "customType":"skill-prompt",
+            "display":true, "attribution":"user",
+            "details":{"clientMessageId":"skill"},
+            "content":"Expanded skill instructions", "timestamp":1770000005000_u64
+        });
+        for (field, value) in [
+            ("role", serde_json::json!("developer")),
+            ("customType", serde_json::json!("other")),
+            ("attribution", serde_json::json!("agent")),
+            ("display", serde_json::json!(false)),
+            ("details", serde_json::json!({})),
+        ] {
+            let mut unrelated = skill.clone();
+            unrelated[field] = value;
+            unrelated["clientMessageId"] = serde_json::json!("skill");
+            apply_rpc_frame(
+                &state,
+                "s2",
+                &serde_json::json!({
+                    "type":"message_end", "message":unrelated
+                }),
+            )
+            .await;
+            assert!(
+                state.sessions.read().await["s2"]
+                    .messages
+                    .iter()
+                    .any(|message| message.id == "__pending_prompt:skill")
+            );
+        }
+        let before = state.sessions.read().await["s1"].projection().transcript;
+        let mut events = state.events.subscribe();
+        let event = serde_json::json!({"type":"message_end", "message":skill});
+        apply_rpc_frame(&state, "s1", &event).await;
+        state
+            .events
+            .emit_current_session_snapshot(&state, "s1")
+            .await;
+        let delta = loop {
+            if let ServerMessage::SessionDelta { session_id, state } = events.recv().await.unwrap()
+                && session_id == "s1"
+            {
+                break state;
+            }
+        };
+        assert_eq!(delta.transcript_replace_from, 0);
+        let mut browser_transcript = before;
+        browser_transcript.truncate(delta.transcript_replace_from);
+        browser_transcript.extend(delta.transcript_append);
+        let once = state.sessions.read().await["s1"].projection().transcript;
+        assert_eq!(browser_transcript, once);
+        {
+            let sessions = state.sessions.read().await;
+            let record = &sessions["s1"];
+            assert_eq!(
+                record
+                    .messages
+                    .iter()
+                    .map(|message| message.id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["__pending_prompt:other", "prior", "prompt:skill"]
+            );
+            assert!(record.streaming_message.is_some());
+            let mut uncorrelated = skill.clone();
+            uncorrelated["details"] = serde_json::json!({});
+            let ordinary_skill = map_omp_message(&uncorrelated).unwrap();
+            assert_eq!(record.messages[2].role, ordinary_skill.role);
+            assert_eq!(record.messages[2].blocks, ordinary_skill.blocks);
+        }
+        apply_rpc_frame(&state, "s1", &event).await;
+        assert_eq!(
+            state.sessions.read().await["s1"].projection().transcript,
+            once
+        );
+
+        // A missed lifecycle event is recovered solely from persisted submission metadata.
+        let history = [
+            serde_json::json!({"id":"prior","role":"assistant","content":"preceding generation"}),
+            skill.clone(),
+            skill,
+        ];
+        let (messages, cards) = project_omp_transcript(&history);
+        assert_eq!(messages.len(), 2);
+        assert!(replace_record_transcript(
+            &mut initial,
+            messages.clone(),
+            cards.clone()
+        ));
+        assert_eq!(
+            initial
+                .messages
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["__pending_prompt:other", "prior", "prompt:skill"]
+        );
+        let recovered = initial.projection().transcript;
+        assert!(replace_record_transcript(&mut initial, messages, cards));
+        assert_eq!(initial.projection().transcript, recovered);
+    }
+
+    #[tokio::test]
+    async fn prompt_rejection_removes_only_rejected_identity_and_abort_keeps_queue() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "s1", "s1", 32).await;
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            send_prompt(
+                &state,
+                "s1".into(),
+                "same".into(),
+                None,
+                Some(PromptBehavior::Steer),
+            )
+            .await;
+            ids.push(
+                commands.recv().await.unwrap()["clientMessageId"]
+                    .as_str()
+                    .unwrap()
+                    .to_owned(),
+            );
+        }
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"tool_execution_start", "toolCallId":"holding", "toolName":"bash", "args":{}
+            }),
+        )
+        .await;
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"response", "command":"prompt", "id":ids[0],
+                "success":false, "error":"rejected"
+            }),
+        )
+        .await;
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"response", "command":"abort", "id":"cancel", "success":true
+            }),
+        )
+        .await;
+        apply_rpc_frame(&state, "s1", &serde_json::json!({"type":"agent_end"})).await;
+        let sessions = state.sessions.read().await;
+        assert_eq!(
+            sessions["s1"]
+                .messages
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>(),
+            vec![format!("__pending_prompt:{}", ids[1])]
+        );
+        assert_eq!(sessions["s1"].active_tool_calls[0].insert_after_count, 1);
     }
 
     #[tokio::test]

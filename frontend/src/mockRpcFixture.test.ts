@@ -53,10 +53,11 @@ describe("mock OMP RPC fixture", () => {
     child.stdin.write(`${JSON.stringify({ id: "state-before", type: "get_state" })}\n`);
     const stateBefore = await frames.next("state-before");
 
-    child.stdin.write(`${JSON.stringify({ id: "prompt-text", type: "prompt", message: "kept prompt" })}\n`);
+    child.stdin.write(`${JSON.stringify({ id: "prompt-text", clientMessageId: "prompt-text", type: "prompt", message: "kept prompt" })}\n`);
     expect((await frames.next("prompt-text")).success).toBe(true);
     child.stdin.write(`${JSON.stringify({
       id: "prompt-images",
+      clientMessageId: "prompt-images",
       type: "prompt",
       message: "rollback target",
       images: textImages,
@@ -64,6 +65,7 @@ describe("mock OMP RPC fixture", () => {
     expect((await frames.next("prompt-images")).success).toBe(true);
     child.stdin.write(`${JSON.stringify({
       id: "prompt-image-only",
+      clientMessageId: "prompt-image-only",
       type: "prompt",
       message: "",
       images: [imageOnly],
@@ -77,6 +79,9 @@ describe("mock OMP RPC fixture", () => {
       "mock-user-entry-1",
       "mock-user-entry-2",
       "mock-user-entry-3",
+    ]);
+    expect(userMessages.map(message => message.clientMessageId)).toEqual([
+      "prompt-text", "prompt-images", "prompt-image-only",
     ]);
     expect(userMessages[1].content?.filter(item => item.type === "image")).toEqual(textImages);
 

@@ -481,6 +481,8 @@ pub(crate) enum OmpRpcCommand {
     #[serde(rename = "prompt")]
     Prompt {
         id: String,
+        #[serde(rename = "clientMessageId", skip_serializing_if = "Option::is_none")]
+        client_message_id: Option<String>,
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         images: Option<Vec<PromptImagePayload>>,
@@ -623,6 +625,7 @@ pub(crate) fn prompt_command(
     behavior: Option<PromptBehavior>,
 ) -> Value {
     OmpRpcCommand::Prompt {
+        client_message_id: Some(id.clone()),
         id,
         message,
         images,

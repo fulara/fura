@@ -2710,13 +2710,11 @@ pub(crate) async fn remove_optimistic_prompt_message(
     state
         .events
         .mutate_session_and_emit(state, session_id, |record| {
-            let before = record.messages.len();
-            record
+            let index = record
                 .messages
-                .retain(|message| message.id != optimistic_message_id);
-            if record.messages.len() == before {
-                return None;
-            }
+                .iter()
+                .position(|message| message.id == optimistic_message_id)?;
+            remove_record_message(record, index);
             Some(ServerMessage::SessionSnapshot {
                 session_id: session_id.to_string(),
                 state: record.projection(),
