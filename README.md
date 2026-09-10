@@ -225,6 +225,7 @@ these resources manually; a PID record alone never authorizes termination.
 FURA_SMOKE_PORT=38888 ./run-mock-rpc.sh
 npm --prefix frontend run smoke
 python3 -m unittest scripts/test_smoke_process.py -v
+python3 -m unittest scripts/test_native_preflight.py -v
 ```
 
 Use this launcher for mock smoke tests, not a production restart helper. For
@@ -243,6 +244,16 @@ the local lifecycle guards require `Process.identity()` as well as the matching
 version sentinel. A source rebase does not update the addon already loaded by
 running agents. Test the matched source/addon pair beside the live service;
 publication is not deployment and does not restart existing sessions.
+
+Both real launchers reject addons without the fork's `Process.identity` method
+before building or starting Fura. The OMP process broker also refuses such an
+addon before spawning any child; an upstream version sentinel alone is not
+enough to establish compatibility with the fork.
+These guards do not replace an addon already loaded by a running agent or
+broker. If supervised launch reports a missing identity method, do not retry
+through a production restart helper: use the isolated, finite smoke harness
+with the matched addon and leave live processes untouched.
+The native-preflight regression requires Bun on `PATH` or in `BUN_BIN`.
 
 ## Configuration
 

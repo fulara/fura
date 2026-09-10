@@ -53,9 +53,9 @@ if (( ${#native_addons[@]} == 0 )); then
   exit 1
 fi
 
-if ! (cd "${OMP_REPO}/packages/coding-agent" && PATH="$(dirname -- "${BUN_BIN}"):${PATH}" "${BUN_BIN}" src/cli.ts --version >/dev/null); then
+if ! check_omp_native; then
   echo "OMP CLI/native preflight failed. Rebuild the native addon for this checkout." >&2
-  echo "Run: env RUSTUP_TOOLCHAIN=nightly-2026-04-29 bun run build:native" >&2
+  echo "Run: env -u CARGO -u RUSTUP_TOOLCHAIN RUSTC_WRAPPER= ${BUN_BIN} run build:native" >&2
   echo "from: ${OMP_REPO}" >&2
   exit 1
 fi

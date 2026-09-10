@@ -43,21 +43,7 @@ if [[ -n "${required_bun}" ]]; then
   fi
 fi
 
-if ! (
-  cd "${OMP_REPO}/packages/coding-agent"
-  PATH="$(dirname -- "${BUN_BIN}"):${PATH}" "${BUN_BIN}" -e '
-    const pkg = await Bun.file("../natives/package.json").json();
-    const sentinel = `__piNativesV${pkg.version.replace(/[^A-Za-z0-9]/g, "_")}`;
-    const natives = await import("@oh-my-pi/pi-natives");
-    if (typeof natives[sentinel] !== "function") {
-      throw new Error(`OMP native addon does not expose ${sentinel}`);
-    }
-    if (typeof natives.editDescription !== "function") {
-      throw new Error("OMP native addon does not expose editDescription");
-    }
-  ' || exit $?
-  PATH="$(dirname -- "${BUN_BIN}"):${PATH}" "${BUN_BIN}" src/cli.ts --version >/dev/null
-); then
+if ! check_omp_native; then
   echo "OMP CLI/native preflight failed. Rebuild the native addon for this checkout." >&2
   echo "Run: env -u CARGO -u RUSTUP_TOOLCHAIN RUSTC_WRAPPER= ${BUN_BIN} run build:native" >&2
   echo "from: ${OMP_REPO}" >&2

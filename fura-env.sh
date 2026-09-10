@@ -29,6 +29,25 @@ use_omp_submodule() {
   fi
 }
 
+check_omp_native() (
+  cd "${OMP_REPO}/packages/coding-agent" || exit 1
+  PATH="$(dirname -- "${BUN_BIN}"):${PATH}" "${BUN_BIN}" -e '
+    const pkg = await Bun.file("../natives/package.json").json();
+    const sentinel = `__piNativesV${pkg.version.replace(/[^A-Za-z0-9]/g, "_")}`;
+    const natives = await import("@oh-my-pi/pi-natives");
+    if (typeof natives[sentinel] !== "function") {
+      throw new Error(`OMP native addon does not expose ${sentinel}`);
+    }
+    if (typeof natives.editDescription !== "function") {
+      throw new Error("OMP native addon does not expose editDescription");
+    }
+    if (typeof natives.Process?.prototype?.identity !== "function") {
+      throw new Error("OMP native addon does not expose Process.identity; build the Fura fork addon");
+    }
+  ' || exit $?
+  PATH="$(dirname -- "${BUN_BIN}"):${PATH}" "${BUN_BIN}" src/cli.ts --version >/dev/null
+)
+
 require_env() {
   local missing=()
   local name

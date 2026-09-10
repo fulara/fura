@@ -149,11 +149,10 @@ test("desktop revision Code preserves modal, deletion base, rename and initial f
     await expect(code).toContainText("INITIAL");
     await code.getByRole("button", { name: "Back to working-tree Code", exact: true }).click();
     await expect(code).toHaveCount(0);
-    expect(
-      await page
-        .locator(".code-viewer:visible")
-        .evaluate((element) => element.parentElement?.contains(element.ownerDocument.activeElement)),
-    ).toBe(true);
+    await expect.poll(() => page.evaluate(() => {
+      const viewer = document.querySelector(".code-viewer");
+      return viewer?.parentElement?.contains(document.activeElement) ?? false;
+    })).toBe(true);
     await gitPanel(page);
     await view.getByRole("button", { name: "Current changes", exact: true }).click();
     await view.getByRole("combobox", { name: "Git change group", exact: true }).selectOption("untracked");
