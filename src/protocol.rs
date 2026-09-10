@@ -390,6 +390,11 @@ pub(crate) struct GitHistoryPage {
     pub(crate) branch: Option<String>,
     pub(crate) head_oid: Option<String>,
     pub(crate) history_head_oid: Option<String>,
+    pub(crate) history_ref: Option<String>,
+    pub(crate) history_tip_oid: Option<String>,
+    pub(crate) branches: Option<Vec<GitRefSummary>>,
+    #[serde(default)]
+    pub(crate) branches_truncated: bool,
     pub(crate) commits: Vec<DiffCommitSummary>,
     pub(crate) next_cursor: Option<String>,
 }
@@ -870,6 +875,7 @@ pub(crate) enum ClientMessage {
         request_id: String,
         session_id: String,
         repo_id: Option<String>,
+        history_ref: Option<String>,
         cursor: Option<String>,
     },
     #[serde(rename = "git.file.request")]

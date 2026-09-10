@@ -67,7 +67,7 @@ import {
   resolvedRefLabel,
   summarizeWireDiffFiles,
 } from "./diffState";
-import { acceptGitHistoryResult, beginGitHistoryRequest, createGitHistoryState, gitHeadLabel, renderGitHistoryBrowser, type GitHistoryState, type GitReviewView } from "./gitHistory";
+import { acceptGitHistoryResult, beginGitHistoryRequest, createGitHistoryState, gitHeadLabel, renderGitHistoryBrowser, selectGitHistoryRef, type GitHistoryState, type GitReviewView } from "./gitHistory";
 import { openCommittedFileView } from "./gitFileView";
 import {
   annotationsForDiffLocation,
@@ -5635,11 +5635,16 @@ function gitReviewFor(sessionId: string, repoRoot?: string | null): GitHistorySt
     restoredGitReviewSessions.add(sessionId);
     try {
       const saved = JSON.parse(sessionStorage.getItem(`fura.gitReview.${sessionId}`) ?? "null");
-      if (saved && typeof saved.repoRoot === "string" && !saved.repoRoot.includes("\0") && (saved.view === "changes" || saved.view === "history")) {
-        const restored = createGitHistoryState(saved.repoRoot);
-        restored.view = saved.view;
-        restored.selectedOid = typeof saved.selectedOid === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(saved.selectedOid) ? saved.selectedOid : null;
-        gitHistoryStates.set(gitHistoryStateKey(sessionId, saved.repoRoot), restored);
+      const selections = Array.isArray(saved?.repositories) ? saved.repositories : [saved];
+      for (const selection of selections) {
+        if (!selection || typeof selection.repoRoot !== "string" || selection.repoRoot.includes("\0") || !["changes", "history"].includes(selection.view)) continue;
+        const restored = createGitHistoryState(selection.repoRoot);
+        restored.view = selection.view;
+        restored.selectedOid = typeof selection.selectedOid === "string" && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(selection.selectedOid) ? selection.selectedOid : null;
+        restored.historyRef = typeof selection.historyRef === "string" && /^(?:refs\/heads\/|refs\/remotes\/)/u.test(selection.historyRef) && !selection.historyRef.includes("\0") ? selection.historyRef : null;
+        gitHistoryStates.set(gitHistoryStateKey(sessionId, restored.repoRoot), restored);
+      }
+      if (typeof saved?.repoRoot === "string" && gitHistoryStates.has(gitHistoryStateKey(sessionId, saved.repoRoot))) {
         sessionChangesRepoIds.set(sessionId, saved.repoRoot);
       }
     } catch { /* Ignore an obsolete or malformed browser selection. */ }
@@ -5655,8 +5660,11 @@ function gitReviewFor(sessionId: string, repoRoot?: string | null): GitHistorySt
 }
 
 function persistGitReviewSelection(sessionId: string, history: GitHistoryState): void {
+  const repositories = [...gitHistoryStates.entries()]
+    .filter(([key, value]) => key === gitHistoryStateKey(sessionId, value.repoRoot))
+    .map(([, value]) => ({ repoRoot: value.repoRoot, view: value.view, selectedOid: value.selectedOid, historyRef: value.historyRef }));
   sessionStorage.setItem(`fura.gitReview.${sessionId}`, JSON.stringify({
-    repoRoot: history.repoRoot, view: history.view, selectedOid: history.selectedOid,
+    repoRoot: history.repoRoot, repositories,
   }));
 }
 
@@ -5674,10 +5682,23 @@ function requestGitHistory(sessionId: string, repoRoot?: string | null, cursor: 
   const requestId = randomUuid();
   beginGitHistoryRequest(history, requestId, cursor);
   pendingGitHistory = { sessionId, state: history };
-  if (!send({ type: "git.history.request", clientId: diffClientId, requestId, sessionId, repoId: history.repoRoot || null, cursor })) {
+  if (!send({ type: "git.history.request", clientId: diffClientId, requestId, sessionId, repoId: history.repoRoot || null, historyRef: history.historyRef, cursor })) {
     acceptGitHistoryResult(history, requestId, null, "Not connected to the Fura bridge.");
     pendingGitHistory = null;
   }
+}
+
+function selectHistoryBranch(sessionId: string, ref: string | null): void {
+  const history = gitReviewFor(sessionId);
+  if (history.historyRef === ref) return;
+  clearPendingGitHistory();
+  if (currentSessionChangesRequest?.sessionId === sessionId) clearCurrentSessionChangesRequest("refsChanged");
+  selectGitHistoryRef(history, ref);
+  sessionChangesSelectedFiles.delete(sessionId);
+  persistGitReviewSelection(sessionId, history);
+  requestGitHistory(sessionId, history.repoRoot);
+  markDiffsViewDirty();
+  renderDiffsViewIfActive(sessionId);
 }
 
 function selectGitCommit(sessionId: string, oid: string): void {
@@ -5716,8 +5737,13 @@ function openAdvancedGitCompare(sessionId: string): void {
   const history = gitReviewFor(sessionId);
   openCwdPicker("diff");
   cwdPickerDiffRepo.value = history.repoRoot;
-  const selected = history.page?.commits.find(commit => commit.oid === history.selectedOid);
-  cwdPickerDiffBase.value = history.view === "history" ? selected?.parentOids[0] ?? "HEAD" : "HEAD";
+  const state = sessionChangesStates.get(sessionId);
+  const pinned = state?.status === "ready" && state.selectedRepoId === history.repoRoot && state.review.currentCommitOid === history.selectedOid
+    ? state.review.commits.find(commit => commit.oid === history.selectedOid)
+    : undefined;
+  const selected = pinned ?? history.page?.commits.find(commit => commit.oid === history.selectedOid);
+  cwdPickerDiffBase.required = history.view === "history";
+  cwdPickerDiffBase.value = history.view === "history" ? selected?.parentOids[0] ?? "" : "HEAD";
   cwdPickerDiffHead.value = history.view === "history" && history.selectedOid ? history.selectedOid : "WORKTREE";
   cwdPickerDiffAgentSession.checked = false;
 }
@@ -6839,7 +6865,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   const compare = mkEl("button");
   compare.type = "button";
   compare.textContent = "Advanced Compare";
-  compare.disabled = !history.repoRoot;
+  compare.disabled = !history.repoRoot || (history.view === "history" && !history.selectedOid);
   compare.addEventListener("click", () => openAdvancedGitCompare(sessionId));
   const expand = mkEl("button");
   expand.type = "button";
@@ -6858,6 +6884,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   root.prepend(header);
   if (history.view === "history") {
     sidebarTop.append(renderGitHistoryBrowser(history, {
+      selectBranch: ref => selectHistoryBranch(sessionId, ref),
       select: oid => selectGitCommit(sessionId, oid),
       loadOlder: () => {
         if (!history.page?.nextCursor || history.loading) return;
@@ -8348,6 +8375,7 @@ function syncCwdPickerDiffDefaults(): void {
   const defaultRoot = cwdPickerInput.value.trim() || serverConfig?.defaultCwd || "";
   cwdPickerDiffRepo.value = defaultRoot;
   cwdPickerDiffBase.value = "HEAD";
+  cwdPickerDiffBase.required = false;
   cwdPickerDiffHead.value = "HEAD";
   cwdPickerDiffMode.value = "full";
   cwdPickerDiffAgentSession.checked = true;
@@ -8432,6 +8460,11 @@ function submitCwdPickerDiff(): void {
     normalDesktopDockview?.ensureComparePanel();
     normalDesktopDockview?.activatePanel("compare");
     requestRangeDiff({ ...inputs, ignoreWhitespace: false });
+    return;
+  }
+  if (cwdPickerDiffBase.required && !cwdPickerDiffBase.value.trim()) {
+    setCwdPickerError("This selected commit has no available parent. Choose an explicit Base ref for Advanced Compare.");
+    cwdPickerDiffBase.focus();
     return;
   }
   const base = cwdPickerDiffBase.value.trim() || "HEAD";

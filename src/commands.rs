@@ -332,6 +332,7 @@ pub(crate) async fn handle_client_message_for_connection(
             request_id,
             session_id,
             repo_id,
+            history_ref,
             cursor,
         } => {
             handle_git_history_request(
@@ -341,6 +342,7 @@ pub(crate) async fn handle_client_message_for_connection(
                 request_id,
                 session_id,
                 repo_id,
+                history_ref,
                 cursor,
             )
             .await
@@ -3500,6 +3502,7 @@ async fn handle_git_history_request(
     request_id: String,
     session_id: String,
     repo_id: Option<String>,
+    history_ref: Option<String>,
     cursor: Option<String>,
 ) -> Vec<ServerMessage> {
     let mut jobs = state.diff_jobs.write().await;
@@ -3521,7 +3524,12 @@ async fn handle_git_history_request(
                     .or_else(|| repos.first()),
             }
             .ok_or_else(|| anyhow!("selected repository is not available in this session"))?;
-            crate::diff::list_git_history(Path::new(&selected.repo_root), cursor.as_deref()).await
+            crate::diff::list_git_history(
+                Path::new(&selected.repo_root),
+                history_ref.as_deref(),
+                cursor.as_deref(),
+            )
+            .await
         };
         let result = tokio::time::timeout(Duration::from_secs(15), operation)
             .await

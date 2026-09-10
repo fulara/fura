@@ -330,6 +330,10 @@ export type GitHistoryPage = {
   branch: string | null;
   headOid: string | null;
   historyHeadOid: string | null;
+  historyRef: string | null;
+  historyTipOid: string | null;
+  branches: GitRefSummary[] | null;
+  branchesTruncated: boolean;
   commits: DiffCommitSummary[];
   nextCursor: string | null;
 };
@@ -758,7 +762,7 @@ export type ClientMessage =
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }
   | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; changeKind: GitChangeKind; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
-  | { type: "git.history.request"; clientId: string; requestId: string; sessionId: string; repoId?: string | null; cursor?: string | null }
+  | { type: "git.history.request"; clientId: string; requestId: string; sessionId: string; repoId?: string | null; historyRef?: string | null; cursor?: string | null }
   | { type: "git.file.request"; clientId: string; requestId: string; repoRoot: string; commitOid: string; path: string }
   | { type: "git.rangeDiff.request"; clientId: string; requestId: string; repoRoot: string; base: string; old: string; new: string; ignoreWhitespace: boolean }
   | { type: "git.rangeDiff.cancel"; requestId: string }

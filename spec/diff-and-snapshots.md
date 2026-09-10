@@ -21,12 +21,31 @@ diff is against the first parent. Detached HEAD and unborn repositories have exp
 The detail pane shows the full commit message and OID, changed files, statistics, hunks,
 comments/questions and the existing wider-context controls.
 
-Pages contain at most 30 commits in topological order. The opaque cursor pins the traversal
-to its original HEAD; a branch movement cannot silently reorder a subsequent page.
-The browser retains a sliding window of at most 300 commits. Latest/Refresh restarts paging;
-Older/Newer commit navigation uses the loaded window, with Load older at its boundary.
-The selected commit remains independent of that window. View/repository/commit selection
-is restored per session and repository, including after a browser reload.
+**History branch** selects what is viewed, never what is checked out. HEAD is the
+default; options use fully qualified local `refs/heads/*` and locally stored
+`refs/remotes/*` names, excluding tags and symbolic aliases such as `origin/HEAD`.
+Local and remote labels remain distinct even when their short names collide.
+The first page includes at most 1,000 stored refs and explicitly reports a capped
+list; later pages retain those choices. Selected refs absent from that bounded
+list remain selectable through the retained selection.
+
+The checkout label always identifies actual HEAD. A separate viewed-ref/pinned-tip
+label identifies the history snapshot. Changing the viewed branch clears its pages,
+cursor and selected commit, then selects the first returned commit using the usual
+review flow. Choices and immutable selections are stored per session/repository in
+the existing sessionStorage key; legacy single-repository selections remain readable.
+Current changes continues to use actual HEAD/index/worktree, not the viewed branch.
+Dedicated review sessions and Range-diff are not branch-selector consumers.
+
+Pages contain at most 30 commits in topological order. The opaque v2 cursor binds
+canonical repository, selected ref, pinned tip OID and offset. A branch movement
+cannot silently reorder a subsequent page. Legacy, malformed or mismatched cursors
+require an explicit refresh. The browser retains at most 300 commits.
+Latest/Refresh resolves the viewed ref again and restarts paging without changing
+the selected immutable review. Older/Newer uses the loaded window, with Load older
+at its boundary. Deleted refs still permit existing pinned pages while their objects
+exist; refreshing a missing ref errors instead of falling back to HEAD. Detached or
+unborn checkout does not prevent browsing another valid branch.
 With focus inside History, `n` selects the next loaded row (older commit), and `p`
 the previous row (newer commit), without wrapping at the window boundaries.
 These shortcuts ignore editable fields, selects, modifiers and composition events;
@@ -37,6 +56,12 @@ request, session and repository; commit summaries additionally match the selecte
 Disconnects settle pending history/file reads. Returning to an interrupted selection
 reloads it instead of leaving an indefinite loading view. The pane can be expanded or
 popped out without losing selection or commit navigation.
+
+Advanced Compare obtains its Base/Head from the selected immutable review even
+after that commit leaves the loaded page. If no parent exists or is available,
+Base stays empty and must be chosen explicitly; checkout HEAD is never invented
+as that commit's parent. The ordinary history review still uses the empty tree
+for an initial commit.
 
 Desktop chrome is compact: repository selector, branch/HEAD and view navigation share
 one header (two rows in narrow panels). **Review options** is a native disclosure for
@@ -104,6 +129,11 @@ They do not modify the index, branch, working files, Git objects or existing sna
 Git reads use literal pathspecs and disable optional index locks, fsmonitor, external diff
 drivers, textconv and signature display. They inspect stored objects, ignoring `refs/replace`,
 consistently with the immutable blob reader. Agent-review prompts state this inspection policy.
+Read-only Git subprocesses also clear inherited Git repository/index/object/config
+redirections and disable lazy fetching and all transports. Missing promised objects
+produce explicit errors, including in selected-commit patches and immutable file
+previews; browsing never downloads them. This requires installed Git support for
+`--no-lazy-fetch`. Existing mutation command invocation semantics are unchanged.
 Output and previews are bounded; unsupported non-UTF-8 paths fail explicitly.
 
 Working-tree reads conservatively refuse repositories with active clean/process filters
@@ -249,6 +279,10 @@ notices, which trigger a fresh repository summary. `compareDiff.*`, `diff.conten
 `diff.cancel` remain separate. Snapshot commands, DTOs and `missingSnapshot` are removed.
 
 `git.history.request` / `git.history` carry bounded history pages and opaque cursors.
+Optional `historyRef` defaults to HEAD when absent/null and is validated within the
+session-authorized repository. Results retain actual `branch`/`headOid`, echo
+`historyRef`, expose current `historyTipOid` separately from pinned `historyHeadOid`,
+and include first-page `branches` plus `branchesTruncated` (null list on later pages).
 `git.file.request` / `git.file` carry immutable committed-file previews. Both have
 client/request correlation and connection-owned jobs; replacement requests and socket
 closure abort their owners. `sessionChanges.request.currentCommitOid` selects an immutable

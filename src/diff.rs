@@ -9,6 +9,7 @@ use std::{
 };
 
 use anyhow::{Context, anyhow, bail};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use git2::Repository;
 use tokio::{io::AsyncReadExt, process::Command, time};
 use uuid::Uuid;
@@ -2671,13 +2672,86 @@ async fn read_commit_summary(repo: &Path, oid: &str) -> anyhow::Result<DiffCommi
     })
 }
 
+fn validate_history_ref(history_ref: &str) -> anyhow::Result<()> {
+    if history_ref.len() > 1024
+        || !git2::Reference::is_valid_name(history_ref)
+        || !(history_ref.starts_with("refs/heads/") || history_ref.starts_with("refs/remotes/"))
+    {
+        bail!("History requires a fully qualified local or remote branch ref");
+    }
+    Ok(())
+}
+
+async fn list_history_branches(repo_root: &Path) -> anyhow::Result<(Vec<GitRefSummary>, bool)> {
+    let output = git_stdout(
+        repo_root,
+        &[
+            "for-each-ref",
+            "--count=1001",
+            "--sort=refname",
+            "--format=%(refname)%00%(objectname)%00%(symref)",
+            "refs/heads/",
+            "refs/remotes/",
+        ],
+        MAX_GIT_OUTPUT_BYTES,
+    )
+    .await?;
+    let mut branches = Vec::new();
+    let mut lines = output.lines();
+    for line in lines.by_ref().take(1000) {
+        let mut fields = line.split('\0');
+        let (Some(name), Some(oid), Some(symbolic)) = (fields.next(), fields.next(), fields.next())
+        else {
+            bail!("Invalid Git branch listing");
+        };
+        if !symbolic.is_empty() || validate_history_ref(name).is_err() {
+            continue;
+        }
+        validate_commit_oid(oid)?;
+        branches.push(GitRefSummary {
+            name: name.to_string(),
+            short_name: short_ref_name(name),
+            ref_kind: ref_kind_for_name(name),
+            oid: oid.to_string(),
+        });
+    }
+    Ok((branches, lines.next().is_some()))
+}
+
 pub(crate) async fn list_git_history(
     repo: &Path,
+    history_ref: Option<&str>,
     cursor: Option<&str>,
 ) -> anyhow::Result<GitHistoryPage> {
     time::timeout(GIT_TIMEOUT, async {
+        if let Some(history_ref) = history_ref {
+            validate_history_ref(history_ref)?;
+        }
         let repo_root = discover_repo_root(&repo.display().to_string())?;
-        let (branch, head_oid) = {
+        let root = repo_root.display().to_string();
+        let (history_head_oid, offset) = if let Some(cursor) = cursor {
+            let invalid = || anyhow!("Invalid or mismatched Git history cursor; refresh history");
+            if cursor.len() > 32_768 {
+                return Err(invalid());
+            }
+            let encoded = cursor.strip_prefix("v2:").ok_or_else(invalid)?;
+            let bytes = URL_SAFE_NO_PAD.decode(encoded).map_err(|_| invalid())?;
+            let (cursor_root, cursor_ref, head, offset): (String, Option<String>, String, usize) =
+                serde_json::from_slice(&bytes).map_err(|_| invalid())?;
+            if cursor_root != root
+                || cursor_ref.as_deref() != history_ref
+                || validate_commit_oid(&head).is_err()
+                || offset == 0
+                || offset > usize::MAX - 30
+                || !offset.is_multiple_of(30)
+            {
+                return Err(invalid());
+            }
+            (Some(head), offset)
+        } else {
+            (None, 0)
+        };
+        let (branch, head_oid, history_tip_oid) = {
             let repository = Repository::open(&repo_root)?;
             let branch = repository
                 .find_reference("HEAD")?
@@ -2688,31 +2762,40 @@ pub(crate) async fn list_git_history(
                 Err(error) if error.code() == git2::ErrorCode::UnbornBranch => None,
                 Err(error) => return Err(error.into()),
             };
-            (branch, head)
+            let tip = if let Some(name) = history_ref {
+                match repository.find_reference(name) {
+                    Ok(reference) => Some(
+                        reference
+                            .target()
+                            .ok_or_else(|| {
+                                anyhow!("Symbolic branch aliases cannot select history")
+                            })?
+                            .to_string(),
+                    ),
+                    Err(error) if error.code() == git2::ErrorCode::NotFound && cursor.is_some() => {
+                        None
+                    }
+                    Err(error) => {
+                        return Err(anyhow!("History branch is unavailable: {name}: {error}"));
+                    }
+                }
+            } else {
+                head.clone()
+            };
+            (branch, head, tip)
         };
-        let (history_head_oid, offset) = if let Some(cursor) = cursor {
-            let fields: Vec<_> = cursor.split(':').collect();
-            if fields.len() != 3 || fields[0] != "v1" {
-                bail!("Invalid Git history cursor; refresh history");
-            }
-            validate_commit_oid(fields[1])?;
-            let offset: usize = fields[2]
-                .parse()
-                .context("Invalid Git history cursor offset")?;
-            if offset == 0 || offset > usize::MAX - 30 || !offset.is_multiple_of(30) {
-                bail!("Invalid Git history cursor offset; refresh history");
-            }
-            (Some(fields[1].to_string()), offset)
+        let history_head_oid = if cursor.is_some() {
+            history_head_oid
         } else {
-            (head_oid.clone(), 0)
+            history_tip_oid.clone()
         };
         let mut commits = Vec::new();
         let mut next_cursor = None;
         if let Some(head) = &history_head_oid {
-            // The cursor's HEAD remains fixed even if the live branch advances or resets.
-            if cursor.is_some() {
-                read_commit_summary(&repo_root, head).await?;
-            }
+            // A cursor retains its stored commit even after the selected ref moves or disappears.
+            read_commit_summary(&repo_root, head)
+                .await
+                .context("History commit is unavailable; refresh history")?;
             let revs = git_stdout(
                 &repo_root,
                 &[
@@ -2731,14 +2814,25 @@ pub(crate) async fn list_git_history(
                 commits.push(read_commit_summary(&repo_root, oid).await?);
             }
             if oids.len() > 30 {
-                next_cursor = Some(format!("v1:{head}:{}", offset + 30));
+                let bytes = serde_json::to_vec(&(&root, history_ref, head, offset + 30))?;
+                next_cursor = Some(format!("v2:{}", URL_SAFE_NO_PAD.encode(bytes)));
             }
         }
+        let (branches, branches_truncated) = if cursor.is_none() {
+            let (branches, truncated) = list_history_branches(&repo_root).await?;
+            (Some(branches), truncated)
+        } else {
+            (None, false)
+        };
         Ok(GitHistoryPage {
-            repo_root: repo_root.display().to_string(),
+            repo_root: root,
             branch,
             head_oid,
             history_head_oid,
+            history_ref: history_ref.map(str::to_string),
+            history_tip_oid,
+            branches,
+            branches_truncated,
             commits,
             next_cursor,
         })
@@ -3155,8 +3249,19 @@ async fn git_stdout_limited(
         .copied()
         .unwrap_or_default();
     if !matches!(subcommand, "rebase" | "checkout" | "worktree") {
-        // A review's OID must identify stored objects, consistently with libgit2 blob reads.
-        command.env("GIT_NO_REPLACE_OBJECTS", "1");
+        // Match immutable libgit2 reads: only local stored objects in the selected repository.
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                command.env_remove(key);
+            }
+        }
+        command
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_ALLOW_PROTOCOL", "")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["--no-lazy-fetch", "-c", "protocol.allow=never"])
+            .stdin(Stdio::null());
     }
     let diff_index = if matches!(args.first(), Some(&"diff" | &"diff-tree")) {
         Some(0)
@@ -4762,6 +4867,339 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_ref_json_dispatch_reads_topic_not_checked_out_main() {
+        let (temp, repo, root, head) = test_repo();
+        git(&repo, &["branch", "topic", &root]);
+        let before = repository_bytes(&repo);
+        let state = crate::tests::test_state(16, None);
+        state.sessions.write().await.insert(
+            "history-topic".into(),
+            diff_test_record("history-topic", &repo, &temp.path().join("session.jsonl")),
+        );
+        let mut events = state.events.subscribe();
+        for (selected, expected) in [
+            (Some(serde_json::json!("refs/heads/topic")), &root),
+            (None, &head),
+            (Some(serde_json::Value::Null), &head),
+        ] {
+            let mut request = serde_json::json!({
+                "type": "git.history.request",
+                "clientId": "history-client",
+                "requestId": "topic-request",
+                "sessionId": "history-topic"
+            });
+            if let Some(selected) = selected {
+                request["historyRef"] = selected;
+            }
+            let message: ClientMessage = serde_json::from_value(request).unwrap();
+            assert!(
+                crate::commands::handle_client_message_for_connection(&state, message, 91)
+                    .await
+                    .is_empty()
+            );
+            let event = time::timeout(Duration::from_secs(20), async {
+                loop {
+                    let event = events.recv().await.unwrap();
+                    if matches!(event, ServerMessage::GitHistory { .. }) {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            let ServerMessage::GitHistory { page, error, .. } = event else {
+                unreachable!();
+            };
+            assert!(error.is_none(), "{error:?}");
+            let page = page.unwrap();
+            assert_eq!(
+                &page.commits[0].oid, expected,
+                "historyRef must select topic, not HEAD"
+            );
+            assert_eq!(page.head_oid.as_deref(), Some(head.as_str()));
+            assert_eq!(page.branch.as_deref(), Some("main"));
+        }
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn history_ref_pins_local_remote_and_deleted_branches_without_checkout() {
+        let (_temp, repo, root, head) = test_repo();
+        let topic = {
+            let repository = Repository::open(&repo).unwrap();
+            let signature =
+                git2::Signature::now("History Tester", "history@example.invalid").unwrap();
+            let mut tip = git2::Oid::from_str(&root).unwrap();
+            for index in 0..34 {
+                let parent = repository.find_commit(tip).unwrap();
+                tip = repository
+                    .commit(
+                        None,
+                        &signature,
+                        &signature,
+                        &format!("topic {index}"),
+                        &parent.tree().unwrap(),
+                        &[&parent],
+                    )
+                    .unwrap();
+            }
+            repository
+                .reference("refs/heads/topic", tip, false, "fixture")
+                .unwrap();
+            repository
+                .reference("refs/remotes/origin/topic", tip, false, "fixture")
+                .unwrap();
+            repository
+                .reference_symbolic("refs/heads/alias", "refs/heads/topic", false, "fixture")
+                .unwrap();
+            repository
+                .reference_symbolic(
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/topic",
+                    false,
+                    "fixture",
+                )
+                .unwrap();
+            tip.to_string()
+        };
+        git(&repo, &["tag", "topic", &head]);
+        write_file(&repo, "src/lib.rs", "staged fixture\n");
+        git(&repo, &["add", "src/lib.rs"]);
+        write_file(&repo, "src/lib.rs", "unstaged fixture\n");
+        write_file(&repo, "untracked", "keep\n");
+        let before = repository_bytes(&repo);
+        let expected: Vec<String> =
+            git_output(&repo, &["rev-list", "--topo-order", "refs/heads/topic"])
+                .lines()
+                .map(str::to_string)
+                .collect();
+        let first = list_git_history(&repo.join("src"), Some("refs/heads/topic"), None)
+            .await
+            .unwrap();
+        assert_eq!(first.commits[0].oid, topic);
+        assert_eq!(first.history_ref.as_deref(), Some("refs/heads/topic"));
+        assert_eq!(first.history_head_oid.as_deref(), Some(topic.as_str()));
+        assert_eq!(first.history_tip_oid.as_deref(), Some(topic.as_str()));
+        assert_eq!(first.head_oid.as_deref(), Some(head.as_str()));
+        assert_eq!(first.branch.as_deref(), Some("main"));
+        let branches = first.branches.as_ref().unwrap();
+        assert_eq!(
+            branches
+                .iter()
+                .map(|branch| branch.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "refs/heads/main",
+                "refs/heads/topic",
+                "refs/remotes/origin/topic"
+            ]
+        );
+        assert_eq!(branches[1].oid, topic);
+        assert_eq!(branches[2].ref_kind, DiffRefKind::Remote);
+        let remote = list_git_history(&repo, Some("refs/remotes/origin/topic"), None)
+            .await
+            .unwrap();
+        assert_eq!(remote.commits[0].oid, topic);
+        for name in [
+            "",
+            "HEAD",
+            "topic",
+            "--all",
+            "refs/tags/topic",
+            "refs/heads/topic~1",
+            "refs/heads/topic^{commit}",
+            "refs/heads/topic:src/lib.rs",
+            "refs/heads/../topic",
+            "refs/heads/topic@{0}",
+            "refs/heads/topic\n",
+            "refs/heads/alias",
+            "refs/remotes/origin/HEAD",
+            "refs/heads/missing",
+        ] {
+            assert!(
+                list_git_history(&repo, Some(name), None).await.is_err(),
+                "{name:?}"
+            );
+        }
+        let cursor = first.next_cursor.as_deref().unwrap();
+        for selected in [
+            None,
+            Some("refs/heads/main"),
+            Some("refs/remotes/origin/topic"),
+        ] {
+            assert!(
+                list_git_history(&repo, selected, Some(cursor))
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("refresh")
+            );
+        }
+        let foreign = TempDir::new().unwrap();
+        Repository::init(foreign.path()).unwrap();
+        assert!(
+            list_git_history(foreign.path(), Some("refs/heads/topic"), Some(cursor))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("refresh")
+        );
+        assert_eq!(before, repository_bytes(&repo));
+
+        git(&repo, &["update-ref", "refs/heads/topic", &root]);
+        let before = repository_bytes(&repo);
+        let moved = list_git_history(&repo, Some("refs/heads/topic"), Some(cursor))
+            .await
+            .unwrap();
+        assert_eq!(moved.history_head_oid.as_deref(), Some(topic.as_str()));
+        assert_eq!(moved.history_tip_oid.as_deref(), Some(root.as_str()));
+        assert!(moved.branches.is_none());
+        let actual: Vec<_> = first
+            .commits
+            .iter()
+            .chain(&moved.commits)
+            .map(|commit| commit.oid.clone())
+            .collect();
+        assert_eq!(actual, expected);
+        let latest = list_git_history(&repo, Some("refs/heads/topic"), None)
+            .await
+            .unwrap();
+        assert_eq!(latest.commits[0].oid, root);
+        assert_eq!(latest.history_head_oid.as_deref(), Some(root.as_str()));
+        assert_eq!(before, repository_bytes(&repo));
+
+        git(&repo, &["update-ref", "-d", "refs/heads/topic"]);
+        let before = repository_bytes(&repo);
+        let deleted = list_git_history(&repo, Some("refs/heads/topic"), Some(cursor))
+            .await
+            .unwrap();
+        assert!(deleted.history_tip_oid.is_none());
+        assert_eq!(deleted.history_head_oid.as_deref(), Some(topic.as_str()));
+        assert_eq!(
+            deleted
+                .commits
+                .iter()
+                .map(|commit| &commit.oid)
+                .collect::<Vec<_>>(),
+            moved
+                .commits
+                .iter()
+                .map(|commit| &commit.oid)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            list_git_history(&repo, Some("refs/heads/topic"), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(before, repository_bytes(&repo));
+
+        let repository = Repository::open(&repo).unwrap();
+        repository
+            .set_head_detached(git2::Oid::from_str(&head).unwrap())
+            .unwrap();
+        drop(repository);
+        let before = repository_bytes(&repo);
+        let detached = list_git_history(&repo, Some("refs/remotes/origin/topic"), None)
+            .await
+            .unwrap();
+        assert!(detached.branch.is_none());
+        assert_eq!(detached.head_oid.as_deref(), Some(head.as_str()));
+        assert_eq!(detached.commits[0].oid, topic);
+        assert_eq!(before, repository_bytes(&repo));
+        Repository::open(&repo)
+            .unwrap()
+            .set_head("refs/heads/unborn")
+            .unwrap();
+        let before = repository_bytes(&repo);
+        let unborn = list_git_history(&repo, None, None).await.unwrap();
+        assert!(unborn.head_oid.is_none() && unborn.history_tip_oid.is_none());
+        assert!(unborn.commits.is_empty());
+        let selected = list_git_history(&repo, Some("refs/remotes/origin/topic"), None)
+            .await
+            .unwrap();
+        assert_eq!(selected.branch.as_deref(), Some("unborn"));
+        assert!(selected.head_oid.is_none());
+        assert_eq!(selected.commits[0].oid, topic);
+        assert!(
+            list_git_history(&repo, Some("refs/heads/unborn"), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn history_ref_bounds_listing_and_rejects_malformed_v2_cursors() {
+        let (_temp, repo, _root, head) = test_repo();
+        {
+            let repository = Repository::open(&repo).unwrap();
+            let oid = git2::Oid::from_str(&head).unwrap();
+            for index in 0..1005 {
+                repository
+                    .reference(
+                        &format!("refs/heads/branch-{index:04}"),
+                        oid,
+                        false,
+                        "fixture",
+                    )
+                    .unwrap();
+            }
+        }
+        let before = repository_bytes(&repo);
+        let page = list_git_history(&repo, None, None).await.unwrap();
+        assert_eq!(
+            serde_json::to_value(&page).unwrap()["branchesTruncated"],
+            true
+        );
+        assert_eq!(page.branches.unwrap().len(), 1000);
+        let selected = list_git_history(&repo, Some("refs/heads/main"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            selected.commits[0].oid, head,
+            "a branch beyond the listing cap remains selectable"
+        );
+        let canonical = repo.canonicalize().unwrap().display().to_string();
+        let encode = |value: serde_json::Value| {
+            format!(
+                "v2:{}",
+                URL_SAFE_NO_PAD.encode(serde_json::to_vec(&value).unwrap())
+            )
+        };
+        let tree = git_output(&repo, &["rev-parse", "HEAD^{tree}"]);
+        assert_eq!(before, repository_bytes(&repo));
+        git(
+            &repo,
+            &["tag", "-a", "annotated-history", "-m", "tag", &head],
+        );
+        let tag = git_output(&repo, &["rev-parse", "refs/tags/annotated-history"]);
+        let after_tag = repository_bytes(&repo);
+        for cursor in [
+            format!("v1:{head}:30"),
+            "v2:invalid".into(),
+            encode(serde_json::json!([canonical, null, head, 0])),
+            encode(serde_json::json!([canonical, null, head, 1])),
+            encode(serde_json::json!([canonical, null, head, u64::MAX])),
+            encode(serde_json::json!([canonical, null, "HEAD", 30])),
+            encode(serde_json::json!([canonical, null, head, 30, "extra"])),
+            encode(serde_json::json!([canonical, null, tree, 30])),
+            encode(serde_json::json!([canonical, null, tag, 30])),
+            encode(serde_json::json!([canonical, null, "0".repeat(40), 30])),
+        ] {
+            assert!(
+                list_git_history(&repo, None, Some(&cursor))
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("refresh"),
+                "{cursor}"
+            );
+        }
+        assert_eq!(after_tag, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
     async fn history_pages_pin_merge_traversal_across_refresh_and_detached_head() {
         let (_temp, repo, root, _) = test_repo();
         git(&repo, &["checkout", "-b", "side", &root]);
@@ -4781,7 +5219,9 @@ mod tests {
             .map(str::to_string)
             .collect();
         let before = repository_bytes(&repo);
-        let first = list_git_history(&repo.join("src"), None).await.unwrap();
+        let first = list_git_history(&repo.join("src"), None, None)
+            .await
+            .unwrap();
         assert_eq!(
             first.repo_root,
             repo.canonicalize().unwrap().display().to_string()
@@ -4793,7 +5233,7 @@ mod tests {
         assert_eq!(before, repository_bytes(&repo));
         git(&repo, &["commit", "--allow-empty", "-m", "new live head"]);
         let live = git_output(&repo, &["rev-parse", "HEAD"]);
-        let next = list_git_history(&repo, first.next_cursor.as_deref())
+        let next = list_git_history(&repo, None, first.next_cursor.as_deref())
             .await
             .unwrap();
         assert_eq!(next.head_oid.as_deref(), Some(live.as_str()));
@@ -4808,14 +5248,14 @@ mod tests {
         assert_eq!(actual, expected);
         assert!(actual.contains(&side));
         assert_eq!(
-            list_git_history(&repo, None).await.unwrap().commits[0].oid,
+            list_git_history(&repo, None, None).await.unwrap().commits[0].oid,
             live
         );
         git(&repo, &["checkout", "--detach", &root]);
-        let detached = list_git_history(&repo, None).await.unwrap();
+        let detached = list_git_history(&repo, None, None).await.unwrap();
         assert!(detached.branch.is_none());
         assert_eq!(detached.commits[0].oid, root);
-        let pinned = list_git_history(&repo, first.next_cursor.as_deref())
+        let pinned = list_git_history(&repo, None, first.next_cursor.as_deref())
             .await
             .unwrap();
         assert_eq!(
@@ -4836,7 +5276,7 @@ mod tests {
             &format!("v1:{head}:1"),
             &format!("v1:{head}:18446744073709551615"),
         ] {
-            assert!(list_git_history(&repo, Some(cursor)).await.is_err());
+            assert!(list_git_history(&repo, None, Some(cursor)).await.is_err());
         }
     }
 
@@ -4844,7 +5284,7 @@ mod tests {
     async fn history_handles_unborn_and_rejects_non_commit_selections() {
         let temp = TempDir::new().unwrap();
         git(temp.path(), &["init", "-b", "main"]);
-        let page = list_git_history(temp.path(), None).await.unwrap();
+        let page = list_git_history(temp.path(), None, None).await.unwrap();
         assert_eq!(page.branch.as_deref(), Some("main"));
         assert!(page.head_oid.is_none() && page.history_head_oid.is_none());
         assert!(page.commits.is_empty() && page.next_cursor.is_none());
@@ -4868,10 +5308,195 @@ mod tests {
         git(&repo, &["tag", "-a", "annotated", "-m", "tag", &head]);
         let tag = git_output(&repo, &["rev-parse", "annotated"]);
         assert!(
-            list_git_history(&repo, Some(&format!("v1:{tag}:30")))
+            list_git_history(&repo, None, Some(&format!("v1:{tag}:30")))
                 .await
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn history_ref_missing_promisor_objects_never_fetch_or_mutate() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_temp, repo, base, head) = test_repo();
+        let blob = git_output(&repo, &["rev-parse", "HEAD:src/lib.rs"]);
+        fs::remove_file(repo.join(".git/objects").join(&blob[..2]).join(&blob[2..])).unwrap();
+        let probes = TempDir::new().unwrap();
+        let marker = probes.path().join("fetched");
+        let helper = probes.path().join("transport");
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nprintf fetched > '{}'\nexit 1\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o755)).unwrap();
+        git(
+            &repo,
+            &[
+                "config",
+                "remote.origin.url",
+                &format!("ext::{}", helper.display()),
+            ],
+        );
+        git(&repo, &["config", "remote.origin.promisor", "true"]);
+        git(
+            &repo,
+            &["config", "remote.origin.partialclonefilter", "blob:none"],
+        );
+        git(&repo, &["config", "extensions.partialClone", "origin"]);
+        git(&repo, &["config", "protocol.ext.allow", "always"]);
+        // The only possible transport is this disposable marker script, never a network remote.
+        let mut control = StdCommand::new("git");
+        for (key, _) in std::env::vars_os() {
+            if key.to_string_lossy().starts_with("GIT_") {
+                control.env_remove(key);
+            }
+        }
+        let output = control
+            .current_dir(&repo)
+            .args(["show", &format!("{head}:src/lib.rs")])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(
+            marker.exists(),
+            "the unhardened fixture must attempt lazy fetch"
+        );
+        fs::remove_file(&marker).unwrap();
+        let before = repository_bytes(&repo);
+        let page = list_git_history(&repo, Some("refs/heads/main"), None)
+            .await
+            .unwrap();
+        assert_eq!(page.commits[0].oid, head);
+        assert!(
+            generate_file_patch(
+                &repo,
+                &base,
+                &head,
+                &DiffFileSelector {
+                    old_path: None,
+                    new_path: "src/lib.rs".into(),
+                },
+                3
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            read_git_file(repo.to_str().unwrap(), &head, "src/lib.rs")
+                .await
+                .is_err()
+        );
+        assert!(!marker.exists());
+        assert_eq!(before, repository_bytes(&repo));
+        let missing_tip = {
+            let repository = Repository::open(&repo).unwrap();
+            let parent = repository
+                .find_commit(git2::Oid::from_str(&head).unwrap())
+                .unwrap();
+            let signature =
+                git2::Signature::now("History Tester", "history@example.invalid").unwrap();
+            let tip = repository
+                .commit(
+                    Some("refs/heads/missing-tip"),
+                    &signature,
+                    &signature,
+                    "promised commit",
+                    &parent.tree().unwrap(),
+                    &[&parent],
+                )
+                .unwrap()
+                .to_string();
+            fs::remove_file(repo.join(".git/objects").join(&tip[..2]).join(&tip[2..])).unwrap();
+            tip
+        };
+        let before = repository_bytes(&repo);
+        assert!(
+            list_git_history(&repo, Some("refs/heads/missing-tip"), None)
+                .await
+                .is_err()
+        );
+        assert!(read_commit_summary(&repo, &missing_tip).await.is_err());
+        assert!(!marker.exists());
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn history_ref_ignores_inherited_git_redirections() {
+        const CHILD: &str = "FURA_HISTORY_ENV_TEST_REPO";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let repo = PathBuf::from(path);
+            let expected = std::env::var("FURA_HISTORY_ENV_TEST_HEAD").unwrap();
+            let before = repository_bytes(&repo);
+            let page = list_git_history(&repo, Some("refs/heads/main"), None)
+                .await
+                .unwrap();
+            assert_eq!(
+                page.repo_root,
+                repo.canonicalize().unwrap().display().to_string()
+            );
+            assert_eq!(page.commits[0].oid, expected);
+            let parent = &page.commits[0].parent_oids[0];
+            let patch = generate_file_patch(
+                &repo,
+                parent,
+                &expected,
+                &DiffFileSelector {
+                    old_path: None,
+                    new_path: "src/lib.rs".into(),
+                },
+                3,
+            )
+            .await
+            .unwrap()
+            .0;
+            assert!(patch.contains("+pub fn value() -> i32 { 2 }"));
+            assert_eq!(
+                read_git_file(repo.to_str().unwrap(), &expected, "src/lib.rs")
+                    .await
+                    .unwrap()
+                    .text,
+                "pub fn value() -> i32 { 2 }\n"
+            );
+            assert_eq!(before, repository_bytes(&repo));
+            return;
+        }
+        let (_temp, repo, _, head) = test_repo();
+        let (_other_temp, other, _, _) = test_repo();
+        write_file(&other, "src/lib.rs", "foreign repository\n");
+        git(&other, &["commit", "-am", "foreign"]);
+        let before = repository_bytes(&repo);
+        let other_before = repository_bytes(&other);
+        let output = StdCommand::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "diff::tests::history_ref_ignores_inherited_git_redirections",
+                "--nocapture",
+            ])
+            .env(CHILD, &repo)
+            .env("FURA_HISTORY_ENV_TEST_HEAD", &head)
+            .env("GIT_DIR", other.join(".git"))
+            .env("GIT_COMMON_DIR", other.join(".git"))
+            .env("GIT_WORK_TREE", &other)
+            .env("GIT_INDEX_FILE", other.join(".git/index"))
+            .env("GIT_OBJECT_DIRECTORY", other.join(".git/objects"))
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.fsmonitor")
+            .env("GIT_CONFIG_VALUE_0", "false")
+            .env("GIT_EXEC_PATH", "/nonexistent-git-exec-path")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(before, repository_bytes(&repo));
+        assert_eq!(other_before, repository_bytes(&other));
     }
 
     #[cfg(unix)]
@@ -4913,7 +5538,7 @@ mod tests {
                 .is_err()
         );
         assert!(mutable_identity(&repo, &head, "worktree").await.is_err());
-        let page = list_git_history(&repo, None).await.unwrap();
+        let page = list_git_history(&repo, None, None).await.unwrap();
         assert_eq!(page.commits[0].oid, head);
         let state = crate::tests::test_state(8, None);
         let prepared = prepare_commit_review(
@@ -5037,7 +5662,7 @@ mod tests {
             &repo,
             &["config", "gpg.program", verifier.to_str().unwrap()],
         );
-        let result = list_git_history(&repo, None).await;
+        let result = list_git_history(&repo, None, None).await;
         assert!(!marker.exists(), "history ran configured gpg.program");
         assert_eq!(result.unwrap().commits[0].subject, "Signed review fixture");
     }
@@ -5052,7 +5677,7 @@ mod tests {
         git(&repo, &["checkout", "main"]);
         git(&repo, &["replace", &head, &replacement]);
         let before = repository_bytes(&repo);
-        let history = list_git_history(&repo, None).await.unwrap();
+        let history = list_git_history(&repo, None, None).await.unwrap();
         assert_eq!(history.commits[0].subject, "change value");
         let patch = generate_file_patch(
             &repo,

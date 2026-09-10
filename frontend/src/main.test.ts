@@ -282,6 +282,49 @@ async function createPendingHarness() {
   return { connection: connections[0] };
 }
 
+describe("pinned History Advanced Compare", () => {
+  it("uses the selected review parent after Latest moves that commit outside the loaded page", async () => {
+    const { connection } = await createHarness();
+    const parent = "a".repeat(40), selected = "b".repeat(40), latest = "c".repeat(40);
+    const commit = { oid: selected, shortOid: selected.slice(0, 12), subject: "Pinned selected commit", message: "Pinned selected commit", parentOids: [parent], committedAt: "2025-01-01T00:00:00Z", isMerge: false };
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const answerHistory = (oid: string) => {
+      const request = [...connection.sent].reverse().find(message => message.type === "git.history.request");
+      if (!request || request.type !== "git.history.request") throw new Error("History request missing");
+      connection.emit({ type: "git.history", targetClientId: request.clientId, requestId: request.requestId, sessionId: "live", error: null,
+        page: { repoRoot: "/repo", branch: "main", headOid: oid, historyHeadOid: oid, historyRef: null, historyTipOid: oid, branches: [], branchesTruncated: false,
+          commits: [{ ...commit, oid, shortOid: oid.slice(0, 12) }], nextCursor: null } });
+    };
+    const click = (text: string) => {
+      const button = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")].find(button => button.textContent === text);
+      if (!button) throw new Error(`Button missing: ${text}`);
+      button.click();
+    };
+    answerHistory(selected);
+    click("History");
+    const request = [...connection.sent].reverse().find(message => message.type === "sessionChanges.request");
+    if (!request || request.type !== "sessionChanges.request") throw new Error("Selected review request missing");
+    expect(request.currentCommitOid).toBe(selected);
+    const base = sessionChangesState("live");
+    if (base.status !== "ready") throw new Error("Review fixture missing");
+    connection.emit({ type: "sessionChanges.summary", state: {
+      ...base, targetClientId: request.clientId, diffId: request.diffId,
+      request: { ...base.request, scope: "sessionChanges", sessionId: "live", changeKind: "unstaged", clientId: request.clientId, diffId: request.diffId, repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: selected },
+      comparison: { ...base.comparison, base: { kind: "commit", oid: parent, shortOid: parent.slice(0, 12) }, head: { kind: "commit", oid: selected, shortOid: selected.slice(0, 12) },
+        leftTreeOrCommit: parent, rightTreeOrCommit: selected, currentCommitOid: selected, comparisonKey: "pinned-review" },
+      review: { commits: [commit], currentCommitOid: selected, currentCommitIndex: 0, previousCommitOid: parent },
+    } });
+    click("Latest");
+    answerHistory(latest);
+    expect(document.querySelector(`[data-commit-oid="${selected}"]`)).toBeNull();
+    click("Advanced Compare");
+    expect(document.querySelector<HTMLInputElement>("#cwdPickerDiffHead")!.value).toBe(selected);
+    expect(document.querySelector<HTMLInputElement>("#cwdPickerDiffBase")!.value).toBe(parent);
+  });
+});
+
 
 describe("auth gate", () => {
   beforeEach(() => {
