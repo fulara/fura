@@ -270,6 +270,8 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::SessionChangesRequest { .. } => "sessionChanges.request",
         ClientMessage::GitHistoryRequest { .. } => "git.history.request",
         ClientMessage::GitFileRequest { .. } => "git.file.request",
+        ClientMessage::GitRangeDiffRequest { .. } => "git.rangeDiff.request",
+        ClientMessage::GitRangeDiffCancel { .. } => "git.rangeDiff.cancel",
         ClientMessage::SessionReposUpdate { .. } => "sessionRepos.update",
         ClientMessage::CompareDiffRequest { .. } => "compareDiff.request",
         ClientMessage::DiffCancel { .. } => "diff.cancel",
@@ -653,6 +655,7 @@ pub(crate) async fn handle_socket(
     };
 
     run.await;
+    crate::commands::cancel_git_range_diff(&state, connection_id, None).await;
     if let Some(job) = state
         .diff_jobs
         .write()
@@ -1238,6 +1241,7 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::SessionChangesSummary { .. } => "sessionChanges.summary",
         ServerMessage::GitHistory { .. } => "git.history",
         ServerMessage::GitFile { .. } => "git.file",
+        ServerMessage::GitRangeDiff { .. } => "git.rangeDiff",
         ServerMessage::CompareDiffSummary { .. } => "compareDiff.summary",
         ServerMessage::DiffContent { .. } => "diff.content",
         ServerMessage::DiffComplete { .. } => "diff.complete",
@@ -1481,6 +1485,19 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "git.file",
             request_id = %request_id,
             bytes = file.as_ref().map_or(0, |file| file.text.len()),
+            failed = error.is_some(),
+        ),
+        ServerMessage::GitRangeDiff {
+            request_id,
+            result,
+            error,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "git.rangeDiff",
+            request_id = %request_id,
+            bytes = result.as_ref().map_or(0, |result| result.output.len()),
+            truncated = result.as_ref().is_some_and(|result| result.truncated),
             failed = error.is_some(),
         ),
         ServerMessage::SessionChangesSummary { state } => info!(

@@ -443,6 +443,15 @@ export type SessionChangesSummaryState =
       repos: SessionRepoCandidate[];
     };
 
+export type GitRangeDiffResult = {
+  repoRoot: string;
+  base: { input: string; oid: string };
+  old: { input: string; oid: string };
+  new: { input: string; oid: string };
+  output: string;
+  truncated: boolean;
+};
+
 export type CompareDiffSummaryState = {
   targetClientId: string;
   diffId: string;
@@ -686,6 +695,7 @@ export type ServerMessage =
   | { type: "code.hover"; workspaceId: string; requestId: string; path: string; contents?: string | null; range?: CodeRange | null }
   | { type: "git.history"; targetClientId: string; requestId: string; sessionId: string; page: GitHistoryPage | null; error: string | null }
   | { type: "git.file"; targetClientId: string; requestId: string; file: GitFileContent | null; error: string | null }
+  | { type: "git.rangeDiff"; targetClientId: string; requestId: string; result: GitRangeDiffResult | null; error: string | null }
   | { type: "sessionChanges.summary"; state: SessionChangesSummaryState }
   | { type: "compareDiff.summary"; state: CompareDiffSummaryState }
   | { type: "diff.content"; content: DiffContentState }
@@ -749,6 +759,8 @@ export type ClientMessage =
   | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; changeKind: GitChangeKind; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
   | { type: "git.history.request"; clientId: string; requestId: string; sessionId: string; repoId?: string | null; cursor?: string | null }
   | { type: "git.file.request"; clientId: string; requestId: string; repoRoot: string; commitOid: string; path: string }
+  | { type: "git.rangeDiff.request"; clientId: string; requestId: string; repoRoot: string; base: string; old: string; new: string }
+  | { type: "git.rangeDiff.cancel"; requestId: string }
   | { type: "sessionRepos.update"; sessionId: string; action: SessionRepoAction; path: string }
   | { type: "compareDiff.request"; clientId: string; diffId: string; repoRoot: string; base: DiffRefInput; head: DiffRefInput; detailMode: DiffDetailMode; mergeBase?: boolean; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
   | { type: "diff.content.request"; clientId: string; diffId: string; scope: DiffScope; sessionId?: string | null; comparisonKey: string; selectedFile?: DiffFileSelector | null; contextLines?: number | null }

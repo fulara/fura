@@ -1,0 +1,84 @@
+.range-diff-view {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.range-diff-view .range-diff-output {
+  --range-diff-fg: #eef1f8;
+  --range-diff-bg: #111318;
+  margin: 0;
+  padding: 0.75rem;
+  max-width: 100%;
+  max-height: 70vh;
+  overflow: auto;
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
+  tab-size: 8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  font-synthesis: weight;
+  color: var(--range-diff-fg);
+  background: var(--range-diff-bg);
+  border: 1px solid var(--color-border-subtle, #252a35);
+  border-radius: 0.4rem;
+}
+
+.range-diff-view .range-diff-output span {
+  color: var(--range-diff-fg);
+  background-color: var(--range-diff-bg);
+}
+
+.range-diff-view .range-diff-output .range-diff-inverse {
+  color: var(--range-diff-bg);
+  background-color: var(--range-diff-fg);
+}
+
+.range-diff-view .range-diff-bold { font-weight: 700; }
+.range-diff-view .range-diff-dim { opacity: 0.65; }
+.range-diff-view .range-diff-fg-30 { --range-diff-fg: #353b48; }
+.range-diff-view .range-diff-fg-31 { --range-diff-fg: #ff8e96; }
+.range-diff-view .range-diff-fg-32 { --range-diff-fg: #80dca0; }
+.range-diff-view .range-diff-fg-33 { --range-diff-fg: #ffd681; }
+.range-diff-view .range-diff-fg-34 { --range-diff-fg: #8eb4ff; }
+.range-diff-view .range-diff-fg-35 { --range-diff-fg: #dda0ed; }
+.range-diff-view .range-diff-fg-36 { --range-diff-fg: #7dd8e6; }
+.range-diff-view .range-diff-fg-37 { --range-diff-fg: #d6dbea; }
+.range-diff-view .range-diff-fg-90 { --range-diff-fg: #8b95a8; }
+.range-diff-view .range-diff-fg-91 { --range-diff-fg: #ffb3b8; }
+.range-diff-view .range-diff-fg-92 { --range-diff-fg: #adf2bd; }
+.range-diff-view .range-diff-fg-93 { --range-diff-fg: #ffe7a6; }
+.range-diff-view .range-diff-fg-94 { --range-diff-fg: #b5cfff; }
+.range-diff-view .range-diff-fg-95 { --range-diff-fg: #ecc5f7; }
+.range-diff-view .range-diff-fg-96 { --range-diff-fg: #b0eff5; }
+.range-diff-view .range-diff-fg-97 { --range-diff-fg: #ffffff; }
+.range-diff-view .range-diff-bg-40 { --range-diff-bg: #353b48; }
+.range-diff-view .range-diff-bg-41 { --range-diff-bg: #ff8e96; }
+.range-diff-view .range-diff-bg-42 { --range-diff-bg: #80dca0; }
+.range-diff-view .range-diff-bg-43 { --range-diff-bg: #ffd681; }
+.range-diff-view .range-diff-bg-44 { --range-diff-bg: #8eb4ff; }
+.range-diff-view .range-diff-bg-45 { --range-diff-bg: #dda0ed; }
+.range-diff-view .range-diff-bg-46 { --range-diff-bg: #7dd8e6; }
+.range-diff-view .range-diff-bg-47 { --range-diff-bg: #d6dbea; }
+.range-diff-view .range-diff-bg-100 { --range-diff-bg: #8b95a8; }
+.range-diff-view .range-diff-bg-101 { --range-diff-bg: #ffb3b8; }
+.range-diff-view .range-diff-bg-102 { --range-diff-bg: #adf2bd; }
+.range-diff-view .range-diff-bg-103 { --range-diff-bg: #ffe7a6; }
+.range-diff-view .range-diff-bg-104 { --range-diff-bg: #b5cfff; }
+.range-diff-view .range-diff-bg-105 { --range-diff-bg: #ecc5f7; }
+.range-diff-view .range-diff-bg-106 { --range-diff-bg: #b0eff5; }
+.range-diff-view .range-diff-bg-107 { --range-diff-bg: #ffffff; }
+.range-diff-view .range-diff-output .range-diff-no-change {
+  color: var(--color-text-muted, #9ba4b5);
+}
+
+.range-diff-view .range-diff-notice {
+  margin: 0.5rem 0;
+  font-size: var(--font-size-small, 0.82rem);
+  color: var(--color-text-muted, #9ba4b5);
+}
+
+.range-diff-view .range-diff-truncated {
+  color: var(--color-warning, #ffd681);
+}

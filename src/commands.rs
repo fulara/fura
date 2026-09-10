@@ -363,6 +363,30 @@ pub(crate) async fn handle_client_message_for_connection(
             )
             .await
         }
+        ClientMessage::GitRangeDiffRequest {
+            client_id,
+            request_id,
+            repo_root,
+            base,
+            old,
+            new,
+        } => {
+            handle_git_range_diff_request(
+                state,
+                owner_connection_id,
+                client_id,
+                request_id,
+                repo_root,
+                base,
+                old,
+                new,
+            )
+            .await
+        }
+        ClientMessage::GitRangeDiffCancel { request_id } => {
+            cancel_git_range_diff(state, owner_connection_id, Some(&request_id)).await;
+            Vec::new()
+        }
         ClientMessage::SessionReposUpdate {
             session_id,
             action,
@@ -3606,6 +3630,235 @@ async fn handle_git_file_request(
     jobs.git_file_jobs
         .insert(connection_id, DiffFilePatchJob { token, handle });
     Vec::new()
+}
+
+async fn handle_git_range_diff_request(
+    state: &AppState,
+    connection_id: u64,
+    client_id: String,
+    request_id: String,
+    repo_root: String,
+    base: String,
+    old: String,
+    new: String,
+) -> Vec<ServerMessage> {
+    let mut jobs = state.diff_jobs.write().await;
+    if let Some(previous) = jobs.range_diff_jobs.remove(&connection_id) {
+        previous.handle.abort();
+    }
+    jobs.next_token = jobs.next_token.wrapping_add(1);
+    let token = jobs.next_token;
+    let task_state = state.clone();
+    let job_request_id = request_id.clone();
+    let handle = tokio::spawn(async move {
+        let result = crate::range_diff::read_range_diff(&repo_root, &base, &old, &new).await;
+        // Keep ownership through publication: replacement/cancel cannot slip
+        // between a stale-token check and broadcasting this result.
+        let mut jobs = task_state.diff_jobs.write().await;
+        if jobs
+            .range_diff_jobs
+            .get(&connection_id)
+            .is_none_or(|job| job.token != token)
+        {
+            return;
+        }
+        let (result, error) = match result {
+            Ok(result) => (Some(result), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        task_state
+            .events
+            .emit(
+                &task_state,
+                ServerMessage::GitRangeDiff {
+                    target_client_id: client_id,
+                    request_id,
+                    result,
+                    error,
+                },
+            )
+            .await;
+        jobs.range_diff_jobs.remove(&connection_id);
+    });
+    jobs.range_diff_jobs.insert(
+        connection_id,
+        crate::state::GitRangeDiffJob {
+            request_id: job_request_id,
+            token,
+            handle,
+        },
+    );
+    Vec::new()
+}
+
+pub(crate) async fn cancel_git_range_diff(
+    state: &AppState,
+    connection_id: u64,
+    request_id: Option<&str>,
+) {
+    let mut jobs = state.diff_jobs.write().await;
+    if jobs
+        .range_diff_jobs
+        .get(&connection_id)
+        .is_some_and(|job| request_id.is_none_or(|request_id| job.request_id == request_id))
+    {
+        if let Some(job) = jobs.range_diff_jobs.remove(&connection_id) {
+            job.handle.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod range_diff_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn repository() -> TempDir {
+        let temp = TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        let tree = repo.treebuilder(None).unwrap().write().unwrap();
+        let signature = git2::Signature::now("Range Tester", "range@example.invalid").unwrap();
+        repo.commit(
+            Some("HEAD"),
+            &signature,
+            &signature,
+            "base",
+            &repo.find_tree(tree).unwrap(),
+            &[],
+        )
+        .unwrap();
+        temp
+    }
+
+    async fn request(state: &AppState, repo: &Path, owner: u64, id: &str) {
+        let message: ClientMessage = serde_json::from_value(json!({
+            "type": "git.rangeDiff.request", "clientId": format!("client-{owner}"),
+            "requestId": id, "repoRoot": repo.to_string_lossy(),
+            "base": "HEAD", "old": "HEAD", "new": "HEAD"
+        }))
+        .unwrap();
+        assert!(
+            handle_client_message_for_connection(state, message, owner)
+                .await
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn replacement_stale_cancel_and_disconnect_are_connection_owned() {
+        let state = crate::tests::test_state(16, None);
+        let repo = repository();
+        let mut events = state.events.subscribe();
+        request(&state, repo.path(), 41, "old-request").await;
+        request(&state, repo.path(), 41, "replacement").await;
+        request(&state, repo.path(), 42, "other-connection").await;
+        let stale_cancel: ClientMessage = serde_json::from_value(json!({
+            "type": "git.rangeDiff.cancel", "requestId": "old-request"
+        }))
+        .unwrap();
+        handle_client_message_for_connection(&state, stale_cancel, 41).await;
+        // A guessed request ID on another connection cannot cancel its owner.
+        cancel_git_range_diff(&state, 42, Some("replacement")).await;
+        cancel_git_range_diff(&state, 42, None).await;
+        let event = tokio::time::timeout(Duration::from_secs(20), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let ServerMessage::GitRangeDiff {
+            target_client_id,
+            request_id,
+            result,
+            error,
+        } = &event
+        else {
+            panic!("unexpected event: {event:?}");
+        };
+        assert_eq!(target_client_id, "client-41");
+        assert_eq!(request_id, "replacement");
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(result.as_ref().unwrap().output, "");
+        let wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(wire["type"], "git.rangeDiff");
+        assert!(wire["result"]["repoRoot"].is_string());
+        assert!(wire["result"]["base"]["oid"].is_string());
+        assert!(wire["error"].is_null());
+        // Completion removes ownership, so disconnect/cancel stays idempotent.
+        cancel_git_range_diff(&state, 41, None).await;
+        assert!(state.diff_jobs.read().await.range_diff_jobs.is_empty());
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn current_request_cancel_suppresses_result_but_not_other_connection() {
+        let state = crate::tests::test_state(16, None);
+        let repo = repository();
+        let mut events = state.events.subscribe();
+        request(&state, repo.path(), 41, "cancelled").await;
+        request(&state, repo.path(), 42, "survivor").await;
+        let cancel: ClientMessage = serde_json::from_value(json!({
+            "type": "git.rangeDiff.cancel", "requestId": "cancelled"
+        }))
+        .unwrap();
+        handle_client_message_for_connection(&state, cancel, 41).await;
+        let event = tokio::time::timeout(Duration::from_secs(20), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, ServerMessage::GitRangeDiff {
+            target_client_id, request_id, result: Some(_), error: None
+        } if target_client_id == "client-42" && request_id == "survivor"));
+        cancel_git_range_diff(&state, 42, None).await;
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn invalid_ref_returns_correlated_error_without_native_output() {
+        let state = crate::tests::test_state(16, None);
+        let repo = repository();
+        let mut events = state.events.subscribe();
+        let message = ClientMessage::GitRangeDiffRequest {
+            client_id: "client".into(),
+            request_id: "invalid".into(),
+            repo_root: repo.path().to_string_lossy().into_owned(),
+            base: "HEAD".into(),
+            old: "@{u}".into(),
+            new: "HEAD".into(),
+        };
+        handle_client_message_for_connection(&state, message, 41).await;
+        let event = tokio::time::timeout(Duration::from_secs(20), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, ServerMessage::GitRangeDiff {
+            target_client_id, request_id, result: None, error: Some(error)
+        } if target_client_id == "client" && request_id == "invalid" && error.contains("upstream")));
+    }
+
+    #[test]
+    fn range_diff_debug_summary_never_contains_native_output() {
+        let native = "\x1b[31mprivate commit and patch content\x1b[m";
+        let reference = GitRangeDiffRef {
+            input: "HEAD".into(),
+            oid: "a".repeat(40),
+        };
+        let event = ServerMessage::GitRangeDiff {
+            target_client_id: "client".into(),
+            request_id: "request".into(),
+            error: None,
+            result: Some(GitRangeDiffResult {
+                repo_root: "/repo".into(),
+                base: reference.clone(),
+                old: reference.clone(),
+                new: reference,
+                output: native.into(),
+                truncated: false,
+            }),
+        };
+        let summary =
+            serde_json::to_string(&crate::event_debug::summarize_server_event(&event)).unwrap();
+        assert!(!summary.contains("private commit"));
+        assert!(!summary.contains("patch content"));
+    }
 }
 
 #[cfg(test)]

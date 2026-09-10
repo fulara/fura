@@ -29,6 +29,7 @@ mod omp_rpc;
 mod presets;
 mod projection;
 mod protocol;
+mod range_diff;
 mod review_comments;
 mod rpc;
 mod rpc_frame;

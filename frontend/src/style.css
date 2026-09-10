@@ -4881,3 +4881,60 @@ h2 {
 .git-file-content { overflow: auto; max-height: 65vh; padding: 1rem; background: #0c1017; tab-size: 4; }
 
 .diffs-actions.git-commit-navigation { justify-content: flex-start; }
+
+#cwdPickerDiffBody [hidden] { display: none; }
+
+.range-compare-view {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.range-compare-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: 0.4rem;
+  align-items: end;
+  padding: 0.5rem;
+}
+
+.range-compare-controls label {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+  font-size: 0.75rem;
+}
+
+.range-compare-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 8rem;
+  min-width: 0;
+  overflow: auto;
+  padding: 0 0.5rem 0.5rem;
+}
+
+.range-diff-identity {
+  flex: none;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 0.75rem/1.5 ui-monospace, monospace;
+  margin-bottom: 0.5rem;
+}
+
+.range-compare-body > .range-diff-view {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 6rem;
+}
+
+.range-compare-body .range-diff-output {
+  flex: 1;
+  min-height: 6rem;
+  max-height: none;
+}

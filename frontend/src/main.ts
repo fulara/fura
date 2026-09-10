@@ -8,6 +8,7 @@ import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisib
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
 import { mkEl, reconcileChildren, requireElement, setRenderDocument } from "./dom";
 import { createGitDiffHighlighter } from "./gitDiffHighlight";
+import { renderRangeDiffOutput } from "./rangeDiff";
 import type { DiffHighlighter } from "./diffHighlight";
 import {
   isCompactReadCard,
@@ -170,6 +171,7 @@ import type {
   ControlStatusProjection,
   ControlSuggestedAction,
   CompareDiffSummaryState,
+  GitRangeDiffResult,
   DiffDetailMode,
   DiffLineLocation,
   DiffReviewAnnotation,
@@ -512,18 +514,21 @@ app.innerHTML = `
         <input id="cwdPickerDiffRepo" autocomplete="off" spellcheck="false" placeholder="/home/user/project" />
         <label for="cwdPickerDiffBase">Base ref</label>
         <input id="cwdPickerDiffBase" autocomplete="off" spellcheck="false" placeholder="main" />
+        <label id="cwdPickerDiffOldLabel" for="cwdPickerDiffOld" hidden>Old</label>
+        <input id="cwdPickerDiffOld" autocomplete="off" spellcheck="false" value="@{u}" hidden />
         <label for="cwdPickerDiffHead">Head ref</label>
         <input id="cwdPickerDiffHead" autocomplete="off" spellcheck="false" placeholder="feature/my-branch" />
         <label for="cwdPickerDiffMode">Diff mode</label>
         <select id="cwdPickerDiffMode">
           <option value="full">Full</option>
           <option value="stat">Stat</option>
+          <option value="rangeDiff">Range-diff</option>
         </select>
         <label class="checkbox-row" for="cwdPickerDiffAgentSession">
           <input id="cwdPickerDiffAgentSession" type="checkbox" checked />
           <span>Create/attach agent session for questions</span>
         </label>
-        <p class="field-help">Questions from the diff use the normal prompt channel of the backing session.</p>
+        <p id="cwdPickerDiffAgentHelp" class="field-help">Questions from the diff use the normal prompt channel of the backing session.</p>
       </div>
       <footer class="modal-footer">
         <span id="cwdPickerStatus" class="modal-status" aria-live="polite" aria-atomic="true"></span>
@@ -715,6 +720,7 @@ const cwdPickerDiffTab = requireElement<HTMLButtonElement>("cwdPickerDiffTab");
 const cwdPickerDiffBody = requireElement<HTMLDivElement>("cwdPickerDiffBody");
 const cwdPickerDiffRepo = requireElement<HTMLInputElement>("cwdPickerDiffRepo");
 const cwdPickerDiffBase = requireElement<HTMLInputElement>("cwdPickerDiffBase");
+const cwdPickerDiffOld = requireElement<HTMLInputElement>("cwdPickerDiffOld");
 const cwdPickerDiffHead = requireElement<HTMLInputElement>("cwdPickerDiffHead");
 const cwdPickerDiffMode = requireElement<HTMLSelectElement>("cwdPickerDiffMode");
 const cwdPickerDiffAgentSession = requireElement<HTMLInputElement>("cwdPickerDiffAgentSession");
@@ -844,6 +850,14 @@ let compareHeadRef = "WORKTREE";
 type PendingDiffFilePatchRequest = { diffId: string; comparisonKey: string; filePath: string | null };
 type DiffFilePatchError = { filePath: string | null; message: string };
 let comparePayloadKind: DiffDetailMode = "filePatch";
+let compareMode: "files" | "rangeDiff" = "files";
+type RangeDiffInputs = { repoRoot: string; base: string; old: string; new: string };
+let rangeDiffInputs: RangeDiffInputs = { repoRoot: "", base: "", old: "@{u}", new: "HEAD" };
+let pendingRangeDiff: { requestId: string; inputs: RangeDiffInputs } | null = null;
+let rangeDiffResult: GitRangeDiffResult | null = null;
+let rangeDiffError: string | null = null;
+let rangeDiffBody: HTMLElement | null = null;
+let ordinaryPickerRefs = { base: "HEAD", head: "HEAD" };
 let comparePanelDirty = true;
 const diffFileFilters = new Map<string, string>();
 const diffAnnotations = new Map<string, DiffReviewAnnotation[]>();
@@ -1482,6 +1496,18 @@ cwdPickerWorktreeBranch.addEventListener("input", () => {
   }
   applyCwdPickerAutofill();
 });
+cwdPickerDiffMode.addEventListener("change", () => {
+  if (cwdPickerDiffMode.value === "rangeDiff") {
+    ordinaryPickerRefs = { base: cwdPickerDiffBase.value, head: cwdPickerDiffHead.value };
+    cwdPickerDiffBase.value = rangeDiffInputs.base;
+    cwdPickerDiffOld.value = rangeDiffInputs.old;
+    cwdPickerDiffHead.value = rangeDiffInputs.new;
+  } else if (!cwdPickerDiffOld.hidden) {
+    cwdPickerDiffBase.value = ordinaryPickerRefs.base;
+    cwdPickerDiffHead.value = ordinaryPickerRefs.head;
+  }
+  syncCwdPickerRangeDiffFields();
+});
 cwdPickerOverlay.addEventListener("mousedown", event => {
   if (event.target === cwdPickerOverlay) closeCwdPicker();
 });
@@ -1728,6 +1754,12 @@ function connect(token: string): void {
       send({ type: "session.list" });
     },
     onClose: () => {
+      if (pendingRangeDiff) {
+        invalidateRangeDiff();
+        rangeDiffError = "Connection closed while reading range-diff. Compare again to retry.";
+        markComparePanelDirty();
+        renderComparePanelIfActive();
+      }
       invalidateRollbackChat();
       pendingSessionFork = null;
       if (pendingGitFile?.loading) {
@@ -2111,6 +2143,22 @@ function handleServerMessage(message: ServerMessage): void {
       if (state.sessionId === activeSessionId && staleSessionChanges.has(state.sessionId)) {
         requestActiveDiffState();
       }
+      break;
+    }
+    case "git.rangeDiff": {
+      const pending = pendingRangeDiff;
+      if (message.targetClientId !== diffClientId || !pending || message.requestId !== pending.requestId) break;
+      const result = message.result;
+      pendingRangeDiff = null;
+      if (result && (result.base.input !== pending.inputs.base || result.old.input !== pending.inputs.old || result.new.input !== pending.inputs.new)) {
+        rangeDiffError = "Range-diff response did not match the requested refs. Compare again.";
+        rangeDiffResult = null;
+      } else {
+        rangeDiffResult = result;
+        rangeDiffError = message.error;
+      }
+      markComparePanelDirty();
+      renderComparePanelIfActive();
       break;
     }
     case "compareDiff.summary": {
@@ -6960,10 +7008,132 @@ function updateSessionRepo(sessionId: string, action: SessionRepoAction, path: s
   }
 }
 
+function invalidateRangeDiff(): void {
+  if (pendingRangeDiff && connection?.isOpen()) {
+    send({ type: "git.rangeDiff.cancel", requestId: pendingRangeDiff.requestId });
+  }
+  pendingRangeDiff = null;
+  rangeDiffResult = null;
+  rangeDiffError = null;
+}
+
+function requestRangeDiff(values: RangeDiffInputs): void {
+  invalidateRangeDiff();
+  rangeDiffInputs = {
+    repoRoot: values.repoRoot.trim(), base: values.base.trim(),
+    old: values.old.trim(), new: values.new.trim(),
+  };
+  if (Object.values(rangeDiffInputs).some(value => !value)) {
+    rangeDiffError = "Repository, Base, Old and New are required for range-diff.";
+  } else {
+    const requestId = nextClientRequestId("range-diff");
+    pendingRangeDiff = { requestId, inputs: { ...rangeDiffInputs } };
+    if (!send({ type: "git.rangeDiff.request", clientId: diffClientId, requestId, ...rangeDiffInputs })) {
+      pendingRangeDiff = null;
+      rangeDiffError = "Not connected to the Fura bridge.";
+    }
+  }
+  markComparePanelDirty();
+  renderComparePanelIfActive();
+}
+
+function compareModeSelector(repoRoot: () => string): HTMLSelectElement {
+  const select = mkEl("select");
+  select.setAttribute("aria-label", "Compare mode");
+  for (const [value, text] of [["files", "File diff"], ["rangeDiff", "Range-diff"]] as const) {
+    const option = mkEl("option");
+    option.value = value;
+    option.textContent = text;
+    select.append(option);
+  }
+  select.value = compareMode;
+  select.addEventListener("change", () => {
+    invalidateRangeDiff();
+    compareMode = select.value === "rangeDiff" ? "rangeDiff" : "files";
+    if (compareMode === "rangeDiff") rangeDiffInputs.repoRoot = repoRoot();
+    else {
+      const root = repoRoot();
+      if (compareRepoRoot !== root) clearCurrentCompareDiff("repoChanged");
+      compareRepoRoot = root;
+    }
+    markComparePanelDirty();
+    renderComparePanelIfActive();
+  });
+  return select;
+}
+
+function renderRangeDiffBody(): void {
+  const body = rangeDiffBody;
+  if (!body) return;
+  body.replaceChildren();
+  body.setAttribute("aria-busy", String(Boolean(pendingRangeDiff)));
+  if (!rangeDiffResult) {
+    const status = body.ownerDocument.createElement("p");
+    status.className = "empty";
+    status.setAttribute("role", rangeDiffError ? "alert" : "status");
+    status.textContent = rangeDiffError ?? (pendingRangeDiff ? "Loading range-diff…" : "Compare Base..Old against Base..New.");
+    body.append(status);
+    return;
+  }
+  const result = rangeDiffResult;
+  const identity = body.ownerDocument.createElement("div");
+  identity.className = "range-diff-identity";
+  identity.textContent = `Repository: ${result.repoRoot}\nBase: ${result.base.input} (${result.base.oid})\nOld: ${result.old.input} (${result.old.oid})\nNew: ${result.new.input} (${result.new.oid})`;
+  const output = body.ownerDocument.createElement("div");
+  body.append(identity, output);
+  renderRangeDiffOutput(output, result.output, result.truncated);
+}
+
+function renderRangeDiffCompare(container: HTMLElement): void {
+  const root = mkEl("div");
+  root.className = "compare-view range-compare-view";
+  const form = mkEl("form");
+  form.className = "range-compare-controls";
+  form.append(compareModeSelector(() => rangeDiffInputs.repoRoot));
+  const fields = {} as Record<keyof RangeDiffInputs, HTMLInputElement>;
+  for (const [key, title] of [["repoRoot", "Repository"], ["base", "Base"], ["old", "Old"], ["new", "New"]] as const) {
+    const label = mkEl("label");
+    label.textContent = title;
+    const input = mkEl("input");
+    input.setAttribute("aria-label", title);
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.maxLength = 4096;
+    input.value = rangeDiffInputs[key];
+    input.placeholder = key === "base" ? "e.g. origin/v35" : title;
+    input.addEventListener("input", () => {
+      rangeDiffInputs[key] = input.value;
+      invalidateRangeDiff();
+      renderRangeDiffBody();
+    });
+    fields[key] = input;
+    label.append(input);
+    form.append(label);
+  }
+  const run = mkEl("button");
+  run.type = "submit";
+  run.textContent = "Compare";
+  form.append(run);
+  form.addEventListener("submit", event => {
+    event.preventDefault();
+    requestRangeDiff({ repoRoot: fields.repoRoot.value, base: fields.base.value, old: fields.old.value, new: fields.new.value });
+  });
+  rangeDiffBody = mkEl("section");
+  rangeDiffBody.className = "range-compare-body";
+  root.append(form, rangeDiffBody);
+  container.append(root);
+  renderRangeDiffBody();
+}
+
 function renderComparePanel(container: HTMLElement): void {
   setRenderDocument(container.ownerDocument);
   comparePanelDirty = false;
   container.replaceChildren();
+  rangeDiffBody = null;
+  if (compareMode === "rangeDiff") {
+    renderRangeDiffCompare(container);
+    return;
+  }
 
   const root = mkEl("div");
   root.className = "compare-view";
@@ -7004,6 +7174,10 @@ function renderComparePanel(container: HTMLElement): void {
   run.type = "button";
   run.textContent = "Compare";
   run.addEventListener("click", () => requestCompareDiff({ repoRoot: repoInput.value, base: baseInput.value, head: headInput.value, payloadKind: payload.value as DiffDetailMode }));
+  repoInput.setAttribute("aria-label", "Repository");
+  baseInput.setAttribute("aria-label", "Base");
+  headInput.setAttribute("aria-label", "Head");
+  form.append(compareModeSelector(() => repoInput.value));
   form.append(repoInput, baseInput, headInput, payload, run);
   sidebarTop.append(form);
 
@@ -7835,6 +8009,7 @@ function initDesktopWorkspace(): void {
         return;
       }
       clearCurrentCompareDiff("closed");
+      invalidateRangeDiff();
       markComparePanelDirty();
       renderComparePanelIfActive();
     },
@@ -8044,6 +8219,7 @@ function setCwdPickerCreatePending(pending: boolean, requestId: string | null = 
   cwdPickerProposedModel.disabled = pending;
   cwdPickerDiffRepo.disabled = pending;
   cwdPickerDiffBase.disabled = pending;
+  cwdPickerDiffOld.disabled = pending;
   cwdPickerDiffHead.disabled = pending;
   cwdPickerDiffMode.disabled = pending;
   cwdPickerDiffAgentSession.disabled = pending;
@@ -8163,6 +8339,7 @@ function syncCwdPickerDiffDefaults(): void {
   cwdPickerDiffHead.value = "HEAD";
   cwdPickerDiffMode.value = "full";
   cwdPickerDiffAgentSession.checked = true;
+  syncCwdPickerRangeDiffFields();
 }
 
 
@@ -8218,9 +8395,33 @@ function focusCwdPickerCreateTarget(target: SessionCreateValidationTarget): void
   focusTargets[target]?.focus();
 }
 
+function syncCwdPickerRangeDiffFields(): void {
+  const range = cwdPickerDiffMode.value === "rangeDiff";
+  cwdPickerDiffOld.hidden = !range;
+  requireElement<HTMLLabelElement>("cwdPickerDiffOldLabel").hidden = !range;
+  document.querySelector<HTMLLabelElement>('label[for="cwdPickerDiffBase"]')!.textContent = range ? "Base" : "Base ref";
+  document.querySelector<HTMLLabelElement>('label[for="cwdPickerDiffHead"]')!.textContent = range ? "New" : "Head ref";
+  cwdPickerDiffAgentSession.parentElement!.hidden = range;
+  requireElement<HTMLParagraphElement>("cwdPickerDiffAgentHelp").hidden = range;
+}
+
 function submitCwdPickerDiff(): void {
   if (cwdPickerCreatePending) return;
   const repoRoot = cwdPickerDiffRepo.value.trim();
+  if (cwdPickerDiffMode.value === "rangeDiff") {
+    const inputs = { repoRoot, base: cwdPickerDiffBase.value.trim(), old: cwdPickerDiffOld.value.trim(), new: cwdPickerDiffHead.value.trim() };
+    if (Object.values(inputs).some(value => !value)) {
+      setCwdPickerError("Repository, Base, Old and New are required for range-diff.");
+      return;
+    }
+    closeCwdPicker();
+    compareMode = "rangeDiff";
+    if (activeSessionUsesDiffReviewWorkspace()) activateControllerWorkspace();
+    normalDesktopDockview?.ensureComparePanel();
+    normalDesktopDockview?.activatePanel("compare");
+    requestRangeDiff(inputs);
+    return;
+  }
   const base = cwdPickerDiffBase.value.trim() || "HEAD";
   const head = cwdPickerDiffHead.value.trim() || "HEAD";
   const payloadKind: DiffDetailMode = cwdPickerDiffMode.value === "stat" ? "statOnly" : "filePatch";
@@ -8232,6 +8433,8 @@ function submitCwdPickerDiff(): void {
   const diff = { repoRoot, base, head, payloadKind };
   if (!cwdPickerDiffAgentSession.checked) {
     closeCwdPicker();
+    invalidateRangeDiff();
+    compareMode = "files";
     compareRepoRoot = repoRoot;
     compareBaseRef = base;
     compareHeadRef = head;

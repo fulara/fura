@@ -406,6 +406,24 @@ pub(crate) struct GitFileContent {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct GitRangeDiffRef {
+    pub(crate) input: String,
+    pub(crate) oid: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitRangeDiffResult {
+    pub(crate) repo_root: String,
+    pub(crate) base: GitRangeDiffRef,
+    pub(crate) old: GitRangeDiffRef,
+    pub(crate) new: GitRangeDiffRef,
+    pub(crate) output: String,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct DisplayedPatchRange {
     pub(crate) base: DiffEndpoint,
     pub(crate) head: DiffEndpoint,
@@ -860,6 +878,17 @@ pub(crate) enum ClientMessage {
         commit_oid: String,
         path: String,
     },
+    #[serde(rename = "git.rangeDiff.request")]
+    GitRangeDiffRequest {
+        client_id: String,
+        request_id: String,
+        repo_root: String,
+        base: String,
+        old: String,
+        new: String,
+    },
+    #[serde(rename = "git.rangeDiff.cancel")]
+    GitRangeDiffCancel { request_id: String },
     #[serde(rename = "sessionRepos.update")]
     SessionReposUpdate {
         session_id: String,
@@ -1189,6 +1218,13 @@ pub(crate) enum ServerMessage {
         target_client_id: String,
         request_id: String,
         file: Option<GitFileContent>,
+        error: Option<String>,
+    },
+    #[serde(rename = "git.rangeDiff")]
+    GitRangeDiff {
+        target_client_id: String,
+        request_id: String,
+        result: Option<GitRangeDiffResult>,
         error: Option<String>,
     },
     #[serde(rename = "sessionChanges.summary")]

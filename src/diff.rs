@@ -800,7 +800,7 @@ fn select_session_repo(
         .cloned()
 }
 
-fn discover_repo_root(path: &str) -> anyhow::Result<PathBuf> {
+pub(crate) fn discover_repo_root(path: &str) -> anyhow::Result<PathBuf> {
     let root = PathBuf::from(path)
         .canonicalize()
         .with_context(|| format!("failed to resolve repo path: {path}"))?;

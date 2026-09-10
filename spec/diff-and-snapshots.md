@@ -187,6 +187,37 @@ unchanged files disappear, and file lists, counts and patches agree, including t
 Lazy file reads select exact deltas rather than descendant paths matched by Git pathspecs.
 Review worktrees remain an explicit operation, never a prerequisite for reading a diff.
 
+**Range-diff** is a second mode in the same Compare access, not a review session.
+Editable Base / Old / New invoke installed Git's three-ref form: compare
+`Base..Old` against `Base..New`. For example, `origin/v35`, `@{u}`, `HEAD`.
+Old defaults to `@{u}`, New to `HEAD`; Base remains explicit. Missing upstreams,
+invalid refs and non-repositories are errors, never guessed replacements.
+Opening from a dedicated agent-review layout switches to the existing normal
+workspace without starting an agent or discarding the session's composer draft.
+
+Git owns pairing, ordering and patch generation. The browser displays one scrollable
+monospace output, preserving whitespace and safe dual-color SGR styles. Native `=`
+summary rows gain `(no change)` without a patch body. Added, removed and changed
+commits retain native output; there are no links, comments, file actions or commit tree.
+Text nodes prevent HTML execution; unsupported terminal controls are stripped.
+Unfamiliar textual output remains plain text rather than being heuristically parsed.
+
+All three refs resolve to full commit OIDs before comparison. Results show repository,
+input refs and pinned OIDs. The read-only Git runner disables external diff, pagers,
+signatures, hooks, optional locks, replacement objects, lazy fetch and transports.
+Any effective configured textconv driver is refused, even if inactive: native
+range-diff's nested `log -p` does not reliably inherit outer `--no-textconv`.
+This requires Git supporting `--no-lazy-fetch` and does not sandbox concurrent
+same-user repository/configuration mutation.
+
+Limits are 256 non-merge commits and 8,000,000 patch-input bytes per range,
+256,000 output bytes, 12 seconds per subprocess and 15 seconds overall.
+The browser also caps lines, line length and DOM runs, visibly marking clipping
+or bounded plain-text fallback. These bounds are not OS-enforced Git memory quotas.
+On Unix, cancellation kills the owned process group; other platforms kill the child.
+Input edits, replacement, mode changes, panel closure and disconnect invalidate the
+browser result; reconnect does not silently replay a comparison as current.
+
 `/rebase <branch>` retains its existing guarded Git behavior but no longer requests a
 snapshot afterward. It still acts on the session cwd repository, without fetching.
 
@@ -195,6 +226,7 @@ snapshot afterward. It still acts on the session cwd repository, without fetchin
 - `src/diff.rs`: direct Git groups/comparisons, version validation, lazy patches, jobs,
   review worktrees and rebase mechanics.
 - `src/session_repos.rs`: repository discovery and durable manual corrections.
+- `src/range_diff.rs` / `frontend/src/rangeDiff.ts`: bounded native range-diff execution and safe ANSI rendering.
 - `src/protocol.rs` / `frontend/src/protocol.ts`: manually mirrored DTOs.
 - `frontend/src/main.ts`, `gitHistory.ts`, `gitFileView.ts`, `diffState.ts`, `diffReview.ts`: panel/review behavior.
 - `src/commands.rs`: dispatch, repository updates, rebase and agent review orchestration.
@@ -211,6 +243,13 @@ notices, which trigger a fresh repository summary. `compareDiff.*`, `diff.conten
 client/request correlation and connection-owned jobs; replacement requests and socket
 closure abort their owners. `sessionChanges.request.currentCommitOid` selects an immutable
 commit review independently of the current-change group. No new OMP protocol is required.
+
+`git.rangeDiff.request` carries `requestId`, `clientId`, `repoRoot`, `base`, `old`
+and `new`; `git.rangeDiff` returns correlated pinned identity, native output,
+truncation and errors. `git.rangeDiff.cancel` names the request. Jobs belong to
+the authenticated socket, with one active request per connection; replacement
+and disconnect abort it. No OMP operation, fetch, checkout or repository write
+is part of this mode.
 
 ## OMP cutover and historical data
 

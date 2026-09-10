@@ -1719,6 +1719,7 @@ pub(crate) struct DiffJobRegistry {
     pub(crate) file_patches: HashMap<(String, DiffScope, String, String), DiffFilePatchJob>,
     pub(crate) history_jobs: HashMap<u64, DiffFilePatchJob>,
     pub(crate) git_file_jobs: HashMap<u64, DiffFilePatchJob>,
+    pub(crate) range_diff_jobs: HashMap<u64, GitRangeDiffJob>,
 }
 
 pub(crate) struct DiffStateGenerationJob {
@@ -1729,6 +1730,12 @@ pub(crate) struct DiffStateGenerationJob {
 }
 
 pub(crate) struct DiffFilePatchJob {
+    pub(crate) token: u64,
+    pub(crate) handle: JoinHandle<()>,
+}
+
+pub(crate) struct GitRangeDiffJob {
+    pub(crate) request_id: String,
     pub(crate) token: u64,
     pub(crate) handle: JoinHandle<()>,
 }
