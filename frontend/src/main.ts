@@ -32,6 +32,11 @@ import {
   createPromptSendMessage,
   restorePendingImagesFromDraft,
   resolvePromptSubmitAction,
+  SessionComposerDrafts,
+  CONTROLLER_DRAFT,
+  NO_SESSION_DRAFT,
+  type ComposerDraftKey,
+  type SessionComposerDraft,
   type PromptBehavior,
 } from "./composer";
 import {
@@ -754,9 +759,15 @@ type VoiceSegmentDraft = {
   start: number;
   end: number;
   text: string;
+  composer?: { key: ComposerDraftKey; draft: SessionComposerDraft };
 };
-let pendingImages: PendingImage[] = [];
-let pendingSnippets: PendingSnippet[] = [];
+const composerDrafts = new SessionComposerDrafts();
+let composerDraftKey: ComposerDraftKey = NO_SESSION_DRAFT;
+let composerDraft = composerDrafts.get(composerDraftKey);
+let pendingImages = composerDraft.images;
+let pendingSnippets = composerDraft.snippets;
+const pendingDraftDeletions = new Set<string>();
+let voiceComposerDraft: VoiceSegmentDraft["composer"];
 let nextPendingAttachmentId = 1;
 
 let connection: FuraConnection | null = null;
@@ -779,8 +790,6 @@ let lastAutofilledWorktreeBranch = "";
 const unreadSessions = new Set<string>();
 let sessions: SessionSummary[] = [];
 let workspaceMode: WorkspaceMode = "session";
-let sessionPromptDraft = "";
-let controllerPromptDraft = "";
 let selectedCategoryFilter = "";
 let activeCategoryEditorDirty = false;
 let activeCategoryEditorSessionId: string | null = null;
@@ -1013,7 +1022,7 @@ function selectedDiffFilePath(key: string, state: DiffReviewableState, filePaths
 let lastDiffsRenderedSessionId: string | null = null;
 let lastDiffsRenderedProjectionPresent = false;
 const sessionNotices = new Map<string, SessionNotice[]>();
-let busyPromptDraft: BusyPromptDraft | null = null;
+const busyPromptDrafts = new Map<string, BusyPromptDraft[]>();
 type RollbackChatPhase = "loading" | "ready" | "error" | "applying";
 type RollbackChatDraft = {
   text: string;
@@ -1074,7 +1083,6 @@ function pruneStaleSessionCaches(liveSessionIds: ReadonlySet<string>): void {
   ]);
   for (const sessionId of [
     currentSessionChangesRequest?.sessionId,
-    busyPromptDraft?.sessionId,
     diffPreviewDraft?.sessionId,
     agentReviewDraft?.sessionId,
     codePreviewDraft?.sessionId,
@@ -1132,7 +1140,6 @@ function pruneStaleSessionCaches(liveSessionIds: ReadonlySet<string>): void {
     promptHistories.delete(sessionId);
     promptHistoryMessageIds.delete(sessionId);
 
-    if (busyPromptDraft?.sessionId === sessionId) busyPromptDraft = null;
     if (diffPreviewDraft?.sessionId === sessionId) diffPreviewDraft = null;
     if (agentReviewDraft?.sessionId === sessionId) agentReviewDraft = null;
     if (codePreviewDraft?.sessionId === sessionId) codePreviewDraft = null;
@@ -1592,7 +1599,7 @@ promptForm.addEventListener("submit", event => {
       const accepted = sendPromptWithBusyHandling({
         sessionId: action.sessionId,
         text,
-        editorText,
+        editorText: promptInput.value,
         images: pendingImages,
         snippets: pendingSnippets,
       });
@@ -1608,6 +1615,9 @@ promptInput.addEventListener("paste", async event => {
   const shouldCaptureSnippet = imageItems.length === 0 && pastedText.length > 500;
   if (imageItems.length === 0 && !shouldCaptureSnippet) return;
   event.preventDefault();
+  saveComposerDraft();
+  const originKey = composerDraftKey;
+  const origin = composerDraft;
 
   if (shouldCaptureSnippet) {
     const marker = createPendingMarker("Snippet");
@@ -1620,9 +1630,18 @@ promptInput.addEventListener("paste", async event => {
     if (!file) continue;
     try {
       const base64 = await blobToBase64(file);
+      // Decoding can finish after a switch, send or deletion.
+      if (!composerDrafts.isCurrent(originKey, origin)) continue;
+      if (origin === composerDraft) saveComposerDraft();
       const marker = createPendingMarker("Image");
-      pendingImages.push({ type: "image", marker, data: base64, mimeType: file.type });
-      insertTextAtCursor(marker);
+      origin.images.push({ type: "image", marker, data: base64, mimeType: file.type });
+      if (origin === composerDraft) {
+        insertTextAtCursor(marker);
+      } else {
+        origin.editorText = insertTextAtSelection(
+          origin.editorText, origin.editorText.length, origin.editorText.length, marker,
+        ).value;
+      }
     } catch {
       appendLog("Failed to read pasted image.");
     }
@@ -1631,6 +1650,7 @@ promptInput.addEventListener("paste", async event => {
   updatePalette();
 });
 promptInput.addEventListener("input", () => {
+  saveComposerDraft();
   resetPromptHistoryNavigation();
   updatePalette();
   syncRollbackChatDraftWarning();
@@ -1757,6 +1777,27 @@ function hideAuthGate(): void {
   authTokenInput.value = "";
 }
 
+function saveComposerDraft(): void {
+  composerDraft.editorText = promptInput.value;
+  composerDraft.images = pendingImages;
+  composerDraft.snippets = pendingSnippets;
+}
+
+function showComposerDraft(): void {
+  promptInput.value = composerDraft.editorText;
+  pendingImages = composerDraft.images;
+  pendingSnippets = composerDraft.snippets;
+  renderImagePreviews();
+}
+
+function switchComposerDraft(key: ComposerDraftKey): void {
+  if (composerDraftKey === key) return;
+  saveComposerDraft();
+  composerDraftKey = key;
+  composerDraft = composerDrafts.get(key);
+  showComposerDraft();
+}
+
 function activeWorkspaceKey(): string | null {
   return workspaceMode === "controller" ? "controller" : activeSessionId;
 }
@@ -1766,8 +1807,7 @@ function activateControllerWorkspace(): void {
   if (workspaceMode !== "controller") {
     pendingGitFile?.view.close();
     clearCodeRevision();
-    sessionPromptDraft = promptInput.value;
-    promptInput.value = controllerPromptDraft;
+    switchComposerDraft(CONTROLLER_DRAFT);
     workspaceMode = "controller";
     resetPromptHistoryNavigation();
     markTranscriptViewDirty({ resetCache: true });
@@ -1785,17 +1825,13 @@ function activateSession(sessionId: string): void {
   ) {
     invalidateRollbackChat();
   }
-  const previousMode = workspaceMode;
   const previousSessionId = activeSessionId;
   const sessionChanged = activeSessionId !== sessionId || workspaceMode !== "session";
   if (sessionChanged) {
     clearPendingGitHistory();
     pendingGitFile?.view.close();
     clearCodeRevision();
-    if (previousMode === "controller") {
-      controllerPromptDraft = promptInput.value;
-      promptInput.value = sessionPromptDraft;
-    }
+    switchComposerDraft(sessionId);
     if (previousSessionId && previousSessionId !== sessionId && currentSessionChangesRequest?.sessionId === previousSessionId) {
       clearCurrentSessionChangesRequest("sessionChanged");
     }
@@ -1895,7 +1931,15 @@ function handleServerMessage(message: ServerMessage): void {
       {
         const previousActiveSessionId = activeSessionId;
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
+        if (workspaceMode === "session" && !activeSessionId) switchComposerDraft(NO_SESSION_DRAFT);
         const liveSessionIds = new Set(message.sessions.map(session => session.sessionId));
+        // Absence alone is not deletion: only retire explicitly deleted sessions.
+        for (const sessionId of pendingDraftDeletions) {
+          if (liveSessionIds.has(sessionId)) continue;
+          composerDrafts.clear(sessionId);
+          busyPromptDrafts.delete(sessionId);
+          pendingDraftDeletions.delete(sessionId);
+        }
         pruneStaleSessionCaches(liveSessionIds);
         if (rollbackChatState && !liveSessionIds.has(rollbackChatState.sourceSessionId)) {
           invalidateRollbackChat();
@@ -2523,6 +2567,7 @@ function handleServerMessage(message: ServerMessage): void {
       appendLog(`[raw ${message.sessionId}] ${JSON.stringify(message.frame)}`);
       break;
     case "error":
+      pendingDraftDeletions.clear();
       appendLog(`Error: ${message.message}`);
       if (message.requestId && message.requestId === proposedModelCatalogRequestId) {
         proposedModelCatalogLoading = false;
@@ -2690,7 +2735,9 @@ function getOrCreateControlClientId(): string {
 
 function handlePromptBusy(message: Extract<ServerMessage, { type: "prompt.busy" }>): void {
   appendLog(`[${message.sessionId}] prompt needs steer or follow-up choice`);
-  busyPromptDraft = createBusyPromptDraftFromServer(message, createPendingMarker);
+  const drafts = busyPromptDrafts.get(message.sessionId) ?? [];
+  drafts.push(createBusyPromptDraftFromServer(message, createPendingMarker));
+  busyPromptDrafts.set(message.sessionId, drafts);
   if (message.sessionId === activeSessionId) {
     render();
     promptInput.focus();
@@ -2770,10 +2817,11 @@ function sendPromptMessage(
   text: string,
   images: PendingImage[],
   behavior?: PromptBehavior,
-): void {
+): boolean {
+  if (!send(createPromptSendMessage(sessionId, text, images, behavior))) return false;
   sessionNotices.delete(sessionId);
   addPromptToHistory(sessionId, text);
-  send(createPromptSendMessage(sessionId, text, images, behavior));
+  return true;
 }
 
 function addPromptToHistory(sessionId: string, text: string): void {
@@ -2853,10 +2901,9 @@ function navigatePromptHistory(sessionId: string, direction: 1 | -1): void {
 
 function clearPromptEditor(): void {
   resetPromptHistoryNavigation();
-  pendingImages = [];
-  pendingSnippets = [];
-  renderImagePreviews();
-  promptInput.value = "";
+  composerDrafts.clear(composerDraftKey);
+  composerDraft = composerDrafts.get(composerDraftKey);
+  showComposerDraft();
   updatePalette();
 }
 
@@ -2873,6 +2920,8 @@ async function startVoiceRecording(): Promise<void> {
   }
 
   voiceTarget = currentVoiceTarget();
+  saveComposerDraft();
+  voiceComposerDraft = voiceTarget === promptInput ? { key: composerDraftKey, draft: composerDraft } : undefined;
   voiceSegments.clear();
   handleVoiceStatus("connecting", "Requesting microphone.");
 
@@ -2983,7 +3032,10 @@ function isEditableTextElement(element: Element | null): element is HTMLInputEle
 }
 
 function applyVoiceTranscript(itemId: string, text: string, isFinal: boolean): void {
-  const target = voiceSegments.get(itemId)?.target ?? (voiceTarget && !voiceTarget.disabled ? voiceTarget : currentVoiceTarget());
+  const target = voiceComposerDraft ? promptInput
+    : voiceSegments.get(itemId)?.target ?? (voiceTarget && !voiceTarget.disabled ? voiceTarget : currentVoiceTarget());
+  if (voiceComposerDraft && !composerDrafts.isCurrent(voiceComposerDraft.key, voiceComposerDraft.draft)) return;
+  if (target === promptInput) saveComposerDraft();
   const existing = voiceSegments.get(itemId);
   const draft = existing ?? createVoiceSegmentDraft(target);
   const nextText = isFinal ? text : draft.text + text;
@@ -2993,26 +3045,35 @@ function applyVoiceTranscript(itemId: string, text: string, isFinal: boolean): v
   } else {
     voiceSegments.set(itemId, draft);
   }
-  if (target === promptInput) {
+  if (target === promptInput && (!draft.composer || draft.composer.draft === composerDraft)) {
     resetPromptHistoryNavigation();
     updatePalette();
   }
 }
 
 function createVoiceSegmentDraft(target: HTMLInputElement | HTMLTextAreaElement): VoiceSegmentDraft {
-  const start = target.selectionStart ?? target.value.length;
-  const end = target.selectionEnd ?? start;
-  const prefix = target.value.slice(0, start);
+  const composer = target === promptInput ? voiceComposerDraft : undefined;
+  const value = composer?.draft.editorText ?? target.value;
+  const inactive = composer && composer.draft !== composerDraft;
+  const start = inactive ? value.length : target.selectionStart ?? value.length;
+  const end = inactive ? start : target.selectionEnd ?? start;
+  const prefix = value.slice(0, start);
   const lead = prefix && !/\s$/.test(prefix) ? " " : "";
-  return { target, start, end, text: lead };
+  return { target, start, end, text: lead, composer };
 }
 
 function replaceVoiceSegmentText(draft: VoiceSegmentDraft, text: string): void {
-  const before = draft.target.value.slice(0, draft.start);
-  const after = draft.target.value.slice(draft.end);
-  draft.target.value = `${before}${text}${after}`;
+  const value = draft.composer?.draft.editorText ?? draft.target.value;
+  const before = value.slice(0, draft.start);
+  const after = value.slice(draft.end);
+  const next = `${before}${text}${after}`;
   draft.text = text;
   draft.end = draft.start + text.length;
+  if (draft.composer) {
+    draft.composer.draft.editorText = next;
+    if (draft.composer.draft !== composerDraft) return;
+  }
+  draft.target.value = next;
   draft.target.selectionStart = draft.end;
   draft.target.selectionEnd = draft.end;
   draft.target.focus();
@@ -3051,14 +3112,15 @@ function sendPromptWithBusyHandling(options: {
   onSend?: () => void;
 }): boolean {
   const projection = projections.get(options.sessionId);
-  const knownSlashCommand = findSlashCommand(options.editorText);
-  const liveSlashCommand = projection ? findLiveSlashCommand(options.editorText, projection.availableCommands ?? []) : undefined;
+  const commandText = options.editorText.trim();
+  const knownSlashCommand = findSlashCommand(commandText);
+  const liveSlashCommand = projection ? findLiveSlashCommand(commandText, projection.availableCommands ?? []) : undefined;
   const isRunnableSlashCommand = knownSlashCommand || isLiveSlashCommandRunnableWhileBusy(liveSlashCommand);
-  const isSlashCommandLike = /^\/[^\s:]+/.test(options.editorText);
+  const isSlashCommandLike = /^\/[^\s:]+/.test(commandText);
 
   if (projection?.isBusy) {
     if (isRunnableSlashCommand && options.images.length === 0) {
-      sendPromptMessage(options.sessionId, options.text, options.images);
+      if (!sendPromptMessage(options.sessionId, options.text, options.images)) return false;
       options.onSend?.();
       return true;
     }
@@ -3070,25 +3132,26 @@ function sendPromptWithBusyHandling(options: {
       render();
       return false;
     }
-    busyPromptDraft = createBusyPromptDraft({
+    if (!connection?.isOpen() || busyPromptDrafts.has(options.sessionId)) return false;
+    busyPromptDrafts.set(options.sessionId, [createBusyPromptDraft({
       sessionId: options.sessionId,
       text: options.text,
       editorText: options.editorText,
       images: options.images,
       snippets: options.snippets,
       onSend: options.onSend,
-    });
+    })]);
     renderBusyPromptChoice();
     return true;
   }
 
-  sendPromptMessage(options.sessionId, options.text, options.images);
+  if (!sendPromptMessage(options.sessionId, options.text, options.images)) return false;
   options.onSend?.();
   return true;
 }
 
 function renderBusyPromptChoice(): void {
-  const draft = busyPromptDraft;
+  const draft = activeSessionId ? busyPromptDrafts.get(activeSessionId)?.[0] : undefined;
   const compacting = Boolean(draft && projections.get(draft.sessionId)?.compacting);
   const shouldShow = Boolean(workspaceMode === "session" && draft && draft.sessionId === activeSessionId && !compacting);
   const wasHidden = busyPromptOverlay.hidden;
@@ -3115,10 +3178,16 @@ function renderBusyPromptChoice(): void {
   }
 }
 
+function removeBusyPromptDraft(sessionId: string): void {
+  const drafts = busyPromptDrafts.get(sessionId);
+  drafts?.shift();
+  if (!drafts?.length) busyPromptDrafts.delete(sessionId);
+}
+
 function restoreBusyPromptDraft(): void {
-  const draft = busyPromptDraft;
-  if (!draft) return;
-  busyPromptDraft = null;
+  const draft = activeSessionId ? busyPromptDrafts.get(activeSessionId)?.[0] : undefined;
+  if (!draft || workspaceMode !== "session") return;
+  removeBusyPromptDraft(draft.sessionId);
 
   resetPromptHistoryNavigation();
   promptInput.value = restoreBusyPromptEditorText(draft, promptInput.value);
@@ -3131,13 +3200,13 @@ function restoreBusyPromptDraft(): void {
 }
 
 function sendBusyPromptDraft(behavior: "steer" | "followUp"): void {
-  const draft = busyPromptDraft;
-  if (!draft) return;
+  const draft = activeSessionId ? busyPromptDrafts.get(activeSessionId)?.[0] : undefined;
+  if (!draft || workspaceMode !== "session") return;
   // Compaction skips any prompt OMP receives, so never send a steer/follow-up into a compacting session.
   if (projections.get(draft.sessionId)?.compacting) return;
-  sendPromptMessage(draft.sessionId, draft.text, draft.images, behavior);
+  if (!sendPromptMessage(draft.sessionId, draft.text, draft.images, behavior)) return;
   const onSend = draft.onSend;
-  busyPromptDraft = null;
+  removeBusyPromptDraft(draft.sessionId);
   onSend?.();
   renderBusyPromptChoice();
   render();
@@ -3463,7 +3532,8 @@ function closeDeleteSessionPicker(): void {
 function submitDeleteSessionPicker(): void {
   const view = deleteSessionTarget;
   if (!view) return;
-  send(sessionDeleteMessage(view, deleteSessionWorktree.checked));
+  if (!send(sessionDeleteMessage(view, deleteSessionWorktree.checked))) return;
+  pendingDraftDeletions.add(view.sessionId);
   closeDeleteSessionPicker();
 }
 // --- Top-level render ---
@@ -4268,7 +4338,7 @@ function renderActiveSession(): void {
   const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
   const rollbackApplying = rollbackChatState?.phase === "applying";
   const summary = projection?.summary ?? activeSessionSummary();
-  const hasBusyDraft = busyPromptDraft?.sessionId === activeSessionId;
+  const hasBusyDraft = Boolean(activeSessionId && busyPromptDrafts.has(activeSessionId));
   const awaitingAsk = Boolean(summary?.awaitingAsk);
   const compacting = Boolean(projection?.compacting);
 
@@ -7902,6 +7972,7 @@ function insertTextAtCursor(text: string): void {
   promptInput.value = insertion.value;
   promptInput.selectionStart = insertion.cursor;
   promptInput.selectionEnd = insertion.cursor;
+  saveComposerDraft();
 }
 
 function createPendingMarker(label: "Image" | "Snippet"): string {
@@ -7922,6 +7993,7 @@ function expandSnippetTokens(text: string): string {
 }
 
 function renderImagePreviews(): void {
+  saveComposerDraft();
   renderAttachmentPreviews(imagePreviews, pendingImages, pendingSnippets, {
     onRemoveImage: (index, image) => {
       pendingImages.splice(index, 1);

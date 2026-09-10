@@ -3,10 +3,27 @@ import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
+import type { ServerMessage } from "../src/protocol";
 
 const bridgeToken = "dev";
 const tinyPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
+
+function observeRollbackResult(page: Page): Promise<Extract<ServerMessage, { type: "session.rewind.result" }>> {
+  const { promise, resolve } = Promise.withResolvers<Extract<ServerMessage, { type: "session.rewind.result" }>>();
+  page.on("websocket", socket => {
+    let requestId: string | undefined;
+    socket.on("framesent", ({ payload }) => {
+      const message = JSON.parse(payload.toString());
+      if (message.type === "session.rewind.select") requestId = message.requestId;
+    });
+    socket.on("framereceived", ({ payload }) => {
+      const message = JSON.parse(payload.toString()) as ServerMessage;
+      if (message.type === "session.rewind.result" && message.requestId === requestId) resolve(message);
+    });
+  });
+  return promise;
+}
 
 async function pasteTinyPng(page: Page, selector: string): Promise<void> {
   await page.locator(selector).evaluate((element, pngBase64) => {
@@ -125,10 +142,10 @@ test("desktop prompt keeps a roomy default after reload and fits short viewports
 test("desktop rolls back a text and image prompt into an unsent draft", async ({ page }) => {
   const sessionName = `Desktop rollback ${Date.now()}`;
   const promptText = "desktop rollback draft";
+  const rollbackResult = observeRollbackResult(page);
 
   await authenticateDesktop(page);
   await createDesktopSession(page, sessionName);
-  const sessionCountBefore = await page.locator("#sessionsList .session-item").count();
 
   await page.locator("#promptInput").fill(promptText);
   await pasteTinyPng(page, "#promptInput");
@@ -147,7 +164,8 @@ test("desktop rolls back a text and image prompt into an unsent draft", async ({
   await page.locator("#rollbackChatRestore").click();
 
   await expect(page.locator("#rollbackChatOverlay")).toBeHidden();
-  await expect(page.locator("#sessionsList .session-item")).toHaveCount(sessionCountBefore + 1);
+  const branch = await rollbackResult;
+  expect(branch.sessionId).not.toBe(branch.sourceSessionId);
   await expect(page.locator("#promptInput")).toHaveValue(exactDraft);
   await expect(page.locator("#imagePreviews img")).toBeVisible();
   await expect(page.locator(".message.user")).toHaveCount(0);
@@ -329,10 +347,10 @@ test("mobile authenticates, creates a mock session, and receives a prompt respon
 test("mobile rolls back a text and image prompt into an unsent draft", async ({ page }) => {
   const sessionName = `Mobile rollback ${Date.now()}`;
   const promptText = "mobile rollback draft";
+  const rollbackResult = observeRollbackResult(page);
 
   await authenticateMobile(page);
   await createMobileSession(page, sessionName);
-  const sessionCountBefore = await page.locator("#mobileSessionsList .session-item").count();
 
   await page.locator("#mobilePromptInput").fill(promptText);
   await page.locator("#mobileImageInput").setInputFiles({
@@ -355,7 +373,8 @@ test("mobile rolls back a text and image prompt into an unsent draft", async ({ 
   await page.locator("#mobileRollbackConfirm").click();
 
   await expect(page.locator("#mobileRollbackOverlay")).toBeHidden();
-  await expect(page.locator("#mobileSessionsList .session-item")).toHaveCount(sessionCountBefore + 1);
+  const branch = await rollbackResult;
+  expect(branch.sessionId).not.toBe(branch.sourceSessionId);
   await expect(page.locator("#mobilePromptInput")).toHaveValue(exactDraft);
   await expect(page.locator("#mobileImagePreviews img")).toBeVisible();
   await expect(page.locator("#mobileTranscript .message.user")).toHaveCount(0);

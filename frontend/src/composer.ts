@@ -9,6 +9,32 @@ export type ComposerPromptDraft = {
   snippets: PendingSnippet[];
 };
 
+export type SessionComposerDraft = Pick<ComposerPromptDraft, "editorText" | "images" | "snippets">;
+export const CONTROLLER_DRAFT = Symbol("controller");
+export const NO_SESSION_DRAFT = Symbol("no-session");
+export type ComposerDraftKey = string | symbol;
+
+export class SessionComposerDrafts {
+  private readonly drafts = new Map<ComposerDraftKey, SessionComposerDraft>();
+
+  get(key: ComposerDraftKey): SessionComposerDraft {
+    let draft = this.drafts.get(key);
+    if (!draft) {
+      draft = { editorText: "", images: [], snippets: [] };
+      this.drafts.set(key, draft);
+    }
+    return draft;
+  }
+
+  isCurrent(key: ComposerDraftKey, draft: SessionComposerDraft): boolean {
+    return this.drafts.get(key) === draft;
+  }
+
+  clear(key: ComposerDraftKey): void {
+    this.drafts.delete(key);
+  }
+}
+
 const IMAGE_MARKER_PATTERN = /\[Image (?:#)?([1-9]\d*)(?:,[^\]\n]*)?\](?: attachment:\/\/\1)?/g;
 export type PromptSubmitWorkspaceMode = "session" | "controller";
 export type PromptSubmitAction =

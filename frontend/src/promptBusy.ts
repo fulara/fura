@@ -52,5 +52,5 @@ export function busyPromptAttachmentNote(draft: BusyPromptDraft): string {
 }
 
 export function restoreBusyPromptEditorText(draft: BusyPromptDraft, currentText: string): string {
-  return [draft.editorText, currentText.trim()].filter(Boolean).join("\n\n");
+  return [draft.editorText, currentText].filter(Boolean).join("\n\n");
 }

@@ -99,6 +99,24 @@ of 18rem and 40vh so short windows retain transcript space and reachable control
 Its height is outside saved Dockview layouts. Manual resizing remains unpersisted;
 reload restores the larger default without resetting panel layouts or other preferences.
 
+### Unsent desktop drafts
+
+The desktop composer keeps an in-memory draft per logical session ID: exact text,
+images and pasted snippets. New sessions start empty; Ask Fura and the no-session
+workspace have separate drafts. Switching panels, same-session projections and
+WebSocket reconnects within the same document do not clear them. Reloading the
+page or restarting the browser discards drafts; there is no server or browser-storage persistence.
+
+An accepted send consumes only its originating draft. A disconnected/failed
+transport send retains it. Steer/follow-up choices are owned by their session;
+late rejections retain newer editor text, and failed choices remain recoverable.
+Asynchronous image reads and voice updates remain bound to the captured draft,
+and cannot revive one already submitted or deleted.
+
+Drafts are retired after an explicit session-delete request and its removal from
+the catalog, never just because a session is temporarily absent from a snapshot.
+This feature does not add per-session drafts to the mobile composer.
+
 ### Context usage
 
 Both status bars display OMP's authoritative `get_state.contextUsage`: current

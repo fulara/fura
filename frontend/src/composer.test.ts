@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  CONTROLLER_DRAFT,
+  NO_SESSION_DRAFT,
+  SessionComposerDrafts,
   createPromptSendMessage,
   isPromptImagePayload,
   promptDraftAttachmentCount,
@@ -13,6 +16,94 @@ import type { PendingImage, PendingSnippet } from "./composerAttachments";
 
 const image: PendingImage = { type: "image", marker: "[Image 1]", data: "abc", mimeType: "image/png" };
 const snippet: PendingSnippet = { type: "snippet", marker: "[Snippet 1]", text: "long pasted text" };
+
+describe("SessionComposerDrafts", () => {
+  it("keeps exact session text and attachments across switches without sharing empty arrays", () => {
+    const drafts = new SessionComposerDrafts();
+    const first = drafts.get("session-1");
+    const second = drafts.get("session-2");
+    const text = "\t  Zażółć 漢字 e\u0301 \u{1D11E}\n\n  indented line\t\n ";
+    first.editorText = text;
+    first.images.push(image);
+    first.snippets.push(snippet);
+
+    expect(second).toEqual({ editorText: "", images: [], snippets: [] });
+    second.editorText = "other session";
+    expect(drafts.get("session-2")).toBe(second);
+    expect(drafts.get("session-1")).toBe(first);
+    expect(drafts.get("session-1")).toEqual({ editorText: text, images: [image], snippets: [snippet] });
+    expect(drafts.get("session-2").editorText).toBe("other session");
+    expect(drafts.isCurrent("session-1", first)).toBe(true);
+    expect(drafts.isCurrent("session-1", { ...first })).toBe(false);
+    expect(drafts.isCurrent("session-2", first)).toBe(false);
+  });
+
+  it("retains whitespace-only drafts", () => {
+    const drafts = new SessionComposerDrafts();
+    drafts.get("session-1").editorText = " \t\n\n  ";
+    drafts.get("session-2");
+
+    expect(drafts.get("session-1").editorText).toBe(" \t\n\n  ");
+  });
+
+  it("isolates controller and no-session drafts from each other and string session IDs", () => {
+    const drafts = new SessionComposerDrafts();
+    const keys = [
+      CONTROLLER_DRAFT, NO_SESSION_DRAFT,
+      "controller", "no-session", String(CONTROLLER_DRAFT), String(NO_SESSION_DRAFT),
+    ];
+    keys.forEach((key, index) => {
+      drafts.get(key).editorText = `draft ${index}`;
+    });
+
+    keys.forEach((key, index) => {
+      expect(drafts.get(key).editorText).toBe(`draft ${index}`);
+    });
+  });
+
+  it("clears only the origin while retaining other sessions and workspace drafts", () => {
+    const drafts = new SessionComposerDrafts();
+    const origin = drafts.get("session-1");
+    origin.editorText = "sent";
+    const other = drafts.get("session-2");
+    other.editorText = "still unsent";
+    other.images.push(image);
+    const controller = drafts.get(CONTROLLER_DRAFT);
+    controller.editorText = "controller unsent";
+    const noSession = drafts.get(NO_SESSION_DRAFT);
+    noSession.snippets.push(snippet);
+
+    drafts.clear("session-1");
+    drafts.clear("missing-session");
+
+    expect(drafts.get("session-1")).toEqual({ editorText: "", images: [], snippets: [] });
+    expect(drafts.get("session-2")).toBe(other);
+    expect(other).toEqual({ editorText: "still unsent", images: [image], snippets: [] });
+    expect(drafts.get(CONTROLLER_DRAFT)).toBe(controller);
+    expect(controller.editorText).toBe("controller unsent");
+    expect(drafts.get(NO_SESSION_DRAFT)).toBe(noSession);
+    expect(noSession.snippets).toEqual([snippet]);
+  });
+
+  it("invalidates detached drafts so delayed work cannot repopulate a sent or deleted draft", () => {
+    const drafts = new SessionComposerDrafts();
+    const detached = drafts.get("session-1");
+    detached.editorText = "old draft";
+    expect(drafts.isCurrent("session-1", detached)).toBe(true);
+
+    drafts.clear("session-1");
+    expect(drafts.isCurrent("session-1", detached)).toBe(false);
+    const fresh = drafts.get("session-1");
+    expect(fresh).not.toBe(detached);
+    expect(drafts.isCurrent("session-1", detached)).toBe(false);
+    expect(drafts.isCurrent("session-1", fresh)).toBe(true);
+
+    detached.editorText = "late text";
+    detached.images.push(image);
+    detached.snippets.push(snippet);
+    expect(drafts.get("session-1")).toEqual({ editorText: "", images: [], snippets: [] });
+  });
+});
 
 describe("resolvePromptSubmitAction", () => {
   const base = {
