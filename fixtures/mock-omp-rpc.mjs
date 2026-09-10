@@ -386,17 +386,18 @@ for await (const line of rl) {
       const slashMessage = String(command.message ?? "");
       if (slashMessage.startsWith("/")) {
         // Server-side slash execution: echo a command_output frame, no model turn.
-        success(command);
         if (/^\/compact(?:\s|$)/.test(slashMessage)) {
           isCompacting = true;
+          // OMP acknowledges immediately; only terminal output follows later.
+          success(command, { agentInvoked: false });
           setTimeout(() => {
             isCompacting = false;
             contextTokens = 4000;
             write({ type: "command_output", text: "Mock compaction complete." });
-            write({ type: "prompt_result", id: command.id, agentInvoked: false });
           }, 150);
           break;
         }
+        success(command);
         write({ type: "command_output", text: `Mock command output for ${slashMessage.trim()}` });
         write({ type: "prompt_result", id: command.id, agentInvoked: false });
         break;

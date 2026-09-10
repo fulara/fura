@@ -4245,6 +4245,17 @@ pub(crate) mod tests {
                 .await
                 .is_empty()
         );
+        apply_rpc_response(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type": "response",
+                "command": "get_state",
+                "success": true,
+                "data": { "sessionId": "s1", "isCompacting": false, "isStreaming": false }
+            }),
+        )
+        .await;
         let sessions = state.sessions.read().await;
         let record = sessions.get("s1").expect("record remains");
         assert!(!record.is_compacting);
@@ -4322,6 +4333,124 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn background_compaction_terminal_events_restore_authoritative_state() {
+        async fn answer_state_requests(
+            state: &AppState,
+            commands: &mut mpsc::Receiver<Value>,
+            compacting: bool,
+            tokens: u64,
+        ) {
+            while let Ok(command) = commands.try_recv() {
+                if command["type"] == "get_state" {
+                    apply_rpc_response(
+                        state,
+                        "transport-1",
+                        &serde_json::json!({
+                            "id": command["id"],
+                            "type": "response",
+                            "command": "get_state",
+                            "success": true,
+                            "data": {
+                                "sessionId": "s1",
+                                "isStreaming": false,
+                                "isCompacting": compacting,
+                                "contextUsage": {
+                                    "tokens": tokens,
+                                    "contextWindow": 200_000,
+                                    "percent": tokens as f64 / 2_000.0
+                                }
+                            }
+                        }),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        for (completion, tokens_after) in [
+            (
+                serde_json::json!({
+                    "type": "command_output",
+                    "text": "Kompakcja zakończona."
+                }),
+                20_000,
+            ),
+            (
+                serde_json::json!({
+                    "type": "command_output",
+                    "text": "Compaction failed: fixture provider error"
+                }),
+                180_000,
+            ),
+            (
+                serde_json::json!({
+                    "type": "response",
+                    "command": "abort",
+                    "success": true
+                }),
+                180_000,
+            ),
+        ] {
+            let state = test_state(64, None);
+            let mut record = test_record();
+            record.context_tokens = Some(180_000);
+            state
+                .sessions
+                .write()
+                .await
+                .insert("s1".to_string(), record);
+            let mut commands = register_test_transport(&state, "transport-1", "s1", 64).await;
+
+            send_prompt(&state, "s1".to_string(), "/compact".to_string(), None, None).await;
+            let command = commands.recv().await.expect("compact prompt");
+            // OMP acknowledges the background slash command before compact() finishes.
+            apply_rpc_frame(
+                &state,
+                "transport-1",
+                &serde_json::json!({
+                    "type": "response",
+                    "id": command["id"],
+                    "command": "prompt",
+                    "success": true,
+                    "data": { "agentInvoked": false }
+                }),
+            )
+            .await;
+            assert!(
+                state.sessions.read().await["s1"].projection().compacting,
+                "a local-only acknowledgement must not unlock ongoing compaction"
+            );
+            answer_state_requests(&state, &mut commands, true, 180_000).await;
+            assert!(state.sessions.read().await["s1"].projection().compacting);
+
+            // Output is not itself proof that compaction ended: a fallback or
+            // progress notice must not unlock the composer while OMP is still busy.
+            apply_rpc_frame(
+                &state,
+                "transport-1",
+                &serde_json::json!({
+                    "type": "command_output",
+                    "text": "Trying another compaction method."
+                }),
+            )
+            .await;
+            answer_state_requests(&state, &mut commands, true, 180_000).await;
+            assert!(state.sessions.read().await["s1"].projection().compacting);
+
+            apply_rpc_frame(&state, "transport-1", &completion).await;
+            answer_state_requests(&state, &mut commands, false, tokens_after).await;
+            let projection = state.sessions.read().await["s1"].projection();
+            assert!(!projection.compacting, "{completion}");
+            assert!(!projection.is_busy, "{completion}");
+            assert_eq!(
+                projection.context_tokens,
+                Some(tokens_after),
+                "{completion}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn slash_compact_error_unlocks_the_session() {
         let state = test_state(8, None);
         state
@@ -4356,6 +4485,27 @@ pub(crate) mod tests {
             }),
         )
         .await;
+
+        while let Ok(command) = commands.try_recv() {
+            if command["type"] == "get_state" {
+                apply_rpc_response(
+                    &state,
+                    "s1",
+                    &serde_json::json!({
+                        "id": command["id"],
+                        "type": "response",
+                        "command": "get_state",
+                        "success": true,
+                        "data": {
+                            "sessionId": "s1",
+                            "isCompacting": false,
+                            "isStreaming": false
+                        }
+                    }),
+                )
+                .await;
+            }
+        }
 
         assert!(
             state

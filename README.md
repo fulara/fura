@@ -19,6 +19,12 @@ full commit metadata expands on demand. The **⋯ / Review options** menu contai
 repository management and **Advanced Compare**. Touch/pointer-coarse controls retain
 larger targets; the separate mobile layout is unchanged.
 
+Manual `/compact` uses OMP's builtin parser, including its compaction modes.
+Its RPC acknowledgement accepts background work; it does not signal completion.
+Fura keeps the composer locked until authoritative state reports that compaction
+has ended, refreshing after command output or cancellation. Success and failure
+restore controls without a browser reload; output text is not parsed as lifecycle state.
+
 ## Git changes
 
 The Git changes panel separates **Current changes** (unstaged, staged and nonignored

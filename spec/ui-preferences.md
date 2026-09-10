@@ -100,10 +100,14 @@ remain visible above the prompt.
 Both status bars display OMP's authoritative `get_state.contextUsage`: current
 context tokens, model capacity and percentage, not cumulative session token usage.
 Fura refreshes this state after model selection/cycling, builtin `/compact`
-completion (`prompt_result` or local-only prompt response), low-level `compact`
-responses and automatic compaction completion. No further prompt or page reload
-is needed. Unknown usage clears the previous value rather than retaining stale
-numbers; provider-specific token accounting stays in OMP.
+acknowledgement, low-level `compact` responses and automatic compaction completion.
+The builtin acknowledgement (`prompt_result` or local-only prompt response) can
+precede background compaction completion: it must not unlock the composer.
+While compacting, `command_output` triggers another authoritative refresh for
+success, failure or progress; successful `abort` responses cover cancellation
+without terminal output. Only authoritative state ends the compaction lock.
+No further prompt or page reload is needed. Unknown usage clears the previous
+value rather than retaining stale numbers; provider-specific accounting stays in OMP.
 
 ## Adding a new preference
 

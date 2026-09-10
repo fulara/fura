@@ -36,7 +36,8 @@ OMP (`--mode rpc-ui`) advertises and runs slash commands:
 - Frame dispatch (`src/rpc.rs::apply_rpc_frame`):
   - `available_commands_update` → `mutate_session_snapshot` setting `available_commands`.
   - `command_output` → emitted as a **`SessionNotice`** (reuses the existing notice path;
-    no new browser message type).
+    no new browser message type). While compacting, it also triggers an authoritative
+    state refresh; output text is not interpreted as completion.
   - `session_info_update` / `config_update` → trigger `refresh_rpc_state` so the
     projection picks up title/model/thinking changes after a server-side slash command.
 - Controller (Ask Fura) transport ignores these frames.
@@ -45,7 +46,9 @@ OMP (`--mode rpc-ui`) advertises and runs slash commands:
 
 - **Fura-native** (dedicated UX) stays intercepted: `plan`→`set_plan_mode`, `goal`→Goal-card
   notice, `model`/`thinking`/`fork`/`rebase`/`session`/`usage`/`export`/`new` (alias
-  `clear`)/`compact`/`handoff`/`rename`.
+  `clear`)/`handoff`/`rename`.
+- `/compact`, including its modes, goes through OMP's builtin prompt parser.
+  Fura projects its busy state but does not implement compaction itself.
 - **`handle`-bearing builtins Fura has no native UI for** (`tools`, `context`, `jobs`, `stats`,
   `changelog`, `fast`, `browser`, `dump`, `share`) fall through to OMP, which runs them
   server-side and returns `command_output`. They were removed from the TUI-only denylist.

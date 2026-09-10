@@ -1376,6 +1376,19 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     )
                     .await;
             }
+            // Background /compact finishes with command_output, not an agent turn.
+            // Output may also be progress or failure; only get_state can unlock it.
+            let is_compacting = state
+                .sessions
+                .read()
+                .await
+                .get(&target_session_id)
+                .is_some_and(|record| record.is_compacting);
+            if is_compacting
+                && let Err(message) = refresh_rpc_state(state, &target_session_id).await
+            {
+                warn!(session_id = %target_session_id, %message, "post-command-output state refresh failed");
+            }
         }
         OmpRpcFrame::SessionInfoUpdate { .. } | OmpRpcFrame::ConfigUpdate { .. } => {
             // Server-side slash commands (run by OMP in the prompt handler) can change
@@ -2710,6 +2723,20 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 warn!(session_id = %current_session_id, %message, "post-compaction state refresh failed");
             }
         }
+        Some("abort") => {
+            // Explicit cancellation has no command_output in OMP's /compact path.
+            let is_compacting = state
+                .sessions
+                .read()
+                .await
+                .get(&current_session_id)
+                .is_some_and(|record| record.is_compacting);
+            if is_compacting
+                && let Err(message) = refresh_rpc_state(state, &current_session_id).await
+            {
+                warn!(session_id = %current_session_id, %message, "post-compaction-abort state refresh failed");
+            }
+        }
         Some("prompt") => {
             let local_only = frame
                 .get("data")
@@ -2784,9 +2811,6 @@ pub(crate) async fn settle_local_only_prompt_result(
                 }
                 true
             });
-            if was_compacting {
-                record.is_compacting = false;
-            }
             if had_draft {
                 record.status = SessionStatus::Idle;
                 record.streaming_message = None;
@@ -2804,8 +2828,8 @@ pub(crate) async fn settle_local_only_prompt_result(
         broadcast_sessions_snapshot(state).await;
     }
     if was_compacting {
-        // Builtin /compact settles as a local-only prompt, not a compact RPC
-        // response or an agent turn. Its context usage must be refreshed here.
+        // OMP acknowledges background /compact before it finishes. Keep the
+        // composer locked until an authoritative state response says otherwise.
         if let Err(message) = refresh_rpc_state(state, session_id).await {
             warn!(session_id = %session_id, %message, "post-slash-compaction state refresh failed");
         }

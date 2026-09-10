@@ -142,7 +142,7 @@ test("desktop lists and changes the active session model", async ({ page }) => {
   await expect(page.locator("#statusBar .model")).toHaveText("Mock Reasoner");
 });
 
-test("compact updates context usage without another prompt on desktop and mobile", async ({ page }) => {
+test("compact refreshes context and accepts the next prompt without reload on desktop and mobile", async ({ page }) => {
   await authenticateDesktop(page);
   await createDesktopSession(page, `Context smoke ${Date.now()}`);
   await page.locator("#promptInput").fill("/model local/tiny");
@@ -154,6 +154,9 @@ test("compact updates context usage without another prompt on desktop and mobile
   await expect(page.locator("#statusBar .context")).toHaveText("12.5%/32K");
   await expect(page.locator("#promptInput")).toBeEnabled();
   await expect(page.locator(".message.assistant")).toHaveCount(0);
+  await page.locator("#promptInput").fill("Continue after desktop compaction");
+  await page.locator("#sendButton").click();
+  await expect(page.locator(".message.assistant").last()).toContainText("Mock assistant received");
 
   await page.goto("/mobile.html");
   await expect(page.locator("#mobileConnectionStatus")).toHaveText("connected");
@@ -164,6 +167,9 @@ test("compact updates context usage without another prompt on desktop and mobile
   await expect(page.locator("#mobileStatusBar .context")).toHaveText("2.0%/200K");
   await expect(page.locator("#mobilePromptInput")).toBeEnabled();
   await expect(page.locator(".message.assistant")).toHaveCount(0);
+  await page.locator("#mobilePromptInput").fill("Continue after mobile compaction");
+  await page.locator("#mobileSendButton").click();
+  await expect(page.locator(".message.assistant").last()).toContainText("Mock assistant received");
 });
 
 test("desktop explicit compare reads HEAD and working-tree content", async ({ page }) => {
