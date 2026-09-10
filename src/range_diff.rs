@@ -203,6 +203,7 @@ pub(crate) async fn read_range_diff(
     base: &str,
     old: &str,
     new: &str,
+    ignore_whitespace: bool,
 ) -> anyhow::Result<GitRangeDiffResult> {
     time::timeout(TIMEOUT, async {
         let repo = crate::diff::discover_repo_root(repo_root)?;
@@ -229,10 +230,14 @@ pub(crate) async fn read_range_diff(
                 "--no-show-signature", "--no-merges", "--format=medium",
                 "--show-notes-by-default", "--no-prefix", "--submodule=short", "-p", &range, "--"], PATCH_INPUT_LIMIT).await?;
         }
-        let (output, truncated) = capture(git_command(&repo), &["range-diff",
-            "--no-ext-diff", "--no-textconv", "--color=always", "--dual-color",
-            &base.oid, &old.oid, &new.oid, "--"], OUTPUT_LIMIT).await?;
-        Ok(GitRangeDiffResult { repo_root: repo.to_string_lossy().into_owned(), base, old, new, output, truncated })
+        let mut command = git_command(&repo);
+        command.args(["range-diff", "--no-ext-diff", "--no-textconv", "--color=always", "--dual-color"]);
+        if ignore_whitespace {
+            command.arg("--ignore-all-space");
+        }
+        let (output, truncated) = capture(command,
+            &[&base.oid, &old.oid, &new.oid, "--"], OUTPUT_LIMIT).await?;
+        Ok(GitRangeDiffResult { repo_root: repo.to_string_lossy().into_owned(), base, old, new, ignore_whitespace, output, truncated })
     }).await.context("Git range-diff timed out after 15 seconds")?
 }
 
@@ -374,7 +379,7 @@ mod tests {
         fixture.config("branch.topic.remote", "origin");
         fixture.config("branch.topic.merge", "refs/heads/topic");
         let before = bytes(fixture.temp.path());
-        let result = read_range_diff(fixture.root(), "origin/base", "@{u}", "HEAD")
+        let result = read_range_diff(fixture.root(), "origin/base", "@{u}", "HEAD", false)
             .await
             .unwrap();
         assert_eq!(result.base.oid, fixture.base.to_string());
@@ -426,12 +431,12 @@ mod tests {
         let tip = fixture
             .commit(fixture.base, "added", "addition\n", "new patch")
             .to_string();
-        let empty = read_range_diff(fixture.root(), &base, &base, &base)
+        let empty = read_range_diff(fixture.root(), &base, &base, &base, false)
             .await
             .unwrap();
         assert_eq!(empty.output, "");
         assert!(!empty.truncated);
-        let added = read_range_diff(fixture.root(), &base, &base, &tip)
+        let added = read_range_diff(fixture.root(), &base, &base, &tip, false)
             .await
             .unwrap();
         assert!(
@@ -439,7 +444,7 @@ mod tests {
                 .lines()
                 .any(|line| line.contains(" > "))
         );
-        let removed = read_range_diff(fixture.root(), &base, &tip, &base)
+        let removed = read_range_diff(fixture.root(), &base, &tip, &base, false)
             .await
             .unwrap();
         assert!(
@@ -458,7 +463,7 @@ mod tests {
             "WORKTREE",
         ] {
             assert!(
-                read_range_diff(fixture.root(), &base, input, &tip)
+                read_range_diff(fixture.root(), &base, input, &tip, false)
                     .await
                     .is_err(),
                 "{input:?}"
@@ -475,7 +480,7 @@ mod tests {
             .commit(fixture.base, "file", "text\n", &subject)
             .to_string();
         let base = fixture.base.to_string();
-        let result = read_range_diff(fixture.root(), &base, &base, &tip)
+        let result = read_range_diff(fixture.root(), &base, &base, &tip, false)
             .await
             .unwrap();
         assert!(result.truncated);
@@ -513,6 +518,7 @@ mod tests {
             &fixture.base.to_string(),
             &fixture.base.to_string(),
             &tip.to_string(),
+            false,
         )
         .await
         .unwrap_err();
@@ -534,6 +540,7 @@ mod tests {
             &fixture.base.to_string(),
             &fixture.base.to_string(),
             &tip.to_string(),
+            false,
         )
         .await
         .unwrap_err();
@@ -593,7 +600,7 @@ mod tests {
         fs::write(fixture.temp.path().join("dirty"), "uncommitted\n").unwrap();
         let before = bytes(fixture.temp.path());
         let base = fixture.base.to_string();
-        let result = read_range_diff(fixture.root(), &base, &base, &tip.to_string())
+        let result = read_range_diff(fixture.root(), &base, &base, &tip.to_string(), false)
             .await
             .unwrap();
         assert!(plain(&result.output).contains("stored patch"));
@@ -603,7 +610,7 @@ mod tests {
         fixture.config("diff.hostile.textconv", script.to_str().unwrap());
         fixture.config("diff.hostile.cachetextconv", "true");
         let before = bytes(fixture.temp.path());
-        let error = read_range_diff(fixture.root(), &base, &base, &tip.to_string())
+        let error = read_range_diff(fixture.root(), &base, &base, &tip.to_string(), false)
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("textconv"));
@@ -651,7 +658,8 @@ mod tests {
                 fixture.root(),
                 &fixture.base.to_string(),
                 &fixture.base.to_string(),
-                &tip.to_string()
+                &tip.to_string(),
+                false
             )
             .await
             .is_err()
@@ -666,7 +674,7 @@ mod tests {
         if std::env::var_os(CHILD).is_some() {
             let fixture = Fixture::new();
             let base = fixture.base.to_string();
-            let result = read_range_diff(fixture.root(), &base, &base, &base)
+            let result = read_range_diff(fixture.root(), &base, &base, &base, false)
                 .await
                 .unwrap();
             assert_eq!(

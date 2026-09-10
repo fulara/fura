@@ -448,6 +448,7 @@ export type GitRangeDiffResult = {
   base: { input: string; oid: string };
   old: { input: string; oid: string };
   new: { input: string; oid: string };
+  ignoreWhitespace: boolean;
   output: string;
   truncated: boolean;
 };
@@ -759,7 +760,7 @@ export type ClientMessage =
   | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; changeKind: GitChangeKind; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
   | { type: "git.history.request"; clientId: string; requestId: string; sessionId: string; repoId?: string | null; cursor?: string | null }
   | { type: "git.file.request"; clientId: string; requestId: string; repoRoot: string; commitOid: string; path: string }
-  | { type: "git.rangeDiff.request"; clientId: string; requestId: string; repoRoot: string; base: string; old: string; new: string }
+  | { type: "git.rangeDiff.request"; clientId: string; requestId: string; repoRoot: string; base: string; old: string; new: string; ignoreWhitespace: boolean }
   | { type: "git.rangeDiff.cancel"; requestId: string }
   | { type: "sessionRepos.update"; sessionId: string; action: SessionRepoAction; path: string }
   | { type: "compareDiff.request"; clientId: string; diffId: string; repoRoot: string; base: DiffRefInput; head: DiffRefInput; detailMode: DiffDetailMode; mergeBase?: boolean; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }

@@ -418,6 +418,8 @@ pub(crate) struct GitRangeDiffResult {
     pub(crate) base: GitRangeDiffRef,
     pub(crate) old: GitRangeDiffRef,
     pub(crate) new: GitRangeDiffRef,
+    #[serde(default)]
+    pub(crate) ignore_whitespace: bool,
     pub(crate) output: String,
     pub(crate) truncated: bool,
 }
@@ -886,6 +888,8 @@ pub(crate) enum ClientMessage {
         base: String,
         old: String,
         new: String,
+        #[serde(default)]
+        ignore_whitespace: bool,
     },
     #[serde(rename = "git.rangeDiff.cancel")]
     GitRangeDiffCancel { request_id: String },

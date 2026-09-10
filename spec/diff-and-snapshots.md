@@ -202,6 +202,16 @@ commits retain native output; there are no links, comments, file actions or comm
 Text nodes prevent HTML execution; unsupported terminal controls are stripped.
 Unfamiliar textual output remains plain text rather than being heuristically parsed.
 
+The Range-diff-only **Ignore whitespace** checkbox defaults off and passes
+`--ignore-all-space` to the final native `range-diff` command. It does not filter
+the DOM, normalize patches or change commit matching/statuses: an indentation-only
+pair can retain `!` with no body; only native `=` receives `(no change)`.
+Substantive edits, added/removed commits and blank-line changes follow native Git.
+Toggling preserves repository/refs, cancels the previous request and immediately
+recomputes. The echoed option is part of result identity; old or mismatched-mode
+responses cannot replace the current output. There is no durable preference.
+File diff is unaffected, and raw-patch preflight limits remain unchanged.
+
 All three refs resolve to full commit OIDs before comparison. Results show repository,
 input refs and pinned OIDs. The read-only Git runner disables external diff, pagers,
 signatures, hooks, optional locks, replacement objects, lazy fetch and transports.
@@ -244,9 +254,10 @@ client/request correlation and connection-owned jobs; replacement requests and s
 closure abort their owners. `sessionChanges.request.currentCommitOid` selects an immutable
 commit review independently of the current-change group. No new OMP protocol is required.
 
-`git.rangeDiff.request` carries `requestId`, `clientId`, `repoRoot`, `base`, `old`
-and `new`; `git.rangeDiff` returns correlated pinned identity, native output,
-truncation and errors. `git.rangeDiff.cancel` names the request. Jobs belong to
+`git.rangeDiff.request` carries `requestId`, `clientId`, `repoRoot`, `base`, `old`,
+`new` and `ignoreWhitespace`; `git.rangeDiff` returns correlated pinned identity,
+the option, native output, truncation and errors. Missing option fields default to
+false for compatibility. `git.rangeDiff.cancel` names the request. Jobs belong to
 the authenticated socket, with one active request per connection; replacement
 and disconnect abort it. No OMP operation, fetch, checkout or repository write
 is part of this mode.

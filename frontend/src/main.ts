@@ -851,8 +851,8 @@ type PendingDiffFilePatchRequest = { diffId: string; comparisonKey: string; file
 type DiffFilePatchError = { filePath: string | null; message: string };
 let comparePayloadKind: DiffDetailMode = "filePatch";
 let compareMode: "files" | "rangeDiff" = "files";
-type RangeDiffInputs = { repoRoot: string; base: string; old: string; new: string };
-let rangeDiffInputs: RangeDiffInputs = { repoRoot: "", base: "", old: "@{u}", new: "HEAD" };
+type RangeDiffInputs = { repoRoot: string; base: string; old: string; new: string; ignoreWhitespace: boolean };
+let rangeDiffInputs: RangeDiffInputs = { repoRoot: "", base: "", old: "@{u}", new: "HEAD", ignoreWhitespace: false };
 let pendingRangeDiff: { requestId: string; inputs: RangeDiffInputs } | null = null;
 let rangeDiffResult: GitRangeDiffResult | null = null;
 let rangeDiffError: string | null = null;
@@ -2150,8 +2150,8 @@ function handleServerMessage(message: ServerMessage): void {
       if (message.targetClientId !== diffClientId || !pending || message.requestId !== pending.requestId) break;
       const result = message.result;
       pendingRangeDiff = null;
-      if (result && (result.base.input !== pending.inputs.base || result.old.input !== pending.inputs.old || result.new.input !== pending.inputs.new)) {
-        rangeDiffError = "Range-diff response did not match the requested refs. Compare again.";
+      if (result && (result.base.input !== pending.inputs.base || result.old.input !== pending.inputs.old || result.new.input !== pending.inputs.new || (result.ignoreWhitespace ?? false) !== pending.inputs.ignoreWhitespace)) {
+        rangeDiffError = "Range-diff response did not match the requested refs or whitespace mode. Compare again.";
         rangeDiffResult = null;
       } else {
         rangeDiffResult = result;
@@ -7022,8 +7022,9 @@ function requestRangeDiff(values: RangeDiffInputs): void {
   rangeDiffInputs = {
     repoRoot: values.repoRoot.trim(), base: values.base.trim(),
     old: values.old.trim(), new: values.new.trim(),
+    ignoreWhitespace: values.ignoreWhitespace,
   };
-  if (Object.values(rangeDiffInputs).some(value => !value)) {
+  if ([rangeDiffInputs.repoRoot, rangeDiffInputs.base, rangeDiffInputs.old, rangeDiffInputs.new].some(value => !value)) {
     rangeDiffError = "Repository, Base, Old and New are required for range-diff.";
   } else {
     const requestId = nextClientRequestId("range-diff");
@@ -7090,7 +7091,7 @@ function renderRangeDiffCompare(container: HTMLElement): void {
   const form = mkEl("form");
   form.className = "range-compare-controls";
   form.append(compareModeSelector(() => rangeDiffInputs.repoRoot));
-  const fields = {} as Record<keyof RangeDiffInputs, HTMLInputElement>;
+  const fields = {} as Record<"repoRoot" | "base" | "old" | "new", HTMLInputElement>;
   for (const [key, title] of [["repoRoot", "Repository"], ["base", "Base"], ["old", "Old"], ["new", "New"]] as const) {
     const label = mkEl("label");
     label.textContent = title;
@@ -7110,13 +7111,24 @@ function renderRangeDiffCompare(container: HTMLElement): void {
     label.append(input);
     form.append(label);
   }
+  const whitespaceLabel = mkEl("label");
+  whitespaceLabel.className = "checkbox-row";
+  whitespaceLabel.title = "Ignore whitespace in patch comparisons; commit matching and statuses stay unchanged.";
+  const ignoreWhitespace = mkEl("input");
+  ignoreWhitespace.type = "checkbox";
+  ignoreWhitespace.checked = rangeDiffInputs.ignoreWhitespace;
+  ignoreWhitespace.addEventListener("change", () => {
+    requestRangeDiff({ ...rangeDiffInputs, ignoreWhitespace: ignoreWhitespace.checked });
+  });
+  whitespaceLabel.append(ignoreWhitespace, "Ignore whitespace");
+  form.append(whitespaceLabel);
   const run = mkEl("button");
   run.type = "submit";
   run.textContent = "Compare";
   form.append(run);
   form.addEventListener("submit", event => {
     event.preventDefault();
-    requestRangeDiff({ repoRoot: fields.repoRoot.value, base: fields.base.value, old: fields.old.value, new: fields.new.value });
+    requestRangeDiff({ repoRoot: fields.repoRoot.value, base: fields.base.value, old: fields.old.value, new: fields.new.value, ignoreWhitespace: ignoreWhitespace.checked });
   });
   rangeDiffBody = mkEl("section");
   rangeDiffBody.className = "range-compare-body";
@@ -8419,7 +8431,7 @@ function submitCwdPickerDiff(): void {
     if (activeSessionUsesDiffReviewWorkspace()) activateControllerWorkspace();
     normalDesktopDockview?.ensureComparePanel();
     normalDesktopDockview?.activatePanel("compare");
-    requestRangeDiff(inputs);
+    requestRangeDiff({ ...inputs, ignoreWhitespace: false });
     return;
   }
   const base = cwdPickerDiffBase.value.trim() || "HEAD";

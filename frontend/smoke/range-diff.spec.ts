@@ -23,7 +23,7 @@ function git(root: string, args: string[], environment: Record<string, string> =
 
 // Every write, ref, upstream, and rebase belongs to this disposable repository.
 // No remote transport is used: branch.main.remote=. makes @{u} a local ref.
-function fixture(options: { upstream?: boolean; oversized?: boolean } = {}) {
+function fixture(options: { upstream?: boolean; oversized?: boolean; whitespace?: boolean } = {}) {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), "fura-range-diff-smoke-")));
   const run = (...args: string[]) => git(root, args).trim();
   try {
@@ -95,11 +95,27 @@ function fixture(options: { upstream?: boolean; oversized?: boolean } = {}) {
       oversized = run("rev-parse", "HEAD");
     }
     run("checkout", "-q", "main");
+    let indentationOld = "", indentationNew = "", blankNew = "";
+    if (options.whitespace) {
+      run("checkout", "-qb", "indentation-old", base);
+      const original = readFileSync(path.join(root, "same.ts"), "utf8");
+      put("same.ts", original.replace("export const value15 = 15;", "    export const value15 = 150;"));
+      indentationOld = commit("Indentation patch");
+      run("checkout", "-qb", "indentation-new", base);
+      put("same.ts", original.replace("export const value15 = 15;", "        export const value15 = 150;"));
+      indentationNew = commit("Indentation patch");
+      run("checkout", "-qb", "blank-new", base);
+      put("same.ts", original.replace("export const value15 = 15;", "        export const value15 = 150;\n"));
+      blankNew = commit("Indentation patch");
+      run("checkout", "-q", "indentation-new");
+      run("config", "branch.indentation-new.remote", ".");
+      run("config", "branch.indentation-new.merge", "refs/heads/indentation-old");
+    }
     put("README.txt", "DIRTY_WORKTREE_SENTINEL\n");
     put("staged.txt", "STAGED_INDEX_SENTINEL\n");
     run("add", "staged.txt");
     put("untracked.txt", "UNTRACKED_SENTINEL\n");
-    return { root, base, old, newer, singleOld, singleNew, hostile, hostileNew, hostileSubject, oversized, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+    return { root, base, old, newer, singleOld, singleNew, hostile, hostileNew, hostileSubject, oversized, indentationOld, indentationNew, blankNew, cleanup: () => rmSync(root, { recursive: true, force: true }) };
   } catch (error) {
     rmSync(root, { recursive: true, force: true });
     throw error;
@@ -120,9 +136,9 @@ function repositoryBytes(root: string): Array<[string, string]> {
 }
 
 type Ref = { input: string; oid: string };
-type Result = { repoRoot: string; base: Ref; old: Ref; new: Ref; output: string; truncated: boolean };
+type Result = { repoRoot: string; base: Ref; old: Ref; new: Ref; ignoreWhitespace?: boolean; output: string; truncated: boolean };
 type Response = { type: "git.rangeDiff"; requestId: string; result: Result | null; error: string | null };
-type Request = { type: string; requestId: string; repoRoot?: string; base?: string; old?: string; new?: string };
+type Request = { type: string; requestId: string; repoRoot?: string; base?: string; old?: string; new?: string; ignoreWhitespace?: boolean };
 type Capture = { responses: Response[]; requests: Request[]; held: Array<() => void>; hold: boolean; disconnect: () => Promise<void> };
 async function captureTransport(page: Page) {
   const capture: Capture = {
@@ -187,6 +203,18 @@ async function submit(page: Page, capture: Capture) {
   await expect.poll(() => capture.responses.find(response => response.requestId === request.requestId)).toBeDefined();
   return capture.responses.find(response => response.requestId === request.requestId)!;
 }
+async function toggleWhitespace(page: Page, capture: Capture, checked: boolean) {
+  const count = capture.requests.length;
+  await compare(page).getByRole("checkbox", { name: "Ignore whitespace", exact: true }).setChecked(checked);
+  await expect.poll(() => capture.requests.slice(count).find(request => request.type === "git.rangeDiff.request")).toBeDefined();
+  const request = capture.requests.slice(count).find(request => request.type === "git.rangeDiff.request")!;
+  expect(request.ignoreWhitespace).toBe(checked);
+  await expect.poll(() => capture.responses.find(response => response.requestId === request.requestId)).toBeDefined();
+  const response = capture.responses.find(response => response.requestId === request.requestId)!;
+  expect(response.error).toBeNull();
+  expect(response.result?.ignoreWhitespace).toBe(checked);
+  return response;
+}
 function native(result: Result) {
   return git(result.repoRoot, [
     "--no-replace-objects", "--no-lazy-fetch", "--no-optional-locks", "--literal-pathspecs",
@@ -194,6 +222,7 @@ function native(result: Result) {
     "-c", "log.showSignature=false", "-c", "maintenance.auto=false", "-c", "gc.auto=0",
     "-c", "protocol.allow=never", "-c", "credential.helper=", "-c", "diff.external=", "-c", "diff.submodule=short",
     "range-diff", "--no-ext-diff", "--no-textconv", "--color=always", "--dual-color",
+    ...(result.ignoreWhitespace ? ["--ignore-all-space"] : []),
     result.base.oid, result.old.oid, result.new.oid, "--",
   ], { GIT_NO_LAZY_FETCH: "1", GIT_NO_REPLACE_OBJECTS: "1", GIT_ALLOW_PROTOCOL: "" });
 }
@@ -215,6 +244,121 @@ async function expectNative(page: Page, response: Response) {
 }
 
 test.beforeEach(({ page }) => page.on("pageerror", error => { throw error; }));
+
+test("Ignore whitespace follows native range-diff without changing pairing or hiding real changes", async ({ page }, info) => {
+  const repo = fixture({ whitespace: true }), before = repositoryBytes(repo.root), capture = await captureTransport(page);
+  try {
+    await authenticate(page);
+    await openRange(page, repo.root);
+    const checkbox = compare(page).getByRole("checkbox", { name: "Ignore whitespace", exact: true });
+    await expect(checkbox).toBeVisible();
+    await expect(checkbox).not.toBeChecked();
+    await expect(page.getByRole("checkbox", { name: "Ignore whitespace", exact: true })).toHaveCount(1);
+    await expect.poll(() => capture.responses.length).toBe(1);
+    const unfiltered = await expectNative(page, capture.responses[0]);
+    expect(unfiltered.ignoreWhitespace).toBe(false);
+    expect(capture.requests.find(request => request.type === "git.rangeDiff.request")?.ignoreWhitespace).toBe(false);
+    expect(unfiltered.base).toEqual({ input: "origin/v35", oid: repo.base });
+    expect(unfiltered.old).toEqual({ input: "@{u}", oid: repo.indentationOld });
+    expect(unfiltered.new).toEqual({ input: "HEAD", oid: repo.indentationNew });
+    expect(plain(unfiltered.output)).toContain("@@ same.ts");
+    expect(plain(unfiltered.output)).toMatch(/ ! .*Indentation patch/);
+    await page.screenshot({ path: info.outputPath("range-diff-whitespace-unfiltered-body.png"), fullPage: true });
+
+    const filtered = await expectNative(page, await toggleWhitespace(page, capture, true));
+    await expect(checkbox).toBeChecked();
+    expect(filtered.base).toEqual(unfiltered.base);
+    expect(filtered.old).toEqual(unfiltered.old);
+    expect(filtered.new).toEqual(unfiltered.new);
+    expect(plain(filtered.output)).toBe(`${plain(unfiltered.output).split("\n")[0]}\n`);
+    expect(plain(filtered.output)).toMatch(/ ! .*Indentation patch/);
+    await expect(output(page)).not.toContainText("(no change)");
+    await expect(compare(page).locator(".range-diff-empty")).toHaveCount(0);
+    for (const [name, value] of Object.entries({ Repository: repo.root, Base: "origin/v35", Old: "@{u}", New: "HEAD" })) {
+      await expect(compare(page).getByRole("textbox", { name, exact: true })).toHaveValue(value);
+    }
+    await page.screenshot({ path: info.outputPath("range-diff-whitespace-checked-bang-no-body.png"), fullPage: true });
+
+    const restored = await expectNative(page, await toggleWhitespace(page, capture, false));
+    await expect(checkbox).not.toBeChecked();
+    expect(restored.output).toBe(unfiltered.output);
+
+    await setRefs(page, { base: repo.base, old: repo.old, new: repo.newer });
+    const mixedUnfiltered = await expectNative(page, await submit(page, capture));
+    const mixed = await expectNative(page, await toggleWhitespace(page, capture, true));
+    const summaries = (text: string) => plain(text).split("\n").filter(line => /^\s*(?:\d+|-)\s*:/.test(line));
+    expect(summaries(mixed.output)).toEqual(summaries(mixedUnfiltered.output));
+    for (const status of ["=", "!", "<", ">"]) expect(summaries(mixed.output).some(line => line.includes(` ${status} `))).toBe(true);
+    await expect(output(page)).toContainText("value15 = 151");
+    await expect(output(page)).toContainText("Removed patch");
+    await expect(output(page)).toContainText("Added patch");
+    for (const line of summaries((await output(page).textContent())!)) {
+      expect(line.includes("(no change)")).toBe(line.includes(" = "));
+    }
+
+    await setRefs(page, { base: repo.base, old: repo.indentationOld, new: repo.blankNew });
+    const blank = await expectNative(page, await submit(page, capture));
+    expect(blank.ignoreWhitespace).toBe(true);
+    expect(plain(blank.output)).toMatch(/ ! .*Indentation patch/);
+    expect(plain(blank.output)).toContain("@@ same.ts");
+    expect(plain(blank.output)).toMatch(/^\s*\+\+$/m);
+    await expect(output(page)).not.toContainText("(no change)");
+    expect(repositoryBytes(repo.root)).toEqual(before);
+  } finally { repo.cleanup(); }
+});
+
+test("Ignore whitespace rapid toggles cancel pending jobs and reject delayed real option results", async ({ page }) => {
+  const repo = fixture({ whitespace: true }), before = repositoryBytes(repo.root), capture = await captureTransport(page);
+  try {
+    capture.hold = true;
+    await authenticate(page);
+    await openRange(page, repo.root);
+    const checkbox = compare(page).getByRole("checkbox", { name: "Ignore whitespace", exact: true });
+    await expect(checkbox).toBeVisible();
+    await expect(checkbox).not.toBeChecked();
+    await expect.poll(() => capture.held.length).toBe(1);
+    const firstChecked = await toggleWhitespace(page, capture, true);
+    const unchecked = await toggleWhitespace(page, capture, false);
+    const latest = await toggleWhitespace(page, capture, true);
+    await expect.poll(() => capture.held.length).toBe(4);
+    const requests = capture.requests.filter(request => request.type === "git.rangeDiff.request");
+    expect(requests.map(request => request.ignoreWhitespace)).toEqual([false, true, false, true]);
+    expect(new Set(requests.map(request => request.requestId)).size).toBe(4);
+    for (const request of requests.slice(0, -1)) {
+      expect(capture.requests.some(candidate => candidate.type === "git.rangeDiff.cancel" && candidate.requestId === request.requestId)).toBe(true);
+    }
+    expect(firstChecked.result!.output).toBe(native(firstChecked.result!));
+    expect(unchecked.result!.output).toBe(native(unchecked.result!));
+    expect(unchecked.result!.output).not.toBe(latest.result!.output);
+    for (const [name, value] of Object.entries({ Repository: repo.root, Base: "origin/v35", Old: "@{u}", New: "HEAD" })) {
+      await expect(compare(page).getByRole("textbox", { name, exact: true })).toHaveValue(value);
+    }
+
+    const held = capture.held.splice(0);
+    // Deliver an old unchecked result while the latest checked job is pending.
+    held[0]();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(checkbox).toBeChecked();
+    await expect(output(page)).toHaveCount(0);
+    await expect(compare(page).locator(".range-diff-identity")).toHaveCount(0);
+    held[3]();
+    const accepted = await expectNative(page, latest);
+    expect(plain(accepted.output).trim().split("\n")).toHaveLength(1);
+    await expect(output(page)).not.toContainText("(no change)");
+
+    // Then deliver older checked and unchecked results after the current result.
+    held[1]();
+    held[2]();
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+    await expect(checkbox).toBeChecked();
+    await expect(output(page)).toHaveText(plain(accepted.output));
+    await expect(output(page)).not.toContainText("@@");
+    capture.hold = false;
+    const restored = await expectNative(page, await toggleWhitespace(page, capture, false));
+    expect(restored.output).toBe(unchecked.result!.output);
+    expect(repositoryBytes(repo.root)).toEqual(before);
+  } finally { repo.cleanup(); }
+});
 
 test("native mixed range-diff preserves pinned identity, patch order, dual colors and read-only state", async ({ page }, info) => {
   const repo = fixture(), before = repositoryBytes(repo.root), capture = await captureTransport(page);
@@ -398,6 +542,7 @@ test("Advanced Compare opens range-diff while ordinary Compare, History and Code
     await expect.poll(() => capture.responses.length).toBe(1);
     await expectNative(page, capture.responses[0]);
     await compare(page).getByRole("combobox", { name: "Compare mode", exact: true }).selectOption("files");
+    await expect(compare(page).getByRole("checkbox", { name: "Ignore whitespace", exact: true })).toHaveCount(0);
     await compare(page).getByRole("textbox", { name: "Base", exact: true }).fill(repo.base);
     await compare(page).getByRole("textbox", { name: "Head", exact: true }).fill(repo.newer);
     await compare(page).getByRole("button", { name: "Compare", exact: true }).click();

@@ -370,6 +370,7 @@ pub(crate) async fn handle_client_message_for_connection(
             base,
             old,
             new,
+            ignore_whitespace,
         } => {
             handle_git_range_diff_request(
                 state,
@@ -380,6 +381,7 @@ pub(crate) async fn handle_client_message_for_connection(
                 base,
                 old,
                 new,
+                ignore_whitespace,
             )
             .await
         }
@@ -3641,6 +3643,7 @@ async fn handle_git_range_diff_request(
     base: String,
     old: String,
     new: String,
+    ignore_whitespace: bool,
 ) -> Vec<ServerMessage> {
     let mut jobs = state.diff_jobs.write().await;
     if let Some(previous) = jobs.range_diff_jobs.remove(&connection_id) {
@@ -3651,7 +3654,9 @@ async fn handle_git_range_diff_request(
     let task_state = state.clone();
     let job_request_id = request_id.clone();
     let handle = tokio::spawn(async move {
-        let result = crate::range_diff::read_range_diff(&repo_root, &base, &old, &new).await;
+        let result =
+            crate::range_diff::read_range_diff(&repo_root, &base, &old, &new, ignore_whitespace)
+                .await;
         // Keep ownership through publication: replacement/cancel cannot slip
         // between a stale-token check and broadcasting this result.
         let mut jobs = task_state.diff_jobs.write().await;
@@ -3745,6 +3750,190 @@ mod range_diff_tests {
     }
 
     #[tokio::test]
+    async fn whitespace_option_dispatch_matches_native_git_and_preserves_statuses() {
+        let state = crate::tests::test_state(16, None);
+        let temp = repository();
+        let repo = Repository::open(temp.path()).unwrap();
+        let commit = |parent: git2::Oid, text: &str| {
+            let parent = repo.find_commit(parent).unwrap();
+            let mut tree = repo.treebuilder(Some(&parent.tree().unwrap())).unwrap();
+            tree.insert("sample.txt", repo.blob(text.as_bytes()).unwrap(), 0o100644)
+                .unwrap();
+            let tree = repo.find_tree(tree.write().unwrap()).unwrap();
+            let signature = git2::Signature::new(
+                "Range Tester",
+                "range@example.invalid",
+                &git2::Time::new(1_700_000_001, 0),
+            )
+            .unwrap();
+            repo.commit(
+                None,
+                &signature,
+                &signature,
+                "Change value",
+                &tree,
+                &[&parent],
+            )
+            .unwrap()
+        };
+        let original = (0..80)
+            .map(|n| format!("    value_{n} = {n};\n"))
+            .collect::<String>();
+        let base = commit(repo.head().unwrap().target().unwrap(), &original);
+        let old_text = original.replace("value_40 = 40;", "value_40 = 400;");
+        let old = commit(base, &old_text);
+        let indented = commit(base, &old_text.replace("    value_40", "        value_40"));
+        let compact = commit(base, &old_text.replace("value_40 = 400;", "value_40=400;"));
+        let substantive = commit(
+            base,
+            &old_text.replace("value_40 = 400;", "value_40 = 401;"),
+        );
+        let blank = commit(
+            base,
+            &old_text.replace("value_40 = 400;\n", "value_40 = 400;\n\n"),
+        );
+        let mut events = state.events.subscribe();
+
+        for (case, old, new, marker, hidden_body) in [
+            ("indentation", old, indented, " ! ", true),
+            ("spaces-removed", old, compact, " ! ", true),
+            ("substantive", old, substantive, " ! ", false),
+            ("blank-line", old, blank, " ! ", false),
+            ("identical", old, old, " = ", true),
+            ("added", base, old, " > ", false),
+            ("removed", old, base, " < ", false),
+        ] {
+            let mut summaries = None;
+            let mut normal_output = None;
+            for option in [Some(true), Some(false), None] {
+                let ignore = option.unwrap_or(false);
+                let mut native = std::process::Command::new("git");
+                for (key, _) in std::env::vars_os() {
+                    if key.to_string_lossy().starts_with("GIT_") {
+                        native.env_remove(key);
+                    }
+                }
+                native.current_dir(temp.path()).args([
+                    "--no-pager",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "log.showSignature=false",
+                    "-c",
+                    "diff.external=",
+                    "range-diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--color=always",
+                    "--dual-color",
+                ]);
+                if ignore {
+                    native.arg("--ignore-all-space");
+                }
+                let native = native
+                    .args([
+                        base.to_string(),
+                        old.to_string(),
+                        new.to_string(),
+                        "--".into(),
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(
+                    native.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&native.stderr)
+                );
+                let expected = String::from_utf8(native.stdout).unwrap();
+                let id = format!("{case}-{option:?}");
+                let mut request = json!({
+                    "type": "git.rangeDiff.request", "clientId": "whitespace-client",
+                    "requestId": id, "repoRoot": temp.path().to_string_lossy(),
+                    "base": base.to_string(), "old": old.to_string(), "new": new.to_string()
+                });
+                if let Some(option) = option {
+                    request["ignoreWhitespace"] = json!(option);
+                }
+                let message = serde_json::from_value(request).unwrap();
+                handle_client_message_for_connection(&state, message, 41).await;
+                let event = tokio::time::timeout(Duration::from_secs(20), events.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let wire = serde_json::to_value(&event).unwrap();
+                assert_eq!(wire["requestId"], id);
+                assert_eq!(wire["targetClientId"], "whitespace-client");
+                assert!(wire["error"].is_null(), "{wire}");
+                let result = &wire["result"];
+                let output = result["output"].as_str().unwrap();
+                // Check real output before the new echo field so RED is behavioral.
+                assert_eq!(output, expected, "{case}, ignoreWhitespace={option:?}");
+                assert_eq!(result["ignoreWhitespace"], json!(ignore));
+                assert_eq!(result["truncated"], false);
+                if case == "indentation" && ignore {
+                    let mut legacy = result.clone();
+                    legacy.as_object_mut().unwrap().remove("ignoreWhitespace");
+                    let legacy: GitRangeDiffResult = serde_json::from_value(legacy).unwrap();
+                    assert_eq!(
+                        serde_json::to_value(legacy).unwrap()["ignoreWhitespace"],
+                        false
+                    );
+                }
+                if option == Some(false) {
+                    normal_output = Some(output.to_owned());
+                } else if option.is_none() {
+                    assert_eq!(
+                        Some(output),
+                        normal_output.as_deref(),
+                        "{case}: missing defaults off"
+                    );
+                }
+                // Git's forced-color output contains SGR sequences only.
+                let plain: String = output
+                    .split('\x1b')
+                    .enumerate()
+                    .map(|(index, part)| {
+                        if index == 0 {
+                            part
+                        } else {
+                            part.split_once('m').unwrap().1
+                        }
+                    })
+                    .collect();
+                let headers = plain
+                    .lines()
+                    .filter(|line| !line.starts_with(' '))
+                    .collect::<Vec<_>>();
+                assert_eq!(headers.len(), 1, "{plain}");
+                assert!(headers[0].contains(marker), "{plain}");
+                if let Some(summaries) = &summaries {
+                    assert_eq!(
+                        &headers.join("\n"),
+                        summaries,
+                        "option changed native pairing/status"
+                    );
+                } else {
+                    summaries = Some(headers.join("\n"));
+                }
+                if (ignore && hidden_body) || marker != " ! " {
+                    assert_eq!(plain.lines().count(), 1, "{case}: {plain}");
+                } else {
+                    assert!(
+                        plain.lines().any(|line| line.starts_with("    @@")),
+                        "{case}: {plain}"
+                    );
+                }
+                if case == "substantive" {
+                    assert!(plain.contains("value_40 = 401;"), "{plain}");
+                }
+                if case == "blank-line" {
+                    assert!(plain.lines().any(|line| line == "    ++"), "{plain}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn replacement_stale_cancel_and_disconnect_are_connection_owned() {
         let state = crate::tests::test_state(16, None);
         let repo = repository();
@@ -3823,6 +4012,7 @@ mod range_diff_tests {
             base: "HEAD".into(),
             old: "@{u}".into(),
             new: "HEAD".into(),
+            ignore_whitespace: false,
         };
         handle_client_message_for_connection(&state, message, 41).await;
         let event = tokio::time::timeout(Duration::from_secs(20), events.recv())
@@ -3850,6 +4040,7 @@ mod range_diff_tests {
                 base: reference.clone(),
                 old: reference.clone(),
                 new: reference,
+                ignore_whitespace: false,
                 output: native.into(),
                 truncated: false,
             }),
