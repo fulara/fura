@@ -85,7 +85,7 @@ separate evidence, not a claim that the app's internal behavior was inspected.
 
 Desktop uses a fixed compact layout, not another persisted display preference:
 208px session sidebar, flat two-line session rows, small proportional titles,
-compact panel headers and a 48px resizable prompt field. Session metadata and
+compact panel headers and a 96px default-height resizable prompt field. Session metadata and
 repository paths ellipsize rather than expanding their rows. Transcript prose
 and code font sizes are unchanged. Keyboard focus remains visible; coarse-pointer
 controls use at least 44px targets. Shared-component density overrides live in
@@ -94,6 +94,10 @@ shared form typography and card defaults.
 The prompt field touches the status-bar separator when no images are attached.
 The hidden attachment strip contributes no padding or border; attached images
 remain visible above the prompt.
+The textarea remains manually resizable down to 48px, with a maximum of the smaller
+of 18rem and 40vh so short windows retain transcript space and reachable controls.
+Its height is outside saved Dockview layouts. Manual resizing remains unpersisted;
+reload restores the larger default without resetting panel layouts or other preferences.
 
 ### Context usage
 

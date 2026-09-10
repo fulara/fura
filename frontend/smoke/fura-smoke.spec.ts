@@ -87,6 +87,41 @@ test("desktop authenticates, creates a mock session, and receives a prompt respo
   await expect.poll(async () => (await page.locator(".message.assistant").boundingBox())?.height ?? 0).toBeGreaterThan(20);
 });
 
+test("desktop prompt keeps a roomy default after reload and fits short viewports", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await authenticateDesktop(page);
+  const sessionName = `Prompt height smoke ${Date.now()}`;
+  await createDesktopSession(page, sessionName);
+  const prompt = page.locator("#promptInput");
+  const usableHeight = () => prompt.evaluate(element => {
+    const style = getComputedStyle(element);
+    return element.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
+  });
+  // More than twice the old 39.6px text area, not extra container padding.
+  expect(await usableHeight()).toBeGreaterThanOrEqual(80);
+  await page.reload();
+  await expect(page.locator("#connectionStatus")).toHaveText("connected");
+  expect(await usableHeight()).toBeGreaterThanOrEqual(80);
+  await page.locator("#sessionsList .session-item button").filter({ hasText: sessionName }).first().click();
+  await expect(prompt).toBeEnabled();
+
+  await page.setViewportSize({ width: 1440, height: 320 });
+  // A previously enlarged editor must also fit when the window becomes short.
+  await prompt.evaluate(element => { element.style.height = "288px"; });
+  for (const selector of ["#promptInput", "#sendButton", "#abortButton", "#stopButton"]) {
+    const bounds = await page.locator(selector).boundingBox();
+    expect(bounds).not.toBeNull();
+    expect(bounds!.y).toBeGreaterThanOrEqual(0);
+    expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(320);
+  }
+  expect((await page.locator("#workspacePanelHost").boundingBox())!.height).toBeGreaterThan(100);
+  await page.locator("#abortButton").click({ trial: true });
+  await page.locator("#stopButton").click({ trial: true });
+  await prompt.fill("Prompt from a short desktop window");
+  await page.locator("#sendButton").click();
+  await expect(page.locator(".message.assistant").last()).toContainText("Mock assistant received");
+});
+
 test("desktop rolls back a text and image prompt into an unsent draft", async ({ page }) => {
   const sessionName = `Desktop rollback ${Date.now()}`;
   const promptText = "desktop rollback draft";

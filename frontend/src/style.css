@@ -2818,9 +2818,9 @@ h2 {
 .prompt-form textarea {
   resize: vertical;
   display: block;
-  height: 48px;
+  height: 96px;
   min-height: 48px;
-  max-height: 18rem;
+  max-height: min(18rem, 40vh);
 }
 
 .prompt-actions {
