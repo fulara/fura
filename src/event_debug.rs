@@ -327,7 +327,7 @@ pub(crate) fn summarize_rpc_event(session_id: &str, raw_line: &str) -> Map<Strin
 }
 
 pub(crate) fn summarize_client_event(message: &ClientMessage) -> Map<String, Value> {
-    let record = match message {
+    match message {
         ClientMessage::PlanApprove {
             session_id,
             plan_file_path,
@@ -406,8 +406,7 @@ pub(crate) fn summarize_client_event(message: &ClientMessage) -> Map<String, Val
             record
         }
         _ => event_record("client_to_bridge", "other"),
-    };
-    record
+    }
 }
 
 pub(crate) fn summarize_server_event(message: &ServerMessage) -> Map<String, Value> {
@@ -523,11 +522,10 @@ async fn append_jsonl(path: &Path, record: &Map<String, Value>) {
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
+        && let Err(error) = async_fs::create_dir_all(parent).await
     {
-        if let Err(error) = async_fs::create_dir_all(parent).await {
-            warn!(path = %path.display(), %error, "failed to create event debug file directory");
-            return;
-        }
+        warn!(path = %path.display(), %error, "failed to create event debug file directory");
+        return;
     }
 
     let Ok(mut encoded) = serde_json::to_string(record) else {

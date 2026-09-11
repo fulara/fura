@@ -228,20 +228,39 @@ fn additional_directories(path: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     let Ok(file) = File::open(path) else {
         return Vec::new();
     };
-    // Reuse the catalog's title-prelude/legacy header handling, with a byte bound.
-    let mut lines = BufReader::new(file.take(1024 * 1024)).lines();
-    let Some((header, _)) = crate::catalog::scan_session_header(&mut lines) else {
-        return Vec::new();
-    };
-    header
-        .additional_directories
-        .as_ref()
-        .and_then(Value::as_array)
-        .into_iter()
+    // Preserve the legacy first-header boundary and byte/line limits.
+    for line in BufReader::new(file.take(1024 * 1024))
+        .lines()
+        .take(16)
         .flatten()
-        .filter_map(Value::as_str)
-        .filter_map(|path| local_path(path, cwd))
-        .collect()
+    {
+        let Ok(header) = serde_json::from_str::<Value>(line.trim()) else {
+            continue;
+        };
+        if header.get("type").and_then(Value::as_str) != Some("session") {
+            continue;
+        }
+        // These fields were validated by SessionHeader even though only directories
+        // were consumed. Keep its required id and optional-string contract.
+        if !header.get("id").is_some_and(Value::is_string)
+            || ["timestamp", "cwd", "title"].iter().any(|field| {
+                header
+                    .get(field)
+                    .is_some_and(|value| !value.is_null() && !value.is_string())
+            })
+        {
+            return Vec::new();
+        }
+        return header
+            .get("additionalDirectories")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .filter_map(|path| local_path(path, cwd))
+            .collect();
+    }
+    Vec::new()
 }
 
 fn repo_root(path: &Path) -> anyhow::Result<PathBuf> {
@@ -549,6 +568,60 @@ mod tests {
             roots(&discover(&temp.path().join("db"), "legacy", legacy).unwrap()),
             vec![cwd]
         );
+    }
+
+    #[test]
+    fn additional_directories_preserve_header_validation_and_first_header_boundary() {
+        let temp = TempDir::new().unwrap();
+        let file = temp.path().join("session.jsonl");
+        let path = file.to_str().unwrap();
+        let valid =
+            json!({"type":"session","id":"s","additionalDirectories":["extra"],"futureField":true});
+        fs::write(
+            &file,
+            format!(
+                "not json\n{}\n{valid}\n",
+                json!({"type":"title","title":"Prelude"})
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            additional_directories(path, Some(temp.path())),
+            vec![temp.path().join("extra")]
+        );
+        for field in ["timestamp", "cwd", "title"] {
+            for value in [Value::Null, json!("valid string")] {
+                let mut header = valid.clone();
+                header[field] = value;
+                fs::write(&file, header.to_string()).unwrap();
+                assert_eq!(
+                    additional_directories(path, Some(temp.path())),
+                    vec![temp.path().join("extra")]
+                );
+            }
+            let mut malformed = valid.clone();
+            malformed[field] = json!(12);
+            fs::write(&file, format!("{malformed}\n{valid}\n")).unwrap();
+            assert!(
+                additional_directories(path, Some(temp.path())).is_empty(),
+                "{field} must retain string validation, not fall through to another header"
+            );
+        }
+        for id in [Value::Null, json!(12)] {
+            let mut malformed = valid.clone();
+            malformed["id"] = id;
+            fs::write(&file, format!("{malformed}\n{valid}\n")).unwrap();
+            assert!(additional_directories(path, Some(temp.path())).is_empty());
+        }
+        fs::write(
+            &file,
+            format!(
+                "{}\n{valid}",
+                json!({"type":"session","additionalDirectories":["extra"]})
+            ),
+        )
+        .unwrap();
+        assert!(additional_directories(path, Some(temp.path())).is_empty());
     }
 
     #[test]

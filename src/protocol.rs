@@ -522,13 +522,13 @@ pub(crate) enum SessionChangesSummaryState {
         target_client_id: String,
         diff_id: String,
         request: DiffRequestIdentity,
-        comparison: DiffComparisonIdentity,
+        comparison: Box<DiffComparisonIdentity>,
         session_id: String,
         repos: Vec<SessionRepoCandidate>,
         selected_repo_id: String,
         summary: DiffSummaryPayload,
         review: CommitStepState,
-        review_worktree: Option<DiffReviewWorktree>,
+        review_worktree: Option<Box<DiffReviewWorktree>>,
     },
     MissingRepo {
         target_client_id: String,
@@ -1040,7 +1040,7 @@ pub(crate) enum ClientMessage {
     #[serde(rename = "review.agentReview.start")]
     ReviewAgentReviewStart {
         session_id: String,
-        state: DiffReviewableState,
+        state: Box<DiffReviewableState>,
         instructions: String,
     },
 }
@@ -1240,7 +1240,7 @@ pub(crate) enum ServerMessage {
     #[serde(rename = "sessionChanges.summary")]
     SessionChangesSummary { state: SessionChangesSummaryState },
     #[serde(rename = "compareDiff.summary")]
-    CompareDiffSummary { state: CompareDiffSummaryState },
+    CompareDiffSummary { state: Box<CompareDiffSummaryState> },
     #[serde(rename = "diff.content")]
     DiffContent { content: DiffContentState },
     #[serde(rename = "diff.complete")]

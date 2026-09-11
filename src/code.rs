@@ -372,7 +372,17 @@ async fn start_navigation(
     let state = state.clone();
     tokio::spawn(async move {
         run_navigation_query(
-            state, workspace, rust_root, path, abs_path, text, position, request_id, kind,
+            state,
+            workspace,
+            rust_root,
+            NavigationQuery {
+                request_path: path,
+                abs_path,
+                text,
+                position,
+                request_id,
+                kind,
+            },
         )
         .await;
     });
@@ -391,17 +401,29 @@ fn nav_result_is_empty(message: &ServerMessage) -> bool {
     }
 }
 
-async fn run_navigation_query(
-    state: AppState,
-    workspace: CodeWorkspace,
-    rust_root: PathBuf,
+struct NavigationQuery {
     request_path: String,
     abs_path: PathBuf,
     text: String,
     position: Position,
     request_id: String,
     kind: NavigationKind,
+}
+
+async fn run_navigation_query(
+    state: AppState,
+    workspace: CodeWorkspace,
+    rust_root: PathBuf,
+    query: NavigationQuery,
 ) {
+    let NavigationQuery {
+        request_path,
+        abs_path,
+        text,
+        position,
+        request_id,
+        kind,
+    } = query;
     let workspace_id = workspace.workspace_id.clone();
 
     let analyzer = match ensure_analyzer(&state, &rust_root).await {
@@ -734,10 +756,10 @@ impl CodeWorkspaceRegistry {
             session_id.as_deref(),
             review_worktree_id.as_deref(),
         );
-        if let Some(workspace_id) = self.by_key.get(&key) {
-            if let Some(workspace) = self.by_id.get(workspace_id) {
-                return workspace.clone();
-            }
+        if let Some(workspace_id) = self.by_key.get(&key)
+            && let Some(workspace) = self.by_id.get(workspace_id)
+        {
+            return workspace.clone();
         }
 
         let workspace_id = Uuid::new_v4().to_string();
@@ -1070,10 +1092,10 @@ fn subsequence_score(candidate: &str, query: &str) -> Option<i64> {
         }
         let (index, width) = matched?;
         score += 10;
-        if let Some(previous) = last_match {
-            if index == previous + 1 {
-                score += 8;
-            }
+        if let Some(previous) = last_match
+            && index == previous + 1
+        {
+            score += 8;
         }
         if index == 0
             || candidate[..index].ends_with('/')
@@ -1155,7 +1177,7 @@ fn display_protocol_path(path: &str) -> String {
 }
 
 fn should_ignore_dir(name: &str) -> bool {
-    IGNORED_DIRS.iter().any(|ignored| name == *ignored)
+    IGNORED_DIRS.contains(&name)
 }
 
 fn should_ignore_entry(

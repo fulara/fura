@@ -612,15 +612,15 @@ async fn read_lsp_message<R: AsyncBufRead + Unpin>(
             break;
         }
         let text = std::str::from_utf8(line).context("non-utf8 LSP header")?;
-        if let Some((name, value)) = text.split_once(':') {
-            if name.eq_ignore_ascii_case("content-length") {
-                content_length = Some(
-                    value
-                        .trim()
-                        .parse()
-                        .context("invalid Content-Length header")?,
-                );
-            }
+        if let Some((name, value)) = text.split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            content_length = Some(
+                value
+                    .trim()
+                    .parse()
+                    .context("invalid Content-Length header")?,
+            );
         }
     }
     let length = content_length.context("LSP message missing Content-Length")?;
@@ -866,14 +866,14 @@ fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let (Some(high), Some(low)) =
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
                 (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
-            {
-                out.push((high << 4) | low);
-                index += 3;
-                continue;
-            }
+        {
+            out.push((high << 4) | low);
+            index += 3;
+            continue;
         }
         out.push(bytes[index]);
         index += 1;

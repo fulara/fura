@@ -936,18 +936,6 @@ pub(crate) enum TranscriptEntry {
     Review(ReviewCard),
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct SessionHeader {
-    #[serde(rename = "type")]
-    pub(crate) entry_type: String,
-    pub(crate) id: String,
-    pub(crate) timestamp: Option<String>,
-    pub(crate) cwd: Option<String>,
-    pub(crate) additional_directories: Option<Value>,
-    pub(crate) title: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

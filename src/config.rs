@@ -127,23 +127,19 @@ pub(crate) struct RemoteListenerConfig {
     pub(crate) allowed_origins: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ThinkingVisibilityPreference {
+    #[default]
     Auto,
     Shown,
     Hidden,
 }
 
-impl Default for ThinkingVisibilityPreference {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum ProposedThinkingLevel {
+    #[default]
     Default,
     Off,
     Minimal,
@@ -152,12 +148,6 @@ pub(crate) enum ProposedThinkingLevel {
     High,
     XHigh,
     Max,
-}
-
-impl Default for ProposedThinkingLevel {
-    fn default() -> Self {
-        Self::Default
-    }
 }
 
 impl ProposedThinkingLevel {
@@ -436,10 +426,10 @@ pub(crate) fn remote_listener_from_args(
 
     let mut allowed_origins = vec![remote_origin(&host, bind.port())];
     for origin in configured_allowed_origins {
-        if let Some(origin) = normalize_allowed_origin(&origin) {
-            if !allowed_origins.contains(&origin) {
-                allowed_origins.push(origin);
-            }
+        if let Some(origin) = normalize_allowed_origin(&origin)
+            && !allowed_origins.contains(&origin)
+        {
+            allowed_origins.push(origin);
         }
     }
 

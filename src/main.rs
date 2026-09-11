@@ -155,13 +155,13 @@ async fn main() -> anyhow::Result<()> {
         args.tls_key.as_deref(),
         args.allowed_origins,
     )?;
-    if let Some(remote) = remote_listener.as_ref() {
-        if remote.bind.ip().is_unspecified() {
-            warn!(
-                bind = %remote.bind,
-                "remote bind uses an unspecified address; this may expose Fura on more interfaces than intended"
-            );
-        }
+    if let Some(remote) = remote_listener.as_ref()
+        && remote.bind.ip().is_unspecified()
+    {
+        warn!(
+            bind = %remote.bind,
+            "remote bind uses an unspecified address; this may expose Fura on more interfaces than intended"
+        );
     }
 
     let rpc_args = build_omp_rpc_args(args.no_default_rpc_args, args.rpc_args);
@@ -786,18 +786,20 @@ pub(crate) mod tests {
 
         apply_rpc_state_to_record(
             &mut record,
-            false,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(None),
-            None,
+            RpcRecordState {
+                is_streaming: false,
+                is_compacting: false,
+                session_name: None,
+                model: None,
+                thinking_level: None,
+                session_file: None,
+                context_tokens: None,
+                context_window: None,
+                context_percent: None,
+                plan_mode: None,
+                goal_mode: Some(None),
+                todo_phases: None,
+            },
         );
 
         assert!(record.goal_mode.is_none());
@@ -814,22 +816,24 @@ pub(crate) mod tests {
 
         apply_rpc_state_to_record(
             &mut record,
-            false,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(Some(PlanModeProjection {
-                enabled: true,
-                plan_file_path: "local://PLAN.md".to_string(),
-                workflow: Some("parallel".to_string()),
-            })),
-            None,
-            None,
+            RpcRecordState {
+                is_streaming: false,
+                is_compacting: false,
+                session_name: None,
+                model: None,
+                thinking_level: None,
+                session_file: None,
+                context_tokens: None,
+                context_window: None,
+                context_percent: None,
+                plan_mode: Some(Some(PlanModeProjection {
+                    enabled: true,
+                    plan_file_path: "local://PLAN.md".to_string(),
+                    workflow: Some("parallel".to_string()),
+                })),
+                goal_mode: None,
+                todo_phases: None,
+            },
         );
 
         assert!(
@@ -850,22 +854,24 @@ pub(crate) mod tests {
 
         apply_rpc_state_to_record(
             &mut record,
-            false,
-            false,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some(Some(PlanModeProjection {
-                enabled: false,
-                plan_file_path: "local://PLAN.md".to_string(),
-                workflow: Some("parallel".to_string()),
-            })),
-            None,
-            None,
+            RpcRecordState {
+                is_streaming: false,
+                is_compacting: false,
+                session_name: None,
+                model: None,
+                thinking_level: None,
+                session_file: None,
+                context_tokens: None,
+                context_window: None,
+                context_percent: None,
+                plan_mode: Some(Some(PlanModeProjection {
+                    enabled: false,
+                    plan_file_path: "local://PLAN.md".to_string(),
+                    workflow: Some("parallel".to_string()),
+                })),
+                goal_mode: None,
+                todo_phases: None,
+            },
         );
 
         assert!(
@@ -6557,8 +6563,8 @@ pub(crate) mod tests {
             responses.is_empty(),
             "config.set should not emit direct responses"
         );
-        assert_eq!(*state.show_tools.read().await, false);
-        assert_eq!(*state.show_edit_diffs.read().await, false);
+        assert!(!*state.show_tools.read().await);
+        assert!(!*state.show_edit_diffs.read().await);
         assert_eq!(
             *state.thinking_visibility.read().await,
             ThinkingVisibilityPreference::Hidden

@@ -175,34 +175,31 @@ pub(crate) async fn handle_control_abort(
                 },
             }];
         }
-        if let Some(conversation_id) = &conversation_id {
-            if &run.conversation_id != conversation_id {
-                return vec![ServerMessage::ControlStatus {
-                    target_client_id: Some(client_id),
-                    status: ControlStatusProjection {
-                        status: "error".to_string(),
-                        message: Some(
-                            "Ask Fura is busy with a different conversation.".to_string(),
-                        ),
-                    },
-                }];
-            }
-        }
-        controller.transport_session_id.clone()
-    };
-
-    if let Some(transport_session_id) = transport_session_id {
-        if let Err(message) =
-            send_rpc_command(state, &transport_session_id, abort_command(next_rpc_id())).await
+        if let Some(conversation_id) = &conversation_id
+            && &run.conversation_id != conversation_id
         {
             return vec![ServerMessage::ControlStatus {
                 target_client_id: Some(client_id),
                 status: ControlStatusProjection {
                     status: "error".to_string(),
-                    message: Some(message),
+                    message: Some("Ask Fura is busy with a different conversation.".to_string()),
                 },
             }];
         }
+        controller.transport_session_id.clone()
+    };
+
+    if let Some(transport_session_id) = transport_session_id
+        && let Err(message) =
+            send_rpc_command(state, &transport_session_id, abort_command(next_rpc_id())).await
+    {
+        return vec![ServerMessage::ControlStatus {
+            target_client_id: Some(client_id),
+            status: ControlStatusProjection {
+                status: "error".to_string(),
+                message: Some(message),
+            },
+        }];
     }
 
     clear_active_run(state).await;
@@ -380,10 +377,9 @@ async fn ensure_controller_session(state: &AppState) -> Result<String, String> {
         .await
         .transport_session_id
         .clone()
+        && state.session_runtime.contains_transport(&existing).await
     {
-        if state.session_runtime.contains_transport(&existing).await {
-            return Ok(existing);
-        }
+        return Ok(existing);
     }
 
     let transport_session_id = Uuid::new_v4().to_string();
@@ -600,10 +596,10 @@ async fn dispatch_controller_tool(
         }
         "fura_set_prompt_draft" => {
             let args: SetPromptDraftArgs = parse_tool_args(arguments)?;
-            if let Some(session_id) = &args.session_id {
-                if !state.sessions.read().await.contains_key(session_id) {
-                    return Err(format!("session {session_id} is not available"));
-                }
+            if let Some(session_id) = &args.session_id
+                && !state.sessions.read().await.contains_key(session_id)
+            {
+                return Err(format!("session {session_id} is not available"));
             }
             let run = current_run(state).await?;
             let _ = state
@@ -731,11 +727,11 @@ async fn search_sessions(state: &AppState, query: &str, limit: usize) -> Vec<Con
             ("timestamp", summary.timestamp.as_deref()),
             ("category", summary.category.as_deref()),
         ] {
-            if let Some(value) = value {
-                if value.to_lowercase().contains(&normalized_query) {
-                    score += if label == "title" { 5 } else { 2 };
-                    reasons.push(format!("matched {label}"));
-                }
+            if let Some(value) = value
+                && value.to_lowercase().contains(&normalized_query)
+            {
+                score += if label == "title" { 5 } else { 2 };
+                reasons.push(format!("matched {label}"));
             }
         }
 

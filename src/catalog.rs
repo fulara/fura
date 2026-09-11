@@ -11,10 +11,10 @@ use tracing::warn;
 
 use crate::session_recency::{JournalFact, JournalRecency, SessionFileStamp, read_json_line};
 use crate::{
-    AppState, GoalModeProjection, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionHeader,
-    SessionKind, SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard,
-    TranscriptMessage, append_bridge_debug_event, is_controller_session_record,
-    map_goal_mode_projection, project_omp_transcript, save_fura_config,
+    AppState, GoalModeProjection, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionKind,
+    SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard, TranscriptMessage,
+    append_bridge_debug_event, is_controller_session_record, map_goal_mode_projection,
+    project_omp_transcript, save_fura_config,
 };
 
 #[derive(Debug, Clone)]
@@ -239,10 +239,8 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
         .session_runtime
         .prune_session_metadata(&retained_session_ids)
         .await;
-    if metadata_pruned {
-        if let Err(error) = save_fura_config(state).await {
-            warn!(%error, "failed to save pruned session metadata");
-        }
+    if metadata_pruned && let Err(error) = save_fura_config(state).await {
+        warn!(%error, "failed to save pruned session metadata");
     }
 
     let mut fields = Map::new();
@@ -355,36 +353,6 @@ fn collect_direct_session_files(
         .collect()
 }
 
-pub(crate) fn scan_session_header<I>(lines: &mut I) -> Option<(SessionHeader, Option<String>)>
-where
-    I: Iterator<Item = std::io::Result<String>>,
-{
-    let mut prelude_title = None;
-    for line in lines.take(16).flatten() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<Value>(trimmed) else {
-            continue;
-        };
-        match value.get("type").and_then(Value::as_str) {
-            Some("session") => {
-                let header = serde_json::from_value::<SessionHeader>(value).ok()?;
-                return Some((header, prelude_title));
-            }
-            Some("title") if prelude_title.is_none() => {
-                prelude_title = value
-                    .get("title")
-                    .and_then(Value::as_str)
-                    .and_then(sanitize_session_title);
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 #[derive(serde::Deserialize)]
 struct GoalModeEntry {
     mode: String,
@@ -483,9 +451,7 @@ fn scan_session_metadata(
             continue;
         };
         if fact.kind == "session" {
-            if fact.id.is_none() {
-                return None;
-            }
+            fact.id.as_ref()?;
             header = Some(fact);
             break;
         }
@@ -639,19 +605,16 @@ pub(crate) fn read_session_file_messages(path: &Path) -> (Vec<TranscriptMessage>
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if entry.get("type").and_then(|v| v.as_str()) == Some("message") {
-            if let Some(mut message) = entry.get("message").cloned() {
-                if let Some(object) = message.as_object_mut() {
-                    if !object.contains_key("timestamp") {
-                        if let Some(timestamp) =
-                            entry.get("timestamp").and_then(Timestamp::from_rpc)
-                        {
-                            object.insert("timestamp".to_string(), Value::from(timestamp.millis()));
-                        }
-                    }
-                }
-                message_values.push(message);
+        if entry.get("type").and_then(|v| v.as_str()) == Some("message")
+            && let Some(mut message) = entry.get("message").cloned()
+        {
+            if let Some(object) = message.as_object_mut()
+                && !object.contains_key("timestamp")
+                && let Some(timestamp) = entry.get("timestamp").and_then(Timestamp::from_rpc)
+            {
+                object.insert("timestamp".to_string(), Value::from(timestamp.millis()));
             }
+            message_values.push(message);
         }
     }
     project_omp_transcript(&message_values)

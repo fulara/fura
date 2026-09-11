@@ -1349,12 +1349,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         if is_background_running {
                             let is_todo_write =
                                 is_todo_tool(&record.active_tool_calls[pos].tool_name);
-                            if is_todo_write {
-                                if let Some(todo_phases) =
+                            if is_todo_write
+                                && let Some(todo_phases) =
                                     todo_phases_from_tool_result_value(result.as_ref())
-                                {
-                                    record.todo_phases = Some(todo_phases);
-                                }
+                            {
+                                record.todo_phases = Some(todo_phases);
                             }
                             let card = &mut record.active_tool_calls[pos];
                             card.is_active = true;
@@ -1366,12 +1365,11 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             let mut card = record.active_tool_calls.remove(pos);
                             card.is_active = false;
                             card.is_error = is_error;
-                            if is_todo_tool(&card.tool_name) && !card.is_error {
-                                if let Some(todo_phases) =
+                            if is_todo_tool(&card.tool_name) && !card.is_error
+                                && let Some(todo_phases) =
                                     todo_phases_from_tool_result_value(result.as_ref())
-                                {
-                                    record.todo_phases = Some(todo_phases);
-                                }
+                            {
+                                record.todo_phases = Some(todo_phases);
                             }
                             card.result = result.clone();
                             card.partial_result = None;
@@ -1908,18 +1906,20 @@ async fn apply_omp_session_state(
         RpcStateUpdate {
             current_session_id,
             target_session_id: target_session_id.clone(),
-            is_streaming: data.is_streaming,
-            is_compacting: data.is_compacting,
-            session_name: data.session_name,
-            model,
-            thinking_level: data.thinking_level,
-            session_file: data.session_file,
-            context_tokens,
-            context_window,
-            context_percent,
-            plan_mode: Some(map_plan_mode_state_projection(data.plan_mode.as_ref())),
-            goal_mode: Some(map_goal_mode_state_projection(data.goal_mode.as_ref())),
-            todo_phases: Some(data.todo_phases),
+            record_state: RpcRecordState {
+                is_streaming: data.is_streaming,
+                is_compacting: data.is_compacting,
+                session_name: data.session_name,
+                model,
+                thinking_level: data.thinking_level,
+                session_file: data.session_file,
+                context_tokens,
+                context_window,
+                context_percent,
+                plan_mode: Some(map_plan_mode_state_projection(data.plan_mode.as_ref())),
+                goal_mode: Some(map_goal_mode_state_projection(data.goal_mode.as_ref())),
+                todo_phases: Some(data.todo_phases),
+            },
         },
     )
     .await;
@@ -2377,14 +2377,13 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 let _ = state.events.emit(state, prompt_busy).await;
                 return;
             }
-            if command == Some("prompt") {
-                if let Some(command_id) = value_str(frame, "id") {
-                    let cleared_review =
-                        clear_review_context_for_command(state, &current_session_id, command_id)
-                            .await;
-                    if cleared_review {
-                        let _ = refresh_rpc_state(state, &current_session_id).await;
-                    }
+            if command == Some("prompt")
+                && let Some(command_id) = value_str(frame, "id")
+            {
+                let cleared_review =
+                    clear_review_context_for_command(state, &current_session_id, command_id).await;
+                if cleared_review {
+                    let _ = refresh_rpc_state(state, &current_session_id).await;
                 }
             }
         }
@@ -2393,13 +2392,13 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
         {
             settle_local_only_prompt_result(state, &current_session_id, command_id).await;
         }
-        if matches!(command, Some("prompt" | "set_host_tools")) {
-            if let Some(command_id) = value_str(frame, "id") {
-                let cleared_review =
-                    clear_review_context_for_command(state, &current_session_id, command_id).await;
-                if cleared_review && command == Some("set_host_tools") {
-                    settle_prompt_error_and_broadcast(state, &current_session_id).await;
-                }
+        if matches!(command, Some("prompt" | "set_host_tools"))
+            && let Some(command_id) = value_str(frame, "id")
+        {
+            let cleared_review =
+                clear_review_context_for_command(state, &current_session_id, command_id).await;
+            if cleared_review && command == Some("set_host_tools") {
+                settle_prompt_error_and_broadcast(state, &current_session_id).await;
             }
         }
         if command == Some("compact") {
@@ -2586,18 +2585,17 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             apply_model_change_response(state, &current_session_id, model_value, thinking_level)
                 .await;
         }
-        Some("set_thinking_level") => {
+        Some("set_thinking_level")
             if state
                 .session_runtime
                 .pending_create(session_id)
                 .await
-                .is_none()
+                .is_none() =>
+        {
+            if let Err(message) =
+                send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await
             {
-                if let Err(message) =
-                    send_rpc_command(state, session_id, get_state_command(next_rpc_id())).await
-                {
-                    warn!(session_id = %current_session_id, %message, "post-thinking-change state refresh failed");
-                }
+                warn!(session_id = %current_session_id, %message, "post-thinking-change state refresh failed");
             }
         }
         Some("cycle_thinking_level") => {
@@ -2808,10 +2806,8 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 .and_then(|data| data.get("agentInvoked"))
                 .and_then(|value| value.as_bool())
                 == Some(false);
-            if local_only {
-                if let Some(command_id) = value_str(frame, "id") {
-                    settle_local_only_prompt_result(state, &current_session_id, command_id).await;
-                }
+            if local_only && let Some(command_id) = value_str(frame, "id") {
+                settle_local_only_prompt_result(state, &current_session_id, command_id).await;
             }
         }
         _ => {}
@@ -3153,10 +3149,10 @@ pub(crate) fn model_display_name(value: &Value) -> Option<String> {
     }
     let object = value.as_object()?;
     for key in ["name", "id", "displayName", "displayModelId"] {
-        if let Some(text) = object.get(key).and_then(|value| value.as_str()) {
-            if !text.is_empty() {
-                return Some(text.to_string());
-            }
+        if let Some(text) = object.get(key).and_then(|value| value.as_str())
+            && !text.is_empty()
+        {
+            return Some(text.to_string());
         }
     }
     None
@@ -3219,11 +3215,10 @@ async fn append_bridge_debug_record(state: &AppState, record: Value, label: &str
     if let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
+        && let Err(error) = async_fs::create_dir_all(parent).await
     {
-        if let Err(error) = async_fs::create_dir_all(parent).await {
-            warn!(path = %path.display(), %error, "failed to create bridge debug file directory");
-            return;
-        }
+        warn!(path = %path.display(), %error, "failed to create bridge debug file directory");
+        return;
     }
 
     let Ok(mut encoded) = serde_json::to_string(&record) else {

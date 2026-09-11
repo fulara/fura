@@ -132,10 +132,10 @@ fn map_bash_execution_message(value: &Value) -> Option<TranscriptMessage> {
     }
     if cancelled {
         body.push_str("\n[cancelled]");
-    } else if let Some(code) = exit_code {
-        if code != 0 {
-            body.push_str(&format!("\n[exit {code}]"));
-        }
+    } else if let Some(code) = exit_code
+        && code != 0
+    {
+        body.push_str(&format!("\n[exit {code}]"));
     }
 
     Some(TranscriptMessage::new(
@@ -194,10 +194,10 @@ fn map_python_execution_message(value: &Value) -> Option<TranscriptMessage> {
     }
     if cancelled {
         text.push_str("\n[cancelled]");
-    } else if let Some(code) = exit_code {
-        if code != 0 {
-            text.push_str(&format!("\n[exit {code}]"));
-        }
+    } else if let Some(code) = exit_code
+        && code != 0
+    {
+        text.push_str(&format!("\n[exit {code}]"));
     }
 
     Some(TranscriptMessage::new(
@@ -209,13 +209,18 @@ fn map_python_execution_message(value: &Value) -> Option<TranscriptMessage> {
     ))
 }
 
+struct PendingToolCall {
+    tool_name: String,
+    intent: Option<String>,
+    args: Value,
+    insert_after_count: usize,
+    timestamp: Option<Timestamp>,
+}
+
 pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage>, Vec<ToolCard>) {
     let mut messages = Vec::new();
     let mut tool_cards = Vec::new();
-    let mut pending_tool_calls: HashMap<
-        String,
-        (String, Option<String>, Value, usize, Option<Timestamp>),
-    > = HashMap::new();
+    let mut pending_tool_calls: HashMap<String, PendingToolCall> = HashMap::new();
     let mut visible_message_count = 0_usize;
     let mut client_message_ids = HashSet::new();
 
@@ -257,13 +262,13 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
                     .unwrap_or_else(|| serde_json::json!({}));
                 pending_tool_calls.insert(
                     tool_call_id.to_string(),
-                    (
+                    PendingToolCall {
                         tool_name,
                         intent,
                         args,
-                        visible_message_count,
-                        value_timestamp(value),
-                    ),
+                        insert_after_count: visible_message_count,
+                        timestamp: value_timestamp(value),
+                    },
                 );
             }
         }
@@ -280,15 +285,16 @@ pub(crate) fn project_omp_transcript(values: &[Value]) -> (Vec<TranscriptMessage
             .get("toolName")
             .and_then(|value| value.as_str())
             .map(str::to_string)
-            .or_else(|| {
-                pending
-                    .as_ref()
-                    .map(|(tool_name, _, _, _, _)| tool_name.clone())
-            })
+            .or_else(|| pending.as_ref().map(|call| call.tool_name.clone()))
             .unwrap_or_default();
         let (intent, args, insert_after_count, timestamp) = pending
-            .map(|(_, intent, args, insert_after_count, timestamp)| {
-                (intent, args, insert_after_count, timestamp)
+            .map(|call| {
+                (
+                    call.intent,
+                    call.args,
+                    call.insert_after_count,
+                    call.timestamp,
+                )
             })
             .unwrap_or_else(|| (None, serde_json::json!({}), visible_message_count, None));
         let mut result = serde_json::Map::new();

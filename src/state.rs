@@ -509,10 +509,8 @@ fn session_event_timing_fields(
                     );
                 }
             }
-            ServerMessage::SessionsSnapshot { sessions } => {
-                if session_count.is_none() {
-                    session_count = Some(sessions.len() as u64);
-                }
+            ServerMessage::SessionsSnapshot { sessions } if session_count.is_none() => {
+                session_count = Some(sessions.len() as u64);
             }
             _ => {}
         }
@@ -1358,62 +1356,7 @@ impl SessionRuntimeState {
     }
 }
 
-pub(crate) fn apply_rpc_state_to_record(
-    record: &mut SessionRecord,
-    is_streaming: bool,
-    is_compacting: bool,
-    session_name: Option<String>,
-    model: Option<String>,
-    thinking_level: Option<String>,
-    session_file: Option<String>,
-    context_tokens: Option<u64>,
-    context_window: Option<u64>,
-    context_percent: Option<f64>,
-    plan_mode: Option<Option<PlanModeProjection>>,
-    goal_mode: Option<Option<GoalModeProjection>>,
-    todo_phases: Option<Vec<TodoPhaseProjection>>,
-) {
-    record.status = if is_streaming {
-        SessionStatus::Busy
-    } else {
-        SessionStatus::Idle
-    };
-    record.is_compacting = is_compacting;
-    if let Some(name) = session_name {
-        if record.title.is_none() || record.title.as_deref() != Some(&name) {
-            record.title = Some(name);
-        }
-    }
-    if let Some(model) = model {
-        record.model = Some(model);
-    }
-    if let Some(thinking_level) = thinking_level {
-        record.thinking_level = Some(thinking_level);
-    }
-    if let Some(session_file) = session_file {
-        record.session_file = Some(session_file);
-    }
-    record.context_tokens = context_tokens;
-    record.context_window = context_window;
-    record.context_percent = context_percent;
-    if let Some(plan_mode) = plan_mode {
-        let keep_pending_plan = plan_mode.as_ref().is_some_and(|mode| mode.enabled);
-        record.plan_mode = plan_mode;
-        if !keep_pending_plan {
-            record.pending_plan_review = None;
-        }
-    }
-    if let Some(goal_mode) = goal_mode {
-        record.goal_mode = goal_mode;
-    }
-    if let Some(todo_phases) = todo_phases {
-        record.todo_phases = Some(todo_phases);
-    }
-}
-
-pub(crate) struct RpcStateUpdate {
-    pub(crate) current_session_id: String,
-    pub(crate) target_session_id: String,
+pub(crate) struct RpcRecordState {
     pub(crate) is_streaming: bool,
     pub(crate) is_compacting: bool,
     pub(crate) session_name: Option<String>,
@@ -1426,6 +1369,51 @@ pub(crate) struct RpcStateUpdate {
     pub(crate) plan_mode: Option<Option<PlanModeProjection>>,
     pub(crate) goal_mode: Option<Option<GoalModeProjection>>,
     pub(crate) todo_phases: Option<Vec<TodoPhaseProjection>>,
+}
+
+pub(crate) fn apply_rpc_state_to_record(record: &mut SessionRecord, state: RpcRecordState) {
+    record.status = if state.is_streaming {
+        SessionStatus::Busy
+    } else {
+        SessionStatus::Idle
+    };
+    record.is_compacting = state.is_compacting;
+    if let Some(name) = state.session_name
+        && (record.title.is_none() || record.title.as_deref() != Some(&name))
+    {
+        record.title = Some(name);
+    }
+    if let Some(model) = state.model {
+        record.model = Some(model);
+    }
+    if let Some(thinking_level) = state.thinking_level {
+        record.thinking_level = Some(thinking_level);
+    }
+    if let Some(session_file) = state.session_file {
+        record.session_file = Some(session_file);
+    }
+    record.context_tokens = state.context_tokens;
+    record.context_window = state.context_window;
+    record.context_percent = state.context_percent;
+    if let Some(plan_mode) = state.plan_mode {
+        let keep_pending_plan = plan_mode.as_ref().is_some_and(|mode| mode.enabled);
+        record.plan_mode = plan_mode;
+        if !keep_pending_plan {
+            record.pending_plan_review = None;
+        }
+    }
+    if let Some(goal_mode) = state.goal_mode {
+        record.goal_mode = goal_mode;
+    }
+    if let Some(todo_phases) = state.todo_phases {
+        record.todo_phases = Some(todo_phases);
+    }
+}
+
+pub(crate) struct RpcStateUpdate {
+    pub(crate) current_session_id: String,
+    pub(crate) target_session_id: String,
+    pub(crate) record_state: RpcRecordState,
 }
 
 pub(crate) async fn apply_get_state_update(
@@ -1458,14 +1446,19 @@ pub(crate) async fn apply_get_state_update(
     } else {
         None
     };
-    let effective_session_name = pending_switch_name.clone().or(update.session_name);
+    let record_state = RpcRecordState {
+        session_name: pending_switch_name
+            .clone()
+            .or(update.record_state.session_name),
+        ..update.record_state
+    };
     let expected_stamp = state
         .sessions
         .read()
         .await
         .get(&update.target_session_id)
         .map(|record| record.file_stamp);
-    let discovered = if let Some(path) = update.session_file.clone() {
+    let discovered = if let Some(path) = record_state.session_file.clone() {
         let cache = state.session_catalog_cache.clone();
         tokio::task::spawn_blocking(move || {
             let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
@@ -1627,21 +1620,7 @@ pub(crate) async fn apply_get_state_update(
                     });
 
                 if let Some(record) = sessions.get_mut(&update.target_session_id) {
-                    apply_rpc_state_to_record(
-                        record,
-                        update.is_streaming,
-                        update.is_compacting,
-                        effective_session_name,
-                        update.model,
-                        update.thinking_level,
-                        update.session_file,
-                        update.context_tokens,
-                        update.context_window,
-                        update.context_percent,
-                        update.plan_mode.clone(),
-                        update.goal_mode.clone(),
-                        update.todo_phases.clone(),
-                    );
+                    apply_rpc_state_to_record(record, record_state);
                 }
 
                 let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
@@ -1653,21 +1632,7 @@ pub(crate) async fn apply_get_state_update(
                 (previous_snapshot, target_snapshot)
             } else {
                 if let Some(record) = sessions.get_mut(&update.target_session_id) {
-                    apply_rpc_state_to_record(
-                        record,
-                        update.is_streaming,
-                        update.is_compacting,
-                        effective_session_name,
-                        update.model,
-                        update.thinking_level,
-                        update.session_file,
-                        update.context_tokens,
-                        update.context_window,
-                        update.context_percent,
-                        update.plan_mode,
-                        update.goal_mode,
-                        update.todo_phases,
-                    );
+                    apply_rpc_state_to_record(record, record_state);
                 }
                 let target_snapshot = sessions.get(&update.target_session_id).map(|record| {
                     ServerMessage::SessionSnapshot {
@@ -1895,18 +1860,20 @@ mod tests {
                 RpcStateUpdate {
                     current_session_id: "s1".into(),
                     target_session_id: "s1".into(),
-                    is_streaming: false,
-                    is_compacting: false,
-                    session_name: None,
-                    model: None,
-                    thinking_level: None,
-                    session_file: Some(session_file),
-                    context_tokens: None,
-                    context_window: None,
-                    context_percent: None,
-                    plan_mode: None,
-                    goal_mode: None,
-                    todo_phases: None,
+                    record_state: RpcRecordState {
+                        is_streaming: false,
+                        is_compacting: false,
+                        session_name: None,
+                        model: None,
+                        thinking_level: None,
+                        session_file: Some(session_file),
+                        context_tokens: None,
+                        context_window: None,
+                        context_percent: None,
+                        plan_mode: None,
+                        goal_mode: None,
+                        todo_phases: None,
+                    },
                 },
             )
             .await;

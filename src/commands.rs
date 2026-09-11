@@ -38,14 +38,16 @@ pub(crate) async fn handle_client_message_for_connection(
         } => {
             create_session(
                 state,
-                request_id,
-                cwd,
-                name,
-                args,
-                category,
-                session_mode.unwrap_or_default(),
-                worktree,
-                proposed_model_id,
+                CreateSessionRequest {
+                    request_id,
+                    cwd,
+                    name,
+                    args,
+                    category,
+                    session_mode: session_mode.unwrap_or_default(),
+                    worktree,
+                    proposed_model_id,
+                },
             )
             .await
         }
@@ -315,15 +317,17 @@ pub(crate) async fn handle_client_message_for_connection(
         } => {
             handle_session_changes_request(
                 state,
-                client_id,
-                diff_id,
-                session_id,
-                repo_id,
-                change_kind,
-                detail_mode,
-                current_commit_oid,
-                selected_file,
-                context_lines,
+                crate::diff::DiffSessionChangesRequest {
+                    client_id,
+                    diff_id,
+                    session_id,
+                    repo_id,
+                    change_kind,
+                    detail_mode,
+                    current_commit_oid,
+                    selected_file,
+                    context_lines,
+                },
             )
             .await
         }
@@ -337,13 +341,15 @@ pub(crate) async fn handle_client_message_for_connection(
         } => {
             handle_git_history_request(
                 state,
-                owner_connection_id,
-                client_id,
-                request_id,
-                session_id,
-                repo_id,
-                history_ref,
-                cursor,
+                GitHistoryRequest {
+                    connection_id: owner_connection_id,
+                    client_id,
+                    request_id,
+                    session_id,
+                    repo_id,
+                    history_ref,
+                    cursor,
+                },
             )
             .await
         }
@@ -376,14 +382,16 @@ pub(crate) async fn handle_client_message_for_connection(
         } => {
             handle_git_range_diff_request(
                 state,
-                owner_connection_id,
-                client_id,
-                request_id,
-                repo_root,
-                base,
-                old,
-                new,
-                ignore_whitespace,
+                GitRangeDiffRequest {
+                    connection_id: owner_connection_id,
+                    client_id,
+                    request_id,
+                    repo_root,
+                    base,
+                    old,
+                    new,
+                    ignore_whitespace,
+                },
             )
             .await
         }
@@ -410,16 +418,18 @@ pub(crate) async fn handle_client_message_for_connection(
         } => {
             handle_compare_diff_request(
                 state,
-                client_id,
-                diff_id,
-                repo_root,
-                base,
-                head,
-                detail_mode,
-                merge_base,
-                current_commit_oid,
-                selected_file,
-                context_lines,
+                crate::diff::DiffCompareRequest {
+                    client_id,
+                    diff_id,
+                    repo_root,
+                    base,
+                    head,
+                    detail_mode,
+                    merge_base,
+                    current_commit_oid,
+                    selected_file,
+                    context_lines,
+                },
             )
             .await
         }
@@ -434,13 +444,15 @@ pub(crate) async fn handle_client_message_for_connection(
         } => {
             handle_diff_content_request(
                 state,
-                client_id,
-                diff_id,
-                scope,
-                session_id,
-                comparison_key,
-                selected_file,
-                context_lines,
+                crate::diff::DiffContentRequest {
+                    client_id,
+                    diff_id,
+                    scope,
+                    session_id,
+                    comparison_key,
+                    selected_file,
+                    context_lines,
+                },
             )
             .await
         }
@@ -564,7 +576,7 @@ pub(crate) async fn handle_client_message_for_connection(
             session_id,
             state: review_state,
             instructions,
-        } => handle_review_agent_review_start(state, session_id, review_state, instructions).await,
+        } => handle_review_agent_review_start(state, session_id, *review_state, instructions).await,
         ClientMessage::SessionFork {
             request_id,
             session_id,
@@ -1069,10 +1081,10 @@ pub(crate) fn create_git_worktree_sync(
     let worktree = match worktree_result {
         Ok(worktree) => worktree,
         Err(error) => {
-            if let Some(branch_name) = branch_name {
-                if let Ok(mut branch) = repo.find_branch(branch_name, BranchType::Local) {
-                    let _ = branch.delete();
-                }
+            if let Some(branch_name) = branch_name
+                && let Ok(mut branch) = repo.find_branch(branch_name, BranchType::Local)
+            {
+                let _ = branch.delete();
             }
             return Err(error).with_context(|| {
                 format!("failed to create worktree at {}", target_path.display())
@@ -1115,8 +1127,8 @@ pub(crate) async fn create_git_worktree(
         .await
         .context("worktree creation task failed")?
 }
-pub(crate) async fn create_session(
-    state: &AppState,
+
+pub(crate) struct CreateSessionRequest {
     request_id: Option<String>,
     cwd: Option<String>,
     name: Option<String>,
@@ -1125,7 +1137,22 @@ pub(crate) async fn create_session(
     session_mode: SessionMode,
     worktree: Option<WorktreeCreateRequest>,
     proposed_model_id: Option<String>,
+}
+
+pub(crate) async fn create_session(
+    state: &AppState,
+    request: CreateSessionRequest,
 ) -> Vec<ServerMessage> {
+    let CreateSessionRequest {
+        request_id,
+        cwd,
+        name,
+        args,
+        category,
+        session_mode,
+        worktree,
+        proposed_model_id,
+    } = request;
     let started_at = Instant::now();
     let category = match normalize_session_category(category) {
         Ok(category) => category,
@@ -1444,13 +1471,13 @@ pub(crate) async fn set_client_config(
     }
 
     let proposed_models = proposed_models.map(normalize_proposed_models);
-    if let Some(models) = proposed_models.as_ref() {
-        if let Err(error) = validate_proposed_models(models) {
-            return vec![ServerMessage::Error {
-                request_id: None,
-                message: error.to_string(),
-            }];
-        }
+    if let Some(models) = proposed_models.as_ref()
+        && let Err(error) = validate_proposed_models(models)
+    {
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: error.to_string(),
+        }];
     }
 
     let previous_show_tools = *state.show_tools.read().await;
@@ -1676,24 +1703,23 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
     };
 
     let session_id = discovered.id.clone();
-    if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
-        if state
+    if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await
+        && state
             .session_runtime
             .contains_transport(&transport_session_id)
             .await
+    {
+        if state
+            .events
+            .emit_current_session_snapshot(state, &session_id)
+            .await
         {
-            if state
-                .events
-                .emit_current_session_snapshot(state, &session_id)
-                .await
-            {
-                return Vec::new();
-            }
-            return vec![ServerMessage::Error {
-                request_id: None,
-                message: format!("session {session_id} is marked live but has no catalog entry"),
-            }];
+            return Vec::new();
         }
+        return vec![ServerMessage::Error {
+            request_id: None,
+            message: format!("session {session_id} is marked live but has no catalog entry"),
+        }];
     }
 
     let category = state.session_runtime.session_category(&session_id).await;
@@ -1768,32 +1794,31 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
 pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<ServerMessage> {
     info!(action = "session.stop", session_id = %session_id);
     clear_review_contexts_for_session(state, &session_id).await;
-    if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
-        if let Some(removed) = state
+    if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await
+        && let Some(removed) = state
             .session_runtime
             .remove_transport(&transport_session_id)
             .await
-        {
-            let _ = removed.handle.stop.send(());
-            fail_removed_btw_requests(
-                state,
-                removed.btw_requests,
-                "The OMP session was stopped before the BTW request completed.",
-            )
-            .await;
-            fail_removed_rewind_requests(
-                state,
-                removed.rewind_requests,
-                "The OMP session was stopped before the rollback completed.",
-            )
-            .await;
-            fail_removed_session_forks(
-                state,
-                removed.session_forks,
-                "The OMP session was stopped before duplication completed.",
-            )
-            .await;
-        }
+    {
+        let _ = removed.handle.stop.send(());
+        fail_removed_btw_requests(
+            state,
+            removed.btw_requests,
+            "The OMP session was stopped before the BTW request completed.",
+        )
+        .await;
+        fail_removed_rewind_requests(
+            state,
+            removed.rewind_requests,
+            "The OMP session was stopped before the rollback completed.",
+        )
+        .await;
+        fail_removed_session_forks(
+            state,
+            removed.session_forks,
+            "The OMP session was stopped before duplication completed.",
+        )
+        .await;
     }
 
     let sent = state
@@ -1833,32 +1858,31 @@ pub(crate) async fn delete_session(
     clear_review_contexts_for_session(state, &session_id).await;
 
     // Stop managed child if running.
-    if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await {
-        if let Some(removed) = state
+    if let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await
+        && let Some(removed) = state
             .session_runtime
             .remove_transport(&transport_session_id)
             .await
-        {
-            let _ = removed.handle.stop.send(());
-            fail_removed_btw_requests(
-                state,
-                removed.btw_requests,
-                "The OMP session was deleted before the BTW request completed.",
-            )
-            .await;
-            fail_removed_rewind_requests(
-                state,
-                removed.rewind_requests,
-                "The OMP session was deleted before the rollback completed.",
-            )
-            .await;
-            fail_removed_session_forks(
-                state,
-                removed.session_forks,
-                "The OMP session was deleted before duplication completed.",
-            )
-            .await;
-        }
+    {
+        let _ = removed.handle.stop.send(());
+        fail_removed_btw_requests(
+            state,
+            removed.btw_requests,
+            "The OMP session was deleted before the BTW request completed.",
+        )
+        .await;
+        fail_removed_rewind_requests(
+            state,
+            removed.rewind_requests,
+            "The OMP session was deleted before the rollback completed.",
+        )
+        .await;
+        fail_removed_session_forks(
+            state,
+            removed.session_forks,
+            "The OMP session was deleted before duplication completed.",
+        )
+        .await;
     }
 
     // Grab paths before dropping from catalog.
@@ -1958,14 +1982,16 @@ pub(crate) async fn handle_slash_command(
             };
             create_session(
                 state,
-                None,
-                cwd,
-                None,
-                args,
-                None,
-                SessionMode::Standard,
-                None,
-                None,
+                CreateSessionRequest {
+                    request_id: None,
+                    cwd,
+                    name: None,
+                    args,
+                    category: None,
+                    session_mode: SessionMode::Standard,
+                    worktree: None,
+                    proposed_model_id: None,
+                },
             )
             .await
         }
@@ -2550,11 +2576,11 @@ pub(crate) async fn send_prompt(
     info!(action = "prompt.send", session_id = %session_id, bytes = text.len(), has_images = images.as_ref().is_some_and(|images| !images.is_empty()), behavior = ?behavior.map(PromptBehavior::as_rpc_streaming_behavior));
 
     let has_images = images.as_ref().is_some_and(|images| !images.is_empty());
-    if behavior.is_none() && !has_images {
-        if let Some(responses) = handle_slash_command(state, session_id.clone(), text.trim()).await
-        {
-            return responses;
-        }
+    if behavior.is_none()
+        && !has_images
+        && let Some(responses) = handle_slash_command(state, session_id.clone(), text.trim()).await
+    {
+        return responses;
     }
 
     let suppress_optimistic_prompt =
@@ -3477,7 +3503,7 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
 
     let snapshot_sent = state
         .events
-        .mutate_session_snapshot(&state, &session_id, |record| {
+        .mutate_session_snapshot(state, &session_id, |record| {
             record.status = SessionStatus::Idle;
         })
         .await;
@@ -3494,8 +3520,7 @@ pub(crate) async fn abort_prompt(state: &AppState, session_id: String) -> Vec<Se
     responses
 }
 
-async fn handle_git_history_request(
-    state: &AppState,
+struct GitHistoryRequest {
     connection_id: u64,
     client_id: String,
     request_id: String,
@@ -3503,7 +3528,21 @@ async fn handle_git_history_request(
     repo_id: Option<String>,
     history_ref: Option<String>,
     cursor: Option<String>,
+}
+
+async fn handle_git_history_request(
+    state: &AppState,
+    request: GitHistoryRequest,
 ) -> Vec<ServerMessage> {
+    let GitHistoryRequest {
+        connection_id,
+        client_id,
+        request_id,
+        session_id,
+        repo_id,
+        history_ref,
+        cursor,
+    } = request;
     let mut jobs = state.diff_jobs.write().await;
     if let Some(previous) = jobs.history_jobs.remove(&connection_id) {
         previous.handle.abort();
@@ -3641,8 +3680,7 @@ async fn handle_git_file_request(
     Vec::new()
 }
 
-async fn handle_git_range_diff_request(
-    state: &AppState,
+struct GitRangeDiffRequest {
     connection_id: u64,
     client_id: String,
     request_id: String,
@@ -3651,7 +3689,22 @@ async fn handle_git_range_diff_request(
     old: String,
     new: String,
     ignore_whitespace: bool,
+}
+
+async fn handle_git_range_diff_request(
+    state: &AppState,
+    request: GitRangeDiffRequest,
 ) -> Vec<ServerMessage> {
+    let GitRangeDiffRequest {
+        connection_id,
+        client_id,
+        request_id,
+        repo_root,
+        base,
+        old,
+        new,
+        ignore_whitespace,
+    } = request;
     let mut jobs = state.diff_jobs.write().await;
     if let Some(previous) = jobs.range_diff_jobs.remove(&connection_id) {
         previous.handle.abort();
@@ -3713,10 +3766,9 @@ pub(crate) async fn cancel_git_range_diff(
         .range_diff_jobs
         .get(&connection_id)
         .is_some_and(|job| request_id.is_none_or(|request_id| job.request_id == request_id))
+        && let Some(job) = jobs.range_diff_jobs.remove(&connection_id)
     {
-        if let Some(job) = jobs.range_diff_jobs.remove(&connection_id) {
-            job.handle.abort();
-        }
+        job.handle.abort();
     }
 }
 
@@ -4356,7 +4408,7 @@ mod review_comment_tests {
             &state,
             ClientMessage::ReviewAgentReviewStart {
                 session_id: "s1".to_string(),
-                state: reviewable_state("+change"),
+                state: Box::new(reviewable_state("+change")),
                 instructions: "Review while a background tool is active".to_string(),
             },
         )
@@ -4384,7 +4436,7 @@ mod review_comment_tests {
             &state,
             ClientMessage::ReviewAgentReviewStart {
                 session_id: "s1".to_string(),
-                state: reviewable_state("+change"),
+                state: Box::new(reviewable_state("+change")),
                 instructions: "Review while busy".to_string(),
             },
         )

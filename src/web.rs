@@ -825,10 +825,7 @@ pub(crate) async fn handle_websocket_frame(
         Message::Close(frame) => {
             let mut fields = Map::new();
             if let Some(frame) = frame {
-                fields.insert(
-                    "code".to_string(),
-                    Value::Number(u16::from(frame.code).into()),
-                );
+                fields.insert("code".to_string(), Value::Number(frame.code.into()));
                 let reason = frame.reason.to_string();
                 if !reason.is_empty() {
                     fields.insert(
@@ -1056,27 +1053,27 @@ async fn send_json_with_context(
             let send_started_at = Instant::now();
             match socket.send(Message::Text(text.into())).await {
                 Ok(()) => {
-                    if let Some(context) = context {
-                        if should_log_send_timing(message) {
-                            let mut fields = websocket_send_timing_fields(
-                                message,
-                                context,
-                                byte_len,
-                                serialize_ms,
-                                send_started_at.elapsed().as_millis() as u64,
-                            );
-                            fields.insert("ok".to_string(), Value::Bool(true));
-                            append_websocket_debug_event(
-                                state,
-                                "websocket.send_timing",
-                                context.connection_id,
-                                context.update_mode,
-                                context.outbound_seq,
-                                None,
-                                fields,
-                            )
-                            .await;
-                        }
+                    if let Some(context) = context
+                        && should_log_send_timing(message)
+                    {
+                        let mut fields = websocket_send_timing_fields(
+                            message,
+                            context,
+                            byte_len,
+                            serialize_ms,
+                            send_started_at.elapsed().as_millis() as u64,
+                        );
+                        fields.insert("ok".to_string(), Value::Bool(true));
+                        append_websocket_debug_event(
+                            state,
+                            "websocket.send_timing",
+                            context.connection_id,
+                            context.update_mode,
+                            context.outbound_seq,
+                            None,
+                            fields,
+                        )
+                        .await;
                     }
                     Ok(())
                 }
