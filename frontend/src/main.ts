@@ -769,8 +769,6 @@ type VoiceSegmentDraft = {
 const composerDrafts = new SessionComposerDrafts();
 let composerDraftKey: ComposerDraftKey = NO_SESSION_DRAFT;
 let composerDraft = composerDrafts.get(composerDraftKey);
-let pendingImages = composerDraft.images;
-let pendingSnippets = composerDraft.snippets;
 const pendingDraftDeletions = new Set<string>();
 let voiceComposerDraft: VoiceSegmentDraft["composer"];
 let nextPendingAttachmentId = 1;
@@ -1568,7 +1566,7 @@ promptForm.addEventListener("submit", event => {
   const action = resolvePromptSubmitAction({
     workspaceMode,
     text,
-    imageCount: pendingImages.length,
+    imageCount: composerDraft.images.length,
     activeSessionId,
     isModelPickerCommand: isModelPickerCommand(editorText),
     slashCommandName: knownSlashCommand?.name ?? null,
@@ -1578,7 +1576,7 @@ promptForm.addEventListener("submit", event => {
   hidePalette();
 
   if (workspaceMode === "session" && knownSlashCommand?.name === "presets" && action.type === "sendPrompt") {
-    if (pendingImages.length > 0) {
+    if (composerDraft.images.length > 0) {
       appendSessionNotice(action.sessionId, {
         level: "warning",
         text: "Presets do not support image attachments. Remove the image before running a preset.",
@@ -1625,8 +1623,8 @@ promptForm.addEventListener("submit", event => {
         sessionId: action.sessionId,
         text,
         editorText: promptInput.value,
-        images: pendingImages,
-        snippets: pendingSnippets,
+        images: composerDraft.images,
+        snippets: composerDraft.snippets,
       });
       if (accepted) clearPromptEditor();
       return;
@@ -1646,7 +1644,7 @@ promptInput.addEventListener("paste", async event => {
 
   if (shouldCaptureSnippet) {
     const marker = createPendingMarker("Snippet");
-    pendingSnippets.push({ type: "snippet", marker, text: pastedText });
+    composerDraft.snippets.push({ type: "snippet", marker, text: pastedText });
     insertTextAtCursor(marker);
   }
 
@@ -1810,14 +1808,10 @@ function hideAuthGate(): void {
 
 function saveComposerDraft(): void {
   composerDraft.editorText = promptInput.value;
-  composerDraft.images = pendingImages;
-  composerDraft.snippets = pendingSnippets;
 }
 
 function showComposerDraft(): void {
   promptInput.value = composerDraft.editorText;
-  pendingImages = composerDraft.images;
-  pendingSnippets = composerDraft.snippets;
   renderImagePreviews();
 }
 
@@ -3238,8 +3232,8 @@ function restoreBusyPromptDraft(): void {
 
   resetPromptHistoryNavigation();
   promptInput.value = restoreBusyPromptEditorText(draft, promptInput.value);
-  pendingImages = [...draft.images, ...pendingImages];
-  pendingSnippets = [...draft.snippets, ...pendingSnippets];
+  composerDraft.images = [...draft.images, ...composerDraft.images];
+  composerDraft.snippets = [...draft.snippets, ...composerDraft.snippets];
   renderImagePreviews();
   renderBusyPromptChoice();
   render();
@@ -3359,8 +3353,8 @@ function syncRollbackChatDraftWarning(): void {
   if (!rollbackChatState || rollbackChatOverlay.hidden) return;
   rollbackChatWarning.hidden =
     promptInput.value.length === 0 &&
-    pendingImages.length === 0 &&
-    pendingSnippets.length === 0;
+    composerDraft.images.length === 0 &&
+    composerDraft.snippets.length === 0;
 }
 
 function renderRollbackChat(): void {
@@ -3442,8 +3436,8 @@ function submitRollbackChat(): void {
   if (!state || !point || state.phase !== "ready") return;
   state.draft = {
     text: promptInput.value,
-    images: pendingImages.map(image => ({ ...image })),
-    snippets: pendingSnippets.map(snippet => ({ ...snippet })),
+    images: composerDraft.images.map(image => ({ ...image })),
+    snippets: composerDraft.snippets.map(snippet => ({ ...snippet })),
   };
   state.selectRequestId = nextClientRequestId("rewind-select");
   state.phase = "applying";
@@ -3466,8 +3460,8 @@ function submitRollbackChat(): void {
 
 function restoreRollbackDraft(draft: RollbackChatDraft): void {
   promptInput.value = draft.text;
-  pendingImages = draft.images.map(image => ({ ...image }));
-  pendingSnippets = draft.snippets.map(snippet => ({ ...snippet }));
+  composerDraft.images = draft.images.map(image => ({ ...image }));
+  composerDraft.snippets = draft.snippets.map(snippet => ({ ...snippet }));
   renderImagePreviews();
   resetPromptHistoryNavigation();
   updatePalette();
@@ -3513,8 +3507,8 @@ function handleRollbackChatResult(message: Extract<ServerMessage, { type: "sessi
   rollbackChatOverlay.hidden = true;
   activateSession(message.sessionId);
   promptInput.value = message.text;
-  pendingImages = restorePendingImagesFromDraft(message.text, message.images, createPendingMarker);
-  pendingSnippets = [];
+  composerDraft.images = restorePendingImagesFromDraft(message.text, message.images, createPendingMarker);
+  composerDraft.snippets = [];
   renderImagePreviews();
   resetPromptHistoryNavigation();
   updatePalette();
@@ -8199,19 +8193,19 @@ function removePendingMarker(marker: string): void {
 }
 
 function expandSnippetTokens(text: string): string {
-  return expandSnippetAttachmentTokens(text, pendingSnippets);
+  return expandSnippetAttachmentTokens(text, composerDraft.snippets);
 }
 
 function renderImagePreviews(): void {
   saveComposerDraft();
-  renderAttachmentPreviews(imagePreviews, pendingImages, pendingSnippets, {
+  renderAttachmentPreviews(imagePreviews, composerDraft.images, composerDraft.snippets, {
     onRemoveImage: (index, image) => {
-      pendingImages.splice(index, 1);
+      composerDraft.images.splice(index, 1);
       removePendingMarker(image.marker);
       renderImagePreviews();
     },
     onRemoveSnippet: (index, snippet) => {
-      pendingSnippets.splice(index, 1);
+      composerDraft.snippets.splice(index, 1);
       removePendingMarker(snippet.marker);
       renderImagePreviews();
     },

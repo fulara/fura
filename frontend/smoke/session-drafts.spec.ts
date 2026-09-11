@@ -1,11 +1,12 @@
 import { expect, type Page, test } from "@playwright/test";
 import { randomUUID } from "node:crypto";
+import { expandSnippetTokens } from "../src/composerAttachments";
 import type { ClientMessage, ServerMessage, SessionSummary } from "../src/protocol";
 
 const tinyPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 type OwnedSession = { id: string; title: string };
-type SentPrompt = { sessionId: string; imageCount: number; textLength: number; behavior?: string };
+type SentPrompt = { sessionId: string; imageCount: number; textLength: number; behavior?: string; imageDetails?: unknown[]; textMatchesFixture?: boolean };
 type SessionSnapshot = Extract<ServerMessage, { type: "session.snapshot" }>;
 
 declare global {
@@ -15,7 +16,9 @@ declare global {
       sessions: SessionSummary[];
       snapshots: Map<string, SessionSnapshot>;
       sent: SentPrompt[];
+      expectedPromptText: string | null;
       holdSession: string | null;
+      holdCatalog: boolean;
       held: string[];
       emit(message: ServerMessage): void;
       releaseMessages(): void;
@@ -31,16 +34,17 @@ declare global {
 // Full fixture snapshots stay in page memory; outgoing observations contain no text/data.
 test.beforeEach(async ({ page }) => {
   page.on("pageerror", error => { throw error; });
-  await page.addInitScript(() => {
+  await page.addInitScript((png: string) => {
     const NativeWebSocket = window.WebSocket;
     const harness: Window["sessionDraftSmoke"] = {
-      sockets: [], sessions: [], snapshots: new Map(), sent: [],
-      holdSession: null, held: [], deferImages: false, imageReads: [],
+      sockets: [], sessions: [], snapshots: new Map(), sent: [], expectedPromptText: null,
+      holdSession: null, holdCatalog: false, held: [], deferImages: false, imageReads: [],
       emit(message) {
         this.sockets.at(-1)!.dispatchEvent(new MessageEvent("message", { data: JSON.stringify(message) }));
       },
       releaseMessages() {
         this.holdSession = null;
+        this.holdCatalog = false;
         for (const data of this.held.splice(0)) {
           this.sockets.at(-1)!.dispatchEvent(new MessageEvent("message", { data }));
         }
@@ -60,8 +64,9 @@ test.beforeEach(async ({ page }) => {
           const message = JSON.parse(event.data) as ServerMessage;
           if (message.type === "sessions.snapshot") harness.sessions = message.sessions;
           if (message.type === "session.snapshot") harness.snapshots.set(message.sessionId, message);
-          if (harness.holdSession && "sessionId" in message && message.sessionId === harness.holdSession
-            && ["session.snapshot", "session.delta", "prompt.busy"].includes(message.type)) {
+          if ((harness.holdCatalog && message.type === "sessions.snapshot")
+            || (harness.holdSession && "sessionId" in message && message.sessionId === harness.holdSession
+              && ["session.snapshot", "session.delta", "prompt.busy"].includes(message.type))) {
             harness.held.push(event.data);
             event.stopImmediatePropagation();
           }
@@ -71,7 +76,12 @@ test.beforeEach(async ({ page }) => {
         if (typeof data === "string") {
           const message = JSON.parse(data) as ClientMessage;
           if (message.type === "prompt.send") {
-            harness.sent.push({ sessionId: message.sessionId, imageCount: message.images?.length ?? 0, textLength: message.text.length, ...(message.behavior ? { behavior: message.behavior } : {}) });
+            const imageDetails = message.images?.some(image => "detail" in (image as object))
+              ? message.images.map(image => {
+                const { data, ...metadata } = image as Record<string, unknown>;
+                return { ...metadata, dataMatchesFixture: data === png };
+              }) : undefined;
+            harness.sent.push({ sessionId: message.sessionId, imageCount: message.images?.length ?? 0, textLength: message.text.length, ...(message.behavior ? { behavior: message.behavior } : {}), ...(imageDetails ? { imageDetails } : {}), ...(harness.expectedPromptText !== null ? { textMatchesFixture: message.text === harness.expectedPromptText } : {}) });
           }
         }
         super.send(data);
@@ -87,7 +97,7 @@ test.beforeEach(async ({ page }) => {
         }));
       }
     };
-  });
+  }, tinyPngBase64);
   await page.goto("/");
   await page.locator("#authTokenInput").fill("dev");
   await page.locator("#authSubmit").click();
@@ -179,9 +189,11 @@ test("desktop keeps exact drafts across sessions, controller, snapshots, panels 
   await selectSession(page, a);
   await expect(prompt).toHaveValue(textA);
 
-  // A valid real catalog with only our selected session temporarily omitted.
+  // Keep native attach refreshes from ending the controlled absence before its assertions.
   await page.evaluate(id => {
     const h = window.sessionDraftSmoke;
+    h.holdCatalog = true;
+    h.holdSession = id;
     h.emit({ type: "sessions.snapshot", sessions: h.sessions.filter(session => session.sessionId !== id) });
   }, a.id);
   await expect(prompt).toBeDisabled();
@@ -189,6 +201,7 @@ test("desktop keeps exact drafts across sessions, controller, snapshots, panels 
   await page.evaluate(() => {
     const h = window.sessionDraftSmoke;
     h.emit({ type: "sessions.snapshot", sessions: h.sessions });
+    h.releaseMessages();
   });
   await selectSession(page, a);
   await expect(prompt).toHaveValue(textA);
@@ -452,4 +465,109 @@ test("images and long snippets stay with their owner; late image reads cannot re
   expect(sent).toHaveLength(1);
   expect(sent[0].sessionId).toBe(a.id);
   expect(sent[0].imageCount).toBe(1);
+});
+
+test("busy restoration retains the current draft through late image and voice results, failed send, and retirement", async ({ page }) => {
+  const a = await createSession(page, "combined A");
+  const b = await createSession(page, "combined B");
+  const prompt = page.locator("#promptInput");
+  const textB = "  unrelated B\n\t";
+  await prompt.fill(textB);
+  await selectSession(page, a);
+  await prompt.fill("Rejected prior A ");
+  await paste(page);
+  await expect(page.locator("#imagePreviews img")).toHaveCount(1);
+  const rejectedText = (await prompt.inputValue()).trim();
+  await page.evaluate(id => { window.sessionDraftSmoke.holdSession = id; }, a.id);
+  await page.locator("#sendButton").click();
+  await expect(prompt).toHaveValue("");
+  const newerA = "\n  LOCAL_AFTER_SEND_A Ω\t  ";
+  await prompt.fill(newerA);
+  const snippetText = `COMBINED_SNIPPET_A\n${"  exact 日本語\t\n".repeat(50)}END_COMBINED_SNIPPET_A`;
+  await paste(page, snippetText);
+  await expect(page.locator("#imagePreviews .snippet-chip")).toHaveCount(1);
+  const localDraftBeforeBusy = await prompt.inputValue();
+  await page.evaluate(() => {
+    navigator.mediaDevices.getUserMedia = () => new Promise<MediaStream>(() => {});
+    window.sessionDraftSmoke.deferImages = true;
+  });
+  await page.locator("#voiceButton").click();
+  await paste(page);
+  await expect.poll(() => page.evaluate(() => window.sessionDraftSmoke.imageReads.length)).toBe(1);
+  await selectSession(page, b);
+  await page.evaluate(input => window.sessionDraftSmoke.emit({
+    type: "prompt.busy", sessionId: input.id, text: input.text,
+    images: [{ type: "image", data: input.png, mimeType: "image/png", detail: "high" }],
+  }), { id: a.id, text: rejectedText, png: tinyPngBase64 });
+  await expect(prompt).toHaveValue(textB);
+  await selectSession(page, a);
+  await expect(page.locator("#busyPromptOverlay")).toBeVisible();
+  await page.locator("#busyPromptCancel").click();
+  await expect(page.locator("#busyPromptOverlay")).toBeHidden();
+  await expect(page.locator("#imagePreviews img")).toHaveCount(1);
+  await expect(page.locator("#imagePreviews .snippet-chip")).toHaveCount(1);
+  const restoredBeforeAsync = `${rejectedText}\n\n${localDraftBeforeBusy}`;
+  await expect(prompt).toHaveValue(restoredBeforeAsync);
+  await selectSession(page, b);
+  await page.evaluate(async () => {
+    window.sessionDraftSmoke.emit({ type: "voice.delta", targetClientId: sessionStorage.getItem("fura.controlClientId")!, itemId: "combined-voice", text: "ASYNC_VOICE_A" });
+    await window.sessionDraftSmoke.releaseImages();
+  });
+  await expect(prompt).toHaveValue(textB);
+  await expect(page.locator("#imagePreviews")).toBeHidden();
+  await selectSession(page, a);
+  await expect(page.locator("#imagePreviews img")).toHaveCount(2);
+  await expect(page.locator("#imagePreviews .snippet-chip")).toHaveCount(1);
+  const imageMarker = `[${await page.locator("#imagePreviews img").nth(1).getAttribute("alt")}]`;
+  const restoredA = `${restoredBeforeAsync} ASYNC_VOICE_A ${imageMarker}`;
+  await expect(prompt).toHaveValue(restoredA);
+  await paste(page, "REMOVE_ONLY_THIS_SNIPPET\n".repeat(30));
+  await expect(page.locator("#imagePreviews .snippet-chip")).toHaveCount(2);
+  await page.locator("#imagePreviews .snippet-chip .image-remove").last().click();
+  await expect(page.locator("#imagePreviews .snippet-chip")).toHaveCount(1);
+  await expect(prompt).toHaveValue(restoredA);
+  await paste(page);
+  await expect(page.locator("#imagePreviews img")).toHaveCount(3);
+  await page.locator("#imagePreviews .image-thumb .image-remove").last().click();
+  await expect(page.locator("#imagePreviews img")).toHaveCount(2);
+  await expect(prompt).toHaveValue(restoredA);
+  await page.evaluate(text => { window.sessionDraftSmoke.expectedPromptText = text; },
+    expandSnippetTokens(restoredA, [{ type: "snippet", marker: localDraftBeforeBusy.slice(newerA.length), text: snippetText }]));
+  const beforeFailedSend = await sentPrompts(page);
+  await page.evaluate(() => { Object.defineProperty(window.sessionDraftSmoke.sockets.at(-1)!, "readyState", { configurable: true, value: WebSocket.CLOSED }); });
+  await page.locator("#sendButton").click();
+  await expect(prompt).toHaveValue(restoredA);
+  expect(await sentPrompts(page)).toEqual(beforeFailedSend);
+  await expect(page.locator("#imagePreviews img")).toHaveCount(2);
+  await expect(page.locator("#imagePreviews .snippet-chip")).toHaveCount(1);
+  await page.evaluate(() => {
+    Reflect.deleteProperty(window.sessionDraftSmoke.sockets.at(-1)!, "readyState");
+    window.sessionDraftSmoke.deferImages = true;
+  });
+  await paste(page);
+  await expect.poll(() => page.evaluate(() => window.sessionDraftSmoke.imageReads.length)).toBe(1);
+  await page.locator("#sendButton").click();
+  await expect(prompt).toHaveValue("");
+  await prompt.fill("  retired owner must not replace new A\t");
+  await selectSession(page, b);
+  await page.evaluate(async () => {
+    window.sessionDraftSmoke.emit({ type: "voice.final", targetClientId: sessionStorage.getItem("fura.controlClientId")!, itemId: "combined-voice", text: "RETIRED_VOICE_RESULT" });
+    await window.sessionDraftSmoke.releaseImages();
+    window.sessionDraftSmoke.releaseMessages();
+  });
+  await expect(prompt).toHaveValue(textB);
+  await expect(page.locator("#imagePreviews")).toBeHidden();
+  await selectSession(page, a);
+  await expect(prompt).toHaveValue("  retired owner must not replace new A\t");
+  await expect(page.locator("#imagePreviews")).toBeHidden();
+  await expect(page.locator(".message.user").last()).toContainText("COMBINED_SNIPPET_A");
+  await expect(page.locator(".message.user").last()).toContainText("END_COMBINED_SNIPPET_A");
+  await expect(page.locator(".message.user").last()).not.toContainText("[Snippet");
+  const sent = (await sentPrompts(page)).at(-1)!;
+  expect(sent).toMatchObject({ sessionId: a.id, imageCount: 2, textMatchesFixture: true });
+  expect(sent.imageDetails).toEqual([
+    { type: "image", mimeType: "image/png", detail: "high", dataMatchesFixture: true },
+    { type: "image", mimeType: "image/png", dataMatchesFixture: true },
+  ]);
+  await page.screenshot({ path: test.info().outputPath("combined-draft-after-retirement.png"), fullPage: true });
 });
