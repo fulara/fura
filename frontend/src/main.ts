@@ -220,7 +220,6 @@ type PanelRenderItem = {
 
 
 type CachedPanelRenderState = {
-  keys: string[];
   nodes: Map<string, HTMLElement>;
   revision: number;
 };
@@ -5251,14 +5250,13 @@ function getCachedPanelRenderState(
 ): CachedPanelRenderState {
   let cache = caches.get(container);
   if (!cache) {
-    cache = { keys: [], nodes: new Map<string, HTMLElement>(), revision };
+    cache = { nodes: new Map<string, HTMLElement>(), revision };
     caches.set(container, cache);
   }
   return cache;
 }
 
 function clearCachedPanelRenderState(cache: CachedPanelRenderState): void {
-  cache.keys = [];
   cache.nodes.clear();
 }
 
@@ -5287,7 +5285,6 @@ function renderCachedPanelItems(
 
   desiredNodes.push(...trailingNodes);
   reconcileChildren(container, desiredNodes);
-  cache.keys = items.map(item => item.key);
   cache.nodes = nextNodes;
   cache.revision = revision;
 }
