@@ -709,13 +709,13 @@ describe("mountMobileApp", () => {
     const { connection } = createHarness();
     connection.emit({
       type: "sessions.snapshot",
-      sessions: [summary("source", { updatedAt: 2 }), summary("other", { updatedAt: 1 })],
+      sessions: [summary("source", { lastMessageAt: 2 }), summary("other", { lastMessageAt: 1 })],
     });
     clickSession(0);
     connection.emit({
       type: "session.snapshot",
       sessionId: "source",
-      state: projection("source", { summary: summary("source", { updatedAt: 2 }) }),
+      state: projection("source", { summary: summary("source", { lastMessageAt: 2 }) }),
     });
     const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput");
     if (!input) throw new Error("mobile prompt input missing");

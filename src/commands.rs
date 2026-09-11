@@ -1620,6 +1620,9 @@ pub(crate) fn opened_session_record(
         status: SessionStatus::Starting,
         created_at: discovered.created_at,
         updated_at: discovered.updated_at,
+        last_message_at: discovered.last_message_at,
+        persisted_message_at: discovered.last_message_at,
+        file_stamp: discovered.file_stamp,
         messages: existing
             .map(|record| record.messages.clone())
             .unwrap_or_default(),
@@ -2588,7 +2591,6 @@ pub(crate) async fn send_prompt(
                     command_notice_message_id.clone(),
                     text.clone(),
                 ));
-                record.updated_at = Timestamp::now();
             })
             .await;
 
@@ -2605,7 +2607,6 @@ pub(crate) async fn send_prompt(
                     text.clone(),
                     command_images.as_ref(),
                 ));
-                record.updated_at = Timestamp::now();
             })
             .await;
 
@@ -4090,6 +4091,9 @@ mod review_comment_tests {
             status: SessionStatus::Idle,
             created_at: Timestamp::now(),
             updated_at: Timestamp::now(),
+            last_message_at: None,
+            persisted_message_at: None,
+            file_stamp: None,
             session_mode: SessionMode::Standard,
             messages: Vec::new(),
             live_message_ids: HashSet::new(),

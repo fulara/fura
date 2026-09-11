@@ -164,6 +164,7 @@ export type SessionSummary = {
   createdAt: number;
   messageCount: number;
   updatedAt: number;
+  lastMessageAt?: number;
   sessionFile?: string | null;
   title?: string | null;
   timestamp?: string | null;

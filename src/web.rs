@@ -1793,6 +1793,7 @@ mod tests {
             status: SessionStatus::Idle,
             created_at: Timestamp::now(),
             updated_at: Timestamp::now(),
+            last_message_at: Timestamp::UNIX_EPOCH,
             message_count,
             kind: SessionKind::Managed,
             session_mode: SessionMode::Standard,

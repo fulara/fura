@@ -69,6 +69,24 @@ describe("applySessionsSnapshot", () => {
     expect(applySessionsSnapshot([summary("beta"), summary("alpha")], null).sessions.map(session => session.sessionId))
       .toEqual(["alpha", "beta"]);
   });
+
+  it("ignores metadata touches and uses creation only for old-server summaries", () => {
+    const oldServer = summary("legacy", { createdAt: 30, updatedAt: 900 });
+    const conversation = summary("conversation", { createdAt: 1, updatedAt: 2, lastMessageAt: 40 });
+    const touched = summary("touched", { createdAt: 2, updatedAt: 1000, lastMessageAt: 10 });
+    expect(applySessionsSnapshot([touched, oldServer, conversation], null).sessions.map(session => session.sessionId))
+      .toEqual(["conversation", "legacy", "touched"]);
+  });
+
+  it("breaks conversation ties by creation then id, regardless of metadata", () => {
+    const sessions = [
+      summary("beta", { createdAt: 3, updatedAt: 999, lastMessageAt: 10 }),
+      summary("older", { createdAt: 2, updatedAt: 1000, lastMessageAt: 10 }),
+      summary("alpha", { createdAt: 3, updatedAt: 1, lastMessageAt: 10 }),
+    ];
+    expect(applySessionsSnapshot(sessions, null).sessions.map(session => session.sessionId))
+      .toEqual(["alpha", "beta", "older"]);
+  });
 });
 
 describe("mergeSessionSummary", () => {
@@ -93,6 +111,15 @@ describe("mergeSessionSummary", () => {
     expect(next[0]?.title).toBe("new");
     expect(sessions[1]).toBe(original);
     expect(sessions[1]?.title).toBe("old");
+  });
+
+  it("reorders when rejected pending recency rolls back to the persisted message", () => {
+    const sessions = [
+      summary("pending", { lastMessageAt: 300 }),
+      summary("other", { lastMessageAt: 200 }),
+    ];
+    const next = mergeSessionSummary(sessions, summary("pending", { updatedAt: 400, lastMessageAt: 100 }));
+    expect(next.map(session => session.sessionId)).toEqual(["other", "pending"]);
   });
 });
 

@@ -62,6 +62,7 @@ function summary(sessionId: string, overrides: Partial<SessionSummary> = {}): Se
     status: overrides.status ?? "idle",
     createdAt: overrides.createdAt ?? 1,
     updatedAt: overrides.updatedAt ?? 1,
+    lastMessageAt: overrides.lastMessageAt,
     messageCount: overrides.messageCount ?? 0,
     title: overrides.title ?? `Session ${sessionId}`,
     cwd: overrides.cwd ?? "/repo",
@@ -613,7 +614,7 @@ describe("desktop cog options", () => {
     const { connection } = await createHarness();
     connection.emit({
       type: "sessions.snapshot",
-      sessions: [summary("live", { updatedAt: 2 }), summary("branched", { updatedAt: 1 })],
+      sessions: [summary("live", { lastMessageAt: 2 }), summary("branched", { lastMessageAt: 1 })],
     });
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });

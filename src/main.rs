@@ -34,6 +34,7 @@ mod review_comments;
 mod rpc;
 mod rpc_frame;
 mod session;
+mod session_recency;
 mod session_repos;
 mod state;
 mod timestamp;
@@ -210,6 +211,7 @@ async fn main() -> anyhow::Result<()> {
         auth_sessions: Arc::new(RwLock::new(HashMap::new())),
         session_runtime: session_runtime.clone(),
         sessions: session_runtime.sessions.clone(),
+        session_catalog_cache: Arc::new(std::sync::Mutex::new(SessionCatalogCache::default())),
         pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
         code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
         review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
@@ -615,6 +617,9 @@ pub(crate) mod tests {
             status: SessionStatus::Idle,
             created_at: Timestamp::from_rpc(&serde_json::json!(0)).expect("valid test timestamp"),
             updated_at: Timestamp::from_rpc(&serde_json::json!(0)).expect("valid test timestamp"),
+            last_message_at: None,
+            persisted_message_at: None,
+            file_stamp: None,
             messages: Vec::new(),
             live_message_ids: HashSet::new(),
             streaming_message: None,
@@ -877,6 +882,8 @@ pub(crate) mod tests {
             timestamp: Some("2026-04-29T00:00:00.000Z".into()),
             created_at: Timestamp::from_rpc(&serde_json::json!(0)).expect("valid test timestamp"),
             updated_at: Timestamp::from_rpc(&serde_json::json!(1)).expect("valid test timestamp"),
+            last_message_at: None,
+            file_stamp: None,
             session_file: session_file.to_string_lossy().into_owned(),
             messages: Vec::new(),
             tool_cards: Vec::new(),
@@ -1024,6 +1031,7 @@ pub(crate) mod tests {
             Timestamp::from_rpc(&serde_json::json!(10)).expect("valid timestamp");
         older_live.updated_at =
             Timestamp::from_rpc(&serde_json::json!(20)).expect("valid timestamp");
+        older_live.last_message_at = Timestamp::from_rpc(&serde_json::json!(20));
 
         let mut newer_saved = test_record();
         newer_saved.id = "newer-saved".into();
@@ -1032,6 +1040,7 @@ pub(crate) mod tests {
             Timestamp::from_rpc(&serde_json::json!(30)).expect("valid timestamp");
         newer_saved.updated_at =
             Timestamp::from_rpc(&serde_json::json!(40)).expect("valid timestamp");
+        newer_saved.last_message_at = Timestamp::from_rpc(&serde_json::json!(40));
 
         let summaries = session_summaries_from_map(&HashMap::from([
             (older_live.id.clone(), older_live),
@@ -1166,6 +1175,7 @@ pub(crate) mod tests {
             auth_sessions: Arc::new(RwLock::new(HashMap::new())),
             session_runtime: session_runtime.clone(),
             sessions: session_runtime.sessions.clone(),
+            session_catalog_cache: Arc::new(std::sync::Mutex::new(SessionCatalogCache::default())),
             pending_prompt_drafts: Arc::new(RwLock::new(HashMap::new())),
             code_workspaces: Arc::new(RwLock::new(CodeWorkspaceRegistry::default())),
             review_worktrees: Arc::new(RwLock::new(DiffReviewWorktreeRegistry::default())),
@@ -1378,12 +1388,15 @@ pub(crate) mod tests {
         let state = test_state(8, None);
         let mut transport = test_record();
         transport.id = "transport-session".to_string();
+        transport.last_message_at = Timestamp::from_rpc(&serde_json::json!(999_000));
         let mut saved = test_record();
         saved.id = "saved-session".to_string();
         saved.kind = SessionKind::Available;
         saved.status = SessionStatus::Available;
         saved.updated_at =
             Timestamp::from_rpc(&serde_json::json!(123_000)).expect("valid timestamp");
+        saved.last_message_at = Timestamp::from_rpc(&serde_json::json!(50_000));
+        saved.persisted_message_at = saved.last_message_at;
         state
             .sessions
             .write()
@@ -1410,6 +1423,7 @@ pub(crate) mod tests {
             .get("saved-session")
             .expect("saved session remains");
         assert_eq!(rebound.updated_at.millis(), 123_000);
+        assert_eq!(rebound.summary().last_message_at.millis(), 50_000);
         assert_eq!(rebound.kind, SessionKind::Managed);
         drop(sessions);
         for expected in ["transport-session", "saved-session"] {
@@ -2319,7 +2333,8 @@ pub(crate) mod tests {
         let session_path = root.join("project").join("goal-session.jsonl");
         write_test_goal_session(&session_path, "goal_paused", "paused");
 
-        let goal_mode = read_session_file_goal_mode(&session_path)
+        let goal_mode = read_session_header(&session_path)
+            .and_then(|session| session.goal_mode)
             .expect("persisted paused goal should hydrate");
         assert!(!goal_mode.enabled);
         assert_eq!(goal_mode.goal.status, GoalStatusProjection::Paused);
@@ -2625,6 +2640,23 @@ pub(crate) mod tests {
         rx
     }
 
+    async fn register_test_history_request(state: &AppState, transport: &str) -> String {
+        let id = next_rpc_id();
+        state
+            .session_runtime
+            .insert_pending_rpc_message_page(
+                id.clone(),
+                PendingRpcMessagesPage {
+                    transport_session_id: transport.into(),
+                    session_id: rpc_session_target_id(state, transport).await,
+                    messages: Vec::new(),
+                    restart_count: 0,
+                },
+            )
+            .await;
+        id
+    }
+
     #[tokio::test]
     async fn attach_before_ready_defers_refresh_then_uses_v2_paging() {
         let state = test_state(8, None);
@@ -2701,6 +2733,7 @@ pub(crate) mod tests {
                     "messages": [{
                         "id": "u1",
                         "role": "user",
+                        "timestamp": 20,
                         "content": [{ "type": "text", "text": "first" }]
                     }],
                     "nextCursor": "cursor-2",
@@ -2726,6 +2759,7 @@ pub(crate) mod tests {
                     "messages": [{
                         "id": "a1",
                         "role": "assistant",
+                        "timestamp": 30,
                         "content": [{ "type": "text", "text": "second" }]
                     }],
                     "totalMessages": 2
@@ -2737,12 +2771,39 @@ pub(crate) mod tests {
         let sessions = state.sessions.read().await;
         let record = sessions.get("s1").expect("session record");
         assert_eq!(record.messages.len(), 2);
+        assert_eq!(record.summary().last_message_at.millis(), 30);
         assert!(
             matches!(&record.messages[0].blocks[0], ContentBlock::Text { text } if text == "first")
         );
         assert!(
             matches!(&record.messages[1].blocks[0], ContentBlock::Text { text } if text == "second")
         );
+    }
+
+    #[tokio::test]
+    async fn stale_history_reply_cannot_change_rebound_recency() {
+        for (version, command) in [(1, "get_messages"), (2, "get_messages_page")] {
+            let state = test_state(16, None);
+            let mut rx = register_test_rpc_transport(&state, "s1").await;
+            state
+                .session_runtime
+                .set_rpc_protocol_version("s1", version)
+                .await;
+            refresh_rpc_messages(&state, "s1").await.unwrap();
+            let request = rx.recv().await.unwrap();
+            let mut target = test_record();
+            target.id = "target".into();
+            target.last_message_at = Timestamp::from_rpc(&serde_json::json!(20));
+            state.sessions.write().await.insert("target".into(), target);
+            map_test_transport(&state, "s1", "target").await;
+            apply_rpc_response(&state, "s1", &serde_json::json!({
+                "id":request["id"],"type":"response","command":command,"success":true,
+                "data":{"messages":[{"role":"assistant","content":"old session","timestamp":900}],"totalMessages":1}
+            })).await;
+            let sessions = state.sessions.read().await;
+            assert_eq!(sessions["target"].summary().last_message_at.millis(), 20);
+            assert!(sessions["target"].messages.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -3618,12 +3679,14 @@ pub(crate) mod tests {
             }),
         )
         .await;
+        let history_id = register_test_history_request(&state, "transport-1").await;
         apply_rpc_response(
             &state,
             "transport-1",
             &serde_json::json!({
                 "type": "response",
                 "command": "get_messages",
+                "id": history_id,
                 "success": true,
                 "data": { "messages": [] }
             }),
@@ -3844,61 +3907,58 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn agent_end_refresh_uses_remapped_session_id_after_get_state() {
-        let state = test_state(8, None);
-        state
-            .sessions
-            .write()
-            .await
-            .insert("transport-1".to_string(), test_record());
-        let mut commands = register_test_transport(&state, "transport-1", "transport-1", 8).await;
-
-        apply_rpc_frame(
-            &state,
-            "transport-1",
-            &serde_json::json!({
-                "type": "response",
-                "command": "get_state",
-                "success": true,
-                "data": {
-                    "sessionId": "real-s1",
-                    "sessionName": "Real Session",
-                    "messageCount": 0
-                }
-            }),
-        )
-        .await;
-
-        apply_rpc_frame(
-            &state,
-            "transport-1",
-            &serde_json::json!({ "type": "agent_end" }),
-        )
-        .await;
-
-        let first = commands.recv().await.expect("first refresh command");
-        let second = commands.recv().await.expect("second refresh command");
-        let third = commands.recv().await.expect("third refresh command");
-        assert_eq!(
-            first.get("type").and_then(|value| value.as_str()),
-            Some("get_state")
-        );
-        assert_eq!(
-            second.get("type").and_then(|value| value.as_str()),
-            Some("get_messages")
-        );
-        assert_eq!(
-            third.get("type").and_then(|value| value.as_str()),
-            Some("get_session_stats")
-        );
-        assert_eq!(
+    async fn agent_end_history_updates_rebound_conversation_not_departed_record() {
+        for version in [1, 2] {
+            let state = test_state(8, None);
+            let mut departed = test_record();
+            departed.id = "transport-1".into();
+            state
+                .sessions
+                .write()
+                .await
+                .insert(departed.id.clone(), departed);
+            let mut commands =
+                register_test_transport(&state, "transport-1", "transport-1", 8).await;
             state
                 .session_runtime
-                .target_session_id_for_transport("transport-1")
-                .await
-                .as_str(),
-            "real-s1"
-        );
+                .set_rpc_protocol_version("transport-1", version)
+                .await;
+            apply_rpc_frame(
+                &state,
+                "transport-1",
+                &serde_json::json!({
+                    "type":"response", "command":"get_state", "success":true,
+                    "data":{"sessionId":"real-s1","sessionName":"Real Session"}
+                }),
+            )
+            .await;
+            apply_rpc_frame(
+                &state,
+                "transport-1",
+                &serde_json::json!({"type":"agent_end"}),
+            )
+            .await;
+            let requests = std::iter::from_fn(|| commands.try_recv().ok()).collect::<Vec<_>>();
+            let command = if version == 2 {
+                "get_messages_page"
+            } else {
+                "get_messages"
+            };
+            let history = requests
+                .iter()
+                .rev()
+                .find(|request| request["type"] == command)
+                .expect("rebound conversation must receive its negotiated history refresh");
+            apply_rpc_frame(&state, "transport-1", &serde_json::json!({
+                "type":"response", "id":history["id"], "command":command, "success":true,
+                "data":{"totalMessages":1,"messages":[{"id":"reply","role":"assistant","timestamp":500,
+                    "content":[{"type":"text","text":"Reply after rebinding"}]}]}
+            })).await;
+            let sessions = state.sessions.read().await;
+            assert_eq!(sessions["real-s1"].summary().last_message_at.millis(), 500);
+            assert_eq!(sessions["real-s1"].messages[0].id, "reply");
+            assert!(sessions["transport-1"].messages.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -6913,6 +6973,301 @@ pub(crate) mod tests {
             record.messages[0].timestamp.map(Timestamp::millis),
             Some(1770000005000)
         );
+        assert_eq!(record.summary().last_message_at.millis(), 1770000005000);
+    }
+
+    #[tokio::test]
+    async fn conversation_recency_uses_authoritative_time_not_stream_arrival() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        for (kind, arrival, content) in [
+            ("message_update", 900, "partial"),
+            ("message_update", 1000, "partial answer"),
+            ("message_end", 1100, "answer"),
+        ] {
+            apply_rpc_frame(&state, "s1", &serde_json::json!({
+                "type": kind, "timestamp": arrival,
+                "message": {"id":"answer", "role":"assistant", "timestamp":100, "content":content}
+            })).await;
+            assert_eq!(
+                state.sessions.read().await["s1"]
+                    .summary()
+                    .last_message_at
+                    .millis(),
+                100
+            );
+        }
+        assert_eq!(state.sessions.read().await["s1"].updated_at.millis(), 0);
+    }
+
+    #[tokio::test]
+    async fn streaming_frame_fallback_is_stable_and_inner_timestamp_replaces_it() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        for arrival in [900, 1000] {
+            apply_rpc_frame(
+                &state,
+                "s1",
+                &serde_json::json!({
+                    "type":"message_update", "timestamp":arrival,
+                    "message":{"role":"assistant", "content":"partial"}
+                }),
+            )
+            .await;
+            assert_eq!(
+                state.sessions.read().await["s1"]
+                    .summary()
+                    .last_message_at
+                    .millis(),
+                900
+            );
+        }
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"message_end", "timestamp":1100,
+                "message":{"id":"answer", "role":"assistant", "timestamp":100, "content":"done"}
+            }),
+        )
+        .await;
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis(),
+            100
+        );
+    }
+
+    #[tokio::test]
+    async fn history_and_nonconversation_events_never_use_arrival_time() {
+        let state = test_state(32, None);
+        let mut record = test_record();
+        record.created_at = Timestamp::from_rpc(&serde_json::json!(10)).unwrap();
+        state.sessions.write().await.insert("s1".into(), record);
+        for message in [
+            serde_json::json!({"role":"assistant", "content":[{"type":"toolCall","id":"t","name":"bash","arguments":{}}], "timestamp":900}),
+            serde_json::json!({"role":"user", "attribution":"agent", "content":"internal", "timestamp":1000}),
+            serde_json::json!({"role":"custom", "customType":"notice", "display":true, "content":"notice", "timestamp":1100}),
+            serde_json::json!({"id":"missing", "role":"assistant", "content":"no time"}),
+        ] {
+            apply_rpc_frame(
+                &state,
+                "s1",
+                &serde_json::json!({"type":"message_end","message":message}),
+            )
+            .await;
+            assert_eq!(
+                state.sessions.read().await["s1"]
+                    .summary()
+                    .last_message_at
+                    .millis(),
+                10
+            );
+        }
+        let history_id = register_test_history_request(&state, "s1").await;
+        apply_rpc_response(&state, "s1", &serde_json::json!({
+            "type":"response","command":"get_messages","success":true,
+            "id":history_id,
+            "data":{"messages":[
+                {"id":"internal","role":"user","attribution":"agent","content":"internal","timestamp":1200},
+                {"id":"missing","role":"assistant","content":"no time"},
+                {"id":"human","role":"user","content":"question","timestamp":20},
+                {"id":"answer","role":"assistant","content":"answer","timestamp":30}
+            ]}
+        })).await;
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis(),
+            30
+        );
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"message_end","message":{"role":"user","content":[],"timestamp":40}
+            }),
+        )
+        .await;
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis(),
+            40
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_recency_rolls_back_on_rejection_and_uses_accepted_upstream_time() {
+        let state = test_state(32, None);
+        let _rx = register_test_rpc_transport(&state, "s1").await;
+        state
+            .sessions
+            .write()
+            .await
+            .get_mut("s1")
+            .unwrap()
+            .last_message_at = Timestamp::from_rpc(&serde_json::json!(10));
+        assert!(
+            send_prompt(&state, "s1".into(), "question".into(), None, None)
+                .await
+                .is_empty()
+        );
+        let pending_id = state.sessions.read().await["s1"].messages[0].id.clone();
+        assert!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis()
+                > 10
+        );
+        let command_id = pending_id.strip_prefix("__pending_prompt:").unwrap();
+        apply_rpc_response(&state, "s1", &serde_json::json!({
+            "type":"response","id":command_id,"command":"prompt","success":false,"error":"rejected"
+        })).await;
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis(),
+            10
+        );
+        assert!(
+            send_prompt(&state, "s1".into(), "accepted".into(), None, None)
+                .await
+                .is_empty()
+        );
+        let pending_id = state.sessions.read().await["s1"].messages[0].id.clone();
+        let command_id = pending_id.strip_prefix("__pending_prompt:").unwrap();
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"message_end","message":{
+                    "role":"user","content":"accepted","timestamp":20,
+                    "clientMessageId":command_id
+                }
+            }),
+        )
+        .await;
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis(),
+            20
+        );
+    }
+
+    #[test]
+    fn persisted_recency_preserves_unacknowledged_live_then_allows_rewind() {
+        let mut record = test_record();
+        record.reconcile_persisted_recency(Timestamp::from_rpc(&serde_json::json!(10)), None);
+        record.observe_conversation_message(
+            &serde_json::json!({"role":"user","content":"new","timestamp":30}),
+            None,
+        );
+        record.reconcile_persisted_recency(Timestamp::from_rpc(&serde_json::json!(20)), None);
+        assert_eq!(record.summary().last_message_at.millis(), 30);
+        record.reconcile_persisted_recency(Timestamp::from_rpc(&serde_json::json!(30)), None);
+        record.reconcile_persisted_recency(Timestamp::from_rpc(&serde_json::json!(10)), None);
+        assert_eq!(record.summary().last_message_at.millis(), 10);
+        record.reconcile_persisted_recency(None, None);
+        assert_eq!(record.summary().last_message_at, record.created_at);
+    }
+
+    #[tokio::test]
+    async fn queued_pending_recency_is_transient_and_crash_does_not_make_it_durable() {
+        let state = test_state(32, None);
+        let _rx = register_test_rpc_transport(&state, "s1").await;
+        state
+            .sessions
+            .write()
+            .await
+            .get_mut("s1")
+            .unwrap()
+            .last_message_at = Timestamp::from_rpc(&serde_json::json!(20));
+        for text in ["first", "second"] {
+            assert!(
+                send_prompt(
+                    &state,
+                    "s1".into(),
+                    text.into(),
+                    None,
+                    Some(PromptBehavior::FollowUp)
+                )
+                .await
+                .is_empty()
+            );
+        }
+        let pending = state.sessions.read().await["s1"].messages[0].id.clone();
+        assert!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis()
+                > 20
+        );
+        remove_optimistic_prompt_message(&state, "s1", &pending).await;
+        assert!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis()
+                > 20
+        );
+        mark_status_and_broadcast(&state, "s1", SessionStatus::Exited).await;
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis(),
+            20
+        );
+        assert!(state.sessions.read().await["s1"].messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_rebound_identity_never_inherits_another_conversations_clock() {
+        let state = test_state(16, None);
+        let mut record = test_record();
+        record.created_at = Timestamp::from_rpc(&serde_json::json!(100)).unwrap();
+        record.last_message_at = Timestamp::from_rpc(&serde_json::json!(500));
+        state.sessions.write().await.insert("s1".into(), record);
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({
+                "type":"response","command":"get_state","success":true,
+                "data":{"sessionId":"unknown"}
+            }),
+        )
+        .await;
+        assert_eq!(
+            state.sessions.read().await["unknown"]
+                .summary()
+                .last_message_at,
+            Timestamp::UNIX_EPOCH
+        );
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis(),
+            500
+        );
     }
 
     #[tokio::test]
@@ -7973,8 +8328,10 @@ pub(crate) mod tests {
         }
         history.extend([skill.clone(), skill, final_message]);
         for _ in 0..2 {
+            let history_id = register_test_history_request(&state, "s1").await;
             apply_rpc_frame(&state, "s1", &serde_json::json!({
                 "type":"response","command":"get_messages","success":true,"data":{"messages":history}
+                ,"id":history_id
             })).await;
             assert_eq!(receive(&mut events, &mut browser), None);
             assert_eq!(receive(&mut events, &mut browser), None);
@@ -9005,12 +9362,14 @@ pub(crate) mod tests {
             assert!(next.tool_cards[0].result.is_some());
         }
 
+        let history_id = register_test_history_request(&state, "old-session").await;
         apply_rpc_response(
             &state,
             "old-session",
             &serde_json::json!({
                 "type": "response",
                 "command": "get_messages",
+                "id": history_id,
                 "success": true,
                 "data": {
                     "messages": [{
@@ -9128,12 +9487,14 @@ pub(crate) mod tests {
             }),
         )
         .await;
+        let history_id = register_test_history_request(&state, "transport-1").await;
         apply_rpc_response(
             &state,
             "transport-1",
             &serde_json::json!({
                 "type": "response",
                 "command": "get_messages",
+                "id": history_id,
                 "success": true,
                 "data": {
                     "messages": [{

@@ -40,6 +40,13 @@ pub(crate) struct SessionRecord {
     pub(crate) status: SessionStatus,
     pub(crate) created_at: Timestamp,
     pub(crate) updated_at: Timestamp,
+    /// Latest confirmed raw conversation activity, independent of file metadata.
+    #[serde(skip)]
+    pub(crate) last_message_at: Option<Timestamp>,
+    #[serde(skip)]
+    pub(crate) persisted_message_at: Option<Timestamp>,
+    #[serde(skip)]
+    pub(crate) file_stamp: Option<crate::session_recency::SessionFileStamp>,
     pub(crate) session_mode: SessionMode,
     pub(crate) messages: Vec<TranscriptMessage>,
     /// IDs of messages that arrived live via `message_end`; preserved across `get_messages` reconciliation.
@@ -91,6 +98,53 @@ pub(crate) struct SessionRecord {
 }
 
 impl SessionRecord {
+    pub(crate) fn reconcile_persisted_recency(
+        &mut self,
+        recency: Option<Timestamp>,
+        stamp: Option<crate::session_recency::SessionFileStamp>,
+    ) {
+        // A scan may finish after a live event. Keep that unacknowledged activity
+        // until persistence catches up; an acknowledged branch may move backwards.
+        if self.last_message_at == self.persisted_message_at
+            || recency >= self.last_message_at
+            || recency < self.persisted_message_at
+            || self.is_terminal()
+        {
+            self.last_message_at = recency;
+        }
+        self.persisted_message_at = recency;
+        self.file_stamp = stamp;
+    }
+
+    pub(crate) fn observe_conversation_message(
+        &mut self,
+        message: &Value,
+        fallback: Option<Timestamp>,
+    ) {
+        if let Some(timestamp) =
+            crate::session_recency::conversation_message_timestamp(message, fallback)
+        {
+            self.last_message_at = self.last_message_at.max(Some(timestamp));
+        }
+    }
+
+    fn effective_last_message_at(&self) -> Timestamp {
+        // Pending queue entries are deliberately transient: removal on rejection
+        // or replacement by OMP's real message also removes their local clock.
+        self.messages
+            .iter()
+            .filter(|message| message.id.starts_with("__pending_prompt:"))
+            .filter_map(|message| message.timestamp)
+            .max()
+            .max(self.last_message_at)
+            .max(
+                self.streaming_message
+                    .as_ref()
+                    .and_then(|message| message.timestamp),
+            )
+            .unwrap_or(self.created_at)
+    }
+
     pub(crate) fn summary(&self) -> SessionSummary {
         SessionSummary {
             session_id: self.id.clone(),
@@ -98,6 +152,7 @@ impl SessionRecord {
             status: self.effective_status(),
             created_at: self.created_at,
             updated_at: self.updated_at,
+            last_message_at: self.effective_last_message_at(),
             message_count: self.messages.len(),
             kind: self.kind,
             session_mode: self.session_mode,
@@ -265,6 +320,7 @@ pub(crate) struct SessionSummary {
     pub(crate) status: SessionStatus,
     pub(crate) created_at: Timestamp,
     pub(crate) updated_at: Timestamp,
+    pub(crate) last_message_at: Timestamp,
     pub(crate) message_count: usize,
     pub(crate) kind: SessionKind,
     pub(crate) session_mode: SessionMode,
@@ -915,6 +971,7 @@ mod tests {
             status: SessionStatus::Idle,
             created_at: Timestamp::now(),
             updated_at: Timestamp::now(),
+            last_message_at: Timestamp::UNIX_EPOCH,
             message_count,
             kind: SessionKind::Managed,
             session_mode: SessionMode::Standard,

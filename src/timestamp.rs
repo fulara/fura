@@ -9,6 +9,8 @@ pub(crate) struct Timestamp {
 }
 
 impl Timestamp {
+    pub(crate) const UNIX_EPOCH: Self = Self { millis: 0 };
+
     pub(crate) fn now() -> Self {
         Self::try_from(SystemTime::now()).expect("system clock is before unix epoch")
     }

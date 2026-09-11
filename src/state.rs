@@ -26,6 +26,7 @@ pub(crate) struct AppState {
     /// Owner for coupled session/runtime maps; selected top-level aliases below point to the same locks during the staged migration.
     pub(crate) session_runtime: SessionRuntimeState,
     pub(crate) sessions: Arc<RwLock<HashMap<String, SessionRecord>>>,
+    pub(crate) session_catalog_cache: Arc<std::sync::Mutex<crate::catalog::SessionCatalogCache>>,
     /// Regular prompt payloads waiting for OMP to either start streaming or reject as busy.
     pub(crate) pending_prompt_drafts: Arc<RwLock<HashMap<String, PendingPromptDraft>>>,
     pub(crate) code_workspaces: Arc<RwLock<CodeWorkspaceRegistry>>,
@@ -575,6 +576,7 @@ pub(crate) struct SessionRuntimeState {
 #[derive(Clone, Debug)]
 pub(crate) struct PendingRpcMessagesPage {
     pub(crate) transport_session_id: String,
+    pub(crate) session_id: String,
     pub(crate) messages: Vec<Value>,
     pub(crate) restart_count: u8,
 }
@@ -1457,10 +1459,44 @@ pub(crate) async fn apply_get_state_update(
         None
     };
     let effective_session_name = pending_switch_name.clone().or(update.session_name);
+    let expected_stamp = state
+        .sessions
+        .read()
+        .await
+        .get(&update.target_session_id)
+        .map(|record| record.file_stamp);
+    let discovered = if let Some(path) = update.session_file.clone() {
+        let cache = state.session_catalog_cache.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut cache = cache.lock().unwrap_or_else(|error| error.into_inner());
+            crate::catalog::read_session_header_cached(std::path::Path::new(&path), &mut cache)
+        })
+        .await
+        .ok()
+        .flatten()
+        .filter(|session| session.id == update.target_session_id)
+    } else {
+        None
+    };
 
     state
         .events
         .coordinate_sessions_and_emit(state, |sessions| {
+            // A catalog refresh may acknowledge a newer file while the disk scan runs.
+            let discovered = discovered.as_ref().filter(|_| {
+                sessions
+                    .get(&update.target_session_id)
+                    .map(|record| record.file_stamp)
+                    == expected_stamp
+            });
+            if let Some(discovered) = discovered.as_ref()
+                && let Some(record) = sessions.get_mut(&update.target_session_id)
+            {
+                record.created_at = discovered.created_at;
+                record.updated_at = discovered.updated_at;
+                record
+                    .reconcile_persisted_recency(discovered.last_message_at, discovered.file_stamp);
+            }
             let (previous_snapshot, target_snapshot) = if target_changed {
                 let source = sessions.get(&update.current_session_id).cloned();
                 let previous_snapshot =
@@ -1470,6 +1506,13 @@ pub(crate) async fn apply_get_state_update(
                         record.kind = SessionKind::Available;
                         record.streaming_message = None;
                         record.live_message_ids.clear();
+                        while let Some(index) = record
+                            .messages
+                            .iter()
+                            .position(|message| message.id.starts_with("__pending_prompt:"))
+                        {
+                            crate::remove_record_message(record, index);
+                        }
                         ServerMessage::SessionSnapshot {
                             session_id: update.current_session_id.clone(),
                             state: record.projection(),
@@ -1495,11 +1538,11 @@ pub(crate) async fn apply_get_state_update(
                     })
                     .or_insert_with(|| {
                         let now = Timestamp::now();
-                        let created_at = source
+                        let created_at = discovered
                             .as_ref()
-                            .map(|record| record.created_at)
+                            .map(|session| session.created_at)
                             .or_else(|| pending_create.as_ref().map(|pending| pending.created_at))
-                            .unwrap_or(now);
+                            .unwrap_or(Timestamp::UNIX_EPOCH);
                         SessionRecord {
                             id: update.target_session_id.clone(),
                             cwd: source
@@ -1519,7 +1562,17 @@ pub(crate) async fn apply_get_state_update(
                                 .unwrap_or_default(),
                             status: SessionStatus::Idle,
                             created_at,
-                            updated_at: now,
+                            updated_at: discovered
+                                .as_ref()
+                                .map(|session| session.updated_at)
+                                .unwrap_or(now),
+                            last_message_at: discovered
+                                .as_ref()
+                                .and_then(|session| session.last_message_at),
+                            persisted_message_at: discovered
+                                .as_ref()
+                                .and_then(|session| session.last_message_at),
+                            file_stamp: discovered.as_ref().and_then(|session| session.file_stamp),
                             messages: Vec::new(),
                             live_message_ids: HashSet::new(),
                             streaming_message: None,
@@ -1654,6 +1707,10 @@ pub(crate) async fn apply_get_state_update(
     if target_changed {
         state
             .session_runtime
+            .clear_pending_rpc_message_pages_for_transport(transport_session_id)
+            .await;
+        state
+            .session_runtime
             .map_transport_to_session(transport_session_id, update.target_session_id.clone())
             .await;
         state
@@ -1664,6 +1721,14 @@ pub(crate) async fn apply_get_state_update(
                 target_mode,
             )
             .await;
+        if state
+            .session_runtime
+            .contains_transport(transport_session_id)
+            .await
+            && let Err(error) = crate::refresh_rpc_messages(state, &update.target_session_id).await
+        {
+            warn!(%error, "failed to refresh rebound session history");
+        }
         if let Err(error) = save_fura_config(state).await {
             warn!(%error, "failed to save remapped session metadata");
         }
@@ -1802,6 +1867,90 @@ pub(crate) struct RpcConfig {
 mod tests {
     use super::*;
     use crate::tests::{test_record, test_state};
+
+    #[tokio::test]
+    async fn get_state_cannot_overwrite_a_newer_catalog_recency() {
+        use std::io::Write;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("s1.jsonl");
+        std::fs::write(&path, concat!(
+            "{\"type\":\"session\",\"id\":\"s1\",\"timestamp\":10}\n",
+            "{\"type\":\"message\",\"id\":\"a\",\"message\":{\"role\":\"user\",\"timestamp\":100,\"content\":\"first\"}}\n",
+        )).unwrap();
+        let discovered = crate::catalog::read_session_header(&path).unwrap();
+        let mut state = test_state(16, None);
+        state.session_root = root.path().to_path_buf();
+        let mut record = test_record();
+        record.session_file = Some(path.to_string_lossy().into_owned());
+        record.reconcile_persisted_recency(discovered.last_message_at, discovered.file_stamp);
+        state.sessions.write().await.insert("s1".into(), record);
+        // Hold publication, but let get_state read and finish its old disk scan.
+        let publication = state.events.gate.lock().await;
+        let update_state = state.clone();
+        let session_file = path.to_string_lossy().into_owned();
+        let update = tokio::spawn(async move {
+            apply_get_state_update(
+                &update_state,
+                "s1",
+                RpcStateUpdate {
+                    current_session_id: "s1".into(),
+                    target_session_id: "s1".into(),
+                    is_streaming: false,
+                    is_compacting: false,
+                    session_name: None,
+                    model: None,
+                    thinking_level: None,
+                    session_file: Some(session_file),
+                    context_tokens: None,
+                    context_window: None,
+                    context_percent: None,
+                    plan_mode: None,
+                    goal_mode: None,
+                    todo_phases: None,
+                },
+            )
+            .await;
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if state
+                    .session_catalog_cache
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .content_scans
+                    > 0
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            serde_json::json!({
+                "type":"message", "id":"b", "parentId":"a",
+                "message":{"role":"assistant","timestamp":300,"content":"newer"}
+            })
+        )
+        .unwrap();
+        crate::catalog::refresh_session_catalog(&state).await;
+        drop(publication);
+        update.await.unwrap();
+        assert_eq!(
+            state.sessions.read().await["s1"]
+                .summary()
+                .last_message_at
+                .millis(),
+            300
+        );
+    }
 
     #[test]
     fn pending_session_delta_flush_becomes_due_after_throttle_window() {

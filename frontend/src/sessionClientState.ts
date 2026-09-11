@@ -11,7 +11,9 @@ export type SessionSnapshotUpdate = {
 };
 
 function compareSessionRecency(left: SessionSummary, right: SessionSummary): number {
-  if (left.updatedAt !== right.updatedAt) return left.updatedAt < right.updatedAt ? 1 : -1;
+  const leftRecency = left.lastMessageAt ?? left.createdAt;
+  const rightRecency = right.lastMessageAt ?? right.createdAt;
+  if (leftRecency !== rightRecency) return leftRecency < rightRecency ? 1 : -1;
   if (left.createdAt !== right.createdAt) return left.createdAt < right.createdAt ? 1 : -1;
   if (left.sessionId === right.sessionId) return 0;
   return left.sessionId < right.sessionId ? -1 : 1;

@@ -46,11 +46,7 @@ const RECENT_RPC_STDERR_LINE_BYTES: usize = 4096;
 const RPC_MESSAGES_PAGE_LIMIT: u16 = 256;
 
 pub(crate) async fn refresh_rpc_messages(state: &AppState, session_id: &str) -> Result<(), String> {
-    if rpc_protocol_version(state, session_id).await >= 2 {
-        start_rpc_messages_page_refresh(state, session_id, 0).await
-    } else {
-        send_rpc_command(state, session_id, get_messages_command(next_rpc_id())).await
-    }
+    start_rpc_messages_page_refresh(state, session_id, 0).await
 }
 
 async fn refresh_rpc_state_tail(state: &AppState, session_id: &str) -> Result<(), String> {
@@ -607,6 +603,7 @@ async fn queue_rpc_messages_page(
     restart_count: u8,
 ) -> Result<(), String> {
     let request_id = next_rpc_id();
+    let target_session_id = rpc_session_target_id(state, transport_session_id).await;
     state
         .session_runtime
         .insert_pending_rpc_message_page(
@@ -614,13 +611,17 @@ async fn queue_rpc_messages_page(
             PendingRpcMessagesPage {
                 transport_session_id: transport_session_id.to_string(),
                 messages,
+                session_id: target_session_id.clone(),
                 restart_count,
             },
         )
         .await;
-    let command =
-        get_messages_page_command(request_id.clone(), cursor, Some(RPC_MESSAGES_PAGE_LIMIT));
-    if let Err(error) = send_rpc_command(state, transport_session_id, command).await {
+    let command = if rpc_protocol_version(state, &target_session_id).await >= 2 {
+        get_messages_page_command(request_id.clone(), cursor, Some(RPC_MESSAGES_PAGE_LIMIT))
+    } else {
+        get_messages_command(request_id.clone())
+    };
+    if let Err(error) = send_rpc_command(state, &target_session_id, command).await {
         let _ = state
             .session_runtime
             .take_pending_rpc_message_page(&request_id)
@@ -1114,8 +1115,9 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 .await;
         }
         OmpRpcFrame::MessageUpdate { message, .. } => {
-            let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
-            if let Some(mut message) = map_omp_message(&message) {
+            let event_timestamp = value_timestamp(frame);
+            let source_message = message;
+            if let Some(mut message) = map_omp_message(&source_message) {
                 message.is_new = true;
                 // Use a stable sentinel ID so the frontend always keyed to the same node
                 // while streaming; the real ID arrives with message_end.
@@ -1131,8 +1133,12 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                                 .as_ref()
                                 .filter(|existing| existing.id == message.id)
                                 .and_then(|existing| existing.timestamp)
-                                .or(Some(event_timestamp));
+                                .or(event_timestamp);
                         }
+                        message.timestamp = crate::session_recency::conversation_message_timestamp(
+                            &source_message,
+                            message.timestamp,
+                        );
                         message.refresh_render_hash();
                         record.streaming_message = Some(message);
                         let projection = record.projection();
@@ -1143,18 +1149,37 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             }
         }
         OmpRpcFrame::MessageEnd { message } => {
-            let event_timestamp = value_timestamp(frame).unwrap_or_else(Timestamp::now);
+            let event_timestamp = value_timestamp(frame);
             let source_message = message.clone();
             if let Some(mut transcript_message) = map_omp_message(&message) {
-                if transcript_message.timestamp.is_none() {
-                    transcript_message.timestamp = Some(event_timestamp);
-                }
+                transcript_message.timestamp = transcript_message.timestamp.or(event_timestamp);
                 transcript_message.is_new = true;
                 // Clear streaming_message and push the final message atomically in a single
                 // lock so no snapshot can fire showing a gap between the two.
                 let delta_sent = state
                     .events
                     .mutate_session_delta(state, &target_session_id, |record| {
+                        let streaming_timestamp = record
+                            .streaming_message
+                            .as_ref()
+                            .filter(|_| matches!(transcript_message.role, MessageRole::Assistant))
+                            .and_then(|message| message.timestamp);
+                        if value_timestamp(&source_message).is_none() {
+                            transcript_message.timestamp = record
+                                .messages
+                                .iter()
+                                .find(|message| {
+                                    !transcript_message.id.is_empty()
+                                        && message.id == transcript_message.id
+                                })
+                                .and_then(|message| message.timestamp)
+                                .or(streaming_timestamp)
+                                .or(transcript_message.timestamp);
+                        }
+                        record.observe_conversation_message(
+                            &source_message,
+                            transcript_message.timestamp,
+                        );
                         if matches!(transcript_message.role, MessageRole::Assistant)
                             && omp_submission_client_message_id(&source_message).is_none()
                         {
@@ -1189,15 +1214,10 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             .position(|existing| existing.id == transcript_message.id)
                         {
                             changed_message_index = changed_message_index.min(index);
-                            if value_timestamp(&source_message).is_none() {
-                                transcript_message.timestamp = record.messages[index].timestamp;
-                                transcript_message.refresh_render_hash();
-                            }
                             record.messages[index] = transcript_message;
                         } else {
                             record.messages.push(transcript_message);
                         }
-                        record.updated_at = Timestamp::now();
                         let projection = record.projection();
                         // Include cards at the changed message boundary, not just the final
                         // entry: consuming a queued prompt can remove an earlier bubble.
@@ -1221,6 +1241,18 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 if delta_sent {
                     broadcast_sessions_snapshot(state).await;
                 }
+            } else if crate::session_recency::conversation_message_timestamp(
+                &source_message,
+                event_timestamp,
+            )
+            .is_some()
+            {
+                state
+                    .events
+                    .mutate_session_snapshot(state, &target_session_id, |record| {
+                        record.observe_conversation_message(&source_message, event_timestamp);
+                    })
+                    .await;
             }
         }
         OmpRpcFrame::ToolExecutionStart {
@@ -1761,6 +1793,10 @@ async fn apply_rpc_messages_page_response(state: &AppState, session_id: &str, fr
         warn!(session_id = %session_id, request_id, "get_messages_page response did not match expected shape");
         return;
     };
+    let current_session_id = rpc_session_target_id(state, session_id).await;
+    if current_session_id != pending.session_id {
+        return;
+    }
     pending.messages.extend(page.messages);
     if let Some(cursor) = page.next_cursor {
         if let Err(message) = queue_rpc_messages_page(
@@ -1777,11 +1813,23 @@ async fn apply_rpc_messages_page_response(state: &AppState, session_id: &str, fr
         return;
     }
 
-    let current_session_id = rpc_session_target_id(state, session_id).await;
+    let recency = pending
+        .messages
+        .iter()
+        .filter_map(|message| crate::session_recency::conversation_message_timestamp(message, None))
+        .max();
     let projected = project_omp_transcript(&pending.messages);
     let (mut messages, tool_cards) = projected;
     prepend_plan_execution_carryover(state, &current_session_id, &mut messages).await;
-    replace_messages_and_broadcast(state, &current_session_id, messages, tool_cards, None).await;
+    replace_messages_and_broadcast(
+        state,
+        &current_session_id,
+        messages,
+        tool_cards,
+        None,
+        recency,
+    )
+    .await;
 }
 
 async fn handle_rpc_messages_page_error(
@@ -1808,8 +1856,7 @@ async fn handle_rpc_messages_page_error(
             debug!(session_id = %session_id, "deferred get_messages_page refresh while session is busy");
         }
         Some("stale_cursor") if pending.restart_count == 0 => {
-            if let Err(error) =
-                start_rpc_messages_page_refresh(state, &pending.transport_session_id, 1).await
+            if let Err(error) = start_rpc_messages_page_refresh(state, &pending.session_id, 1).await
             {
                 warn!(session_id = %session_id, %error, "failed to restart stale get_messages_page refresh");
             }
@@ -2002,7 +2049,7 @@ async fn handle_pending_session_fork_response(
         data,
     )
     .await;
-    if let Err(message) = refresh_rpc_state_tail(state, transport_session_id).await {
+    if let Err(message) = refresh_rpc_state_tail(state, &target_session_id).await {
         warn!(session_id = %target_session_id, %message, "post-duplicate refresh failed");
     }
     let _ = state
@@ -2162,6 +2209,23 @@ async fn handle_pending_rewind_response(
                 let _ = state.events.emit(state, response).await;
                 return true;
             };
+            if matches!(&outcome, RewindOutcome::Success { .. })
+                && data.session_id == current_session_id
+            {
+                state
+                    .events
+                    .mutate_session_snapshot(state, current_session_id, |record| {
+                        // Same-id branch switches must allow a shorter history and a
+                        // backward persisted timestamp, including an unacknowledged turn.
+                        record.messages.clear();
+                        record.tool_cards.clear();
+                        record.active_tool_calls.clear();
+                        record.live_message_ids.clear();
+                        record.streaming_message = None;
+                        record.last_message_at = record.persisted_message_at;
+                    })
+                    .await;
+            }
             let target_session_id = apply_omp_session_state(
                 state,
                 transport_session_id,
@@ -2169,7 +2233,7 @@ async fn handle_pending_rewind_response(
                 data,
             )
             .await;
-            if let Err(message) = refresh_rpc_state_tail(state, transport_session_id).await {
+            if let Err(message) = refresh_rpc_state_tail(state, &target_session_id).await {
                 warn!(session_id = %target_session_id, %message, "post-rollback refresh failed");
             }
             let response = match outcome {
@@ -2548,7 +2612,31 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
             apply_rpc_messages_page_response(state, session_id, frame).await;
         }
         Some("get_messages") => {
+            let Some(request_id) = value_str(frame, "id") else {
+                return;
+            };
+            let Some(pending) = state
+                .session_runtime
+                .take_pending_rpc_message_page(request_id)
+                .await
+            else {
+                return;
+            };
+            if pending.session_id != current_session_id {
+                return;
+            }
             let data = frame.get("data").or_else(|| frame.get("result"));
+            let recency = data
+                .and_then(|data| data.get("messages"))
+                .and_then(Value::as_array)
+                .and_then(|messages| {
+                    messages
+                        .iter()
+                        .filter_map(|message| {
+                            crate::session_recency::conversation_message_timestamp(message, None)
+                        })
+                        .max()
+                });
             let projection = data
                 .and_then(|data| data.get("messages"))
                 .and_then(|messages| messages.as_array())
@@ -2561,6 +2649,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     messages,
                     tool_cards,
                     None,
+                    recency,
                 )
                 .await;
             }
@@ -2846,6 +2935,16 @@ pub(crate) async fn mark_status_and_broadcast(
         .mutate_session_snapshot(state, session_id, |record| {
             record.status = status;
             record.continuation_pending = false;
+            if record.is_terminal() {
+                record.streaming_message = None;
+                while let Some(index) = record
+                    .messages
+                    .iter()
+                    .position(|message| message.id.starts_with("__pending_prompt:"))
+                {
+                    remove_record_message(record, index);
+                }
+            }
         })
         .await;
     if snapshot_sent {
@@ -2966,6 +3065,7 @@ pub(crate) async fn replace_messages_and_broadcast(
     messages: Vec<TranscriptMessage>,
     tool_cards: Vec<ToolCard>,
     status: Option<SessionStatus>,
+    recency: Option<Timestamp>,
 ) {
     let snapshot_sent = state
         .events
@@ -2981,6 +3081,8 @@ pub(crate) async fn replace_messages_and_broadcast(
                     incoming_count,
                     "ignored older get_messages projection"
                 );
+            } else {
+                record.last_message_at = record.last_message_at.max(recency);
             }
         })
         .await;

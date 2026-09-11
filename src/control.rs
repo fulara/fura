@@ -757,7 +757,7 @@ async fn search_sessions(state: &AppState, query: &str, limit: usize) -> Vec<Con
         if score > 0 {
             scored.push((
                 score,
-                summary.updated_at,
+                summary.last_message_at,
                 ControlCandidate {
                     candidate_type: "session".to_string(),
                     candidate_id: format!("session-{}", scored.len() + 1),
