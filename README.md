@@ -218,8 +218,9 @@ Defaults to restarting `./run-local-omp.sh` in the background. Pass a different 
 Open: `http://127.0.0.1:38737/`, then enter bridge token `dev` in the auth screen.
 
 The mock launcher requires Python 3 on POSIX. It does not load `.env` or inherit
-`FURA_*` configuration. Set `FURA_SMOKE_PORT` to override the default port
-(`38737`); authentication is always the mock-only token `dev`.
+`FURA_*` configuration or the caller's `PI_*` session paths and tool-bridge
+capabilities. Set `FURA_SMOKE_PORT` to override the default port (`38737`);
+authentication is always the mock-only token `dev`.
 
 Each run builds the frontend and bridge into a private temporary directory and
 uses its own home, session store, XDG directories, process group and session.
@@ -251,6 +252,13 @@ OMP dependency/native build, home and agent directory. Snapshot SQLite
 credentials with the online backup API rather than copying a live database
 without its WAL. Preserve the configured model/provider and never reuse the
 production session store or an occupied test port.
+Also remove inherited OMP session/profile and tool-bridge environment before
+starting the real smoke workload; changing `HOME` alone does not override
+`PI_CODING_AGENT_DIR`. For browser reconnect, reload the authenticated tab
+(which retains its sessionStorage token), or authenticate a new tab explicitly.
+Confirm the same session ID, the assistant message and settled state over RPC.
+Stopping a session leaves its composer editable; verify the `exited` session
+status rather than expecting a disabled textarea.
 
 Build the native addon from the tested fork, not just an upstream release:
 the local lifecycle guards require `Process.identity()` as well as the matching

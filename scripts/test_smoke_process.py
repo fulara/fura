@@ -26,7 +26,8 @@ class MockLauncherIsolation(unittest.TestCase):
                 f"#!{sys.executable}\n"
                 "import json, os, sys\n"
                 "if 'run' in sys.argv:\n"
-                " print(json.dumps({'pgid':os.getpgrp(),'sid':os.getsid(0),'home':os.environ['HOME']}))\n"
+                " print(json.dumps({'pgid':os.getpgrp(),'sid':os.getsid(0),'home':os.environ['HOME'],"
+                "'parent_context':[key for key in os.environ if key.startswith('PI_')]}))\n"
             )
             cargo.chmod(0o700)
             npm = directory / "npm"
@@ -41,7 +42,12 @@ class MockLauncherIsolation(unittest.TestCase):
                 ["bash", str(ROOT / "run-mock-rpc.sh")],
                 env={**os.environ, "PATH":f"{directory}:{os.environ['PATH']}",
                      "FURA_ENV_FILE":str(config), "FURA_SKIP_FRONTEND_BUILD":"1",
-                     "FURA_SMOKE_PORT":str(port)},
+                     "FURA_SMOKE_PORT":str(port),
+                     **{key: "fixture-only" for key in (
+                         "PI_CODING_AGENT_DIR", "PI_SESSION_FILE", "PI_ARTIFACTS_DIR",
+                         "PI_TOOL_BRIDGE_URL", "PI_TOOL_BRIDGE_TOKEN", "PI_TOOL_BRIDGE_SESSION",
+                         "PI_EVAL_LOCAL_ROOTS", "PI_PROFILE",
+                     )}},
                 capture_output=True, text=True, timeout=15,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -49,6 +55,7 @@ class MockLauncherIsolation(unittest.TestCase):
             self.assertNotEqual(child["pgid"], os.getpgrp())
             self.assertNotEqual(child["sid"], os.getsid(0))
             self.assertNotEqual(child["home"], os.environ["HOME"])
+            self.assertEqual(child["parent_context"], [], "mock workload must not inherit OMP state or capabilities")
 
     def test_partial_startup_failure_preserves_ownership_evidence(self):
         with tempfile.TemporaryDirectory(prefix="fura-startup-regression-") as temp:

@@ -37,7 +37,8 @@ def main():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", port))
     directory = Path(tempfile.mkdtemp(prefix="fura-mock-"))
-    environment = {key: value for key, value in os.environ.items() if not key.startswith("FURA_")}
+    # Parent OMP paths and tool-bridge capabilities must not escape into the workload.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith(("FURA_", "PI_"))}
     real_home = Path.home()
     for name in ("home", "sessions", "cache", "config", "data", "state", "runtime", "tmp"):
         (directory / name).mkdir(mode=0o700)
