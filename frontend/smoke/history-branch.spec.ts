@@ -501,3 +501,53 @@ test("History branch selector persists independent choices across reloads, repos
     expect(fingerprint(b.root)).toEqual(beforeB);
   } finally { a.cleanup(); b.cleanup(); }
 });
+
+test("History loading controls retain readable commits through a real failure and retry", async ({ page }, info) => {
+  const a = fixture("loading-controls"), wire = await transport(page);
+  try {
+    await authenticate(page);
+    await createSession(page, a.root, `History loading controls ${Date.now()}`);
+    await history(page);
+    await choose(page, "refs/heads/topic", a.topic[34]);
+    const latest = view(page).getByRole("button", { name: "Latest", exact: true });
+    const older = view(page).locator(".git-history-footer button");
+    const retained = await rows(page).allTextContents();
+    wire.hold = message => message.type === "git.history";
+    await older.click();
+    await expect.poll(() => wire.held.length).toBe(1);
+    await expect(latest).toBeDisabled();
+    await expect(older).toBeDisabled();
+    await expect(branch(page)).toBeEnabled();
+    expect(await rows(page).allTextContents()).toEqual(retained);
+    wire.hold = () => false;
+    await wire.release();
+    await expect(latest).toBeEnabled();
+    await expect(older).toBeDisabled();
+
+    // Only the disposable fixture changes. Browser reads must leave it untouched.
+    git(a.root, "update-ref", "-d", "refs/heads/topic");
+    const before = fingerprint(a.root);
+    const readable = await rows(page).allTextContents();
+    await latest.click();
+    await expect(view(page).locator(".git-history-error")).toBeVisible();
+    await expect(latest).toBeEnabled();
+    await expect(branch(page)).toBeEnabled();
+    expect(await rows(page).allTextContents()).toEqual(readable);
+    await page.screenshot({ path: info.outputPath("history-failure-readable.png") });
+
+    wire.hold = message => message.type === "git.history";
+    await branch(page).selectOption("");
+    await expect.poll(() => wire.held.length).toBe(1);
+    await expect(latest).toBeDisabled();
+    await expect(older).toBeDisabled();
+    await expect(view(page).locator(".git-history-error")).toHaveCount(0);
+    wire.hold = () => false;
+    await wire.release();
+    await expect(latest).toBeEnabled();
+    await expect(rows(page).first()).toHaveAttribute("data-commit-oid", a.main);
+    await selected(page, a.main);
+    await expect(view(page).locator(".diffs-main-body")).toContainText("loading-controls_MAIN");
+    expect(fingerprint(a.root)).toEqual(before);
+    await page.screenshot({ path: info.outputPath("history-recovered.png") });
+  } finally { a.cleanup(); }
+});

@@ -325,6 +325,77 @@ describe("pinned History Advanced Compare", () => {
   });
 });
 
+describe("History request recovery", () => {
+  it("retains readable history and restores controls after failed sends, disconnects and stale replies", async () => {
+    const { connection } = await createHarness();
+    const oid = "b".repeat(40), olderOid = "a".repeat(40);
+    const commit = { oid, shortOid: oid.slice(0, 12), subject: "Readable previous commit", message: "Readable previous commit", parentOids: [olderOid], committedAt: "2025-01-01T00:00:00Z", isMerge: false };
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    const request = () => {
+      const message = [...connection.sent].reverse().find(item => item.type === "git.history.request");
+      if (!message || message.type !== "git.history.request") throw new Error("History request missing");
+      return message;
+    };
+    const answer = (pending: ReturnType<typeof request>, error: string | null = null, older = false) => {
+      connection.emit({
+        type: "git.history", targetClientId: pending.clientId, requestId: pending.requestId, sessionId: "live", error,
+        page: error ? null : {
+          repoRoot: "/repo", branch: "main", headOid: oid, historyHeadOid: oid, historyRef: null, historyTipOid: oid,
+          branches: [], branchesTruncated: false,
+          commits: [older ? { ...commit, oid: olderOid, subject: "Older readable commit" } : commit],
+          nextCursor: older ? null : "next",
+        },
+      });
+    };
+    const button = (text: string) => {
+      const node = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")].find(item => item.textContent === text);
+      if (!node) throw new Error(`Button missing: ${text}`);
+      return node;
+    };
+    const rows = () => [...document.querySelectorAll("#testDiffPanel .git-history-subject")].map(node => node.textContent);
+    const alert = () => document.querySelector("#testDiffPanel .git-history-error");
+    answer(request());
+    button("History").click();
+    expect(rows()).toEqual(["Readable previous commit"]);
+
+    const rejectedSend = vi.spyOn(connection, "send").mockReturnValueOnce(false);
+    button("Latest").click();
+    rejectedSend.mockRestore();
+    expect(button("Latest").disabled).toBe(false);
+    expect(button("Load older commits").disabled).toBe(false);
+    expect(alert()).not.toBeNull();
+    expect(rows()).toEqual(["Readable previous commit"]);
+
+    button("Load older commits").click();
+    const interrupted = request();
+    expect(button("Latest").disabled).toBe(true);
+    expect(document.querySelector<HTMLSelectElement>("#testDiffPanel .git-history-branch")!.disabled).toBe(false);
+    connection.disconnect();
+    connection.options.onClose?.();
+    expect(button("Latest").disabled).toBe(false);
+    expect(button("Load older commits").disabled).toBe(false);
+    expect(alert()).not.toBeNull();
+    expect(rows()).toEqual(["Readable previous commit"]);
+    answer(interrupted, null, true);
+    expect(rows()).toEqual(["Readable previous commit"]);
+
+    connection.connect();
+    button("Load older commits").click();
+    const retry = request();
+    expect(button("Latest").disabled).toBe(true);
+    expect(alert()).toBeNull();
+    answer(interrupted, "Stale failure");
+    expect(button("Latest").disabled).toBe(true);
+    expect(alert()).toBeNull();
+    answer(retry, null, true);
+    expect(button("Latest").disabled).toBe(false);
+    expect(button("End of history").disabled).toBe(true);
+    expect(rows()).toEqual(["Readable previous commit", "Older readable commit"]);
+  });
+});
+
 
 describe("auth gate", () => {
   beforeEach(() => {

@@ -5668,7 +5668,6 @@ function persistGitReviewSelection(sessionId: string, history: GitHistoryState):
 function clearPendingGitHistory(): void {
   if (pendingGitHistory) {
     pendingGitHistory.state.requestId = null;
-    pendingGitHistory.state.loading = false;
     pendingGitHistory = null;
   }
 }
@@ -5722,7 +5721,7 @@ function selectGitReviewView(sessionId: string, view: GitReviewView): void {
       selectGitCommit(sessionId, first.oid);
       return;
     }
-    if (!history.loading) requestGitHistory(sessionId);
+    if (history.requestId === null) requestGitHistory(sessionId);
     markDiffsViewDirty();
     renderDiffsViewIfActive(sessionId);
     return;
@@ -5959,7 +5958,7 @@ function requestActiveDiffState(options: { refreshExisting?: boolean } = {}): vo
   }
   const state = sessionChangesStates.get(activeSessionId);
   const history = gitReviewFor(activeSessionId);
-  if (!history.page && !history.loading && !history.error) requestGitHistory(activeSessionId);
+  if (!history.page && history.requestId === null && !history.error) requestGitHistory(activeSessionId);
   const selectedCommit = history.view === "history" ? history.selectedOid : null;
   const selectionChanged = state?.status === "ready" &&
     (state.selectedRepoId !== history.repoRoot || (state.review.currentCommitOid ?? null) !== selectedCommit);
@@ -6834,7 +6833,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   identity.className = "git-repository-identity";
   const branch = mkEl("strong");
   branch.className = "git-head-label";
-  branch.textContent = history.page ? gitHeadLabel(history.page) : history.loading ? "Reading branch / HEAD…" : "Branch / HEAD unavailable";
+  branch.textContent = history.page ? gitHeadLabel(history.page) : history.requestId !== null ? "Reading branch / HEAD…" : "Branch / HEAD unavailable";
   const path = mkEl("code");
   path.className = "git-root-path";
   path.textContent = history.repoRoot || "Select a repository";
@@ -6884,7 +6883,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
       selectBranch: ref => selectHistoryBranch(sessionId, ref),
       select: oid => selectGitCommit(sessionId, oid),
       loadOlder: () => {
-        if (!history.page?.nextCursor || history.loading) return;
+        if (!history.page?.nextCursor || history.requestId !== null) return;
         requestGitHistory(sessionId, history.repoRoot, history.page.nextCursor);
         markDiffsViewDirty();
         renderDiffsViewIfActive(sessionId);
@@ -6912,7 +6911,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
     }
     main.append(stepping);
     if (!history.selectedOid) {
-      renderDiffMessage(main, history.loading ? "Loading commit history…" : "Select a commit to review its message, files and hunks.", false);
+      renderDiffMessage(main, history.requestId !== null ? "Loading commit history…" : "Select a commit to review its message, files and hunks.", false);
       return;
     }
   } else {

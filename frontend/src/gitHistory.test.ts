@@ -10,6 +10,18 @@ function page(commits: DiffCommitSummary[], overrides: Partial<GitHistoryPage> =
   return { repoRoot: "/repo", branch: "main", headOid: "a".repeat(40), historyHeadOid: "a".repeat(40), historyRef: null, historyTipOid: "a".repeat(40), branches: [], branchesTruncated: false, commits, nextCursor: "next", ...overrides };
 }
 
+function controls(state: ReturnType<typeof createGitHistoryState>) {
+  const browser = renderGitHistoryBrowser(state, {
+    select: () => {}, loadOlder: () => {}, refresh: () => {}, selectBranch: () => {},
+  });
+  return {
+    browser,
+    latest: browser.querySelector<HTMLButtonElement>(".git-history-heading button")!,
+    older: browser.querySelector<HTMLButtonElement>(".git-history-footer button")!,
+    branch: browser.querySelector<HTMLSelectElement>(".git-history-branch")!,
+  };
+}
+
 describe("Git history browsing", () => {
   it("renders a History branch selector with HEAD and stored local and remote branches", () => {
     const state = createGitHistoryState("/repo");
@@ -41,7 +53,7 @@ describe("Git history browsing", () => {
     beginGitHistoryRequest(state, "second", null);
     expect(acceptGitHistoryResult(state, "first", page([commit(1)]), null)).toBe(false);
     expect(acceptGitHistoryResult(state, "second", page([commit(2)], { repoRoot: "/other" }), null)).toBe(false);
-    expect(state.loading).toBe(true);
+    expect(controls(state).latest.disabled).toBe(true);
     expect(state.page).toBeNull();
     expect(acceptGitHistoryResult(state, "second", page([commit(3)]), null)).toBe(true);
     expect(state.page?.commits.map(item => item.oid)).toEqual([commit(3).oid]);
@@ -71,7 +83,7 @@ describe("Git history browsing", () => {
     beginGitHistoryRequest(state, "retry", "next");
     acceptGitHistoryResult(state, "retry", null, "Repository disappeared");
     expect(state.page?.commits.map(item => item.oid)).toEqual([commit(1).oid]);
-    expect(state.loading).toBe(false);
+    expect(controls(state).latest.disabled).toBe(false);
     expect(state.error).toBe("Repository disappeared");
   });
 
@@ -88,16 +100,14 @@ describe("Git history browsing", () => {
     expect(state.view).toBe("history");
     expect(state.page).toBeNull();
     expect(state.selectedOid).toBeNull();
-    expect(state.requestId).toBeNull();
-    expect(state.requestedCursor).toBeNull();
-    expect(state.loading).toBe(false);
+    expect(controls(state).latest.disabled).toBe(false);
     expect(state.error).toBeNull();
     expect(state.branches).toEqual(branches);
     beginGitHistoryRequest(state, "topic", null);
     expect(acceptGitHistoryResult(state, "older-head", page([commit(2)]), null)).toBe(false);
     expect(acceptGitHistoryResult(state, "older-head", null, "Stale failure")).toBe(false);
     expect(acceptGitHistoryResult(state, "topic", page([commit(2)]), null)).toBe(false);
-    expect(state.loading).toBe(true);
+    expect(controls(state).latest.disabled).toBe(true);
     expect(state.error).toBeNull();
     expect(acceptGitHistoryResult(state, "topic", page([commit(3)], {
       historyRef: "refs/heads/topic", historyHeadOid: "b".repeat(40), historyTipOid: "b".repeat(40), branches,
@@ -115,7 +125,7 @@ describe("Git history browsing", () => {
     beginGitHistoryRequest(state, "initial", null);
     acceptGitHistoryResult(state, "initial", page([commit(1)], { historyTipOid: "b".repeat(40) }), null);
     expect(state.page).toBeNull();
-    expect(state.loading).toBe(false);
+    expect(controls(state).latest.disabled).toBe(false);
     expect(state.error).not.toBeNull();
   });
 
@@ -168,6 +178,44 @@ describe("Git history browsing", () => {
     selector.value = "";
     selector.dispatchEvent(new Event("change"));
     expect(selected).toEqual([null]);
+  });
+
+  it("keeps readable rows and usable branch selection through pending, failed and retried loads", () => {
+    const state = createGitHistoryState("/repo");
+    beginGitHistoryRequest(state, "initial", null);
+    acceptGitHistoryResult(state, "initial", page([commit(1)]), null);
+    // Every string is a request identity; only null means no request.
+    beginGitHistoryRequest(state, "", "next");
+    let ui = controls(state);
+    expect(ui.latest.disabled).toBe(true);
+    expect(ui.older.disabled).toBe(true);
+    expect(ui.branch.disabled).toBe(false);
+    expect(ui.browser.querySelector(".git-history-commit")?.textContent).toContain("Change 1");
+    acceptGitHistoryResult(state, "superseded", null, "Stale failure");
+    ui = controls(state);
+    expect(ui.latest.disabled).toBe(true);
+    expect(ui.browser.querySelector('[role="alert"]')).toBeNull();
+
+    acceptGitHistoryResult(state, "", null, "Repository disappeared");
+    ui = controls(state);
+    expect(ui.latest.disabled).toBe(false);
+    expect(ui.older.disabled).toBe(false);
+    expect(ui.browser.querySelector('[role="alert"]')?.textContent).toBe("Repository disappeared");
+    expect(ui.browser.querySelector(".git-history-commit")?.textContent).toContain("Change 1");
+
+    beginGitHistoryRequest(state, "retry", "next");
+    expect(controls(state).browser.querySelector('[role="alert"]')).toBeNull();
+    acceptGitHistoryResult(state, "retry", page([commit(2)], { nextCursor: null }), null);
+    ui = controls(state);
+    expect(ui.latest.disabled).toBe(false);
+    expect(ui.older.disabled).toBe(true);
+    expect([...ui.browser.querySelectorAll(".git-history-subject")].map(node => node.textContent)).toEqual(["Change 1", "Change 2"]);
+    selectGitHistoryRef(state, "refs/heads/topic");
+    ui = controls(state);
+    expect(ui.latest.disabled).toBe(false);
+    expect(ui.older.disabled).toBe(true);
+    expect(ui.branch.value).toBe("refs/heads/topic");
+    expect(ui.browser.querySelector(".git-history-commit")).toBeNull();
   });
 
   it("loads beyond the first page without duplicate rows and bounds the retained window", () => {

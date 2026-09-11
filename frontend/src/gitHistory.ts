@@ -12,7 +12,6 @@ export type GitHistoryState = {
   page: GitHistoryPage | null;
   requestId: string | null;
   requestedCursor: string | null;
-  loading: boolean;
   error: string | null;
 };
 
@@ -20,7 +19,7 @@ export type GitHistoryState = {
 export const MAX_LOADED_COMMITS = 300;
 
 export function createGitHistoryState(repoRoot: string): GitHistoryState {
-  return { repoRoot, view: "changes", historyRef: null, branches: [], branchesTruncated: false, selectedOid: null, page: null, requestId: null, requestedCursor: null, loading: false, error: null };
+  return { repoRoot, view: "changes", historyRef: null, branches: [], branchesTruncated: false, selectedOid: null, page: null, requestId: null, requestedCursor: null, error: null };
 }
 
 export function selectGitHistoryRef(state: GitHistoryState, ref: string | null): void {
@@ -29,14 +28,12 @@ export function selectGitHistoryRef(state: GitHistoryState, ref: string | null):
   state.page = null;
   state.requestId = null;
   state.requestedCursor = null;
-  state.loading = false;
   state.error = null;
 }
 
 export function beginGitHistoryRequest(state: GitHistoryState, requestId: string, cursor: string | null): void {
   state.requestId = requestId;
   state.requestedCursor = cursor;
-  state.loading = true;
   state.error = null;
 }
 
@@ -50,7 +47,6 @@ export function acceptGitHistoryResult(
   if (page && state.repoRoot && page.repoRoot !== state.repoRoot) return false;
   if (page && page.historyRef !== state.historyRef) return false;
   state.requestId = null;
-  state.loading = false;
   state.error = error;
   if (!page) return true;
   if (state.requestedCursor
@@ -89,6 +85,7 @@ export function renderGitHistoryBrowser(state: GitHistoryState, actions: {
   refresh(): void;
   selectBranch(ref: string | null): void;
 }): HTMLElement {
+  const loading = state.requestId !== null;
   const browser = mkEl("section");
   browser.className = "git-history-browser";
   const heading = mkEl("div");
@@ -99,7 +96,7 @@ export function renderGitHistoryBrowser(state: GitHistoryState, actions: {
   latest.type = "button";
   latest.textContent = "Latest";
   latest.title = "Reload the recent history without changing the selected commit";
-  latest.disabled = state.loading;
+  latest.disabled = loading;
   latest.addEventListener("click", actions.refresh);
   const branch = mkEl("select");
   branch.className = "git-history-branch";
@@ -140,7 +137,7 @@ export function renderGitHistoryBrowser(state: GitHistoryState, actions: {
   }
   if (!state.page?.commits.length) {
     const empty = mkEl("p");
-    empty.textContent = state.loading ? "Loading commit history…" : state.page ? "No commits yet. Current changes are still available." : "Load history to review commits.";
+    empty.textContent = loading ? "Loading commit history…" : state.page ? "No commits yet. Current changes are still available." : "Load history to review commits.";
     list.append(empty);
   }
   for (const commit of state.page?.commits ?? []) {
@@ -185,8 +182,8 @@ export function renderGitHistoryBrowser(state: GitHistoryState, actions: {
   }
   const older = mkEl("button");
   older.type = "button";
-  older.textContent = state.loading ? "Loading history…" : state.page?.nextCursor ? "Load older commits" : "End of history";
-  older.disabled = state.loading || !state.page?.nextCursor;
+  older.textContent = loading ? "Loading history…" : state.page?.nextCursor ? "Load older commits" : "End of history";
+  older.disabled = loading || !state.page?.nextCursor;
   older.addEventListener("click", actions.loadOlder);
   footer.append(older);
   browser.append(footer);
