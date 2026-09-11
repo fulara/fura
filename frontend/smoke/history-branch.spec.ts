@@ -722,3 +722,74 @@ test("History branch picker selects full refs in a popped-out review", async ({ 
     expect(fingerprint(a.root)).toEqual(before);
   } finally { await popout?.close(); a.cleanup(); }
 });
+
+test("History commit description keeps explicit expansion across commits loading and isolated views", async ({ page }, info) => {
+  const a = fixture("description"), b = fixture("description-other"), wire = await transport(page);
+  const name = `Sticky description ${Date.now()}`, otherName = `Other description ${Date.now()}`;
+  try {
+    const tree = git(a.root, "rev-parse", `${a.initial}^{tree}`);
+    const commitA = git(a.root, "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", a.main, "-m", "Description A\n\nACTUAL_BODY_A");
+    const empty = git(a.root, "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", commitA, "-m", "Subject without body");
+    const commitB = git(a.root, "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", empty, "-m", "Description B\n\nACTUAL_BODY_B");
+    git(a.root, "update-ref", "refs/heads/main", commitB);
+    const beforeA = fingerprint(a.root), beforeB = fingerprint(b.root);
+    await authenticate(page); await createSession(page, a.root, name); await history(page);
+    const disclosure = () => view(page).locator(".diff-commit-message");
+    const check = async (oid: string, title: string, message: string, open: boolean) => {
+      await selected(page, oid);
+      await expect(disclosure().locator("summary strong")).toHaveText(title);
+      await expect(disclosure().locator("pre")).toHaveText(message);
+      await expect(disclosure()).toHaveJSProperty("open", open);
+      if (open) await expect(disclosure().locator("pre")).toBeVisible();
+    };
+    const select = async (oid: string) => view(page).locator(`[data-commit-oid="${oid}"]`).click();
+    await check(commitB, "Description B", "Description B\n\nACTUAL_BODY_B", false);
+    await disclosure().locator("summary").click();
+    await check(commitB, "Description B", "Description B\n\nACTUAL_BODY_B", true);
+    await select(commitA);
+    await check(commitA, "Description A", "Description A\n\nACTUAL_BODY_A", true);
+    await select(commitB);
+    await check(commitB, "Description B", "Description B\n\nACTUAL_BODY_B", true);
+    await select(commitA);
+    await check(commitA, "Description A", "Description A\n\nACTUAL_BODY_A", true);
+    await select(empty);
+    await check(empty, "Subject without body", "Subject without body", true);
+    await select(commitB);
+    await check(commitB, "Description B", "Description B\n\nACTUAL_BODY_B", true);
+    await disclosure().locator("summary").press("Space");
+    await select(commitA);
+    await check(commitA, "Description A", "Description A\n\nACTUAL_BODY_A", false);
+    await select(empty);
+    await check(empty, "Subject without body", "Subject without body", false);
+    await select(commitB);
+    await check(commitB, "Description B", "Description B\n\nACTUAL_BODY_B", false);
+    await disclosure().locator("summary").press("Enter");
+    await select(commitA);
+    await disclosure().locator("summary").focus();
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(view(page).getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+    await check(commitA, "Description A", "Description A\n\nACTUAL_BODY_A", true);
+    await expect(view(page).locator(".diff-line-add")).toContainText("description_BASE");
+    await expect(disclosure().locator("summary")).toBeFocused();
+    await select(commitB);
+    wire.hold = message => message.type === "sessionChanges.summary" && message.state.status === "ready"
+      && message.state.review.currentCommitOid === commitA;
+    await select(commitA);
+    await expect.poll(() => wire.held.length).toBeGreaterThan(0);
+    await select(commitB);
+    wire.hold = () => false;
+    await wire.release();
+    await check(commitB, "Description B", "Description B\n\nACTUAL_BODY_B", true);
+    await page.screenshot({ path: info.outputPath("sticky-description-current-content.png") });
+    await addRepo(page, b.root); await history(page); await selected(page, b.main);
+    await expect(disclosure()).toHaveJSProperty("open", false);
+    await repo(page, a.root);
+    await check(commitB, "Description B", "Description B\n\nACTUAL_BODY_B", true);
+    await createSession(page, a.root, otherName); await history(page); await selected(page, commitB);
+    await expect(disclosure()).toHaveJSProperty("open", false);
+    await session(page, name);
+    await check(commitB, "Description B", "Description B\n\nACTUAL_BODY_B", true);
+    expect(fingerprint(a.root)).toEqual(beforeA);
+    expect(fingerprint(b.root)).toEqual(beforeB);
+  } finally { a.cleanup(); b.cleanup(); }
+});

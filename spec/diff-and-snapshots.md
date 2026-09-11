@@ -38,6 +38,16 @@ diff is against the first parent. Detached HEAD and unborn repositories have exp
 The detail pane shows the full commit message and OID, changed files, statistics, hunks,
 comments/questions and the existing wider-context controls.
 
+The existing History commit-message disclosure remembers its open/closed
+preference in memory per session/repository, shared across commit selections.
+First use remains collapsed. Only explicit summary activation (pointer,
+Enter or Space) changes that preference; DOM recreation and delayed toggle
+events do not. Loading, refresh, subject-only commits and later commits retain
+the preference while always rendering the selected commit's actual content.
+Same-view rerenders restore summary focus when it remains available. This is
+not CSS positioning, per-commit state or persisted configuration. Dedicated
+reviews and Advanced Compare retain their existing disclosure behavior.
+
 **History branch** selects what is viewed, never what is checked out. HEAD is the
 default; options use fully qualified local `refs/heads/*` and locally stored
 `refs/remotes/*` names, excluding tags and symbolic aliases such as `origin/HEAD`.

@@ -837,6 +837,7 @@ let currentSessionChangesRequest: { sessionId: string; diffId: string } | null =
 let pendingDiffEntry: { sessionId: string; diffId: string | null } | null = null;
 let diffsFocused = false;
 const gitHistoryStates = new Map<string, GitHistoryState>();
+const historyDescriptionOpen = new WeakMap<GitHistoryState, boolean>();
 const restoredGitReviewSessions = new Set<string>();
 let pendingGitHistory: { sessionId: string; state: GitHistoryState } | null = null;
 let pendingGitFile: { requestId: string; repoRoot: string; commitOid: string; path: string; loading: boolean; sent: boolean; view: ReturnType<typeof openCommittedFileView> } | null = null;
@@ -6773,6 +6774,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const optionsOpen = sameSessionRerender && Boolean(container.querySelector<HTMLDetailsElement>(".git-review-options")?.open);
   const openCommitKey = sameSessionRerender ? container.querySelector<HTMLElement>(".diff-commit-message[open]")?.dataset.comparisonKey : undefined;
   const restoreOptionsFocus = optionsOpen && Boolean(container.ownerDocument.activeElement?.closest(".git-review-options"));
+  const restoreCommitFocus = sameSessionRerender && Boolean(container.ownerDocument.activeElement?.closest(".git-commit-summary"));
   const restoreReviewFocus = sameSessionRerender && container.contains(container.ownerDocument.activeElement)
     && !container.ownerDocument.activeElement?.closest("input, textarea, select, [contenteditable]");
   container.replaceChildren();
@@ -6819,9 +6821,10 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const options = container.querySelector<HTMLDetailsElement>(".git-review-options");
   if (options) options.open = optionsOpen;
   const commit = container.querySelector<HTMLDetailsElement>(".diff-commit-message");
-  if (commit && openCommitKey === commit.dataset.comparisonKey) commit.open = true;
+  if (commit && !root.classList.contains("git-history-mode") && openCommitKey === commit.dataset.comparisonKey) commit.open = true;
   if (restoreReviewFocus) {
-    const focusTarget = restoreOptionsFocus ? options?.querySelector<HTMLElement>("summary") : null;
+    const focusTarget = restoreOptionsFocus ? options?.querySelector<HTMLElement>("summary")
+      : restoreCommitFocus ? commit?.querySelector<HTMLElement>("summary") : null;
     (focusTarget ?? root).focus({ preventScroll: true });
   }
   restoreBranchPicker?.();
@@ -7414,6 +7417,18 @@ function renderReviewableDiffMainContent(
     messageBlock.dataset.comparisonKey = key;
     const commitSummary = mkEl("summary");
     commitSummary.className = "git-commit-summary";
+    const history = main.closest(".git-history-mode") ? gitReviewFor(annotationKey, state.comparison.repoRoot) : undefined;
+    if (history) {
+      messageBlock.open = historyDescriptionOpen.get(history) ?? false;
+      // Only explicit summary activation changes the preference, never queued toggle events.
+      commitSummary.addEventListener("click", event => {
+        if (event.defaultPrevented || !messageBlock.isConnected || activeSessionId !== annotationKey
+          || gitReviewFor(annotationKey) !== history || history.view !== "history" || history.selectedOid !== selectedCommit.oid) return;
+        event.preventDefault();
+        messageBlock.open = !messageBlock.open;
+        historyDescriptionOpen.set(history, messageBlock.open);
+      });
+    }
     commitSummary.title = `${selectedCommit.oid}\n${selectedCommit.message || selectedCommit.subject}`;
     const subject = mkEl("strong");
     subject.textContent = selectedCommit.subject || "(no subject)";
@@ -7694,6 +7709,7 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
   updateDesktopModifiedFileSelection(root, selectedFilePath);
   const preservedHeader = main.querySelector<HTMLElement>(".diffs-toolbar, .git-commit-navigation");
   const openCommitKey = main.querySelector<HTMLElement>(".diff-commit-message[open]")?.dataset.comparisonKey;
+  const restoreCommitFocus = Boolean(main.ownerDocument.activeElement?.closest(".git-commit-summary"));
   const restoreReviewFocus = main.contains(root.ownerDocument.activeElement)
     && !root.ownerDocument.activeElement?.closest("input, textarea, select, [contenteditable]");
   main.replaceChildren(...(preservedHeader ? [preservedHeader] : []));
@@ -7705,8 +7721,11 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
     diffRequestModeForAnnotationKey(annotationKey),
   );
   const commit = main.querySelector<HTMLDetailsElement>(".diff-commit-message");
-  if (commit && openCommitKey === commit.dataset.comparisonKey) commit.open = true;
-  if (restoreReviewFocus) root.focus({ preventScroll: true });
+  if (commit && !root.classList.contains("git-history-mode") && openCommitKey === commit.dataset.comparisonKey) commit.open = true;
+  if (restoreReviewFocus) {
+    const focusTarget = restoreCommitFocus ? commit?.querySelector<HTMLElement>("summary") : null;
+    (focusTarget ?? root).focus({ preventScroll: true });
+  }
   if (annotationKey === "compareDiff") comparePanelDirty = false;
   else diffPanelDirty = false;
   return true;
