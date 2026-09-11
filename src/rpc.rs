@@ -2589,43 +2589,7 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                 warn!(session_id = %current_session_id, "get_state response did not match the typed OMP RPC contract");
                 return;
             };
-            let target_session_id = data.session_id.clone();
-            let session_name = data.session_name.clone();
-            let model = data.model.as_ref().and_then(model_display_name);
-            let thinking_level = data.thinking_level.clone();
-            let session_file = data.session_file.clone();
-            let context_tokens = data.context_usage.as_ref().and_then(|usage| usage.tokens);
-            let context_window = data
-                .context_usage
-                .as_ref()
-                .and_then(|usage| usage.context_window);
-            let context_percent = data.context_usage.as_ref().and_then(|usage| usage.percent);
-            let plan_mode = Some(map_plan_mode_state_projection(data.plan_mode.as_ref()));
-            let goal_mode = Some(map_goal_mode_state_projection(data.goal_mode.as_ref()));
-            let todo_phases = Some(data.todo_phases);
-            apply_get_state_update(
-                state,
-                session_id,
-                RpcStateUpdate {
-                    current_session_id: current_session_id.clone(),
-                    target_session_id: target_session_id.clone(),
-                    is_streaming: data.is_streaming,
-                    is_compacting: data.is_compacting,
-                    session_name,
-                    model,
-                    thinking_level,
-                    session_file,
-                    context_tokens,
-                    context_window,
-                    context_percent,
-                    plan_mode,
-                    goal_mode,
-                    todo_phases,
-                },
-            )
-            .await;
-
-            broadcast_sessions_snapshot(state).await;
+            apply_omp_session_state(state, session_id, current_session_id, data).await;
         }
         Some("handoff") => {
             let snapshot_sent = state

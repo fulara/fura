@@ -1306,31 +1306,40 @@ pub(crate) mod tests {
         map_test_transport(&state, "transport-session", "transport-session").await;
 
         let mut events = state.events.subscribe();
-        apply_get_state_update(
+        apply_rpc_frame(
             &state,
             "transport-session",
-            RpcStateUpdate {
-                current_session_id: "transport-session".to_string(),
-                target_session_id: "real-session".to_string(),
-                is_streaming: false,
-                is_compacting: false,
-                session_name: Some("Real session".to_string()),
-                model: Some("Mock Model".to_string()),
-                thinking_level: Some("high".to_string()),
-                session_file: Some("/tmp/real-session.jsonl".to_string()),
-                context_tokens: Some(10),
-                context_window: Some(100),
-                context_percent: Some(10.0),
-                plan_mode: None,
-                goal_mode: None,
-                todo_phases: None,
-            },
+            &serde_json::json!({
+                "type": "response", "command": "get_state", "success": true,
+                "data": {
+                    "sessionId": "real-session", "sessionName": "Real session",
+                    "model": { "name": "Mock Model" }, "thinkingLevel": "high",
+                    "sessionFile": "/tmp/real-session.jsonl",
+                    "contextUsage": { "tokens": 10, "contextWindow": 100, "percent": 10.0 }
+                }
+            }),
         )
         .await;
 
         match events.recv().await.expect("target session snapshot") {
-            ServerMessage::SessionSnapshot { session_id, .. } => {
+            ServerMessage::SessionSnapshot {
+                session_id,
+                state: projection,
+            } => {
                 assert_eq!(session_id, "real-session");
+                assert_eq!(projection.summary.title.as_deref(), Some("Real session"));
+                assert_eq!(projection.model.as_deref(), Some("Mock Model"));
+                assert_eq!(projection.thinking_level.as_deref(), Some("high"));
+                assert_eq!(projection.context_tokens, Some(10));
+                assert_eq!(projection.context_window, Some(100));
+                assert_eq!(projection.context_percent, Some(10.0));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        match events.recv().await.expect("one session list broadcast") {
+            ServerMessage::SessionsSnapshot { sessions } => {
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(sessions[0].session_id, "real-session");
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -1381,26 +1390,18 @@ pub(crate) mod tests {
             .await
             .extend([(transport.id.clone(), transport), (saved.id.clone(), saved)]);
         map_test_transport(&state, "transport-session", "transport-session").await;
+        let mut events = state.events.subscribe();
 
-        apply_get_state_update(
+        apply_rpc_frame(
             &state,
             "transport-session",
-            RpcStateUpdate {
-                current_session_id: "transport-session".to_string(),
-                target_session_id: "saved-session".to_string(),
-                is_streaming: false,
-                is_compacting: false,
-                session_name: Some("Saved session".to_string()),
-                model: None,
-                thinking_level: None,
-                session_file: Some("/tmp/saved-session.jsonl".to_string()),
-                context_tokens: None,
-                context_window: None,
-                context_percent: None,
-                plan_mode: None,
-                goal_mode: None,
-                todo_phases: None,
-            },
+            &serde_json::json!({
+                "type": "response", "command": "get_state", "success": true,
+                "data": {
+                    "sessionId": "saved-session", "sessionName": "Saved session",
+                    "sessionFile": "/tmp/saved-session.jsonl"
+                }
+            }),
         )
         .await;
 
@@ -1410,6 +1411,169 @@ pub(crate) mod tests {
             .expect("saved session remains");
         assert_eq!(rebound.updated_at.millis(), 123_000);
         assert_eq!(rebound.kind, SessionKind::Managed);
+        drop(sessions);
+        for expected in ["transport-session", "saved-session"] {
+            match events.recv().await.expect("ordered rebind snapshot") {
+                ServerMessage::SessionSnapshot { session_id, .. } => {
+                    assert_eq!(session_id, expected)
+                }
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        assert!(matches!(
+            events.recv().await.expect("session list"),
+            ServerMessage::SessionsSnapshot { .. }
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_state_frames_clear_optional_state_and_keep_controller_hidden() {
+        let state = test_state(16, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        map_test_transport(&state, "transport", "s1").await;
+        let mut events = state.events.subscribe();
+        let mut previous_seq = None;
+        let populated = serde_json::json!({
+            "sessionId": "s1", "sessionName": "Mapper session",
+            "model": { "name": "Mapper model" }, "thinkingLevel": "high",
+            "sessionFile": "/tmp/mapper-session.jsonl", "isStreaming": true,
+            "contextUsage": { "tokens": 42, "contextWindow": 100, "percent": 42.0 },
+            "planMode": { "enabled": true, "planFilePath": "local://plan.md" },
+            "goalMode": {
+                "enabled": true, "mode": "active",
+                "goal": {
+                    "id": "goal-1", "objective": "Keep the mapped goal", "status": "active",
+                    "tokensUsed": 5, "timeUsedSeconds": 2, "createdAt": 1, "updatedAt": 2
+                }
+            },
+            "todoPhases": [{ "name": "Gate", "tasks": [{ "content": "Keep mapped work", "status": "pending" }] }]
+        });
+        for cleared in [
+            serde_json::json!({
+                "sessionId": "s1", "isCompacting": true,
+                "model": null, "thinkingLevel": null, "sessionName": null, "sessionFile": null,
+                "contextUsage": null, "planMode": null, "goalMode": null, "todoPhases": []
+            }),
+            serde_json::json!({ "sessionId": "s1" }),
+        ] {
+            let clearing_compacts = cleared
+                .get("isCompacting")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            for (data, populated_state, compacting) in [
+                (populated.clone(), true, false),
+                (cleared, false, clearing_compacts),
+            ] {
+                apply_rpc_frame(
+                    &state,
+                    "transport",
+                    &serde_json::json!({ "type": "response", "command": "get_state", "success": true, "data": data }),
+                )
+                .await;
+                let ServerMessage::SessionSnapshot {
+                    session_id,
+                    state: projection,
+                } = events
+                    .try_recv()
+                    .expect("mapped snapshot must precede session list")
+                else {
+                    panic!("expected mapped session snapshot");
+                };
+                assert_eq!(session_id, "s1");
+                assert_eq!(projection.summary.title.as_deref(), Some("Mapper session"));
+                assert_eq!(projection.model.as_deref(), Some("Mapper model"));
+                assert_eq!(projection.thinking_level.as_deref(), Some("high"));
+                assert_eq!(projection.is_busy, populated_state || compacting);
+                assert_eq!(projection.compacting, compacting);
+                assert_eq!(projection.context_tokens, populated_state.then_some(42));
+                assert_eq!(projection.context_window, populated_state.then_some(100));
+                assert_eq!(projection.context_percent, populated_state.then_some(42.0));
+                assert_eq!(
+                    projection.plan_mode.as_ref().map(|mode| mode.enabled),
+                    populated_state.then_some(true)
+                );
+                assert_eq!(
+                    projection.goal_mode.as_ref().map(|mode| mode.enabled),
+                    populated_state.then_some(true)
+                );
+                if populated_state {
+                    assert_eq!(
+                        projection.todo_phases[0].tasks[0].content,
+                        "Keep mapped work"
+                    );
+                } else {
+                    assert!(projection.todo_phases.is_empty());
+                }
+                if let Some(previous_seq) = previous_seq {
+                    assert_eq!(projection.seq, previous_seq + 1);
+                }
+                previous_seq = Some(projection.seq);
+                let ServerMessage::SessionsSnapshot { sessions } = events
+                    .try_recv()
+                    .expect("one session list follows the mapped snapshot")
+                else {
+                    panic!("expected session list");
+                };
+                assert_eq!(sessions.len(), 1);
+                assert_eq!(sessions[0], projection.summary);
+                assert!(matches!(
+                    events.try_recv(),
+                    Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+                ));
+            }
+        }
+
+        apply_rpc_frame(
+            &state,
+            "transport",
+            &serde_json::json!({
+                "type": "response", "command": "get_state", "success": true,
+                "data": { "sessionName": "missing required identity" }
+            }),
+        )
+        .await;
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        state.bridge_controller.write().await.transport_session_id =
+            Some("controller-transport".to_string());
+        apply_rpc_frame(
+            &state,
+            "controller-transport",
+            &serde_json::json!({
+                "type": "response", "command": "get_state", "success": true,
+                "data": { "sessionId": "hidden-controller" }
+            }),
+        )
+        .await;
+        assert_eq!(
+            state
+                .session_runtime
+                .target_session_id_for_transport("controller-transport")
+                .await,
+            "hidden-controller"
+        );
+        assert!(
+            !state
+                .sessions
+                .read()
+                .await
+                .contains_key("hidden-controller")
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 
     pub(crate) async fn register_test_transport(
@@ -3059,7 +3223,7 @@ pub(crate) mod tests {
         assert_eq!(fork["type"], "fork");
         let fork_command_id = fork["id"].as_str().expect("fork command id");
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "source",
             &serde_json::json!({
@@ -3079,7 +3243,39 @@ pub(crate) mod tests {
         assert_eq!(get_state["type"], "get_state");
         let get_state_command_id = get_state["id"].as_str().expect("get state command id");
 
-        apply_rpc_response(
+        apply_rpc_frame(
+            &state,
+            "source",
+            &serde_json::json!({
+                "type": "response", "id": "unrelated-state", "command": "get_state", "success": true,
+                "data": { "sessionId": "source", "contextUsage": { "tokens": 17 } }
+            }),
+        )
+        .await;
+        match events
+            .recv()
+            .await
+            .expect("ordinary snapshot while fork waits")
+        {
+            ServerMessage::SessionSnapshot {
+                session_id,
+                state: projection,
+            } => {
+                assert_eq!(session_id, "source");
+                assert_eq!(projection.context_tokens, Some(17));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(matches!(
+            events.recv().await.expect("session list"),
+            ServerMessage::SessionsSnapshot { .. }
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+
+        apply_rpc_frame(
             &state,
             "source",
             &serde_json::json!({
@@ -3660,7 +3856,7 @@ pub(crate) mod tests {
             .insert("transport-1".to_string(), test_record());
         let mut commands = register_test_transport(&state, "transport-1", "transport-1", 8).await;
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport-1",
             &serde_json::json!({
@@ -3743,7 +3939,7 @@ pub(crate) mod tests {
             "a nonterminal settle must not refresh idle get_state between continuation turns"
         );
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport-1",
             &serde_json::json!({
@@ -3852,7 +4048,7 @@ pub(crate) mod tests {
             .insert("s1".to_string(), record);
         map_test_transport(&state, "transport-1", "s1").await;
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport-1",
             &serde_json::json!({
@@ -3878,7 +4074,7 @@ pub(crate) mod tests {
         assert!(!record.is_compacting);
         drop(sessions);
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport-1",
             &serde_json::json!({
@@ -3900,7 +4096,7 @@ pub(crate) mod tests {
         assert!(record.is_compacting);
         drop(sessions);
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport-1",
             &serde_json::json!({
@@ -8677,7 +8873,7 @@ pub(crate) mod tests {
         let branch = commands.recv().await.expect("branch command");
         let branch_id = branch["id"].as_str().expect("branch id").to_string();
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport",
             &serde_json::json!({
@@ -8704,7 +8900,7 @@ pub(crate) mod tests {
             .expect("correlated id")
             .to_string();
 
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport",
             &serde_json::json!({
@@ -8725,16 +8921,25 @@ pub(crate) mod tests {
             }),
         )
         .await;
-        assert!(
-            state
-                .session_runtime
-                .pending_rewind_rpc(&correlated_id)
-                .await
-                .is_some()
-        );
+        match events
+            .recv()
+            .await
+            .expect("ordinary snapshot while rewind waits")
+        {
+            ServerMessage::SessionSnapshot { session_id, .. } => assert_eq!(session_id, "source"),
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(matches!(
+            events.recv().await.expect("session list"),
+            ServerMessage::SessionsSnapshot { .. }
+        ));
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
 
         state.session_runtime.detach_rewind_connection(41).await;
-        apply_rpc_response(
+        apply_rpc_frame(
             &state,
             "transport",
             &serde_json::json!({
