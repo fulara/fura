@@ -67,7 +67,7 @@ import {
   resolvedRefLabel,
   summarizeWireDiffFiles,
 } from "./diffState";
-import { acceptGitHistoryResult, beginGitHistoryRequest, createGitHistoryState, gitHeadLabel, renderGitHistoryBrowser, selectGitHistoryRef, type GitHistoryState, type GitReviewView } from "./gitHistory";
+import { acceptGitHistoryResult, beginGitHistoryRequest, createGitHistoryState, gitHeadLabel, preserveHistoryBranchPicker, renderGitHistoryBrowser, selectGitHistoryRef, type GitHistoryState, type GitReviewView } from "./gitHistory";
 import { openCommittedFileView } from "./gitFileView";
 import {
   annotationsForDiffLocation,
@@ -834,6 +834,8 @@ const sessionChangesDiffIds = new Map<string, string>();
 const sessionChangesSelectedFiles = new Map<string, string>();
 const staleSessionChanges = new Set<string>();
 let currentSessionChangesRequest: { sessionId: string; diffId: string } | null = null;
+let pendingDiffEntry: { sessionId: string; diffId: string | null } | null = null;
+let diffsFocused = false;
 const gitHistoryStates = new Map<string, GitHistoryState>();
 const restoredGitReviewSessions = new Set<string>();
 let pendingGitHistory: { sessionId: string; state: GitHistoryState } | null = null;
@@ -2090,7 +2092,7 @@ function handleServerMessage(message: ServerMessage): void {
         gitHistoryStates.set(gitHistoryStateKey(message.sessionId, history.repoRoot), history);
         sessionChangesRepoIds.set(message.sessionId, history.repoRoot);
         persistGitReviewSelection(message.sessionId, history);
-        if (history.view === "history" && !history.selectedOid && history.page?.commits[0]) {
+        if (!isChoosingDiffEntry(message.sessionId) && history.view === "history" && !history.selectedOid && history.page?.commits[0]) {
           selectGitCommit(message.sessionId, history.page.commits[0].oid);
           break;
         }
@@ -2109,6 +2111,7 @@ function handleServerMessage(message: ServerMessage): void {
       ) {
         break;
       }
+      const entryProbe = pendingDiffEntry?.sessionId === state.sessionId && pendingDiffEntry.diffId === state.diffId;
       diffLoadingSessions.delete(state.sessionId);
       diffErrors.delete(state.sessionId);
       clearPendingDiffFilePatch(state.sessionId, state.diffId);
@@ -2126,8 +2129,23 @@ function handleServerMessage(message: ServerMessage): void {
         sessionChangesRepoIds.set(state.sessionId, state.selectedRepoId);
         if (state.request.scope === "sessionChanges") sessionChangesKinds.set(state.sessionId, state.request.changeKind);
         sessionChangesPayloadKinds.set(state.sessionId, state.comparison.detailMode);
-        selectedDiffFilePath(state.sessionId, state, state.summary.files.map(file => file.newPath));
-      } else {
+        if (!entryProbe) selectedDiffFilePath(state.sessionId, state, state.summary.files.map(file => file.newPath));
+        if (entryProbe && typeof state.workingTreeDirty === "boolean") {
+          pendingDiffEntry = null;
+          const history = gitReviewFor(state.sessionId, state.selectedRepoId);
+          if (!history.page && state.request.scope === "sessionChanges" && !state.request.repoId) {
+            requestGitHistory(state.sessionId, state.selectedRepoId);
+          }
+          history.view = state.workingTreeDirty ? "changes" : "history";
+          if (history.view === "history") {
+            history.selectedOid ??= history.page?.commits[0]?.oid ?? null;
+            if (history.selectedOid) {
+              requestSessionChangesRefresh(state.sessionId, { refreshHistory: false });
+              break;
+            }
+          }
+        }
+      } else if (!entryProbe) {
         sessionChangesSelectedFiles.delete(state.sessionId);
       }
       pruneDiffPatchCache();
@@ -4344,6 +4362,8 @@ function renderActiveSession(): void {
   if (sessionChanged) {
     markTranscriptViewDirty();
     markToolsViewDirty();
+    pendingDiffEntry = null;
+    if (workspaceMode === "session" && isSessionChangesPanelActive()) beginOrdinaryDiffEntry();
   }
 
   if (workspaceMode === "controller") {
@@ -5679,6 +5699,7 @@ function requestGitHistory(sessionId: string, repoRoot?: string | null, cursor: 
 }
 
 function selectHistoryBranch(sessionId: string, ref: string | null): void {
+  pendingDiffEntry = null;
   const history = gitReviewFor(sessionId);
   if (history.historyRef === ref) return;
   clearPendingGitHistory();
@@ -5692,6 +5713,7 @@ function selectHistoryBranch(sessionId: string, ref: string | null): void {
 }
 
 function selectGitCommit(sessionId: string, oid: string): void {
+  pendingDiffEntry = null;
   const history = gitReviewFor(sessionId);
   history.view = "history";
   history.selectedOid = oid;
@@ -5707,6 +5729,7 @@ function selectGitReviewView(sessionId: string, view: GitReviewView): void {
   const history = gitReviewFor(sessionId);
   history.view = view;
   desktopDockview?.setPanelExpanded?.("diffs", view === "history");
+  pendingDiffEntry = null;
   persistGitReviewSelection(sessionId, history);
   sessionChangesSelectedFiles.delete(sessionId);
   if (view === "history" && !history.selectedOid) {
@@ -5724,6 +5747,9 @@ function selectGitReviewView(sessionId: string, view: GitReviewView): void {
 }
 
 function openAdvancedGitCompare(sessionId: string): void {
+  const interruptedEntry = isChoosingDiffEntry(sessionId);
+  pendingDiffEntry = null;
+  if (interruptedEntry) requestSessionChangesRefresh(sessionId, { refreshHistory: false });
   const history = gitReviewFor(sessionId);
   openCwdPicker("diff");
   cwdPickerDiffRepo.value = history.repoRoot;
@@ -5744,7 +5770,7 @@ function requestSessionChanges(sessionId: string): void {
 
 function requestSessionChangesRefresh(
   sessionId: string,
-  options: { repoId?: string | null; payloadKind?: DiffDetailMode | null; changeKind?: GitChangeKind; refreshHistory?: boolean } = {},
+  options: { repoId?: string | null; payloadKind?: DiffDetailMode | null; changeKind?: GitChangeKind; refreshHistory?: boolean; entryDefault?: boolean } = {},
 ): void {
   gitReviewFor(sessionId);
   const previousState = sessionChangesStates.get(sessionId);
@@ -5765,6 +5791,8 @@ function requestSessionChangesRefresh(
   diffErrors.delete(sessionId);
   markDiffsViewDirty();
   const diffId = newDiffId();
+  const entryDefault = options.entryDefault ?? isChoosingDiffEntry(sessionId);
+  if (entryDefault) pendingDiffEntry = { sessionId, diffId };
   setCurrentSessionChangesRequest(sessionId, diffId, options.repoId !== undefined ? "repoChanged" : options.payloadKind ? "payloadChanged" : "refreshed");
   diffLoadingSessions.add(sessionId);
   sessionChangesDiffIds.set(sessionId, diffId);
@@ -5776,7 +5804,7 @@ function requestSessionChangesRefresh(
     repoId,
     detailMode,
     changeKind,
-    currentCommitOid: history.view === "history" ? history.selectedOid : null,
+    currentCommitOid: !entryDefault && history.view === "history" ? history.selectedOid : null,
     selectedFile: null,
   });
   if (!sent) {
@@ -5795,7 +5823,7 @@ function requestSessionChangesRepo(sessionId: string, repoId: string, payloadKin
   sessionChangesRepoIds.set(sessionId, repoId);
   persistGitReviewSelection(sessionId, next);
   sessionChangesSelectedFiles.delete(sessionId);
-  requestSessionChangesRefresh(sessionId, { repoId, payloadKind });
+  requestSessionChangesRefresh(sessionId, { repoId, payloadKind, entryDefault: true });
 }
 
 
@@ -5928,6 +5956,19 @@ function isSessionChangesPanelActive(): boolean {
   return (desktopDockview?.isPanelActive("diffs") ?? false) || (desktopDockview?.isPanelActive("sessionChanges") ?? false);
 }
 
+function isChoosingDiffEntry(sessionId: string): boolean {
+  return pendingDiffEntry?.sessionId === sessionId;
+}
+
+function beginOrdinaryDiffEntry(): void {
+  const summary = activeSessionId ? projections.get(activeSessionId)?.summary ?? currentSessionSummary(activeSessionId) : undefined;
+  if (!activeSessionId || workspaceMode !== "session" || summary?.sessionMode === "diffReview") return;
+  clearPendingGitHistory();
+  clearCurrentSessionChangesRequest("replaced");
+  pendingDiffEntry = { sessionId: activeSessionId, diffId: null };
+  markDiffsViewDirty();
+}
+
 function markSessionChangesStaleAfterAgentSettles(
   sessionId: string,
   previous: SessionProjection | undefined,
@@ -5942,7 +5983,12 @@ function requestActiveDiffState(options: { refreshExisting?: boolean } = {}): vo
   if (!connection?.isOpen()) return;
   if (!activeSessionId || !isSessionChangesPanelActive()) return;
   const projection = projections.get(activeSessionId);
-  if (!projection || diffLoadingSessions.has(activeSessionId)) return;
+  if (!projection) return;
+  if (pendingDiffEntry?.sessionId === activeSessionId && pendingDiffEntry.diffId === null) {
+    requestSessionChangesRefresh(activeSessionId, { entryDefault: true });
+    return;
+  }
+  if (diffLoadingSessions.has(activeSessionId)) return;
   if (projection.summary.sessionMode === "diffReview") {
     const request = diffReviewRequestForSummary(projection.summary);
     if (!request || compareDiffLoading) return;
@@ -6723,6 +6769,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     ? (container.querySelector<HTMLElement>(".diffs-sidebar-scroll")?.scrollTop ?? 0)
     : 0;
   const historyScroll = sameSessionRerender ? container.querySelector<HTMLElement>(".git-history-list")?.scrollTop ?? 0 : 0;
+  const restoreBranchPicker = sameSessionRerender ? preserveHistoryBranchPicker(container) : undefined;
   const optionsOpen = sameSessionRerender && Boolean(container.querySelector<HTMLDetailsElement>(".git-review-options")?.open);
   const openCommitKey = sameSessionRerender ? container.querySelector<HTMLElement>(".diff-commit-message[open]")?.dataset.comparisonKey : undefined;
   const restoreOptionsFocus = optionsOpen && Boolean(container.ownerDocument.activeElement?.closest(".git-review-options"));
@@ -6777,6 +6824,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     const focusTarget = restoreOptionsFocus ? options?.querySelector<HTMLElement>("summary") : null;
     (focusTarget ?? root).focus({ preventScroll: true });
   }
+  restoreBranchPicker?.();
 }
 
 function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, sidebar: HTMLElement, main: HTMLElement): void {
@@ -6787,9 +6835,10 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   }
   const state = sessionChangesStates.get(sessionId);
   const history = gitReviewFor(sessionId);
+  const choosingEntry = isChoosingDiffEntry(sessionId);
   const root = main.parentElement!;
   root.classList.add("git-review-view");
-  root.classList.toggle("git-history-mode", history.view === "history");
+  root.classList.toggle("git-history-mode", !choosingEntry && history.view === "history");
   const header = mkEl("header");
   header.className = "git-review-header";
   const options = mkEl("details");
@@ -6841,7 +6890,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
     const button = mkEl("button");
     button.type = "button";
     button.textContent = label;
-    button.setAttribute("aria-pressed", String(history.view === view));
+    button.setAttribute("aria-pressed", String(!choosingEntry && history.view === view));
     button.addEventListener("click", () => selectGitReviewView(sessionId, view));
     navigation.append(button);
   }
@@ -6872,6 +6921,16 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
   optionsMenu.append(compare);
   header.append(repository, navigation, options);
   root.prepend(header);
+  if (choosingEntry) {
+    const error = diffErrors.get(sessionId);
+    const entryState = state?.diffId === pendingDiffEntry?.diffId ? state : undefined;
+    const missing = entryState?.status === "missingRepo" ? entryState.reason
+      : entryState?.status === "ready" ? entryState.workingTreeStatusError : null;
+    renderDiffMessage(main, error ?? missing ?? (diffLoadingSessions.has(sessionId) || pendingDiffEntry?.diffId === null
+      ? "Checking repository status…"
+      : "Repository status unavailable. Choose a view or refresh."), Boolean(error || missing));
+    return;
+  }
   if (history.view === "history") {
     sidebarTop.append(renderGitHistoryBrowser(history, {
       selectBranch: ref => selectHistoryBranch(sessionId, ref),
@@ -7326,6 +7385,13 @@ function renderReviewableDiffMainContent(
   requestMode: "sessionChanges" | "compareDiff",
 ): void {
   const key = comparisonKey(state);
+  if ("workingTreeStatusError" in state && state.workingTreeStatusError) {
+    const warning = mkEl("p");
+    warning.className = "diffs-error";
+    warning.setAttribute("role", "status");
+    warning.textContent = `Repository status unavailable: ${state.workingTreeStatusError}`;
+    main.append(warning);
+  }
   const annotations = diffAnnotations.get(annotationKey) ?? [];
   const comments = reviewCommentsForComparison(reviewComments.get(annotationKey) ?? [], key);
   const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
@@ -7997,6 +8063,11 @@ function initDesktopWorkspace(): void {
       if (id === "code") markCodeViewDirty();
     },
     onPanelActivated: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
+      const isDiffs = id === "diffs" || id === "sessionChanges";
+      const entering = isDiffs && !diffsFocused;
+      diffsFocused = isDiffs;
+      if (!isDiffs) pendingDiffEntry = null;
+      else if (entering) beginOrdinaryDiffEntry();
       const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
       if (id === "transcript") {
         renderTranscriptPanelIfNeeded(projection, true);
@@ -8024,6 +8095,10 @@ function initDesktopWorkspace(): void {
       }
     },
     onPanelClosed: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
+      if (id === "diffs" || id === "sessionChanges") {
+        diffsFocused = false;
+        pendingDiffEntry = null;
+      }
       if (id === "sessionChanges") {
         markDiffsViewDirty();
         if (activeSessionUsesDiffReviewWorkspace()) {

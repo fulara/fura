@@ -526,6 +526,10 @@ pub(crate) enum SessionChangesSummaryState {
         session_id: String,
         repos: Vec<SessionRepoCandidate>,
         selected_repo_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_tree_dirty: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        working_tree_status_error: Option<String>,
         summary: DiffSummaryPayload,
         review: CommitStepState,
         review_worktree: Option<Box<DiffReviewWorktree>>,

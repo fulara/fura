@@ -1591,11 +1591,34 @@ h2 {
   font-size: 0.7rem;
 }
 .git-history-heading button { background: transparent; border-color: transparent; }
-.git-history-branch, .git-history-snapshot {
+.git-history-branch-picker, .git-history-snapshot {
   grid-column: 1 / -1;
   min-width: 0;
   max-width: 100%;
 }
+.git-history-branch { width: 100%; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.git-history-branch-popup {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 0.4rem;
+  box-sizing: border-box;
+  overflow: auto;
+  border: 1px solid #414b60;
+  border-radius: 6px;
+  background: #161c29;
+  color: #e0e5ef;
+  box-shadow: 0 6px 24px #0008;
+  font-size: 0.75rem;
+}
+.git-history-branch-popup:popover-open { display: flex; flex-direction: column; gap: 0.3rem; }
+.git-history-branch-popup input { width: 100%; min-width: 0; flex-shrink: 0; }
+.git-history-branch-options { overflow: auto; min-height: 0; scrollbar-width: thin; }
+.git-history-branch-option { padding: 0.3rem 0.4rem; cursor: pointer; overflow-wrap: anywhere; }
+.git-history-branch-option:hover, .git-history-branch-option.active { background: #29334c; }
+.git-history-branch-option[aria-selected="true"] { box-shadow: inset 2px 0 #8794ff; }
+.git-history-branch-empty { margin: 0.25rem; color: #aeb8cc; }
+.git-history-branch-empty button { text-decoration: underline; }
 .git-history-snapshot {
   overflow: hidden;
   text-overflow: ellipsis;

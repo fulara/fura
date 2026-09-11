@@ -9,6 +9,23 @@ refs or checking anything out. The header always identifies the repository, bran
 After committing, Current changes may be empty; History remains useful. Repository snapshots
 are no longer created or used as diff bases.
 
+Ordinary entry into Diffs, a session change while that pane is active, or choosing
+another repository requests fresh status for the **selected actual repository**.
+Dirty index/worktree (including conflicts and nonignored untracked files) opens
+Current changes; clean opens History. `status.showUntrackedFiles` cannot hide
+untracked dirtiness from this decision. Git's existing submodule ignore semantics
+remain in force. Viewed history refs and pinned commits are never status inputs.
+
+This is one decision per entry, correlated with that entry's session and diff
+request. While status is loading/unknown, neither mode is presented as selected;
+loading or the actual diagnostic remains visible with manual navigation available.
+Manual mode/commit/Compare navigation cancels a pending decision. Background
+refreshes do not change the chosen mode. Close/reopen and repository/session
+switches invalidate older decisions. Ordinary re-entry reevaluates a stored mode
+but retains its ref, selected immutable OID, file selections and comments; direct
+commit navigation, dedicated review sessions and Advanced Compare retain their
+existing explicit navigation behavior.
+
 The independent inline tool-card diffs still render OMP `result.details.diff`.
 OMP context checkpoint/rewind and native hashline editor snapshots are unrelated and
 remain intact.
@@ -25,9 +42,26 @@ comments/questions and the existing wider-context controls.
 default; options use fully qualified local `refs/heads/*` and locally stored
 `refs/remotes/*` names, excluding tags and symbolic aliases such as `origin/HEAD`.
 Local and remote labels remain distinct even when their short names collide.
-The first page includes at most 1,000 stored refs and explicitly reports a capped
-list; later pages retain those choices. Selected refs absent from that bounded
-list remain selectable through the retained selection.
+Stored branches are ordered by tip **committer** date descending, with full ref
+name ascending as the deterministic tie-breaker; HEAD remains the separate first
+choice. Author date and checkout recency do not affect ordering. Git treats missing
+or invalid commit dates as timestamp zero, tied with epoch dates by full ref name;
+unreadable objects produce an error. Symbolic aliases are excluded before the
+1,000-branch result cap. The existing Git-output safety bound still applies.
+Later pages retain those choices. Selected refs absent from that bounded list
+remain selectable through the retained selection.
+
+The History branch picker filters loaded choices by case-insensitive substring,
+preserving that order and local/remote labels. Search text is transient: opening,
+typing, clearing and dismissing never change the viewed ref or pinned review.
+Only choosing a result by click or Enter commits a selection. Arrow keys move the
+active result; Escape restores trigger focus, and Tab/outside dismissal cancels.
+IME composition cannot accidentally select a result. Reopening starts with an
+empty query. A capped list explicitly says search covers only loaded refs.
+Same-review asynchronous rerenders retain the open picker's query, caret and
+active ref, including initial commit loading. Changing session, repository or
+viewed ref discards that transient draft; it is never written to sessionStorage.
+An in-progress IME composition is not replayed into a replacement input.
 
 The checkout label always identifies actual HEAD. A separate viewed-ref/pinned-tip
 label identifies the history snapshot. Changing the viewed branch clears its pages,
@@ -62,6 +96,9 @@ after that commit leaves the loaded page. If no parent exists or is available,
 Base stays empty and must be chosen explicitly; checkout HEAD is never invented
 as that commit's parent. The ordinary history review still uses the empty tree
 for an initial commit.
+Opening Compare during a pending ordinary-entry status check supersedes that
+probe with the retained explicit review request, so cancelling Compare cannot
+leave a pinned History review waiting for a working-tree response.
 
 Desktop chrome is compact: repository selector, branch/HEAD and view navigation share
 one header (two rows in narrow panels). **Review options** is a native disclosure for
@@ -277,6 +314,13 @@ candidates with `source` and `isDefault`. `sessionRepos.update` takes `sessionId
 (`add`, `hide`, `default`) and `path`. Successful updates emit `Git repositories updated:`
 notices, which trigger a fresh repository summary. `compareDiff.*`, `diff.content.*` and
 `diff.cancel` remain separate. Snapshot commands, DTOs and `missingSnapshot` are removed.
+
+Ready Current changes summaries additionally report `workingTreeDirty`, independent
+of the displayed Git group. Missing/null means unknown, not clean.
+`workingTreeStatusError` preserves a refused/failed status read without disabling
+an otherwise safe staged comparison. Its diagnostic survives lazy patch rendering.
+Immutable commit summaries do not inspect worktree status. These optional response
+fields need no OMP protocol change; an older bridge leaves entry selection explicit.
 
 `git.history.request` / `git.history` carry bounded history pages and opaque cursors.
 Optional `historyRef` defaults to HEAD when absent/null and is validated within the

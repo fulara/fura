@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, readlinkSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { devNull, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -197,11 +197,14 @@ test("review commits without refs, retain notes, load older history and read imm
     await expect(page.locator("#connectionStatus")).toHaveText("connected");
     await page.locator("#sessionsList .session-item").filter({ hasText: name }).locator("button").first().click();
     await page.locator(".dv-tab").filter({ hasText: "Git changes" }).click();
+    await view.getByRole("button", { name: "History", exact: true }).click();
     await expect(view.locator(".diff-commit-message")).toContainText(a.initial);
     await addRepo(page, b.repo);
+    await view.getByRole("button", { name: "History", exact: true }).click();
     await expect(view.locator(".diff-commit-message")).toContainText("Change history-B 1");
     await expect(view).not.toContainText("NOTE_ONLY_FOR_COMMIT_34");
     await view.getByRole("combobox", { name: "Repository", exact: true }).selectOption(a.repo);
+    await view.getByRole("button", { name: "History", exact: true }).click();
     await expect(view.locator(".diff-commit-message")).toContainText(a.initial);
     await page.screenshot({ path: info.outputPath("review-restored.png") });
     expect(bytes(a.repo)).toEqual(beforeA); expect(bytes(b.repo)).toEqual(beforeB);
@@ -294,6 +297,7 @@ test("returning to a session reloads an interrupted commit selection", async ({ 
     await expect(page.locator("#sessionTitle")).toContainText(nameB);
     hold = false;
     await page.locator("#sessionsList .session-item").filter({ hasText: nameA }).locator("button").first().click();
+    await panel(page).getByRole("button", { name: "History", exact: true }).click();
     await expect(panel(page).locator(".diff-commit-message")).toContainText(a.initial);
   } finally { a.cleanup(); b.cleanup(); }
 });
@@ -389,4 +393,134 @@ test("commit shortcuts stay in the focused review and survive asynchronous reren
     await page.keyboard.press("p");
     await expect(view.locator(".diff-commit-message")).toContainText(a.head);
   } finally { a.cleanup(); }
+});
+
+test("ordinary entry chooses from the selected real repository and respects manual navigation", async ({ page }, info) => {
+  const a = fixture("entry-A"), b = fixture("entry-B");
+  const mode = () => panel(page).locator(".git-review-navigation [aria-pressed=true]");
+  const enter = async () => {
+    const restore = panel(page).getByRole("button", { name: "Restore layout", exact: true });
+    if (await restore.count()) {
+      const previous = await mode().textContent();
+      await restore.click();
+      await expect(panel(page).getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+      await expect(mode()).toHaveText(previous!);
+    }
+    await page.locator(".dv-tab:visible").filter({ hasText: "Code" }).click();
+    await page.locator(".dv-tab:visible").filter({ hasText: "Git changes" }).click();
+  };
+  try {
+    git(b.repo, "restore", "--worktree", "same.ts");
+    await authenticate(page); await createSession(page, a.repo, `Entry defaults ${Date.now()}`);
+    await expect(mode()).toHaveText("Current changes");
+    await addRepo(page, b.repo);
+    await expect(mode()).toHaveText("History");
+    await expect(panel(page).locator(".git-root-path")).toHaveText(b.repo);
+    await expect(panel(page).locator(".diff-commit-message")).toContainText(b.head);
+    await panel(page).getByRole("button", { name: "Current changes", exact: true }).click();
+    const before = bytes(b.repo);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(panel(page).getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
+    await expect(mode()).toHaveText("Current changes");
+    expect(bytes(b.repo)).toEqual(before);
+    await enter();
+    await expect(mode()).toHaveText("History");
+    await expect(panel(page).locator(".diff-commit-message")).toContainText(b.head);
+    await page.screenshot({ path: info.outputPath("clean-entry-history.png") });
+    writeFileSync(path.join(b.repo, "same.ts"), b.contents("dirty again"));
+    await enter();
+    await expect(mode()).toHaveText("Current changes");
+    await panel(page).getByRole("button", { name: "History", exact: true }).click();
+    await expect(panel(page).locator(".diff-commit-message")).toContainText(b.head);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(mode()).toHaveText("History");
+    await panel(page).locator(".git-review-options > summary").click();
+    await panel(page).getByRole("button", { name: "Advanced Compare", exact: true }).click();
+    await expect(page.locator("#cwdPickerDiffHead")).toHaveValue(b.head);
+    await page.locator("#cwdPickerCancel").click();
+    git(b.repo, "restore", "--worktree", "same.ts");
+    await enter();
+    await expect(mode()).toHaveText("History");
+    await panel(page).getByRole("combobox", { name: "Repository", exact: true }).selectOption(a.repo);
+    await expect(mode()).toHaveText("Current changes");
+    await expect(panel(page).locator(".git-root-path")).toHaveText(a.repo);
+  } finally { a.cleanup(); b.cleanup(); }
+});
+
+test("ordinary entry recognizes real staged untracked ignored conflicted and unborn states", async ({ page }, info) => {
+  test.setTimeout(120000);
+  const cases = ["staged", "untracked", "ignored", "conflicted", "unborn"] as const;
+  const fixtures = cases.map(kind => ({ kind, ...fixture(`entry-${kind}`) }));
+  try {
+    await authenticate(page);
+    for (const item of fixtures) {
+      if (item.kind === "staged") git(item.repo, "add", "same.ts");
+      else {
+        git(item.repo, "restore", "--worktree", "same.ts");
+        if (item.kind === "untracked") writeFileSync(path.join(item.repo, "new.txt"), "untracked\n");
+        if (item.kind === "ignored") {
+          writeFileSync(path.join(item.repo, ".git", "info", "exclude"), "ignored.txt\n");
+          writeFileSync(path.join(item.repo, "ignored.txt"), "ignored\n");
+        }
+        if (item.kind === "conflicted") {
+          git(item.repo, "checkout", "-qb", "conflicting", item.initial);
+          writeFileSync(path.join(item.repo, "same.ts"), "conflicting branch\n");
+          git(item.repo, "add", "same.ts");
+          git(item.repo, "-c", "commit.gpgsign=false", "commit", "-qm", "conflict");
+          git(item.repo, "checkout", "-q", "main");
+          try { git(item.repo, "merge", "conflicting"); } catch { /* Expected fixture conflict. */ }
+          expect(git(item.repo, "ls-files", "-u")).not.toBe("");
+        }
+        if (item.kind === "unborn") {
+          const empty = path.join(item.parent, "unborn"); mkdirSync(empty);
+          git(empty, "init", "-q", "-b", "main");
+          item.repo = empty;
+        }
+      }
+      const before = bytes(item.repo);
+      await createSession(page, item.repo, `Entry ${item.kind} ${Date.now()}`);
+      await expect(panel(page).locator(".git-review-navigation [aria-pressed=true]"))
+        .toHaveText(item.kind === "ignored" || item.kind === "unborn" ? "History" : "Current changes");
+      if (item.kind === "unborn") await expect(panel(page).locator(".git-history-browser")).toContainText("No commits yet");
+      expect(bytes(item.repo)).toEqual(before);
+      if (item.kind === "staged") {
+        await page.setViewportSize({ width: 760, height: 850 });
+        await panel(page).locator(".git-review-navigation [aria-pressed=true]").scrollIntoViewIfNeeded();
+        await expect(panel(page).locator(".git-review-navigation [aria-pressed=true]")).toBeInViewport();
+        await page.screenshot({ path: info.outputPath("staged-entry-narrow.png") });
+        await page.setViewportSize({ width: 1440, height: 960 });
+      }
+    }
+  } finally { for (const item of fixtures) item.cleanup(); }
+});
+
+test("ordinary entry keeps missing-repository and refused-status diagnostics actionable", async ({ page }, info) => {
+  const item = fixture("entry-filter");
+  const plain = path.join(item.parent, "not-git"); mkdirSync(plain);
+  const marker = path.join(item.parent, "filter-ran");
+  const filter = path.join(item.parent, "filter");
+  try {
+    git(item.repo, "add", "same.ts");
+    writeFileSync(filter, `#!/bin/sh\nprintf ran > '${marker}'\ncat\n`);
+    chmodSync(filter, 0o700);
+    writeFileSync(path.join(item.repo, ".git", "info", "attributes"), "same.ts filter=entry-probe\n");
+    git(item.repo, "config", "filter.entry-probe.clean", filter);
+    writeFileSync(path.join(item.repo, "same.ts"), readFileSync(path.join(item.repo, "same.ts")));
+    const before = bytes(item.repo);
+    await authenticate(page); await createSession(page, plain, `Missing repository ${Date.now()}`);
+    await expect(panel(page).locator(".diffs-error")).toBeVisible();
+    await expect(panel(page).getByRole("button", { name: "History", exact: true })).toBeEnabled();
+    await createSession(page, item.repo, `Refused status ${Date.now()}`);
+    await expect(panel(page).locator(".diffs-error")).toBeVisible();
+    await expect(panel(page).locator(".git-review-navigation [aria-pressed=true]")).toHaveCount(0);
+    await panel(page).getByRole("button", { name: "History", exact: true }).click();
+    await expect(panel(page).locator(".diff-commit-message")).toContainText(item.head);
+    await panel(page).getByRole("button", { name: "Current changes", exact: true }).click();
+    await panel(page).getByRole("combobox", { name: "Git change group", exact: true }).selectOption("staged");
+    await expect(panel(page).locator(".diffs-main-body")).toContainText("entry-filter_WORKTREE_ONLY");
+    await expect(panel(page).locator(".diffs-error")).toBeVisible();
+    expect(existsSync(marker)).toBe(false);
+    expect(bytes(item.repo)).toEqual(before);
+    await page.screenshot({ path: info.outputPath("status-error-staged-still-readable.png") });
+  } finally { item.cleanup(); }
 });

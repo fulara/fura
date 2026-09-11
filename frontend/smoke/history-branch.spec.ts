@@ -81,7 +81,19 @@ function fingerprint(root: string): Array<[string, string]> {
   return result;
 }
 function view(page: Page) { return page.locator(".session-changes-view:visible"); }
-function branch(page: Page) { return view(page).getByRole("combobox", { name: "History branch", exact: true }); }
+function branch(page: Page) { return view(page).getByRole("button", { name: "History branch", exact: true }); }
+async function pickBranch(page: Page, ref: string) {
+  if (!await branch(page).isVisible()) await history(page);
+  await branch(page).click();
+  await view(page).getByRole("combobox", { name: "Filter History branches", exact: true }).fill(ref || "HEAD");
+  await view(page).getByRole("listbox", { name: "History branches", exact: true }).getByRole("option").and(view(page).getByTitle(ref || "HEAD", { exact: true })).click();
+}
+async function branchValues(page: Page) {
+  await branch(page).click();
+  const values = await view(page).getByRole("listbox", { name: "History branches", exact: true }).getByRole("option").evaluateAll(elements => elements.map(element => element.getAttribute("title")));
+  await view(page).getByRole("combobox", { name: "Filter History branches", exact: true }).press("Escape");
+  return values;
+}
 function rows(page: Page) { return view(page).locator(".git-history-commit"); }
 async function gitPanel(page: Page) { await page.locator(".dv-tab").filter({ hasText: "Git changes" }).click(); }
 async function authenticate(page: Page) {
@@ -103,6 +115,7 @@ async function session(page: Page, name: string) {
   await page.locator("#sessionsList .session-item").filter({ hasText: name }).locator("button").first().click();
   await expect(page.locator("#sessionTitle")).toContainText(name);
   await gitPanel(page);
+  await history(page);
 }
 async function history(page: Page) {
   await view(page).getByRole("button", { name: "History", exact: true }).click();
@@ -113,8 +126,8 @@ async function selected(page: Page, oid: string) {
   await expect(view(page).locator(".diff-commit-message")).toContainText(oid);
 }
 async function choose(page: Page, ref: string, oid: string) {
-  await branch(page).selectOption(ref);
-  await expect(branch(page)).toHaveValue(ref);
+  await pickBranch(page, ref);
+  await expect(branch(page)).toHaveAttribute("title", ref || "HEAD");
   await expect(rows(page).first()).toHaveAttribute("data-commit-oid", oid);
   await selected(page, oid);
 }
@@ -134,6 +147,7 @@ async function addRepo(page: Page, root: string) {
 async function repo(page: Page, root: string) {
   await view(page).getByRole("combobox", { name: "Repository", exact: true }).selectOption(root);
   await expect(view(page).locator(".git-root-path")).toHaveText(root);
+  await history(page);
 }
 async function advanced(page: Page, root: string, base: string, head: string) {
   await options(page);
@@ -220,11 +234,11 @@ test("History branch selector reads HEAD, local and remote commits without chang
     await createSession(page, a.root, `History choices ${Date.now()}`);
     const before = fingerprint(a.root), requestBoundary = wire.requests.length;
     await history(page);
-    await expect(branch(page)).toHaveValue("");
+    await expect(branch(page)).toHaveAttribute("title", "HEAD");
     await selected(page, a.main);
     await expect(rows(page).first()).toHaveAttribute("data-commit-oid", a.main);
-    const values = await branch(page).locator("option").evaluateAll(elements => elements.map(element => element.getAttribute("value")));
-    expect(values.slice().sort()).toEqual(["", "refs/heads/main", "refs/heads/topic", "refs/remotes/origin/shared", "refs/remotes/origin/topic"].sort());
+    const values = await branchValues(page);
+    expect(values.slice().sort()).toEqual(["HEAD", "refs/heads/main", "refs/heads/topic", "refs/remotes/origin/shared", "refs/remotes/origin/topic"].sort());
     await choose(page, "refs/heads/topic", a.topic[34]);
     await expect(rows(page)).toHaveCount(30);
     await expect(view(page).locator(".git-head-label")).toContainText(/Checkout.*main/);
@@ -282,7 +296,7 @@ test("History branch selector reads HEAD, local and remote commits without chang
     await group.selectOption("untracked");
     await expect(view(page).locator(".diffs-main-body")).toContainText("choices_UNTRACKED_SENTINEL");
     await history(page);
-    await expect(branch(page)).toHaveValue("refs/heads/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/topic");
     await selected(page, a.topic[34]);
     expect(git(a.root, "symbolic-ref", "--short", "HEAD")).toBe("main");
     expect(git(a.root, "rev-parse", "HEAD")).toBe(a.main);
@@ -351,7 +365,7 @@ test("History branch selector keeps deleted-ref cursors usable and handles missi
     await selected(page, a.topic[0]);
     await view(page).getByRole("button", { name: "Latest", exact: true }).click();
     await expect(view(page).locator(".git-history-browser").getByRole("alert")).toContainText(/missing|not found|no longer|does not exist|cannot resolve/i);
-    await expect(branch(page)).toHaveValue("refs/heads/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/topic");
     await selected(page, a.topic[0]);
     await choose(page, "", a.main);
     await view(page).locator(`[data-commit-oid="${a.initial}"]`).click();
@@ -374,11 +388,11 @@ test("History branch selector keeps deleted-ref cursors usable and handles missi
     await addRepo(page, unborn);
     const unbornBefore = fingerprint(unborn);
     await history(page);
-    await expect(branch(page)).toHaveValue("");
+    await expect(branch(page)).toHaveAttribute("title", "HEAD");
     await expect(view(page).locator(".git-head-label")).toContainText("new-branch");
     await expect(view(page).locator(".git-history-list")).toContainText("No commits yet");
     await expect(rows(page)).toHaveCount(0);
-    expect(await branch(page).locator("option").evaluateAll(elements => elements.map(element => element.getAttribute("value")))).toEqual([""]);
+    expect(await branchValues(page)).toEqual(["HEAD"]);
     await view(page).getByRole("button", { name: "Current changes", exact: true }).click();
     await view(page).getByRole("combobox", { name: "Git change group", exact: true }).selectOption("untracked");
     await expect(view(page).locator(".diffs-main-body")).toContainText("UNBORN_UNTRACKED_SENTINEL");
@@ -400,42 +414,42 @@ test("History branch selector rejects delayed real replies across fast branch, r
     await session(page, nameA);
     const beforeA = fingerprint(a.root), beforeB = fingerprint(b.root);
     wire.hold = message => message.type === "git.history" && message.page?.repoRoot === a.root && message.page.historyRef === "refs/heads/topic";
-    await branch(page).selectOption("refs/heads/topic");
+    await pickBranch(page, "refs/heads/topic");
     await expect.poll(() => wire.held.length).toBeGreaterThan(0);
     // The selector must stay operable while an earlier branch is loading.
     await choose(page, "refs/remotes/origin/topic", a.remote);
     wire.hold = () => false;
     await wire.release();
-    await expect(branch(page)).toHaveValue("refs/remotes/origin/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/remotes/origin/topic");
     await selected(page, a.remote);
     await expect(rows(page).first()).toHaveAttribute("data-commit-oid", a.remote);
 
     wire.hold = message => message.type === "git.history" && message.page?.repoRoot === a.root && message.page.historyRef === "refs/heads/topic";
-    await branch(page).selectOption("refs/heads/topic");
+    await pickBranch(page, "refs/heads/topic");
     await expect.poll(() => wire.held.length).toBeGreaterThan(0);
     await addRepo(page, b.root);
     await choose(page, "refs/remotes/origin/topic", b.remote);
     wire.hold = () => false;
     await wire.release();
     await expect(view(page).locator(".git-root-path")).toHaveText(b.root);
-    await expect(branch(page)).toHaveValue("refs/remotes/origin/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/remotes/origin/topic");
     await selected(page, b.remote);
     await expect(rows(page).first()).toHaveAttribute("data-commit-oid", b.remote);
 
     await repo(page, a.root);
     await choose(page, "refs/remotes/origin/topic", a.remote);
     wire.hold = message => message.type === "git.history" && message.page?.repoRoot === a.root && message.page.historyRef === "refs/heads/topic";
-    await branch(page).selectOption("refs/heads/topic");
+    await pickBranch(page, "refs/heads/topic");
     await expect.poll(() => wire.held.length).toBeGreaterThan(0);
     await session(page, nameB);
     await choose(page, "refs/heads/topic", b.topic[34]);
     wire.hold = () => false;
     await wire.release();
     await expect(view(page).locator(".git-root-path")).toHaveText(b.root);
-    await expect(branch(page)).toHaveValue("refs/heads/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/topic");
     await selected(page, b.topic[34]);
     await session(page, nameA);
-    await expect(branch(page)).toHaveValue("refs/heads/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/topic");
     await selected(page, a.topic[34]);
 
     // A late real parent-review summary must not resurrect the old branch's patch.
@@ -469,33 +483,33 @@ test("History branch selector persists independent choices across reloads, repos
     await choose(page, "refs/remotes/origin/topic", b.remote);
     await createSession(page, a.root, nameB);
     await history(page);
-    await expect(branch(page)).toHaveValue("");
+    await expect(branch(page)).toHaveAttribute("title", "HEAD");
     await choose(page, "refs/remotes/origin/topic", a.remote);
     const beforeA = fingerprint(a.root), beforeB = fingerprint(b.root);
     await session(page, nameA);
     await expect(view(page).locator(".git-root-path")).toHaveText(b.root);
-    await expect(branch(page)).toHaveValue("refs/remotes/origin/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/remotes/origin/topic");
     await selected(page, b.remote);
     await repo(page, a.root);
-    await expect(branch(page)).toHaveValue("refs/heads/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/topic");
     await selected(page, a.topic[33]);
     await page.reload();
     await expect(page.locator("#connectionStatus")).toHaveText("connected");
     await session(page, nameA);
-    await expect(branch(page)).toHaveValue("refs/heads/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/topic");
     await selected(page, a.topic[33]);
     await repo(page, b.root);
-    await expect(branch(page)).toHaveValue("refs/remotes/origin/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/remotes/origin/topic");
     await selected(page, b.remote);
     await session(page, nameB);
     await expect(view(page).locator(".git-root-path")).toHaveText(a.root);
-    await expect(branch(page)).toHaveValue("refs/remotes/origin/topic");
+    await expect(branch(page)).toHaveAttribute("title", "refs/remotes/origin/topic");
     await selected(page, a.remote);
     await choose(page, "", a.main);
     await page.reload();
     await expect(page.locator("#connectionStatus")).toHaveText("connected");
     await session(page, nameB);
-    await expect(branch(page)).toHaveValue("");
+    await expect(branch(page)).toHaveAttribute("title", "HEAD");
     await selected(page, a.main);
     expect(fingerprint(a.root)).toEqual(beforeA);
     expect(fingerprint(b.root)).toEqual(beforeB);
@@ -536,7 +550,7 @@ test("History loading controls retain readable commits through a real failure an
     await page.screenshot({ path: info.outputPath("history-failure-readable.png") });
 
     wire.hold = message => message.type === "git.history";
-    await branch(page).selectOption("");
+    await pickBranch(page, "");
     await expect.poll(() => wire.held.length).toBe(1);
     await expect(latest).toBeDisabled();
     await expect(older).toBeDisabled();
@@ -550,4 +564,161 @@ test("History loading controls retain readable commits through a real failure an
     expect(fingerprint(a.root)).toEqual(before);
     await page.screenshot({ path: info.outputPath("history-recovered.png") });
   } finally { a.cleanup(); }
+});
+
+test("History branch picker searches transiently and orders real tips by committer date", async ({ page }, info) => {
+  const a = fixture("search-order"), wire = await transport(page);
+  try {
+    const tree = git(a.root, "rev-parse", `${a.initial}^{tree}`);
+    const dated = (message: string, author: string, committer: string) => execFileSync("git",
+      ["-C", a.root, "-c", "commit.gpgsign=false", "commit-tree", tree, "-p", a.main, "-m", message],
+      { encoding: "utf8", env: { ...gitEnvironment, GIT_AUTHOR_DATE: author, GIT_COMMITTER_DATE: committer } }).trim();
+    const newest = dated("Newest committer, old author", "2001-01-01T00:00:00Z", "2040-01-01T00:00:00Z");
+    const older = dated("Older committer, future author", "2090-01-01T00:00:00Z", "2030-01-01T00:00:00Z");
+    const recent = ["refs/heads/origin/twin", "refs/heads/za/Żółć", "refs/heads/zz/newest", "refs/remotes/origin/twin"];
+    for (const ref of recent) git(a.root, "update-ref", ref, newest);
+    git(a.root, "update-ref", "refs/heads/aaa/oldest", older);
+    git(a.root, "tag", "zz/newest", older);
+    const before = fingerprint(a.root);
+    await authenticate(page); await createSession(page, a.root, `Search order ${Date.now()}`);
+    await history(page); await selected(page, a.main);
+    expect((await branchValues(page)).slice(0, 6)).toEqual(["HEAD", ...recent, "refs/heads/aaa/oldest"]);
+    const requestCount = () => wire.requests.filter(message => message.type === "git.history.request" || message.type === "sessionChanges.request").length;
+    const boundary = requestCount();
+    await branch(page).click();
+    const search = view(page).getByRole("combobox", { name: "Filter History branches", exact: true });
+    await search.fill("TWIN");
+    await expect(view(page).getByRole("listbox", { name: "History branches", exact: true }).getByRole("option")).toHaveText(["Local: origin/twin", "Remote: origin/twin"]);
+    await expect(branch(page)).toHaveAttribute("title", "HEAD");
+    await selected(page, a.main);
+    expect(requestCount()).toBe(boundary);
+    await page.screenshot({ path: info.outputPath("branch-search-desktop.png") });
+    await search.press("Escape");
+    await expect(search).toBeHidden();
+    await expect(branch(page)).toBeFocused();
+    await branch(page).click();
+    await expect(search).toHaveValue("");
+    await search.fill("no-such-branch");
+    await expect(view(page).getByRole("listbox", { name: "History branches", exact: true }).getByRole("option")).toHaveCount(0);
+    await view(page).getByRole("button", { name: /Clear/ }).click();
+    await expect(search).toHaveValue("");
+    await search.fill("ZA/ŻÓŁĆ");
+    await expect(view(page).getByRole("listbox", { name: "History branches", exact: true }).getByRole("option")).toHaveText(["Local: za/Żółć"]);
+    await search.press("Enter");
+    await selected(page, newest);
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/za/Żółć");
+    await branch(page).click();
+    await search.fill("twin");
+    await search.press("ArrowDown");
+    await search.press("Enter");
+    await expect(branch(page)).toHaveAttribute("title", "refs/remotes/origin/twin");
+    await selected(page, newest);
+    await choose(page, "refs/heads/aaa/oldest", older);
+    await expect(view(page).locator(".git-head-label")).toContainText(/Checkout.*main/);
+    await page.setViewportSize({ width: 760, height: 850 });
+    await branch(page).scrollIntoViewIfNeeded();
+    await expect(branch(page)).toBeInViewport();
+    await branch(page).click();
+    await search.fill("twin");
+    await expect(search).toBeInViewport();
+    await expect(view(page).getByRole("listbox", { name: "History branches", exact: true }).getByRole("option").last()).toBeInViewport();
+    await page.screenshot({ path: info.outputPath("branch-search-narrow.png") });
+    await search.press("Tab");
+    await expect(search).toBeHidden();
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/aaa/oldest");
+    expect(fingerprint(a.root)).toEqual(before);
+  } finally { a.cleanup(); }
+});
+
+test("ordinary entry Compare cancellation rejects a delayed real working-tree probe", async ({ page }) => {
+  const a = fixture("compare-interruption"), wire = await transport(page);
+  try {
+    await authenticate(page); await createSession(page, a.root, `Compare interruption ${Date.now()}`);
+    await history(page); await choose(page, "refs/heads/topic", a.topic[34]);
+    const restore = view(page).getByRole("button", { name: "Restore layout", exact: true });
+    if (await restore.count()) await restore.click();
+    await page.locator(".dv-tab:visible").filter({ hasText: "Code" }).click();
+    wire.hold = message => message.type === "sessionChanges.summary" && message.state.status === "ready"
+      && message.state.review.currentCommitOid === null;
+    await gitPanel(page);
+    await expect.poll(() => wire.held.length).toBeGreaterThan(0);
+    const before = fingerprint(a.root);
+    await advanced(page, a.root, a.topic[33], a.topic[34]);
+    await page.locator("#cwdPickerCancel").click();
+    wire.hold = () => false;
+    await wire.release();
+    await selected(page, a.topic[34]);
+    await expect(view(page).locator(".git-review-navigation [aria-pressed=true]")).toHaveText("History");
+    await expect(view(page).locator(".diffs-main-body")).toContainText("compare-interruption_TOPIC_35");
+    expect(fingerprint(a.root)).toEqual(before);
+  } finally { a.cleanup(); }
+});
+
+test("ordinary entry preserves the selected History file through a clean status probe", async ({ page }) => {
+  const a = fixture("file-entry");
+  try {
+    git(a.root, "restore", "--staged", "--worktree", ".");
+    rmSync(path.join(a.root, "untracked.txt"));
+    const before = fingerprint(a.root);
+    await authenticate(page); await createSession(page, a.root, `File entry ${Date.now()}`);
+    await selected(page, a.main);
+    const file = view(page).locator('.diffs-file-jump[data-diff-file-path="same.ts"]');
+    await file.click();
+    await expect(file).toHaveClass(/active/);
+    const restore = view(page).getByRole("button", { name: "Restore layout", exact: true });
+    if (await restore.count()) await restore.click();
+    await page.locator(".dv-tab:visible").filter({ hasText: "Code" }).click();
+    await gitPanel(page);
+    await selected(page, a.main);
+    await expect(file).toHaveClass(/active/);
+    await expect(view(page).locator(".diffs-all-files-jump")).not.toHaveClass(/active/);
+    expect(fingerprint(a.root)).toEqual(before);
+  } finally { a.cleanup(); }
+});
+
+test("History branch picker survives a delayed real review response without committing its query", async ({ page }) => {
+  const a = fixture("picker-refresh"), wire = await transport(page);
+  try {
+    await authenticate(page); await createSession(page, a.root, `Picker refresh ${Date.now()}`);
+    wire.hold = message => message.type === "sessionChanges.summary" && message.state.status === "ready"
+      && message.state.review.currentCommitOid === a.main;
+    await history(page);
+    await expect.poll(() => wire.held.length).toBeGreaterThan(0);
+    await branch(page).click();
+    const search = view(page).getByRole("combobox", { name: "Filter History branches", exact: true });
+    await search.fill("refs/heads/topic");
+    const before = fingerprint(a.root);
+    wire.hold = () => false;
+    await wire.release();
+    await selected(page, a.main);
+    await expect(search).toHaveValue("refs/heads/topic");
+    await expect(search).toBeFocused();
+    await expect(branch(page)).toHaveAttribute("title", "HEAD");
+    await search.press("Enter");
+    await selected(page, a.topic[34]);
+    await expect(branch(page)).toHaveAttribute("title", "refs/heads/topic");
+    expect(fingerprint(a.root)).toEqual(before);
+  } finally { a.cleanup(); }
+});
+
+test("History branch picker selects full refs in a popped-out review", async ({ page }, info) => {
+  const a = fixture("picker-popout");
+  let popout: Page | null = null;
+  try {
+    await authenticate(page); await createSession(page, a.root, `Picker popout ${Date.now()}`);
+    await history(page); await selected(page, a.main);
+    const before = fingerprint(a.root);
+    const opened = page.waitForEvent("popup");
+    await page.locator(".dv-groupview").filter({ has: page.locator(".dv-tab").filter({ hasText: "Git changes" }) }).locator(".panel-popout-btn").click();
+    popout = await opened;
+    await choose(popout, "refs/remotes/origin/topic", a.remote);
+    await branch(popout).click();
+    const search = view(popout).getByRole("combobox", { name: "Filter History branches", exact: true });
+    await search.fill("refs/heads/topic");
+    await expect(search).toBeInViewport();
+    await popout.screenshot({ path: info.outputPath("branch-search-popout.png") });
+    await search.press("Enter");
+    await selected(popout, a.topic[34]);
+    expect(fingerprint(a.root)).toEqual(before);
+  } finally { await popout?.close(); a.cleanup(); }
 });

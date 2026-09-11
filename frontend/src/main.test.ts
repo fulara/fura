@@ -109,6 +109,7 @@ function sessionChangesState(sessionId: string): SessionChangesSummaryState {
     sessionId,
     repos: [{ id: "/repo", repoRoot: "/repo", label: "repo", source: "cwd", isDefault: true }],
     selectedRepoId: "/repo",
+    workingTreeDirty: true,
     summary: { files: [], stat: "", truncated: false },
     review: { commits: [], currentCommitOid: null, currentCommitIndex: null, previousCommitOid: null },
     reviewWorktree: null,
@@ -167,6 +168,8 @@ const desktopMockActivatePanel = vi.fn(() => true);
 // The Code panel is opt-in per harness so its rendering does not perturb tests
 // that only assert on sent messages.
 let desktopMockMountCodePanel = false;
+let desktopMockPanelActivated: ((id: string) => void) | null = null;
+let desktopMockPanelClosed: ((id: string) => void) | null = null;
 
 function installMocks(): void {
   vi.doMock("./connection", () => ({
@@ -179,8 +182,11 @@ function installMocks(): void {
   vi.doMock("./desktopDockview", () => ({
     initDesktopDockview: (options: {
       onPanelReady(id: string, container: HTMLElement): void;
+      onPanelActivated(id: string): void;
       onPanelClosed?: (id: string) => void;
     }) => {
+      desktopMockPanelActivated ??= options.onPanelActivated;
+      desktopMockPanelClosed ??= options.onPanelClosed ?? null;
       const diffPanel = document.createElement("div");
       diffPanel.id = "testDiffPanel";
       const transcriptPanel = document.createElement("div");
@@ -248,6 +254,8 @@ async function createHarness(options: { preserveLocalStorage?: boolean; mountCod
   };
   connections = [];
   desktopMockActivePanelIds = new Set(["diffs"]);
+  desktopMockPanelActivated = null;
+  desktopMockPanelClosed = null;
   desktopMockActivatePanel.mockClear();
   desktopMockMountCodePanel = options.mountCodePanel ?? false;
   fakeConnectionAutoOpen = true;
@@ -283,6 +291,114 @@ async function createPendingHarness() {
   return { connection: connections[0] };
 }
 
+describe("ordinary Diffs entry default", () => {
+  function activate(id: string) {
+    desktopMockActivePanelIds = new Set([id]);
+    desktopMockPanelActivated?.(id);
+  }
+  function request(connection: FakeConnection) {
+    const value = [...connection.sent].reverse().find(message => message.type === "sessionChanges.request");
+    if (!value || value.type !== "sessionChanges.request") throw new Error("Missing Current changes status request");
+    return value;
+  }
+  function answer(connection: FakeConnection, pending: ReturnType<typeof request>, dirty: boolean | undefined) {
+    const base = sessionChangesState(pending.sessionId);
+    if (base.status !== "ready") throw new Error("Missing ready fixture");
+    const repo = pending.repoId ?? "/repo";
+    const state = { ...base, targetClientId: pending.clientId, diffId: pending.diffId,
+      sessionId: pending.sessionId, selectedRepoId: repo,
+      repos: ["/repo", "/other"].map(root => ({ id: root, repoRoot: root, label: root, source: "cwd" as const, isDefault: root === "/repo" })),
+      request: { ...base.request, ...pending, scope: "sessionChanges" as const },
+      comparison: { ...base.comparison, repoRoot: repo } };
+    Object.assign(state, { workingTreeDirty: dirty });
+    connection.emit({ type: "sessionChanges.summary", state });
+  }
+  function pressed() {
+    return document.querySelector("#testDiffPanel .git-review-navigation [aria-pressed=true]")?.textContent ?? null;
+  }
+  async function open() {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    return connection;
+  }
+  it("waits for status and chooses clean History or dirty Current changes on each entry", async () => {
+    const connection = await open();
+    expect(pressed()).toBeNull();
+    answer(connection, request(connection), false);
+    expect(pressed()).toBe("History");
+    activate("transcript"); activate("diffs");
+    expect(pressed()).toBeNull();
+    expect(request(connection).currentCommitOid).toBeNull();
+    answer(connection, request(connection), true);
+    expect(pressed()).toBe("Current changes");
+    activate("transcript"); activate("diffs");
+    answer(connection, request(connection), false);
+    expect(pressed()).toBe("History");
+  });
+  it("does not interpret unknown status as clean and respects an intervening manual choice", async () => {
+    const connection = await open();
+    answer(connection, request(connection), undefined);
+    expect(pressed()).toBeNull();
+    expect(document.querySelector("#testDiffPanel")?.textContent).toContain("status unavailable");
+    activate("transcript"); activate("diffs");
+    const pending = request(connection);
+    [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")].find(button => button.textContent === "History")!.click();
+    answer(connection, pending, true);
+    expect(pressed()).toBe("History");
+    window.dispatchEvent(new Event("focus"));
+    answer(connection, request(connection), true);
+    expect(pressed()).toBe("History");
+  });
+  it("ignores the previous entry after closing and reopening", async () => {
+    const connection = await open();
+    const old = request(connection);
+    desktopMockActivePanelIds.clear();
+    desktopMockPanelClosed?.("diffs");
+    activate("diffs");
+    const current = request(connection);
+    expect(current.diffId).not.toBe(old.diffId);
+    answer(connection, old, false);
+    expect(pressed()).toBeNull();
+    answer(connection, current, true);
+    expect(pressed()).toBe("Current changes");
+  });
+  it("uses the selected repository and rejects late repository and session replies", async () => {
+    const connection = await open();
+    answer(connection, request(connection), false);
+    const oldRepo = request(connection);
+    const select = document.querySelector<HTMLSelectElement>("#testDiffPanel .diff-repo-select")!;
+    select.value = "/other"; select.dispatchEvent(new Event("change"));
+    const selectedRepo = request(connection);
+    expect(selectedRepo.repoId).toBe("/other");
+    answer(connection, oldRepo, false);
+    expect(pressed()).toBeNull();
+    answer(connection, selectedRepo, true);
+    expect(pressed()).toBe("Current changes");
+    const other = [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")]
+      .find(button => button.textContent?.includes("Session other"))!;
+    other.click();
+    connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+    const nextSession = request(connection);
+    expect(nextSession.sessionId).toBe("other");
+    answer(connection, selectedRepo, true);
+    expect(pressed()).toBeNull();
+    answer(connection, nextSession, false);
+    expect(pressed()).toBe("History");
+  });
+  it("keeps status errors visible and permits explicit navigation", async () => {
+    const connection = await open();
+    const pending = request(connection);
+    connection.emit({ type: "diff.error", targetClientId: pending.clientId, diffId: pending.diffId,
+      scope: "sessionChanges", sessionId: pending.sessionId, message: "Git status fixture failure" });
+    expect(pressed()).toBeNull();
+    expect(document.querySelector("#testDiffPanel")?.textContent).toContain("Git status fixture failure");
+    [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")].find(button => button.textContent === "History")!.click();
+    expect(pressed()).toBe("History");
+  });
+});
+
 describe("pinned History Advanced Compare", () => {
   it("uses the selected review parent after Latest moves that commit outside the loaded page", async () => {
     const { connection } = await createHarness();
@@ -310,19 +426,43 @@ describe("pinned History Advanced Compare", () => {
     expect(request.currentCommitOid).toBe(selected);
     const base = sessionChangesState("live");
     if (base.status !== "ready") throw new Error("Review fixture missing");
-    connection.emit({ type: "sessionChanges.summary", state: {
+    const pinnedResponse: Extract<ServerMessage, { type: "sessionChanges.summary" }> = { type: "sessionChanges.summary", state: {
       ...base, targetClientId: request.clientId, diffId: request.diffId,
       request: { ...base.request, scope: "sessionChanges", sessionId: "live", changeKind: "unstaged", clientId: request.clientId, diffId: request.diffId, repoId: request.repoId, detailMode: request.detailMode, currentCommitOid: selected },
       comparison: { ...base.comparison, base: { kind: "commit", oid: parent, shortOid: parent.slice(0, 12) }, head: { kind: "commit", oid: selected, shortOid: selected.slice(0, 12) },
         leftTreeOrCommit: parent, rightTreeOrCommit: selected, currentCommitOid: selected, comparisonKey: "pinned-review" },
       review: { commits: [commit], currentCommitOid: selected, currentCommitIndex: 0, previousCommitOid: parent },
-    } });
+    } };
+    connection.emit(pinnedResponse);
     click("Latest");
     answerHistory(latest);
     expect(document.querySelector(`[data-commit-oid="${selected}"]`)).toBeNull();
     click("Advanced Compare");
     expect(document.querySelector<HTMLInputElement>("#cwdPickerDiffHead")!.value).toBe(selected);
     expect(document.querySelector<HTMLInputElement>("#cwdPickerDiffBase")!.value).toBe(parent);
+    document.querySelector<HTMLButtonElement>("#cwdPickerCancel")!.click();
+    desktopMockActivePanelIds = new Set(["code"]);
+    desktopMockPanelActivated?.("code");
+    desktopMockActivePanelIds = new Set(["diffs"]);
+    desktopMockPanelActivated?.("diffs");
+    const probe = [...connection.sent].reverse().find(message => message.type === "sessionChanges.request");
+    if (!probe || probe.type !== "sessionChanges.request") throw new Error("Entry probe missing");
+    expect(probe.currentCommitOid).toBeNull();
+    click("Advanced Compare");
+    const restored = [...connection.sent].reverse().find(message => message.type === "sessionChanges.request");
+    if (!restored || restored.type !== "sessionChanges.request") throw new Error("Restored review request missing");
+    expect(restored.currentCommitOid).toBe(selected);
+    expect(restored.diffId).not.toBe(probe.diffId);
+    document.querySelector<HTMLButtonElement>("#cwdPickerCancel")!.click();
+    connection.emit({ type: "sessionChanges.summary", state: {
+      ...base, targetClientId: probe.clientId, diffId: probe.diffId,
+      request: { ...base.request, clientId: probe.clientId, diffId: probe.diffId },
+    } });
+    connection.emit({ ...pinnedResponse, state: {
+      ...pinnedResponse.state, targetClientId: restored.clientId, diffId: restored.diffId,
+      request: { ...pinnedResponse.state.request, clientId: restored.clientId, diffId: restored.diffId },
+    } });
+    expect(document.querySelector("#testDiffPanel")!.textContent).toContain(commit.message);
   });
 });
 
@@ -372,7 +512,7 @@ describe("History request recovery", () => {
     button("Load older commits").click();
     const interrupted = request();
     expect(button("Latest").disabled).toBe(true);
-    expect(document.querySelector<HTMLSelectElement>("#testDiffPanel .git-history-branch")!.disabled).toBe(false);
+    expect(document.querySelector<HTMLButtonElement>("#testDiffPanel .git-history-branch")!.disabled).toBe(false);
     connection.disconnect();
     connection.options.onClose?.();
     expect(button("Latest").disabled).toBe(false);

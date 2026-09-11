@@ -433,6 +433,9 @@ export type SessionChangesSummaryState =
       sessionId: string;
       repos: SessionRepoCandidate[];
       selectedRepoId: string;
+      /** Actual selected repository status; null/absent is unknown, never clean. */
+      workingTreeDirty?: boolean | null;
+      workingTreeStatusError?: string | null;
       summary: DiffSummaryPayload;
       review: CommitStepState;
       reviewWorktree?: DiffReviewWorktree | null;

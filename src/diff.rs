@@ -906,6 +906,15 @@ async fn build_session_changes_summary(
         &prepared.right_tree_or_commit,
     )
     .await?;
+    let (working_tree_dirty, working_tree_status_error) =
+        if prepared.comparison.current_commit_oid.is_none() {
+            match worktree_dirty(&prepared.repo_root, true).await {
+                Ok(dirty) => (Some(dirty), None),
+                Err(error) => (None, Some(format!("{error:#}"))),
+            }
+        } else {
+            (None, None)
+        };
     Ok((
         ServerMessage::SessionChangesSummary {
             state: SessionChangesSummaryState::Ready {
@@ -916,6 +925,8 @@ async fn build_session_changes_summary(
                 session_id,
                 repos,
                 selected_repo_id,
+                working_tree_dirty,
+                working_tree_status_error,
                 summary,
                 review: prepared.review.clone(),
                 review_worktree: prepared.review_worktree.clone().map(Box::new),
@@ -2746,12 +2757,15 @@ fn validate_history_ref(history_ref: &str) -> anyhow::Result<()> {
 }
 
 async fn list_history_branches(repo_root: &Path) -> anyhow::Result<(Vec<GitRefSummary>, bool)> {
+    // Git's last sort key is primary; bare committerdate compares numeric timestamps.
+    // Missing/invalid dates use Git's zero fallback, tied by full ref like epoch commits.
+    // Unreadable objects still fail the read without lazy fetching.
     let output = git_stdout(
         repo_root,
         &[
             "for-each-ref",
-            "--count=1001",
             "--sort=refname",
+            "--sort=-committerdate",
             "--format=%(refname)%00%(objectname)%00%(symref)",
             "refs/heads/",
             "refs/remotes/",
@@ -2760,8 +2774,7 @@ async fn list_history_branches(repo_root: &Path) -> anyhow::Result<(Vec<GitRefSu
     )
     .await?;
     let mut branches = Vec::new();
-    let mut lines = output.lines();
-    for line in lines.by_ref().take(1000) {
+    for line in output.lines() {
         let mut fields = line.split('\0');
         let (Some(name), Some(oid), Some(symbolic)) = (fields.next(), fields.next(), fields.next())
         else {
@@ -2771,6 +2784,10 @@ async fn list_history_branches(repo_root: &Path) -> anyhow::Result<(Vec<GitRefSu
             continue;
         }
         validate_commit_oid(oid)?;
+        // Cap actual branches after sorting and omitting symbolic aliases.
+        if branches.len() == 1000 {
+            return Ok((branches, true));
+        }
         branches.push(GitRefSummary {
             name: name.to_string(),
             short_name: short_ref_name(name),
@@ -2778,7 +2795,7 @@ async fn list_history_branches(repo_root: &Path) -> anyhow::Result<(Vec<GitRefSu
             oid: oid.to_string(),
         });
     }
-    Ok((branches, lines.next().is_some()))
+    Ok((branches, false))
 }
 
 pub(crate) async fn list_git_history(
@@ -3170,7 +3187,7 @@ async fn ensure_review_worktree(
         path: path.display().to_string(),
         checked_out_ref: Some(resolved),
         checked_out_oid: Some(oid),
-        dirty: worktree_dirty(&path).await.unwrap_or(false),
+        dirty: worktree_dirty(&path, false).await.unwrap_or(false),
         status: DiffReviewWorktreeStatus::Ready,
         status_message: Some("Review worktree is ready.".to_string()),
     };
@@ -3194,7 +3211,7 @@ async fn checkout_review_worktree(
             .ok_or_else(|| anyhow!("unknown review worktree: {worktree_id}"))?
     };
     let path = PathBuf::from(&existing.path);
-    if worktree_dirty(&path).await? {
+    if worktree_dirty(&path, false).await? {
         bail!(
             "review worktree has local changes; checkout is blocked to avoid losing work: {}",
             path.display()
@@ -3212,7 +3229,7 @@ async fn checkout_review_worktree(
     let mut updated = existing;
     updated.checked_out_ref = Some(resolved);
     updated.checked_out_oid = Some(oid);
-    updated.dirty = worktree_dirty(&path).await.unwrap_or(false);
+    updated.dirty = worktree_dirty(&path, false).await.unwrap_or(false);
     updated.status = DiffReviewWorktreeStatus::Ready;
     updated.status_message = Some("Review worktree checkout completed.".to_string());
     let mut registry = state.review_worktrees.write().await;
@@ -3223,7 +3240,7 @@ async fn checkout_review_worktree(
 }
 
 async fn refresh_worktree_dirty(mut worktree: DiffReviewWorktree) -> DiffReviewWorktree {
-    worktree.dirty = worktree_dirty(Path::new(&worktree.path))
+    worktree.dirty = worktree_dirty(Path::new(&worktree.path), false)
         .await
         .unwrap_or(true);
     worktree.status = if Path::new(&worktree.path).is_dir() {
@@ -3234,9 +3251,14 @@ async fn refresh_worktree_dirty(mut worktree: DiffReviewWorktree) -> DiffReviewW
     worktree
 }
 
-async fn worktree_dirty(path: &Path) -> anyhow::Result<bool> {
+async fn worktree_dirty(path: &Path, force_untracked: bool) -> anyhow::Result<bool> {
     reject_worktree_filters(path, 0).await?;
-    let status = git_stdout(path, &["status", "--porcelain"], MAX_GIT_OUTPUT_BYTES).await?;
+    let args: &[&str] = if force_untracked {
+        &["status", "--porcelain", "--untracked-files=normal"]
+    } else {
+        &["status", "--porcelain"]
+    };
+    let status = git_stdout(path, args, MAX_GIT_OUTPUT_BYTES).await?;
     Ok(!status.trim().is_empty())
 }
 
@@ -3248,7 +3270,7 @@ async fn worktree_dirty(path: &Path) -> anyhow::Result<bool> {
 /// original HEAD. Returns the resolved repository root on success.
 pub(crate) async fn rebase_session_repo(cwd: &str, branch: &str) -> anyhow::Result<PathBuf> {
     let repo_root = discover_repo_root(cwd)?;
-    if worktree_dirty(&repo_root).await? {
+    if worktree_dirty(&repo_root, false).await? {
         bail!("working tree has uncommitted changes — commit or stash before rebasing");
     }
     resolve_ref_to_oid(&repo_root, branch)
@@ -4453,6 +4475,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn current_changes_reports_all_dirty_groups_without_repository_writes() {
+        let (_temp, repo, _, _) = test_repo();
+        let sessions = TempDir::new().unwrap();
+        let state = crate::tests::test_state(8, None);
+        state.sessions.write().await.insert(
+            "status".into(),
+            diff_test_record("status", &repo, &sessions.path().join("session.jsonl")),
+        );
+        for (step, expected) in [
+            ("clean", false),
+            ("unstaged", true),
+            ("staged", true),
+            ("committed", false),
+            ("untracked", true),
+            ("ignored", false),
+        ] {
+            match step {
+                "unstaged" => write_file(&repo, "src/lib.rs", "dirty tracked file\n"),
+                "staged" => git(&repo, &["add", "src/lib.rs"]),
+                "committed" => git(&repo, &["commit", "-m", "clean again"]),
+                "untracked" => {
+                    git(&repo, &["config", "status.showUntrackedFiles", "no"]);
+                    write_file(&repo, "new-file", "untracked\n");
+                }
+                "ignored" => {
+                    fs::remove_file(repo.join("new-file")).unwrap();
+                    fs::write(repo.join(".git/info/exclude"), "ignored-file\n").unwrap();
+                    write_file(&repo, "ignored-file", "ignored\n");
+                }
+                _ => {}
+            }
+            let before = repository_bytes(&repo);
+            let response =
+                serde_json::to_value(session_changes_response(&state, "status").await).unwrap();
+            assert_eq!(
+                response["state"]["workingTreeDirty"].as_bool(),
+                Some(expected),
+                "{step}: default choice needs all Git groups, not the displayed group's files"
+            );
+            assert_eq!(
+                repository_bytes(&repo),
+                before,
+                "{step}: read changed repository bytes"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn old_snapshot_entries_do_not_change_git_changes_or_require_snapshot_refs() {
         let (_temp, repo, base, _) = test_repo();
         let session_dir = TempDir::new().unwrap();
@@ -4967,12 +5037,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn history_branches_order_tip_committer_dates_and_preserve_ref_identity() {
+        let temp = TempDir::new().unwrap();
+        {
+            let repository = Repository::init(temp.path()).unwrap();
+            let tree_oid = repository.treebuilder(None).unwrap().write().unwrap();
+            let tree = repository.find_tree(tree_oid).unwrap();
+            for (name, authored_at, committed_at) in [
+                ("refs/heads/a-oldest", 1_900_000_000, 1_600_000_000),
+                ("refs/heads/z-newest", 1_400_000_000, 1_800_000_000),
+                ("refs/heads/feature/żółć", 1_500_000_000, 1_700_000_000),
+                ("refs/heads/origin/topic", 1_950_000_000, 1_700_000_000),
+                ("refs/remotes/origin/topic", 1_300_000_000, 1_700_000_000),
+            ] {
+                let author = git2::Signature::new(
+                    "History Tester",
+                    "history@example.invalid",
+                    &git2::Time::new(authored_at, 0),
+                )
+                .unwrap();
+                let committer = git2::Signature::new(
+                    "History Tester",
+                    "history@example.invalid",
+                    &git2::Time::new(committed_at, 0),
+                )
+                .unwrap();
+                repository
+                    .commit(Some(name), &author, &committer, name, &tree, &[])
+                    .unwrap();
+            }
+            for alias in ["refs/heads/000-alias", "refs/remotes/origin/HEAD"] {
+                repository
+                    .reference_symbolic(alias, "refs/heads/z-newest", false, "fixture")
+                    .unwrap();
+            }
+            let newest = repository
+                .find_reference("refs/heads/z-newest")
+                .unwrap()
+                .target()
+                .unwrap();
+            repository
+                .reference("refs/tags/newest", newest, false, "fixture")
+                .unwrap();
+        }
+        let before = repository_bytes(temp.path());
+        let (branches, truncated) = list_history_branches(temp.path()).await.unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            branches
+                .iter()
+                .map(|branch| branch.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "refs/heads/z-newest",
+                "refs/heads/feature/żółć",
+                "refs/heads/origin/topic",
+                "refs/remotes/origin/topic",
+                "refs/heads/a-oldest",
+            ]
+        );
+        assert_eq!(branches[1].short_name, "feature/żółć");
+        assert_eq!(branches[2].short_name, branches[3].short_name);
+        assert_eq!(branches[2].ref_kind, DiffRefKind::Branch);
+        assert_eq!(branches[3].ref_kind, DiffRefKind::Remote);
+        assert_ne!(branches[2].oid, branches[3].oid);
+        assert_eq!(before, repository_bytes(temp.path()));
+    }
+
+    #[tokio::test]
+    async fn history_branches_missing_and_invalid_dates_sort_with_epoch_by_full_ref() {
+        let temp = TempDir::new().unwrap();
+        {
+            let repository = Repository::init(temp.path()).unwrap();
+            let tree = repository.treebuilder(None).unwrap().write().unwrap();
+            let odb = repository.odb().unwrap();
+            for (name, committer) in [
+                ("a-missing", ""),
+                (
+                    "b-invalid",
+                    "committer History <history@example.invalid> 18446744073709551615 +0000\n",
+                ),
+                (
+                    "c-epoch",
+                    "committer History <history@example.invalid> 0 +0000\n",
+                ),
+                (
+                    "z-dated",
+                    "committer History <history@example.invalid> 1700000000 +0000\n",
+                ),
+            ] {
+                let commit = format!(
+                    "tree {tree}\nauthor History <history@example.invalid> 1700000000 +0000\n{committer}\n{name}\n"
+                );
+                let oid = odb
+                    .write(git2::ObjectType::Commit, commit.as_bytes())
+                    .unwrap();
+                repository
+                    .reference(&format!("refs/heads/{name}"), oid, false, "fixture")
+                    .unwrap();
+            }
+        }
+        let before = repository_bytes(temp.path());
+        let (branches, truncated) = list_history_branches(temp.path()).await.unwrap();
+        assert!(!truncated);
+        assert_eq!(
+            branches
+                .iter()
+                .map(|branch| branch.name.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "refs/heads/z-dated",
+                "refs/heads/a-missing",
+                "refs/heads/b-invalid",
+                "refs/heads/c-epoch",
+            ]
+        );
+        assert_eq!(before, repository_bytes(temp.path()));
+    }
+
+    #[tokio::test]
     async fn history_ref_pins_local_remote_and_deleted_branches_without_checkout() {
         let (_temp, repo, root, head) = test_repo();
         let topic = {
             let repository = Repository::open(&repo).unwrap();
-            let signature =
-                git2::Signature::now("History Tester", "history@example.invalid").unwrap();
+            let signature = git2::Signature::new(
+                "History Tester",
+                "history@example.invalid",
+                &repository
+                    .find_commit(git2::Oid::from_str(&head).unwrap())
+                    .unwrap()
+                    .time(),
+            )
+            .unwrap();
             let mut tip = git2::Oid::from_str(&root).unwrap();
             for index in 0..34 {
                 let parent = repository.find_commit(tip).unwrap();
@@ -5179,6 +5375,33 @@ mod tests {
         {
             let repository = Repository::open(&repo).unwrap();
             let oid = git2::Oid::from_str(&head).unwrap();
+            let parent = repository.find_commit(oid).unwrap();
+            let recent_signature = git2::Signature::new(
+                "History Tester",
+                "history@example.invalid",
+                &git2::Time::new(parent.time().seconds() + 1, 0),
+            )
+            .unwrap();
+            repository
+                .commit(
+                    Some("refs/heads/z-recent"),
+                    &parent.author(),
+                    &recent_signature,
+                    "newest tip beyond alphabetical cap",
+                    &parent.tree().unwrap(),
+                    &[&parent],
+                )
+                .unwrap();
+            for index in 0..5 {
+                repository
+                    .reference_symbolic(
+                        &format!("refs/heads/alias-{index}"),
+                        "refs/heads/z-recent",
+                        false,
+                        "fixture",
+                    )
+                    .unwrap();
+            }
             for index in 0..1005 {
                 repository
                     .reference(
@@ -5196,7 +5419,10 @@ mod tests {
             serde_json::to_value(&page).unwrap()["branchesTruncated"],
             true
         );
-        assert_eq!(page.branches.unwrap().len(), 1000);
+        let branches = page.branches.unwrap();
+        assert_eq!(branches.len(), 1000);
+        assert_eq!(branches[0].name, "refs/heads/z-recent");
+        assert_eq!(branches[999].name, "refs/heads/branch-0998");
         let selected = list_git_history(&repo, Some("refs/heads/main"), None)
             .await
             .unwrap();
