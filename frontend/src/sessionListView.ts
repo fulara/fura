@@ -65,6 +65,7 @@ export function createSessionListView(container: HTMLElement, callbacks: Session
       }
 
       emptyElement?.remove();
+      const focused = container.ownerDocument.activeElement;
 
       const nextSessionIds = new Set(options.visibleSessions.map(session => session.sessionId));
       for (const [sessionId, dom] of items) {
@@ -91,6 +92,10 @@ export function createSessionListView(container: HTMLElement, callbacks: Session
         const next = anchor.nextSibling;
         anchor.remove();
         anchor = next;
+      }
+      if (focused && container.contains(focused) && container.ownerDocument.activeElement !== focused
+        && "focus" in focused && typeof focused.focus === "function") {
+        focused.focus({ preventScroll: true });
       }
     },
     clear() {
@@ -167,14 +172,22 @@ function updateSessionListItem(
   const hasUpdates = !isActive && unreadSessionIds.has(session.sessionId);
   const classes = ["session", isActive ? "active" : "", hasUpdates ? "has-updates" : ""].filter(Boolean);
   const label = session.title || shortId(session.sessionId);
+  const statusLabel = sessionStatusLabel(session);
+  const metadata = formatSessionMeta(session);
+  const goalLabel = sessionGoalLabels?.get(session.sessionId) ?? null;
 
   dom.button.className = classes.join(" ");
   dom.button.setAttribute("aria-current", isActive ? "page" : "false");
+  dom.button.setAttribute("aria-label", [label, statusLabel, hasUpdates ? "Unread updates" : "", metadata, goalLabel].filter(Boolean).join(". "));
+  dom.button.title = label;
   dom.title.textContent = label;
+  dom.title.dir = "auto";
   dom.status.className = `session-status session-status-${sessionStatusClass(session)}`;
-  dom.status.textContent = sessionStatusLabel(session);
-  dom.meta.textContent = formatSessionMeta(session);
-  const goalLabel = sessionGoalLabels?.get(session.sessionId) ?? null;
+  dom.status.textContent = statusLabel;
+  dom.status.dataset.label = statusLabel;
+  dom.status.title = statusLabel;
+  dom.status.setAttribute("aria-hidden", "true");
+  dom.meta.textContent = metadata;
   dom.goal.textContent = goalLabel ?? "";
   dom.goal.hidden = !goalLabel;
   dom.deleteBtn.setAttribute("aria-label", `Delete session ${label}`);

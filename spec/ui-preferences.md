@@ -99,6 +99,48 @@ of 18rem and 40vh so short windows retain transcript space and reachable control
 Its height is outside saved Dockview layouts. Manual resizing remains unpersisted;
 reload restores the larger default without resetting panel layouts or other preferences.
 
+Session status occupies a fixed left gutter, not title width. The full title is
+available through the row tooltip and accessible name; status has its own tooltip
+and appears as text on keyboard focus. Active selection, unread state and the
+delete action remain separate. Unread reserves space beside the delete action.
+Keyed rows retain DOM identity, focus and scroll position when activity reorders
+the list, including documents belonging to popout windows.
+
+### Session ordering
+
+Desktop and mobile sort by `lastMessageAt` descending, then `createdAt`
+descending, then stable `sessionId`. Managed/available kind, status and `updatedAt`
+do not participate. `updatedAt` remains bookkeeping, not conversation activity.
+An older bridge without `lastMessageAt` falls back to `createdAt`, not file mtime.
+
+Persisted recency is the maximum valid raw user/eligible assistant timestamp on
+the active journal ancestry. The inner message timestamp wins over its enclosing
+entry timestamp. User messages attributed to an agent, tool results, tool-call-only
+assistant messages, custom/developer events, compaction and metadata do not count.
+Assistant text, thinking, images, redacted thinking and reported errors do count.
+Archived ancestors remain eligible; forks inherit their history. Durable rewind
+excludes abandoned descendants. Missing legacy parent links are linear; an explicit
+missing or null parent terminates ancestry. Missing/invalid activity falls back to
+a valid session-header creation timestamp, then Unix epoch, never arrival time.
+
+Visible streaming and pending sends are temporary recency overlays. Confirmed raw
+message events establish live activity. Rejection, authoritative history replacement,
+identity departure and terminal cleanup remove abandoned overlays. Persisted
+reconciliation protects an unacknowledged live event from delayed disk persistence,
+but accepts acknowledged rewind and disk authority after terminal detach.
+An external rewind whose timestamp lies between the acknowledged disk baseline
+and an unacknowledged live event is indistinguishable from delayed persistence;
+until acknowledgement or detach, the live event wins.
+
+Filesystem invalidation is independent: nanosecond mtime, length, and Unix
+device/inode/ctime form the cache key. Changed stamps refresh metadata and invalidate
+hydrated history even when recency is unchanged. Unchanged discovery does not reopen
+journals, including excluded sessions and already-loaded empty/tool-only histories.
+Cold scans retain ancestry metadata rather than transcript payloads; legacy bare
+content strings and first-user title extraction can still allocate a message string.
+This is not a content-hash cache: a filesystem mutation preserving the entire
+available fingerprint cannot be detected without rereading the file.
+
 ### Unsent desktop drafts
 
 The desktop composer keeps an in-memory draft per logical session ID: exact text,

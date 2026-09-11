@@ -52,7 +52,7 @@ select {
   column-gap: 0.3rem;
   row-gap: 0;
   min-height: 34px;
-  padding: 3px 27px 3px 6px;
+  padding: 3px 27px 3px 18px;
   border: 0;
   border-bottom: 1px solid #1d222c;
   border-left: 2px solid transparent;
@@ -64,6 +64,22 @@ select {
   border-color: #1d222c;
   border-left-color: #7f8cff;
   background: rgba(127, 140, 255, 0.1);
+}
+
+.session.has-updates {
+  padding-right: 39px;
+}
+
+.session.has-updates::after {
+  right: 29px;
+  top: 8px;
+  width: 5px;
+  height: 5px;
+  transform: none;
+}
+
+.session-item:hover .session.has-updates::after {
+  display: block;
 }
 
 .session-delete {
@@ -89,13 +105,37 @@ select {
   font-family: inherit;
   font-size: 0.75rem;
   font-weight: 500;
+  flex: 1;
 }
 
 .session-status {
+  position: absolute;
+  left: 6px;
+  top: 8px;
+  width: 6px;
+  height: 6px;
   border: 0;
   border-radius: 0;
   padding: 0;
-  font-size: 0.5625rem;
+  font-size: 0;
+  overflow: visible;
+}
+
+/* Keyboard focus reveals the same status available through the hover title. */
+.session:focus-visible .session-status::after {
+  content: attr(data-label);
+  position: absolute;
+  top: 8px;
+  left: 0;
+  z-index: 2;
+  padding: 1px 4px;
+  border: 1px solid #475267;
+  border-radius: 2px;
+  background: var(--color-surface-raised);
+  color: #eef1f8;
+  font-size: 0.65625rem;
+  line-height: 12px;
+  box-shadow: 0 1px 3px #0008;
 }
 
 .session-goal-badge {
@@ -114,9 +154,10 @@ select {
 }
 
 .session-status::before {
-  width: 5px;
-  height: 5px;
-  margin-right: 0.2rem;
+  display: block;
+  width: 6px;
+  height: 6px;
+  margin-right: 0;
 }
 
 .session-status-idle {
@@ -137,6 +178,11 @@ select {
 .session-status-busy::before,
 .session-status-starting::before {
   box-shadow: initial;
+}
+
+.session-status-starting::before {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px #7f8cff;
 }
 
 .session-status-ask {
