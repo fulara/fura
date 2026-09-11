@@ -1137,10 +1137,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         record.streaming_message = Some(message);
                         let projection = record.projection();
                         let replace_from = projection.transcript.len().saturating_sub(1);
-                        Some(SessionProjectionDelta::from_projection_replace_tail(
-                            replace_from,
-                            &projection,
-                        ))
+                        Some(replace_from)
                     })
                     .await;
             }
@@ -1218,10 +1215,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                                 true
                             })
                             .count();
-                        Some(SessionProjectionDelta::from_projection_replace_tail(
-                            replace_from,
-                            &projection,
-                        ))
+                        Some(replace_from)
                     })
                     .await;
                 if delta_sent {
@@ -1254,10 +1248,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                     ));
                     let projection = record.projection();
                     let replace_from = projection.transcript.len().saturating_sub(1);
-                    Some(SessionProjectionDelta::from_projection_replace_tail(
-                        replace_from,
-                        &projection,
-                    ))
+                    Some(replace_from)
                 })
                 .await;
         }
@@ -1303,10 +1294,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             matches!(entry, TranscriptEntry::Tool(card) if card.tool_call_id == tool_call_id)
                         })
                         .unwrap_or_else(|| projection.transcript.len().saturating_sub(1));
-                    Some(SessionProjectionDelta::from_projection_replace_tail(
-                        replace_from,
-                        &projection,
-                    ))
+                    Some(replace_from)
                 })
                 .await;
         }
@@ -1367,10 +1355,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                             matches!(entry, TranscriptEntry::Tool(card) if card.tool_call_id == tool_call_id)
                         })
                         .unwrap_or_else(|| projection.transcript.len().saturating_sub(1));
-                    Some(SessionProjectionDelta::from_projection_replace_tail(
-                        replace_from,
-                        &projection,
-                    ))
+                    Some(replace_from)
                 })
                 .await;
         }

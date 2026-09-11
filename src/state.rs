@@ -189,10 +189,10 @@ impl WsEventCoordinator {
         &self,
         state: &AppState,
         session_id: &str,
-        build_delta: F,
+        mutate: F,
     ) -> bool
     where
-        F: FnOnce(&mut SessionRecord) -> Option<SessionProjectionDelta>,
+        F: FnOnce(&mut SessionRecord) -> Option<usize>,
     {
         let started_at = Instant::now();
         let _event_guard = self.gate.lock().await;
@@ -201,11 +201,11 @@ impl WsEventCoordinator {
             let Some(record) = sessions.get_mut(session_id) else {
                 return false;
             };
-            let Some(delta) = build_delta(record) else {
+            let Some(replace_from) = mutate(record) else {
                 return false;
             };
             let mut pending = self.pending_deltas.lock().await;
-            pending.record_delta(session_id, delta.transcript_replace_from);
+            pending.record_delta(session_id, replace_from);
             if pending.flush_due(started_at) {
                 (
                     drain_pending_delta_messages_locked(&mut pending, &sessions),
@@ -1801,6 +1801,7 @@ pub(crate) struct RpcConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tests::{test_record, test_state};
 
     #[test]
     fn pending_session_delta_flush_becomes_due_after_throttle_window() {
@@ -1811,5 +1812,252 @@ mod tests {
         assert_eq!(pending.schedule_flush(now), Some(1));
         assert!(!pending.flush_due(now + SESSION_DELTA_THROTTLE_WINDOW / 2));
         assert!(pending.flush_due(now + SESSION_DELTA_THROTTLE_WINDOW));
+    }
+
+    #[tokio::test]
+    async fn stale_delta_timer_cannot_drain_new_batch_after_event_boundary() {
+        for snapshot_boundary in [true, false] {
+            let state = test_state(8, None);
+            let mut record = test_record();
+            record.title = Some("before boundary".to_string());
+            state
+                .sessions
+                .write()
+                .await
+                .insert("s1".to_string(), record);
+            let mut events = state.events.subscribe();
+            let scheduled_at = Instant::now();
+
+            // Schedule directly: generations are delivered below, without spawning timers.
+            let old_generation = {
+                let mut pending = state.events.pending_deltas.lock().await;
+                pending.record_delta("s1", 0);
+                pending.schedule_flush(scheduled_at).expect("first batch")
+            };
+            if snapshot_boundary {
+                assert!(
+                    state
+                        .events
+                        .emit_current_session_snapshot(&state, "s1")
+                        .await
+                );
+            } else {
+                state
+                    .events
+                    .emit(
+                        &state,
+                        ServerMessage::Error {
+                            request_id: Some("boundary-request".to_string()),
+                            message: "non-session boundary".to_string(),
+                        },
+                    )
+                    .await;
+            }
+
+            match events.try_recv().expect("delta before boundary") {
+                ServerMessage::SessionDelta { session_id, state } => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!((state.base_seq, state.seq), (0, 1));
+                    assert_eq!(state.summary.title.as_deref(), Some("before boundary"));
+                    assert_eq!(state.summary.status, SessionStatus::Idle);
+                }
+                other => panic!("unexpected event before boundary: {other:?}"),
+            }
+            let boundary_seq = if snapshot_boundary {
+                match events.try_recv().expect("snapshot boundary") {
+                    ServerMessage::SessionSnapshot { session_id, state } => {
+                        assert_eq!(session_id, "s1");
+                        assert_eq!(state.seq, 2);
+                        assert_eq!(state.summary.title.as_deref(), Some("before boundary"));
+                        assert_eq!(state.summary.status, SessionStatus::Idle);
+                        state.seq
+                    }
+                    other => panic!("unexpected snapshot boundary: {other:?}"),
+                }
+            } else {
+                match events.try_recv().expect("non-session boundary") {
+                    ServerMessage::Error {
+                        request_id,
+                        message,
+                    } => {
+                        assert_eq!(request_id.as_deref(), Some("boundary-request"));
+                        assert_eq!(message, "non-session boundary");
+                    }
+                    other => panic!("unexpected non-session boundary: {other:?}"),
+                }
+                1
+            };
+
+            {
+                let mut sessions = state.sessions.write().await;
+                let record = sessions.get_mut("s1").expect("session");
+                record.title = Some("new batch".to_string());
+                record.status = SessionStatus::Busy;
+            }
+            let new_generation = {
+                let mut pending = state.events.pending_deltas.lock().await;
+                pending.record_delta("s1", 0);
+                pending.schedule_flush(scheduled_at).expect("new batch")
+            };
+
+            state
+                .events
+                .flush_pending_deltas_for_timer(&state, old_generation)
+                .await;
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+
+            state
+                .events
+                .flush_pending_deltas_for_timer(&state, new_generation)
+                .await;
+            match events.try_recv().expect("new batch from matching timer") {
+                ServerMessage::SessionDelta { session_id, state } => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(
+                        (state.base_seq, state.seq),
+                        (boundary_seq, boundary_seq + 1)
+                    );
+                    assert_eq!(state.summary.title.as_deref(), Some("new batch"));
+                    assert_eq!(state.summary.status, SessionStatus::Busy);
+                    assert!(state.is_busy);
+                }
+                other => panic!("unexpected timer event: {other:?}"),
+            }
+            state
+                .events
+                .flush_pending_deltas_for_timer(&state, new_generation)
+                .await;
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+
+            assert!(
+                state
+                    .events
+                    .emit_current_session_snapshot(&state, "s1")
+                    .await
+            );
+            match events.try_recv().expect("final snapshot") {
+                ServerMessage::SessionSnapshot { session_id, state } => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(state.seq, boundary_seq + 2);
+                    assert_eq!(state.summary.title.as_deref(), Some("new batch"));
+                    assert_eq!(state.summary.status, SessionStatus::Busy);
+                    assert!(state.is_busy);
+                }
+                other => panic!("unexpected final event: {other:?}"),
+            }
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn overdue_delta_mutation_flushes_synchronously_but_false_results_do_not() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut events = state.events.subscribe();
+        let generation = {
+            let mut pending = state.events.pending_deltas.lock().await;
+            pending.record_delta("s1", 0);
+            pending
+                .schedule_flush(Instant::now() - SESSION_DELTA_THROTTLE_WINDOW)
+                .expect("overdue batch")
+        };
+
+        assert!(
+            !state
+                .events
+                .mutate_session_delta(&state, "missing", |_| {
+                    panic!("unknown-session callback must not run")
+                })
+                .await
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(
+            !state
+                .events
+                .mutate_session_delta(&state, "s1", |record| {
+                    record.title = Some("mutation without event".to_string());
+                    None
+                })
+                .await
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            state.sessions.read().await["s1"].title.as_deref(),
+            Some("mutation without event")
+        );
+
+        assert!(
+            state
+                .events
+                .mutate_session_delta(&state, "s1", |record| {
+                    record.status = SessionStatus::Busy;
+                    Some(0)
+                })
+                .await
+        );
+        // No timer delivery or receiver await: the mutation itself must have sent this.
+        match events.try_recv().expect("synchronous overdue delta") {
+            ServerMessage::SessionDelta { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!((state.base_seq, state.seq), (0, 1));
+                assert_eq!(
+                    state.summary.title.as_deref(),
+                    Some("mutation without event")
+                );
+                assert_eq!(state.summary.status, SessionStatus::Busy);
+                assert!(state.is_busy);
+            }
+            other => panic!("unexpected overdue event: {other:?}"),
+        }
+        state
+            .events
+            .flush_pending_deltas_for_timer(&state, generation)
+            .await;
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(
+            state
+                .events
+                .emit_current_session_snapshot(&state, "s1")
+                .await
+        );
+        match events.try_recv().expect("snapshot after synchronous flush") {
+            ServerMessage::SessionSnapshot { session_id, state } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(state.seq, 2);
+                assert_eq!(
+                    state.summary.title.as_deref(),
+                    Some("mutation without event")
+                );
+                assert_eq!(state.summary.status, SessionStatus::Busy);
+                assert!(state.is_busy);
+            }
+            other => panic!("unexpected final event: {other:?}"),
+        }
+        assert!(matches!(
+            events.try_recv(),
+            Err(broadcast::error::TryRecvError::Empty)
+        ));
     }
 }

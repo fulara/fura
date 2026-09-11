@@ -607,7 +607,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn test_record() -> SessionRecord {
+    pub(crate) fn test_record() -> SessionRecord {
         SessionRecord {
             id: "s1".into(),
             cwd: None,
@@ -2825,12 +2825,9 @@ pub(crate) mod tests {
         id: &str,
         text: &str,
         replace_from: usize,
-    ) -> Option<SessionProjectionDelta> {
+    ) -> Option<usize> {
         record.messages.push(text_message(id, text));
-        Some(SessionProjectionDelta::from_projection_replace_tail(
-            replace_from,
-            &record.projection(),
-        ))
+        Some(replace_from)
     }
 
     #[tokio::test]
@@ -7554,6 +7551,438 @@ pub(crate) mod tests {
         let recovered = initial.projection().transcript;
         assert!(replace_record_transcript(&mut initial, messages, cards));
         assert_eq!(initial.projection().transcript, recovered);
+    }
+
+    #[tokio::test]
+    async fn mixed_rpc_replay_reconstructs_tools_streaming_and_pending_skill_snapshot() {
+        fn receive(
+            events: &mut broadcast::Receiver<ServerMessage>,
+            browser: &mut Value,
+        ) -> Option<usize> {
+            match events
+                .try_recv()
+                .expect("explicit replay step must emit an event")
+            {
+                ServerMessage::SessionDelta { session_id, state } => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(state.base_seq, browser["seq"].as_u64().unwrap());
+                    assert_eq!(state.seq, state.base_seq + 1);
+                    let offset = state.transcript_replace_from;
+                    let transcript = browser["transcript"].as_array_mut().unwrap();
+                    assert!(
+                        offset <= transcript.len(),
+                        "replacement cannot skip entries"
+                    );
+                    transcript.truncate(offset);
+                    transcript.extend(
+                        state
+                            .transcript_append
+                            .iter()
+                            .map(|entry| serde_json::to_value(entry).unwrap()),
+                    );
+                    // Apply every wire projection field, without replacing the reconstructed tail.
+                    let Value::Object(mut fields) = serde_json::to_value(state).unwrap() else {
+                        unreachable!()
+                    };
+                    for field in ["baseSeq", "transcriptReplaceFrom", "transcriptAppend"] {
+                        fields.remove(field);
+                    }
+                    browser.as_object_mut().unwrap().extend(fields);
+                    Some(offset)
+                }
+                ServerMessage::SessionSnapshot { session_id, state } => {
+                    assert_eq!(session_id, "s1");
+                    assert_eq!(state.seq, browser["seq"].as_u64().unwrap() + 1);
+                    browser["seq"] = serde_json::json!(state.seq);
+                    assert_eq!(*browser, serde_json::to_value(state).unwrap());
+                    None
+                }
+                ServerMessage::SessionsSnapshot { sessions } => {
+                    assert_eq!(
+                        serde_json::to_value(sessions).unwrap(),
+                        serde_json::json!([browser["summary"]])
+                    );
+                    None
+                }
+                other => panic!("unexpected replay event: {other:?}"),
+            }
+        }
+
+        fn receive_batch(
+            events: &mut broadcast::Receiver<ServerMessage>,
+            browser: &mut Value,
+            offset: usize,
+        ) {
+            assert_eq!(receive(events, browser), Some(offset));
+            assert_eq!(receive(events, browser), None);
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+
+        let state = test_state(64, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "s1", "s1", 16).await;
+        let root = serde_json::json!({
+            "id":"root", "role":"user", "content":"Review the change", "timestamp":1770000000000_u64
+        });
+        let prior = serde_json::json!({
+            "id":"prior", "role":"assistant", "content":"The preceding generation",
+            "timestamp":1770000002000_u64
+        });
+        let before_result =
+            serde_json::json!({"content":[{"type":"text","text":"baseline checked"}]});
+        for frame in [
+            serde_json::json!({"type":"message_end","message":root}),
+            serde_json::json!({
+                "type":"tool_execution_start","toolCallId":"before","toolName":"bash",
+                "args":{"command":"baseline"},"timestamp":1770000001000_u64
+            }),
+            serde_json::json!({
+                "type":"tool_execution_end","toolCallId":"before","toolName":"bash",
+                "result":before_result,"isError":false
+            }),
+        ] {
+            apply_rpc_frame(&state, "s1", &frame).await;
+        }
+        assert!(
+            send_prompt(
+                &state,
+                "s1".into(),
+                "Use /skill:review".into(),
+                None,
+                Some(PromptBehavior::Steer),
+            )
+            .await
+            .is_empty()
+        );
+        let skill_command = commands.try_recv().unwrap();
+        let skill_id = skill_command["clientMessageId"].as_str().unwrap();
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({"type":"message_end","message":prior}),
+        )
+        .await;
+        assert!(
+            send_prompt(
+                &state,
+                "s1".into(),
+                "Keep this follow-up queued".into(),
+                None,
+                Some(PromptBehavior::FollowUp),
+            )
+            .await
+            .is_empty()
+        );
+        let follow_command = commands.try_recv().unwrap();
+        let follow_id = follow_command["clientMessageId"].as_str().unwrap();
+        assert_ne!(skill_id, follow_id);
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({"type":"agent_end","isTerminal":false}),
+        )
+        .await;
+
+        let mut events = state.events.subscribe();
+        assert!(
+            state
+                .events
+                .emit_current_session_snapshot(&state, "s1")
+                .await
+        );
+        let ServerMessage::SessionSnapshot {
+            session_id,
+            state: initial,
+        } = events.try_recv().unwrap()
+        else {
+            panic!("initial authoritative snapshot");
+        };
+        assert_eq!(session_id, "s1");
+        let mut browser = serde_json::to_value(initial).unwrap();
+        assert_eq!(browser["isBusy"], true);
+        let pending_follow = browser["transcript"][4].clone();
+        assert_eq!(
+            pending_follow["id"],
+            format!("__pending_prompt:{follow_id}")
+        );
+        assert_eq!(
+            browser["transcript"][2]["id"],
+            format!("__pending_prompt:{skill_id}")
+        );
+
+        let review_data = serde_json::json!({
+            "agent":"reviewer",
+            "extractedToolData":{
+                "report_finding":[{
+                    "title":"Preserve the queued follow-up", "body":"Only the consumed identity may disappear.",
+                    "priority":"P1", "confidence":0.9, "file_path":"src/rpc.rs",
+                    "line_start":1175, "line_end":1182
+                }],
+                "yield":[{"data":{"overall_correctness":"correct","explanation":"Identity checked","confidence":0.9}}]
+            }
+        });
+        let review_result = serde_json::json!({
+            "content":[{"type":"text","text":"Review finished"}],
+            "details":{"results":[review_data]}
+        });
+        let worker_result =
+            serde_json::json!({"content":[{"type":"text","text":"worker finished"}]});
+        // Current-thread, bounded steps: raw forwarding stays disabled, and no sleeps or
+        // receives yield to a timer. Tool/update frames must really coalesce.
+        for frame in [
+            serde_json::json!({
+                "type":"tool_execution_start","toolCallId":"review","toolName":"task",
+                "args":{"agent":"reviewer"},"timestamp":1770000003000_u64
+            }),
+            serde_json::json!({
+                "type":"tool_execution_start","toolCallId":"worker","toolName":"bash",
+                "args":{"command":"check"},"timestamp":1770000004000_u64
+            }),
+            serde_json::json!({
+                "type":"tool_execution_start","toolCallId":"holding","toolName":"bash",
+                "args":{"command":"hold"},"timestamp":1770000005000_u64
+            }),
+            serde_json::json!({
+                "type":"tool_execution_update","toolCallId":"review",
+                "partialResult":{"details":{"progress":[review_data]}}
+            }),
+            serde_json::json!({
+                "type":"message_update",
+                "message":{"role":"assistant","content":"Partial","timestamp":1770000006000_u64}
+            }),
+            serde_json::json!({
+                "type":"message_update",
+                "message":{"role":"assistant","content":"Partial answer","timestamp":1770000006000_u64}
+            }),
+        ] {
+            apply_rpc_frame(&state, "s1", &frame).await;
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+        assert!(
+            state
+                .events
+                .emit_current_session_snapshot(&state, "s1")
+                .await
+        );
+        receive_batch(&mut events, &mut browser, 5);
+        assert_eq!(browser["summary"]["messageCount"], 4);
+        assert_eq!(browser["transcript"][5]["toolCallId"], "review");
+        assert_eq!(browser["transcript"][6]["kind"], "review");
+        assert_eq!(
+            browser["transcript"][6]["findings"][0]["title"],
+            "Preserve the queued follow-up"
+        );
+        assert_eq!(browser["transcript"][7]["toolCallId"], "worker");
+        assert_eq!(browser["transcript"][8]["toolCallId"], "holding");
+        assert_eq!(browser["transcript"][9]["id"], "__streaming__");
+        let live_review_hash = browser["transcript"][6]["renderHash"].clone();
+        let live_worker_hash = browser["transcript"][7]["renderHash"].clone();
+        let partial_hash = browser["transcript"][9]["renderHash"].clone();
+
+        for frame in [
+            serde_json::json!({
+                "type":"message_update",
+                "message":{"role":"assistant","content":"Complete answer","timestamp":1770000006000_u64}
+            }),
+            serde_json::json!({
+                "type":"tool_execution_end","toolCallId":"worker","toolName":"bash",
+                "result":worker_result,"isError":false
+            }),
+            serde_json::json!({
+                "type":"tool_execution_end","toolCallId":"review","toolName":"task",
+                "result":review_result,"isError":false
+            }),
+        ] {
+            apply_rpc_frame(&state, "s1", &frame).await;
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+        assert!(
+            state
+                .events
+                .emit_current_session_snapshot(&state, "s1")
+                .await
+        );
+        receive_batch(&mut events, &mut browser, 5);
+        assert_eq!(browser["transcript"][5]["toolCallId"], "worker");
+        assert_eq!(browser["transcript"][5]["result"], worker_result);
+        assert_eq!(browser["transcript"][6]["toolCallId"], "review");
+        assert_eq!(browser["transcript"][6]["result"], review_result);
+        assert_eq!(browser["transcript"][7]["isActive"], false);
+        assert_eq!(browser["transcript"][8]["isActive"], true);
+        assert_ne!(browser["transcript"][5]["renderHash"], live_worker_hash);
+        assert_ne!(browser["transcript"][7]["renderHash"], live_review_hash);
+        assert_ne!(browser["transcript"][9]["renderHash"], partial_hash);
+
+        let skill = serde_json::json!({
+            "id":"upstream-skill","role":"custom","customType":"skill-prompt",
+            "display":true,"attribution":"user","details":{"clientMessageId":skill_id},
+            "content":"Expanded review skill instructions","timestamp":1770000007000_u64
+        });
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({"type":"message_end","message":skill}),
+        )
+        .await;
+        // message_end has its own sessions-list boundary; it must not clear streaming.
+        receive_batch(&mut events, &mut browser, 1);
+        assert_eq!(browser["transcript"][3], pending_follow);
+        assert_eq!(browser["transcript"][8]["id"], format!("prompt:{skill_id}"));
+        assert_eq!(browser["transcript"][9]["id"], "__streaming__");
+        let consumed_transcript = browser["transcript"].clone();
+        for command in [&skill_command, &follow_command] {
+            apply_rpc_frame(
+                &state,
+                "s1",
+                &serde_json::json!({
+                    "type":"response","command":"prompt","id":command["id"],"success":true
+                }),
+            )
+            .await;
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({"type":"message_end","message":skill}),
+        )
+        .await;
+        receive_batch(&mut events, &mut browser, 4);
+        assert_eq!(
+            browser["transcript"], consumed_transcript,
+            "same client identity replays in place"
+        );
+
+        let final_message = serde_json::json!({
+            "id":"answer","role":"assistant","content":"Complete answer","timestamp":1770000006000_u64
+        });
+        apply_rpc_frame(
+            &state,
+            "s1",
+            &serde_json::json!({"type":"message_end","message":final_message}),
+        )
+        .await;
+        receive_batch(&mut events, &mut browser, 9);
+        let expected_ids = vec![
+            "root".to_string(),
+            "before".into(),
+            "prior".into(),
+            format!("__pending_prompt:{follow_id}"),
+            "worker".into(),
+            "review".into(),
+            "review".into(),
+            "holding".into(),
+            format!("prompt:{skill_id}"),
+            "answer".into(),
+        ];
+        assert_eq!(
+            browser["transcript"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|entry| {
+                    entry
+                        .get("id")
+                        .unwrap_or(&entry["toolCallId"])
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .collect::<Vec<_>>(),
+            expected_ids
+        );
+        assert_eq!(browser["transcript"][3], pending_follow);
+        assert_eq!(
+            browser["transcript"][8]["blocks"],
+            serde_json::json!([
+                {"kind":"text","text":"Expanded review skill instructions"}
+            ])
+        );
+        assert_eq!(
+            browser["transcript"][9]["blocks"],
+            serde_json::json!([
+                {"kind":"text","text":"Complete answer"}
+            ])
+        );
+        assert_eq!(browser["isBusy"], true);
+
+        // Persisted history omits the unconsumed follow-up and repeats the skill identity.
+        // Tool-only assistant messages are suppressed; their cards retain live boundaries
+        // on both sides of the optimistic prompt, including the still-active holding tool.
+        let mut history = vec![
+            root,
+            serde_json::json!({
+                "role":"assistant","timestamp":1770000001000_u64,
+                "content":[{"type":"toolCall","id":"before","name":"bash","arguments":{"command":"baseline"}}]
+            }),
+            serde_json::json!({
+                "role":"toolResult","toolCallId":"before","toolName":"bash","content":before_result["content"]
+            }),
+            prior,
+        ];
+        for (id, name, args, timestamp) in [
+            (
+                "review",
+                "task",
+                serde_json::json!({"agent":"reviewer"}),
+                1770000003000_u64,
+            ),
+            (
+                "worker",
+                "bash",
+                serde_json::json!({"command":"check"}),
+                1770000004000_u64,
+            ),
+            (
+                "holding",
+                "bash",
+                serde_json::json!({"command":"hold"}),
+                1770000005000_u64,
+            ),
+        ] {
+            history.push(serde_json::json!({
+                "role":"assistant","timestamp":timestamp,
+                "content":[{"type":"toolCall","id":id,"name":name,"arguments":args}]
+            }));
+        }
+        for (id, name, result) in [
+            ("worker", "bash", worker_result),
+            ("review", "task", review_result),
+        ] {
+            let mut result_message = result;
+            result_message["role"] = serde_json::json!("toolResult");
+            result_message["toolCallId"] = serde_json::json!(id);
+            result_message["toolName"] = serde_json::json!(name);
+            history.push(result_message);
+        }
+        history.extend([skill.clone(), skill, final_message]);
+        for _ in 0..2 {
+            apply_rpc_frame(&state, "s1", &serde_json::json!({
+                "type":"response","command":"get_messages","success":true,"data":{"messages":history}
+            })).await;
+            assert_eq!(receive(&mut events, &mut browser), None);
+            assert_eq!(receive(&mut events, &mut browser), None);
+            assert!(matches!(
+                events.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+        }
     }
 
     #[tokio::test]
