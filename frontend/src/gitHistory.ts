@@ -86,20 +86,21 @@ const branchPickerStates = new WeakMap<HTMLElement, {
   repoRoot: string;
   historyRef: string | null;
   capture(): BranchPickerDraft | null;
-  restore(draft: BranchPickerDraft): void;
+  restore(draft: BranchPickerDraft, focused: boolean): void;
 }>();
 
-export function preserveHistoryBranchPicker(container: HTMLElement): (() => void) | undefined {
+export function preserveHistoryBranchPicker(container: HTMLElement, focused = container.ownerDocument.hasFocus()): (() => void) | undefined {
   const element = container.querySelector<HTMLElement>(".git-history-branch-picker");
   const previous = element ? branchPickerStates.get(element) : undefined;
   const draft = previous?.capture();
   if (!previous || !draft) return;
+  const restoreFocus = focused && Boolean(element?.contains(container.ownerDocument.activeElement));
   return () => {
     const replacement = container.querySelector<HTMLElement>(".git-history-branch-picker");
     const next = replacement ? branchPickerStates.get(replacement) : undefined;
     if (next && next.state === previous.state && next.repoRoot === previous.repoRoot
       && next.historyRef === previous.historyRef) {
-      next.restore(draft);
+      next.restore(draft, restoreFocus);
     }
   };
 }
@@ -220,7 +221,7 @@ function renderHistoryBranchPicker(state: GitHistoryState, selectBranch: (ref: s
     empty.hidden = filtered.length !== 0;
     highlight();
   };
-  const show = (draft?: BranchPickerDraft) => {
+  const show = (draft?: BranchPickerDraft, focused = true) => {
     if (!current()) return;
     input.value = draft?.query ?? "";
     composing = false;
@@ -244,7 +245,7 @@ function renderHistoryBranchPicker(state: GitHistoryState, selectBranch: (ref: s
     open = true;
     branch.setAttribute("aria-expanded", "true");
     input.setAttribute("aria-expanded", "true");
-    input.focus();
+    if (focused && (!draft || owner.hasFocus())) input.focus({ preventScroll: true });
     if (draft) input.setSelectionRange(draft.selectionStart, draft.selectionEnd);
   };
   popup.addEventListener("pointerdown", event => event.stopPropagation());

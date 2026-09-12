@@ -163,13 +163,49 @@ function simpleDiffRows(patch: string): DiffRow[] {
 
 let connections: FakeConnection[] = [];
 let fakeConnectionAutoOpen = true;
-let desktopMockActivePanelIds = new Set(["diffs"]);
-const desktopMockActivatePanel = vi.fn(() => true);
-// The Code panel is opt-in per harness so its rendering does not perturb tests
-// that only assert on sent messages.
+type MockWorkspace = "normal" | "diffReview";
+type MockDockviewOptions = {
+  host: HTMLElement;
+  layoutMode: MockWorkspace;
+  onPanelReady(id: string, container: HTMLElement): void;
+  onPanelActivated(id: string): void;
+  onPanelClosed?: (id: string) => void;
+  onPanelVisibilityChanged?: (id: string, visible: boolean) => void;
+  onWindowFocus?: (document: Document) => void;
+};
+let desktopMockActivePanelId: Record<MockWorkspace, string | null> = { normal: "diffs", diffReview: "sessionChanges" };
+let desktopMockVisiblePanelIds: Record<MockWorkspace, Set<string>> = {
+  normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]),
+};
+const desktopMockOptions = new Map<MockWorkspace, MockDockviewOptions>();
+const desktopMockActivatePanel = vi.fn((_id: string) => true);
+// Code is opt-in so unrelated protocol tests do not open a code workspace.
 let desktopMockMountCodePanel = false;
-let desktopMockPanelActivated: ((id: string) => void) | null = null;
 let desktopMockPanelClosed: ((id: string) => void) | null = null;
+
+function setPanelVisible(id: string, visible: boolean, workspace: MockWorkspace = "normal"): void {
+  const visiblePanels = desktopMockVisiblePanelIds[workspace];
+  if (visiblePanels.has(id) === visible) return;
+  if (visible) visiblePanels.add(id);
+  else visiblePanels.delete(id);
+  desktopMockOptions.get(workspace)?.onPanelVisibilityChanged?.(id, visible);
+}
+
+function activatePanel(id: string, workspace: MockWorkspace = "normal"): void {
+  desktopMockActivePanelId[workspace] = id;
+  // Diffs is a separate split; activating Transcript does not hide it.
+  if (["transcript", "goal", "code"].includes(id)) {
+    for (const sibling of ["transcript", "goal", "code"]) {
+      if (sibling !== id) setPanelVisible(sibling, false, workspace);
+    }
+  }
+  setPanelVisible(id, true, workspace);
+  desktopMockOptions.get(workspace)?.onPanelActivated(id);
+}
+
+function focusWorkspace(workspace: MockWorkspace = "normal", owner = document): void {
+  desktopMockOptions.get(workspace)?.onWindowFocus?.(owner);
+}
 
 function installMocks(): void {
   vi.doMock("./connection", () => ({
@@ -180,46 +216,52 @@ function installMocks(): void {
     },
   }));
   vi.doMock("./desktopDockview", () => ({
-    initDesktopDockview: (options: {
-      onPanelReady(id: string, container: HTMLElement): void;
-      onPanelActivated(id: string): void;
-      onPanelClosed?: (id: string) => void;
-    }) => {
-      desktopMockPanelActivated ??= options.onPanelActivated;
-      desktopMockPanelClosed ??= options.onPanelClosed ?? null;
-      const diffPanel = document.createElement("div");
-      diffPanel.id = "testDiffPanel";
-      const transcriptPanel = document.createElement("div");
-      transcriptPanel.id = "testTranscriptPanel";
-      const goalPanel = document.createElement("div");
-      goalPanel.id = "testGoalPanel";
-      const codePanel = document.createElement("div");
-      codePanel.id = "testCodePanel";
-      document.body.append(diffPanel, transcriptPanel, goalPanel);
-      const panels: Record<string, HTMLElement> = {
-        diffs: diffPanel,
-        transcript: transcriptPanel,
-        goal: goalPanel,
+    initDesktopDockview: (options: MockDockviewOptions) => {
+      const normal = options.layoutMode === "normal";
+      desktopMockOptions.set(options.layoutMode, options);
+      if (normal) desktopMockPanelClosed = options.onPanelClosed ?? null;
+      const panels: Record<string, HTMLElement> = {};
+      const ids = normal ? ["diffs", "transcript", "goal"] : ["sessionChanges", "transcript"];
+      if (desktopMockMountCodePanel) ids.push("code");
+      const mount = (id: string) => {
+        if (panels[id]) return false;
+        const panel = document.createElement("div");
+        const name = id === "diffs" || id === "sessionChanges" ? "Diff" : id[0].toUpperCase() + id.slice(1);
+        panel.id = `test${normal ? "" : "Review"}${name}Panel`;
+        panels[id] = panel;
+        options.host.append(panel);
+        options.onPanelReady(id, panel);
+        return true;
       };
-      if (desktopMockMountCodePanel) {
-        document.body.append(codePanel);
-        panels.code = codePanel;
-      }
+      ids.forEach(mount);
+      const workspaceVisible = () => options.host.classList.contains("workspace-panel-host-active");
       return {
         panelMounted: (id: string) => Boolean(panels[id]),
         panelContains: (id: string, element: Element) => Boolean(panels[id]?.contains(element)),
-        isPanelActive: (id: string) => desktopMockActivePanelIds.has(id),
-        activatePanel: desktopMockActivatePanel,
+        isPanelActive: (id: string) => Boolean(panels[id]) && workspaceVisible() && desktopMockActivePanelId[options.layoutMode] === id,
+        isPanelVisible: (id: string) => Boolean(panels[id]) && workspaceVisible() && desktopMockVisiblePanelIds[options.layoutMode].has(id),
+        activatePanel: (id: string) => {
+          if (!desktopMockActivatePanel(id) || !panels[id]) return false;
+          activatePanel(id, options.layoutMode);
+          return true;
+        },
         withPanel: (id: string, render: (container: HTMLElement) => void) => {
           const panel = panels[id];
           if (!panel) return false;
           render(panel);
           return true;
         },
-        ensureSessionChangesPanel: () => false,
-        ensureDiffsPanel: () => false,
-        ensureComparePanel: () => false,
-        closePanel: () => false,
+        ensureSessionChangesPanel: () => !normal && mount("sessionChanges"),
+        ensureDiffsPanel: () => normal && mount("diffs"),
+        ensureComparePanel: () => normal && mount("compare"),
+        closePanel: (id: string) => {
+          if (!panels[id]) return false;
+          setPanelVisible(id, false, options.layoutMode);
+          panels[id].remove();
+          delete panels[id];
+          options.onPanelClosed?.(id);
+          return true;
+        },
         openEphemeralPanel: (id: string) => {
           if (panels[id]) return false;
           const panel = document.createElement("div");
@@ -253,10 +295,11 @@ async function createHarness(options: { preserveLocalStorage?: boolean; mountCod
     this.dispatchEvent(new Event("close"));
   };
   connections = [];
-  desktopMockActivePanelIds = new Set(["diffs"]);
-  desktopMockPanelActivated = null;
+  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges" };
+  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]) };
+  desktopMockOptions.clear();
   desktopMockPanelClosed = null;
-  desktopMockActivatePanel.mockClear();
+  desktopMockActivatePanel.mockReset().mockReturnValue(true);
   desktopMockMountCodePanel = options.mountCodePanel ?? false;
   fakeConnectionAutoOpen = true;
   document.body.innerHTML = `<div id="app"></div>`;
@@ -265,6 +308,7 @@ async function createHarness(options: { preserveLocalStorage?: boolean; mountCod
   window.sessionStorage.setItem(FURA_TOKEN_STORAGE_KEY, "dev");
   window.history.replaceState(null, "", "/");
   vi.spyOn(console, "debug").mockImplementation(() => undefined);
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
   installMocks();
   await import("./main");
   const connection = connections[0];
@@ -277,7 +321,11 @@ async function createPendingHarness() {
   vi.resetModules();
   vi.restoreAllMocks();
   connections = [];
-  desktopMockActivePanelIds = new Set(["diffs"]);
+  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges" };
+  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]) };
+  desktopMockOptions.clear();
+  desktopMockPanelClosed = null;
+  desktopMockActivatePanel.mockReset().mockReturnValue(true);
   desktopMockMountCodePanel = false;
   fakeConnectionAutoOpen = false;
   document.body.innerHTML = `<div id="app"></div>`;
@@ -293,8 +341,8 @@ async function createPendingHarness() {
 
 describe("ordinary Diffs entry default", () => {
   function activate(id: string) {
-    desktopMockActivePanelIds = new Set([id]);
-    desktopMockPanelActivated?.(id);
+    if (id !== "diffs") setPanelVisible("diffs", false);
+    activatePanel(id);
   }
   function request(connection: FakeConnection) {
     const value = [...connection.sent].reverse().find(message => message.type === "sessionChanges.request");
@@ -354,7 +402,8 @@ describe("ordinary Diffs entry default", () => {
   it("ignores the previous entry after closing and reopening", async () => {
     const connection = await open();
     const old = request(connection);
-    desktopMockActivePanelIds.clear();
+    desktopMockActivePanelId.normal = null;
+    setPanelVisible("diffs", false);
     desktopMockPanelClosed?.("diffs");
     activate("diffs");
     const current = request(connection);
@@ -441,10 +490,9 @@ describe("pinned History Advanced Compare", () => {
     expect(document.querySelector<HTMLInputElement>("#cwdPickerDiffHead")!.value).toBe(selected);
     expect(document.querySelector<HTMLInputElement>("#cwdPickerDiffBase")!.value).toBe(parent);
     document.querySelector<HTMLButtonElement>("#cwdPickerCancel")!.click();
-    desktopMockActivePanelIds = new Set(["code"]);
-    desktopMockPanelActivated?.("code");
-    desktopMockActivePanelIds = new Set(["diffs"]);
-    desktopMockPanelActivated?.("diffs");
+    setPanelVisible("diffs", false);
+    activatePanel("code");
+    activatePanel("diffs");
     const probe = [...connection.sent].reverse().find(message => message.type === "sessionChanges.request");
     if (!probe || probe.type !== "sessionChanges.request") throw new Error("Entry probe missing");
     expect(probe.currentCommitOid).toBeNull();
@@ -575,7 +623,7 @@ describe("desktop Goal Mode panel", () => {
 
   it("renders no-session Goal panel copy without implying background execution", async () => {
     const { connection } = await createHarness();
-    desktopMockActivePanelIds.add("goal");
+    activatePanel("goal");
     connection.emit({ type: "sessions.snapshot", sessions: [] });
 
     expect(document.querySelector("#testGoalPanel")?.textContent).toContain("Select a session to view or set a goal.");
@@ -583,7 +631,7 @@ describe("desktop Goal Mode panel", () => {
 
   it("renders Goal Mode inside the normal Dockview goal panel", async () => {
     const { connection } = await createHarness();
-    desktopMockActivePanelIds.add("goal");
+    activatePanel("goal");
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
     connection.emit({
@@ -957,8 +1005,7 @@ describe("desktop cog options", () => {
 
     expect(connection.sent).toContainEqual(expect.objectContaining({ type: "code.workspace.openRoot", root: "/repo", source: "session" }));
 
-    // Simulate the Code panel becoming active after activatePanel("code") in the real shell.
-    desktopMockActivePanelIds.add("code");
+    activatePanel("code");
     connection.emit({
       type: "code.workspace.ready",
       workspace: { workspaceId: "ws-1", sessionId: null, root: "/repo", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
@@ -996,7 +1043,7 @@ describe("desktop cog options", () => {
     codeButton.click();
 
     // The Code panel has NOT been marked active yet (activatePanel races the reply).
-    expect(desktopMockActivePanelIds.has("code")).toBe(false);
+    expect(desktopMockActivePanelId.normal === "code").toBe(false);
     connection.emit({
       type: "code.workspace.ready",
       workspace: { workspaceId: "ws-1", sessionId: null, root: "/repo", rustRoot: null, status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
@@ -1021,7 +1068,7 @@ describe("desktop cog options", () => {
     document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="same.ts"]')!.click();
     const beforeOpen = connection.sent.length;
     clickGitButton("Code");
-    desktopMockActivePanelIds.add("code");
+    activatePanel("code");
     if (connection.sent.slice(beforeOpen).some(message => message.type === "code.workspace.openRoot")) {
       connection.emit({
         type: "code.workspace.ready",
@@ -1139,7 +1186,7 @@ describe("desktop cog options", () => {
     connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
-    desktopMockActivePanelIds.add("code");
+    activatePanel("code");
     connection.emit({
       type: "code.workspace.ready",
       workspace: { workspaceId: "ws-1", sessionId: "live", root: "/repo", rustRoot: "/repo", status: "filesOnly", statusMessage: "Files only.", source: "session", reviewWorktreeId: null },
@@ -1515,6 +1562,441 @@ describe("desktop cog options", () => {
     button.click();
   }
 
+  describe("visible inactive diff lifecycle", () => {
+    const pinnedOid = "b".repeat(40);
+    const parentOid = "a".repeat(40);
+    const commit = { oid: pinnedOid, shortOid: pinnedOid.slice(0, 12), subject: "Pinned History", message: "Pinned History",
+      parentOids: [parentOid], committedAt: "2025-01-01T00:00:00Z", isMerge: false };
+
+    function answerDiff(connection: FakeConnection, pending: Extract<ClientMessage, { type: "sessionChanges.request" }>, key: string) {
+      const base = sessionChangesState(pending.sessionId);
+      if (base.status !== "ready") throw new Error("Ready fixture missing");
+      const repo = pending.repoId ?? "/repo";
+      const oid = pending.currentCommitOid ?? null;
+      connection.emit({ type: "sessionChanges.summary", state: {
+        ...base, targetClientId: pending.clientId, diffId: pending.diffId, selectedRepoId: repo,
+        request: { ...pending, scope: "sessionChanges" },
+        repos: ["/repo", "/other"].map(root => ({ id: root, repoRoot: root, label: root, source: "cwd" as const, isDefault: root === "/repo" })),
+        comparison: { ...base.comparison, repoRoot: repo, comparisonKey: key, detailMode: "filePatch", currentCommitOid: oid,
+          ...(oid ? { base: { kind: "commit" as const, oid: parentOid, shortOid: parentOid.slice(0, 12) },
+            head: { kind: "commit" as const, oid, shortOid: oid.slice(0, 12) }, leftTreeOrCommit: parentOid, rightTreeOrCommit: oid } : {}) },
+        summary: { files: [{ newPath: "same.ts", status: "modified", added: 1, removed: 1 }], truncated: false },
+        review: { commits: [commit], currentCommitOid: oid, currentCommitIndex: oid ? 0 : null, previousCommitOid: oid ? parentOid : null },
+      } });
+    }
+
+    function answerContent(connection: FakeConnection, pending: { clientId: string; diffId: string }, key: string, text: string, scope: "sessionChanges" | "compareDiff" = "sessionChanges") {
+      const patch = `diff --git a/same.ts b/same.ts\n@@ -1 +1 @@\n-old\n+${text}`;
+      connection.emit({ type: "diff.content", content: { targetClientId: pending.clientId, diffId: pending.diffId,
+        scope, comparisonKey: key, file: null, patch, rows: simpleDiffRows(patch), truncated: false, contextLines: 3, generatedAt: "now" } });
+    }
+
+    async function openDiffs(mode: "Current changes" | "History" = "Current changes") {
+      const { connection } = await createHarness();
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+      document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+      answerDiff(connection, latestGitRequest(connection), "initial");
+      if (mode === "History") {
+        const history = [...connection.sent].reverse().find(message => message.type === "git.history.request");
+        if (!history || history.type !== "git.history.request") throw new Error("History request missing");
+        connection.emit({ type: "git.history", targetClientId: history.clientId, requestId: history.requestId, sessionId: "live", error: null,
+          page: { repoRoot: "/repo", branch: "main", headOid: pinnedOid, historyHeadOid: pinnedOid, historyRef: null, historyTipOid: pinnedOid,
+            branches: [], branchesTruncated: false, commits: [commit], nextCursor: null } });
+        clickGitButton("History");
+        answerDiff(connection, latestGitRequest(connection), "initial");
+      }
+      answerContent(connection, latestGitRequest(connection), "initial", "readable-before-refresh");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("readable-before-refresh");
+      return connection;
+    }
+
+    it.each(["Current changes", "History"] as const)("paints accepted %s summary and patch before Diffs is reactivated", async mode => {
+      const connection = await openDiffs(mode);
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();
+      const pending = latestGitRequest(connection);
+      activatePanel("transcript");
+      answerDiff(connection, pending, "replacement");
+      expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.content.request", diffId: pending.diffId, comparisonKey: "replacement" }));
+      answerContent(connection, pending, "replacement", "accepted-while-inactive");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("accepted-while-inactive");
+      expect(desktopMockActivePanelId.normal).toBe("transcript");
+    });
+
+    it("keeps the lazy read started by a summary when that summary's completion follows", async () => {
+      const connection = await openDiffs();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();
+      const pending = latestGitRequest(connection);
+      activatePanel("transcript");
+      answerDiff(connection, pending, "replacement");
+      const reads = () => connection.sent.filter(message => message.type === "diff.content.request" && message.diffId === pending.diffId);
+      expect(reads()).toHaveLength(1);
+      connection.emit({ type: "diff.complete", targetClientId: pending.clientId, diffId: pending.diffId, scope: "sessionChanges" });
+      expect(reads()).toHaveLength(1);
+      answerContent(connection, pending, "replacement", "completed-without-restarting-read");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("completed-without-restarting-read");
+      expect(desktopMockActivePanelId.normal).toBe("transcript");
+    });
+
+    it.each(["Current changes", "History"] as const)("retains readable %s until a same-target replacement is ready", async mode => {
+      const connection = await openDiffs(mode);
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();
+      const pending = latestGitRequest(connection);
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("readable-before-refresh");
+      expect(document.querySelector("#testDiffPanel")?.textContent).toMatch(/refreshing/i);
+      answerDiff(connection, pending, "replacement");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("readable-before-refresh");
+      answerContent(connection, pending, "replacement", "replacement-ready");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("replacement-ready");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).not.toContain("readable-before-refresh");
+      expect(document.querySelector("#testDiffPanel")?.textContent).not.toMatch(/refreshing/i);
+    });
+
+    it("retains the last readable result with a visible refresh failure rather than presenting it as fresh", async () => {
+      const connection = await openDiffs();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();
+      const pending = latestGitRequest(connection);
+      activatePanel("transcript");
+      connection.emit({ type: "diff.error", targetClientId: pending.clientId, diffId: pending.diffId, scope: "sessionChanges",
+        sessionId: pending.sessionId, message: "Refresh fixture failed" });
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("readable-before-refresh");
+      expect(document.querySelector("#testDiffPanel")?.textContent).toContain("Refresh fixture failed");
+      expect(document.querySelector("#testDiffPanel")?.textContent).not.toMatch(/refreshing/i);
+      expect(document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.disabled).toBe(false);
+    });
+
+    it("does not reset pinned History when focus returns to an already visible split", async () => {
+      const connection = await openDiffs("History");
+      const before = latestGitRequest(connection);
+      const root = document.querySelector("#testDiffPanel .diffs-view");
+      activatePanel("transcript");
+      activatePanel("diffs");
+      expect(document.querySelector("#testDiffPanel .git-review-navigation [aria-pressed=true]")?.textContent).toBe("History");
+      expect(document.querySelector("#testDiffPanel .diffs-view")).toBe(root);
+      expect(latestGitRequest(connection).currentCommitOid).toBe(pinnedOid);
+      expect(connection.sent.filter(message => message.type === "diff.cancel" && message.diffId === before.diffId)).toEqual([]);
+    });
+
+    it.each(["focus", "visibility"] as const)("automatically refreshes visible inactive pinned History on document %s return", async trigger => {
+      const connection = await openDiffs("History");
+      const before = latestGitRequest(connection);
+      activatePanel("transcript");
+      if (trigger === "focus") {
+        focusWorkspace();
+        focusWorkspace();
+      } else {
+        vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+        document.dispatchEvent(new Event("visibilitychange"));
+        expect(latestGitRequest(connection).diffId).toBe(before.diffId);
+        vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+        document.dispatchEvent(new Event("visibilitychange"));
+        document.dispatchEvent(new Event("visibilitychange"));
+      }
+      const pending = latestGitRequest(connection);
+      expect(pending.diffId).not.toBe(before.diffId);
+      expect(pending).toMatchObject({ sessionId: "live", repoId: "/repo", currentCommitOid: pinnedOid });
+      expect(connection.sent.filter(message => message.type === "sessionChanges.request" && message.diffId !== before.diffId
+        && connection.sent.indexOf(message) > connection.sent.indexOf(before))).toHaveLength(1);
+      answerDiff(connection, pending, "automatic");
+      answerContent(connection, pending, "automatic", "automatic-pinned-result");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("automatic-pinned-result");
+      expect(document.querySelector("#testDiffPanel .git-review-navigation [aria-pressed=true]")?.textContent).toBe("History");
+    });
+
+    it("refreshes Current worktree context on focus without using a hidden workspace callback", async () => {
+      const connection = await openDiffs();
+      const before = latestGitRequest(connection);
+      activatePanel("transcript");
+      focusWorkspace("diffReview");
+      expect(latestGitRequest(connection).diffId).toBe(before.diffId);
+      focusWorkspace();
+      const pending = latestGitRequest(connection);
+      expect(pending.diffId).not.toBe(before.diffId);
+      expect(pending).toMatchObject({ sessionId: "live", repoId: "/repo", changeKind: "unstaged", currentCommitOid: null });
+      answerDiff(connection, pending, "new-worktree");
+      answerContent(connection, pending, "new-worktree", "external-worktree-edit");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("external-worktree-edit");
+    });
+
+    it.each(["repository", "session"] as const)("clears old identity on %s switch while inactive and rejects late replies", async identity => {
+      const connection = await openDiffs();
+      const old = latestGitRequest(connection);
+      activatePanel("transcript");
+      if (identity === "repository") {
+        const repo = document.querySelector<HTMLSelectElement>("#testDiffPanel .diff-repo-select")!;
+        repo.value = "/other";
+        repo.dispatchEvent(new Event("change"));
+      } else {
+        [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")]
+          .find(button => button.textContent?.includes("Session other"))!.click();
+        connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+      }
+      const current = latestGitRequest(connection);
+      expect(current.diffId).not.toBe(old.diffId);
+      expect(current).toMatchObject(identity === "repository" ? { repoId: "/other" } : { sessionId: "other" });
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).not.toContain("readable-before-refresh");
+      answerDiff(connection, old, "late-old");
+      answerContent(connection, old, "late-old", "wrong-identity");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).not.toContain("wrong-identity");
+      answerDiff(connection, current, "new-identity");
+      answerContent(connection, current, "new-identity", "correct-identity");
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("correct-identity");
+    });
+
+    it("does not fetch hidden Diffs content until its tab is shown", async () => {
+      const connection = await openDiffs();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();
+      const pending = latestGitRequest(connection);
+      setPanelVisible("diffs", false);
+      activatePanel("transcript");
+      answerDiff(connection, pending, "hidden-replacement");
+      expect(connection.sent.some(message => message.type === "diff.content.request" && message.diffId === pending.diffId)).toBe(false);
+    });
+
+    it("keeps a retained review draft editable but cannot submit it during refresh or failure", async () => {
+      const connection = await openDiffs();
+      document.querySelector<HTMLButtonElement>("#testDiffPanel .diff-line-add .diff-comment-btn")!.click();
+      const form = document.querySelector<HTMLFormElement>("#testDiffPanel .review-comment-composer")!;
+      const input = form.querySelector<HTMLTextAreaElement>("textarea")!;
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();
+      const pending = latestGitRequest(connection);
+      for (const failed of [false, true]) {
+        if (failed) connection.emit({ type: "diff.error", targetClientId: pending.clientId, diffId: pending.diffId,
+          scope: "sessionChanges", sessionId: "live", message: "Refresh failed while drafting" });
+        input.value = failed ? "Keep this failed-refresh draft" : "Keep this pending-refresh draft";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        expect(input.disabled).toBe(false);
+        expect(form.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+        connection.sent.length = 0;
+        form.requestSubmit();
+        expect(connection.sent.some(message => message.type === "review.comment.create" || message.type === "review.comment.update")).toBe(false);
+        expect(input.value).toContain("draft");
+      }
+    });
+
+    it("retries the selected review after reconnect without treating it as a new entry", async () => {
+      const connection = await openDiffs("History");
+      connection.disconnect();
+      connection.options.onClose?.();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();
+      const failed = latestGitRequest(connection);
+      expect(document.querySelector("#testDiffPanel")!.textContent).toContain("Not connected");
+      connection.connect();
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+      const refresh = latestGitRequest(connection);
+      expect(refresh.diffId).not.toBe(failed.diffId);
+      expect(refresh.currentCommitOid).toBe(pinnedOid);
+      answerDiff(connection, refresh, "reconnected");
+      answerContent(connection, refresh, "reconnected", "readable-after-reconnect");
+      expect(document.querySelector("#testDiffPanel")!.textContent).toContain("readable-after-reconnect");
+      expect([...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+        .find(button => button.textContent === "Request agent review")!.disabled).toBe(false);
+    });
+
+    it("cannot revive cached file actions from a superseded summary", async () => {
+      const connection = await openDiffs();
+      const request = latestGitRequest(connection);
+      const fileButton = () => document.querySelector<HTMLButtonElement>('#testDiffPanel .diffs-file-jump[data-diff-file-path="same.ts"]')!;
+      fileButton().click();
+      const patch = "diff --git a/same.ts b/same.ts\n@@ -1 +1 @@\n-old\n+cached-file";
+      connection.emit({ type: "diff.content", content: { targetClientId: request.clientId, diffId: request.diffId,
+        scope: "sessionChanges", comparisonKey: "initial", file: { newPath: "same.ts" }, patch,
+        rows: simpleDiffRows(patch), truncated: false, contextLines: 3, generatedAt: "now" } });
+      document.querySelector<HTMLButtonElement>("#testDiffPanel .diff-line-add .diff-comment-btn")!.click();
+      const input = document.querySelector<HTMLTextAreaElement>("#testDiffPanel .review-comment-composer textarea")!;
+      input.value = "Draft for the cached file";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      document.querySelector<HTMLButtonElement>("#testDiffPanel .diffs-all-files-jump")!.click();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();
+      fileButton().click();
+      const submit = document.querySelector<HTMLButtonElement>('#testDiffPanel .review-comment-composer button[type="submit"]');
+      expect(!submit || submit.disabled).toBe(true);
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).not.toContain("cached-file");
+    });
+
+    function latestCompareRequest(connection: FakeConnection) {
+      const request = [...connection.sent].reverse().find(message => message.type === "compareDiff.request");
+      if (!request || request.type !== "compareDiff.request") throw new Error("Review comparison request missing");
+      return request;
+    }
+
+    function answerReview(connection: FakeConnection, key: string) {
+      const request = latestCompareRequest(connection);
+      const base = sessionChangesState("review");
+      if (base.status !== "ready") throw new Error("Review fixture missing");
+      connection.emit({ type: "compareDiff.summary", state: {
+        targetClientId: request.clientId, diffId: request.diffId, request: { ...request, scope: "compareDiff" }, refs: [],
+        comparison: { ...base.comparison, repoRoot: request.repoRoot, comparisonKey: key, detailMode: request.detailMode },
+        summary: { files: [{ newPath: "same.ts", status: "modified", added: 1, removed: 1 }], stat: `${key} stat`, truncated: false },
+        review: base.review,
+      } });
+      return request;
+    }
+
+    async function openDedicatedReview(answer = true) {
+      const { connection } = await createHarness();
+      const session = summary("review", { sessionMode: "diffReview", cwd: "/review", title: "diff: main..topic" });
+      connection.emit({ type: "sessions.snapshot", sessions: [session] });
+      document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "review", state: projection("review", { summary: session }) });
+      if (answer) answerReview(connection, "review-initial");
+      return { connection, session };
+    }
+
+    it.each(["summary", "patch error"] as const)("shows a dedicated review's hidden %s when its tab returns", async result => {
+      const { connection } = await openDedicatedReview(false);
+      const request = latestCompareRequest(connection);
+      if (result === "patch error") answerReview(connection, "hidden-review");
+      setPanelVisible("sessionChanges", false, "diffReview");
+      activatePanel("transcript", "diffReview");
+      if (result === "summary") answerReview(connection, "hidden-review");
+      else connection.emit({ type: "diff.error", targetClientId: request.clientId, diffId: request.diffId,
+        scope: "compareDiff", sessionId: null, message: "Hidden patch failure" });
+      setPanelVisible("sessionChanges", true, "diffReview");
+      if (result === "summary") {
+        expect(connection.sent.some(message => message.type === "diff.content.request" && message.diffId === request.diffId)).toBe(true);
+        answerContent(connection, request, "hidden-review", "visible-after-hidden-summary", "compareDiff");
+        expect(document.querySelector("#testReviewDiffPanel")!.textContent).toContain("visible-after-hidden-summary");
+      } else expect(document.querySelector("#testReviewDiffPanel")!.textContent).toContain("Hidden patch failure");
+    });
+
+    it.each([false, true])("refreshes dedicated Stat after a superseded patch request or error (%s)", async failed => {
+      const { connection } = await openDedicatedReview();
+      const patchRequest = latestCompareRequest(connection);
+      if (failed) connection.emit({ type: "diff.error", targetClientId: patchRequest.clientId, diffId: patchRequest.diffId,
+        scope: "compareDiff", sessionId: null, message: "Old review patch failure" });
+      [...document.querySelectorAll<HTMLButtonElement>("#testReviewDiffPanel button")].find(button => button.textContent === "Show stat")!.click();
+      const stat = answerReview(connection, "review-stat");
+      activatePanel("transcript", "diffReview");
+      focusWorkspace("diffReview");
+      const refresh = latestCompareRequest(connection);
+      expect(refresh.diffId).not.toBe(stat.diffId);
+      expect(refresh.detailMode).toBe("statOnly");
+      answerReview(connection, "review-stat-fresh");
+      expect(document.querySelector("#testReviewDiffPanel")!.textContent).toContain("review-stat-fresh stat");
+      expect(document.querySelector("#testReviewDiffPanel")!.textContent).not.toContain("Old review patch failure");
+      expect(document.querySelector("#testReviewDiffPanel [aria-busy='true']")).toBeNull();
+    });
+
+    it.each(["refs", "cwd"] as const)("reloads a dedicated review when its same-session %s changes", async changed => {
+      const { connection, session } = await openDedicatedReview();
+      const before = latestCompareRequest(connection);
+      answerContent(connection, before, "review-initial", "previous-review-target", "compareDiff");
+      activatePanel("transcript", "diffReview");
+      const next = changed === "refs" ? { ...session, title: "diff: next-base..next-head" } : { ...session, cwd: "/next-review" };
+      connection.emit({ type: "session.snapshot", sessionId: "review", state: projection("review", { summary: next }) });
+      const request = latestCompareRequest(connection);
+      expect(request.diffId).not.toBe(before.diffId);
+      expect(request.repoRoot).toBe(changed === "cwd" ? "/next-review" : "/review");
+      if (changed === "refs") expect(request).toMatchObject({ base: { kind: "gitRef", value: "next-base" }, head: { kind: "gitRef", value: "next-head" } });
+      expect(document.querySelector("#testReviewDiffPanel")!.textContent).not.toContain("previous-review-target");
+      answerReview(connection, "review-next");
+      answerContent(connection, request, "review-next", "next-review-target", "compareDiff");
+      expect(document.querySelector("#testReviewDiffPanel")!.textContent).toContain("next-review-target");
+    });
+
+    it("keeps a dedicated comparison when only its display label changes", async () => {
+      const { connection, session } = await openDedicatedReview();
+      const before = latestCompareRequest(connection);
+      answerContent(connection, before, "review-initial", "unchanged-review-target", "compareDiff");
+      activatePanel("transcript", "diffReview");
+      connection.emit({ type: "session.snapshot", sessionId: "review", state: projection("review", {
+        summary: { ...session, title: "diff: renamed main..topic" },
+      }) });
+      expect(latestCompareRequest(connection).diffId).toBe(before.diffId);
+      expect(document.querySelector("#testReviewDiffPanel")!.textContent).toContain("unchanged-review-target");
+      expect(document.querySelector("#testReviewDiffPanel [aria-busy='true']")).toBeNull();
+    });
+
+    it.each([false, true])("restores in-view focus only when its owner document has focus (%s)", async focused => {
+      const connection = await openDiffs();
+      const options = document.querySelector<HTMLDetailsElement>("#testDiffPanel .git-review-options")!;
+      options.open = true;
+      options.querySelector<HTMLElement>("summary")!.focus();
+      vi.spyOn(document, "hasFocus").mockReturnValue(focused);
+      answerDiff(connection, latestGitRequest(connection), "focus-refresh");
+      answerContent(connection, latestGitRequest(connection), "focus-refresh", "focused-replacement");
+      expect(document.activeElement === document.querySelector("#testDiffPanel .git-review-options > summary")).toBe(focused);
+      expect(document.querySelector<HTMLDetailsElement>("#testDiffPanel .git-review-options")!.open).toBe(true);
+    });
+
+    async function openCompare(mode: "files" | "rangeDiff") {
+      const connection = await openDiffs();
+      clickGitButton("Advanced Compare");
+      if (mode === "rangeDiff") {
+        const select = document.querySelector<HTMLSelectElement>("#cwdPickerDiffMode")!;
+        select.value = "rangeDiff";
+        select.dispatchEvent(new Event("change"));
+        document.querySelector<HTMLInputElement>("#cwdPickerDiffOld")!.value = "topic-old";
+      }
+      document.querySelector<HTMLInputElement>("#cwdPickerDiffRepo")!.value = "/explicit";
+      document.querySelector<HTMLInputElement>("#cwdPickerDiffBase")!.value = "main";
+      document.querySelector<HTMLInputElement>("#cwdPickerDiffHead")!.value = "topic";
+      document.querySelector<HTMLInputElement>("#cwdPickerDiffAgentSession")!.checked = false;
+      document.querySelector<HTMLButtonElement>("#cwdPickerCreate")!.click();
+      return connection;
+    }
+
+    it("paints Compare summary and patch while Transcript is active and keeps explicit refs on session change", async () => {
+      const connection = await openCompare("files");
+      const pending = [...connection.sent].reverse().find(message => message.type === "compareDiff.request");
+      if (!pending || pending.type !== "compareDiff.request") throw new Error("Compare request missing");
+      activatePanel("transcript");
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")]
+        .find(button => button.textContent?.includes("Session other"))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+      const base = sessionChangesState("live");
+      if (base.status !== "ready") throw new Error("Ready fixture missing");
+      connection.emit({ type: "compareDiff.summary", state: { targetClientId: pending.clientId, diffId: pending.diffId,
+        request: { ...pending, scope: "compareDiff" }, refs: [], review: base.review,
+        comparison: { ...base.comparison, repoRoot: "/explicit", comparisonKey: "explicit", detailMode: "filePatch" },
+        summary: { files: [{ newPath: "same.ts", status: "modified", added: 1, removed: 1 }], truncated: false } } });
+      expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.content.request", diffId: pending.diffId, comparisonKey: "explicit" }));
+      answerContent(connection, pending, "explicit", "explicit-compare-result", "compareDiff");
+      expect(document.querySelector("#testComparePanel .diffs-main")?.textContent).toContain("explicit-compare-result");
+      expect(document.querySelector<HTMLInputElement>('#testComparePanel [aria-label="Repository"]')!.value).toBe("/explicit");
+      expect(document.querySelector<HTMLInputElement>('#testComparePanel [aria-label="Head"]')!.value).toBe("topic");
+      [...document.querySelectorAll<HTMLButtonElement>("#testComparePanel button")].find(button => button.textContent === "Compare")!.click();
+      const replacement = [...connection.sent].reverse().find(message => message.type === "compareDiff.request");
+      if (!replacement || replacement.type !== "compareDiff.request") throw new Error("Replacement Compare request missing");
+      expect(replacement.diffId).not.toBe(pending.diffId);
+      expect(document.querySelector("#testComparePanel .diffs-main")?.textContent).toContain("explicit-compare-result");
+      expect(document.querySelector("#testComparePanel")?.textContent).toMatch(/refreshing/i);
+      connection.emit({ type: "diff.error", targetClientId: replacement.clientId, diffId: replacement.diffId,
+        scope: "compareDiff", sessionId: null, message: "Compare refresh failed" });
+      expect(document.querySelector("#testComparePanel .diffs-main")?.textContent).toContain("explicit-compare-result");
+      expect(document.querySelector("#testComparePanel")?.textContent).toContain("Compare refresh failed");
+      expect(document.querySelector("#testComparePanel")?.textContent).not.toMatch(/refreshing/i);
+    });
+
+    it("paints ready Range-diff while inactive without changing its explicit repository or refs", async () => {
+      const connection = await openCompare("rangeDiff");
+      const pending = [...connection.sent].reverse().find(message => message.type === "git.rangeDiff.request");
+      if (!pending || pending.type !== "git.rangeDiff.request") throw new Error("Range request missing");
+      activatePanel("transcript");
+      connection.emit({ type: "git.rangeDiff", targetClientId: pending.clientId, requestId: pending.requestId, error: null,
+        result: { repoRoot: pending.repoRoot, base: { input: pending.base, oid: parentOid }, old: { input: pending.old, oid: parentOid },
+          new: { input: pending.new, oid: pinnedOid }, ignoreWhitespace: false, output: "1: aaaaaaa ! 1: bbbbbbb Inactive range result", truncated: false } });
+      expect(document.querySelector("#testComparePanel")?.textContent).toContain("Inactive range result");
+      expect(document.querySelector('#testComparePanel [aria-busy="true"]')).toBeNull();
+      expect(desktopMockActivePanelId.normal).toBe("transcript");
+      [...document.querySelectorAll<HTMLButtonElement>("#testComparePanel button")].find(button => button.textContent === "Compare")!.click();
+      const replacement = [...connection.sent].reverse().find(message => message.type === "git.rangeDiff.request");
+      if (!replacement || replacement.type !== "git.rangeDiff.request") throw new Error("Replacement range request missing");
+      expect(replacement.requestId).not.toBe(pending.requestId);
+      expect(document.querySelector("#testComparePanel")?.textContent).toContain("Inactive range result");
+      expect(document.querySelector('#testComparePanel [aria-busy="true"]')).not.toBeNull();
+      connection.emit({ type: "git.rangeDiff", targetClientId: pending.clientId, requestId: pending.requestId,
+        result: null, error: "Stale range failure" });
+      expect(document.querySelector("#testComparePanel")?.textContent).not.toContain("Stale range failure");
+      connection.emit({ type: "git.rangeDiff", targetClientId: replacement.clientId, requestId: replacement.requestId,
+        result: null, error: "Range refresh failed" });
+      expect(document.querySelector("#testComparePanel")?.textContent).toContain("Inactive range result");
+      expect(document.querySelector("#testComparePanel")?.textContent).toContain("Range refresh failed");
+      expect(document.querySelector('#testComparePanel [aria-busy="true"]')).toBeNull();
+    });
+  });
+
   function answerRevisionComparison(
     connection: FakeConnection,
     file: DiffFileSummary = { newPath: "src/history.rs", status: "modified", added: 1, removed: 1 },
@@ -1537,11 +2019,11 @@ describe("desktop cog options", () => {
   }
 
   function openGitFileMenu(path = "src/history.rs"): HTMLButtonElement[] {
-    const file = [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel .diffs-file-jump")]
+    const file = [...document.querySelectorAll<HTMLButtonElement>(".workspace-panel-host-active .diffs-file-jump")]
       .find(button => button.dataset.diffFilePath === path);
     if (!file) throw new Error(`Git file ${path} missing`);
     file.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
-    return [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel .diffs-file-menu button")];
+    return [...document.querySelectorAll<HTMLButtonElement>(".workspace-panel-host-active .diffs-file-menu button")];
   }
 
   function requestGitFileFromMenu(connection: FakeConnection, label = "View this revision in Code", path = "src/history.rs") {
@@ -1707,7 +2189,7 @@ describe("desktop cog options", () => {
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
     answerRevisionComparison(connection);
     const superseded = requestGitFileFromMenu(connection);
-    desktopMockActivePanelIds.add("code");
+    activatePanel("code");
     answerRevisionComparison(connection, undefined, "a".repeat(40), "d".repeat(40));
     connection.emit(gitFileReply(superseded, "SUPERSEDED_REVISION"));
     expect(document.querySelector("#testCodePanel")?.textContent).not.toContain("SUPERSEDED_REVISION");
@@ -1737,7 +2219,7 @@ describe("desktop cog options", () => {
     const request = requestGitFileFromMenu(connection, "View this revision in Code", file.newPath);
     expect(request).toMatchObject({ repoRoot: "/repo", commitOid: expectedOid, path: expectedPath });
     expect(connection.sent).toEqual([request]);
-    desktopMockActivePanelIds.add("code");
+    activatePanel("code");
     connection.emit(gitFileReply(request, `fn preserved() {}\n// ${expectedPath}`));
     expect(revisionText()).toBe(`fn preserved() {}\n// ${expectedPath}`);
     expect(document.querySelector("#testCodePanel .code-file-path")?.textContent).toBe(expectedPath);
@@ -1782,6 +2264,12 @@ describe("desktop cog options", () => {
     connection.sent.length = 0;
     window.dispatchEvent(new Event("focus"));
     window.dispatchEvent(new Event("focus"));
+    expect(connection.sent.filter(message => message.type === "sessionChanges.request")).toHaveLength(0);
+    connection.emit({ type: "diff.content", content: {
+      ...content, diffId: staged.diffId, comparisonKey: "staged-v1",
+      file: { oldPath: null, newPath: "same.ts" }, patch: patch.replace("unstaged-only", "staged-only"),
+      rows: simpleDiffRows(patch.replace("unstaged-only", "staged-only")),
+    } });
     expect(connection.sent.filter(message => message.type === "sessionChanges.request")).toHaveLength(1);
     expect(latestGitRequest(connection)).toMatchObject({ changeKind: "staged", repoId: "/repo" });
     expect(latestGitRequest(connection).diffId).not.toBe(staged.diffId);
@@ -2563,10 +3051,8 @@ describe("desktop cog options", () => {
         comparison: { ...baseState.comparison, detailMode: "filePatch", head: { kind: "index" } },
       },
     });
-    expect(connection.sent).toContainEqual(expect.objectContaining({
-      type: "diff.content.request",
-      selectedFile: null,
-    }));
+    expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("cached");
+    expect(document.querySelector("#testDiffPanel [aria-busy='true']")).toBeNull();
   });
 
   it("sends edited Diffs question preview text", async () => {

@@ -121,7 +121,10 @@ test("cached panels preserve interaction state across updates and document moves
       await expect(tool).toContainText("Changed tool result");
       expect(await tool.evaluate(element => element.ownerDocument === document)).toBe(true);
       await popout.screenshot({ path: info.outputPath(`${className}-popout.png`) });
-      await popout.close({ runBeforeUnload: true }); popout = undefined;
+      const closed = popout.waitForEvent("close");
+      await popout.evaluate(() => window.close());
+      await closed;
+      popout = undefined;
       await expect(page.locator(`.panel-content-${className} .tool-card[data-tool-name="bash"]`)).toContainText("Changed tool result");
       await publish();
       expect(await page.locator(`.panel-content-${className} .tool-card[data-tool-name="bash"]`).evaluate(element => element.ownerDocument === document)).toBe(true);

@@ -1,5 +1,6 @@
 import "dockview-core/dist/styles/dockview.css";
 import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
+import { captureDiffViewScroll, restoreDiffViewScroll } from "./diffViewDom";
 
 export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare";
 
@@ -9,6 +10,7 @@ export type DesktopDockview = {
   panelMounted(id: DesktopDockviewPanelId): boolean;
   panelContains(id: DesktopDockviewPanelId, element: Element): boolean;
   isPanelActive(id: DesktopDockviewPanelId): boolean;
+  isPanelVisible(id: DesktopDockviewPanelId): boolean;
   activatePanel(id: DesktopDockviewPanelId): boolean;
   setPanelExpanded(id: DesktopDockviewPanelId, expanded: boolean): void;
   isPanelExpanded(id: DesktopDockviewPanelId): boolean;
@@ -26,6 +28,8 @@ type DesktopDockviewOptions = {
   onPanelReady(id: DesktopDockviewPanelId, container: HTMLElement): void;
   onPanelActivated(id: DesktopDockviewPanelId): void;
   onPanelClosed?(id: DesktopDockviewPanelId): void;
+  onPanelVisibilityChanged?(id: DesktopDockviewPanelId, visible: boolean): void;
+  onWindowFocus?(owner: Document): void;
   onPopoutBlocked(): void;
 };
 
@@ -45,6 +49,94 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   const panelActivators: Partial<Record<DesktopDockviewPanelId, () => void>> = {};
   const owner = options.host.ownerDocument;
   const win = owner.defaultView ?? window;
+  const visiblePanels = new Set<DesktopDockviewPanelId>();
+  const watchedDocuments = new WeakSet<Document>();
+  const pendingScrollRestores = new Map<DesktopDockviewPanelId, () => void>();
+  let visibilityQueued = false;
+
+  function workspaceVisible(): boolean {
+    return !options.host.classList.contains("workspace-panel-host")
+      || options.host.classList.contains("workspace-panel-host-active");
+  }
+
+  function panelSelected(id: DesktopDockviewPanelId): boolean {
+    return workspaceVisible() && Boolean(api.getGroupPanel(id)?.api.isVisible);
+  }
+
+  function notifyVisibility(): void {
+    if (visibilityQueued) return;
+    visibilityQueued = true;
+    queueMicrotask(() => {
+      visibilityQueued = false;
+      // Dockview temporarily hides/removes a moving panel. Observe the settled
+      // group selection, not those intermediate transfer states or OS focus.
+      for (const id of Object.keys(panelEls) as DesktopDockviewPanelId[]) {
+        const element = panelEls[id];
+        if (element) element.style.visibility = element.ownerDocument !== owner && !workspaceVisible() ? "hidden" : "";
+        const visible = panelSelected(id);
+        if (visiblePanels.has(id) === visible) continue;
+        if (visible) visiblePanels.add(id);
+        else visiblePanels.delete(id);
+        options.onPanelVisibilityChanged?.(id, visible);
+      }
+    });
+  }
+
+  function watchPopout(popWin: Window): void {
+    const doc = popWin.document;
+    if (doc === owner || watchedDocuments.has(doc)) return;
+    watchedDocuments.add(doc);
+    const refresh = () => {
+      if (popWin.closed || popWin.document !== doc || doc.visibilityState === "hidden") return;
+      options.onWindowFocus?.(doc);
+    };
+    popWin.addEventListener("focus", () => {
+      const selected = api.panels.find(panel => panel.api.getWindow() === popWin && panel.api.isVisible);
+      selected?.api.setActive();
+      refresh();
+    });
+    doc.addEventListener("visibilitychange", refresh);
+    popWin.addEventListener("beforeunload", () => {
+      const restores = api.panels.filter(panel => panel.api.getWindow() === popWin)
+        .map(panel => desktopPanelId(panel.id))
+        .filter((id): id is DesktopDockviewPanelId => id !== null)
+        .map(preserveTransferScroll);
+      // Capture precedes Dockview's close listener; the main document's next
+      // layout runs after native dispatch and the synchronous redock.
+      win.requestAnimationFrame(() => { for (const restore of restores) restore(); });
+    }, { capture: true });
+  }
+
+  function preserveTransferScroll(id: DesktopDockviewPanelId): () => void {
+    const container = panelEls[id];
+    const snapshot = container && captureDiffViewScroll(container);
+    return () => {
+      if (!container || !snapshot) return;
+      pendingScrollRestores.get(id)?.();
+      const view = container.ownerDocument.defaultView;
+      if (!view) return;
+      const observer = new view.ResizeObserver(restore);
+      const stop = () => {
+        observer.disconnect();
+        view.cancelAnimationFrame(frame);
+        pendingScrollRestores.delete(id);
+      };
+      function restore(): void {
+        const root = container!.querySelector<HTMLElement>(".diffs-view, .compare-view");
+        if (panelEls[id] !== container || !root || root.dataset.reviewTarget !== snapshot!.target) {
+          stop();
+          return;
+        }
+        const rect = root.getBoundingClientRect();
+        if (!root.isConnected || rect.width <= 0 || rect.height <= 0) return;
+        restoreDiffViewScroll(container!, snapshot!);
+        stop();
+      }
+      const frame = view.requestAnimationFrame(restore);
+      pendingScrollRestores.set(id, stop);
+      observer.observe(container);
+    };
+  }
 
   const api = new DockviewComponent(options.host, {
     theme: themeDark,
@@ -53,15 +145,20 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
         const panel = group.activePanel && api.getGroupPanel(group.activePanel.id);
         const panelId = panel && desktopPanelId(panel.id);
         if (!panel || !panelId) return;
+        let restoreScroll = preserveTransferScroll(panelId);
         void api.api.addPopoutGroup(panel, {
           popoutUrl: "/popout.html",
           onDidOpen: ({ window: popWin }) => {
             copyStylesToPopout(owner, popWin);
-            popWin.addEventListener("focus", () => {
-              panel.api.setActive();
-              options.onPanelActivated(panelId);
-            });
+            watchPopout(popWin);
+            popWin.addEventListener("load", () => {
+              restoreScroll = preserveTransferScroll(panelId);
+              watchPopout(popWin);
+            }, { once: true });
           },
+        }).then(opened => {
+          if (opened) restoreScroll();
+          notifyVisibility();
         });
       });
       return { element, init() {}, dispose() {} };
@@ -86,6 +183,11 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
             params.api.getWindow().focus();
           };
           panelEls[panelId] = shell.scroll;
+          params.api.onDidVisibilityChange(notifyVisibility);
+          params.api.onDidLocationChange(() => {
+            watchPopout(params.api.getWindow());
+            notifyVisibility();
+          });
           options.onPanelReady(panelId, shell.scroll);
         },
       };
@@ -95,6 +197,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   api.onDidActivePanelChange(panel => {
     const panelId = panel ? desktopPanelId(panel.id) : null;
     if (panelId) options.onPanelActivated(panelId);
+    notifyVisibility();
   });
   api.onDidOpenPopoutWindowFail(options.onPopoutBlocked);
   api.onDidRemovePanel(panel => {
@@ -102,11 +205,21 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     if (!panelId) return;
     delete panelEls[panelId];
     delete panelActivators[panelId];
+    visiblePanels.delete(panelId);
+    pendingScrollRestores.get(panelId)?.();
     options.onPanelClosed?.(panelId);
   });
 
   restoreOrCreateLayout(api, storage(win), options.storageKey, options.layoutMode);
   ensureRequiredPanels(api, options.layoutMode);
+  notifyVisibility();
+  new MutationObserver(notifyVisibility).observe(options.host, { attributes: true, attributeFilter: ["class"] });
+  api.onWillDrop(() => {
+    const restores = (Object.keys(panelEls) as DesktopDockviewPanelId[]).map(preserveTransferScroll);
+    // Internal drops do not emit onDidDrop. Their synchronous move is complete
+    // when this stack unwinds; each restore then waits for destination layout.
+    queueMicrotask(() => { for (const restore of restores) restore(); });
+  });
 
   let layoutSaveTimer: number | undefined;
   api.onDidLayoutChange(() => {
@@ -126,6 +239,10 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     },
     isPanelActive(id) {
       return api.activePanel?.id === id;
+    },
+    isPanelVisible(id) {
+      const element = panelEls[id];
+      return panelSelected(id) && Boolean(element?.isConnected && element.ownerDocument.visibilityState !== "hidden");
     },
     activatePanel(id) {
       const activate = panelActivators[id];

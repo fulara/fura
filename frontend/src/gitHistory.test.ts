@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { acceptGitHistoryResult, beginGitHistoryRequest, createGitHistoryState, gitHeadLabel, MAX_LOADED_COMMITS, preserveHistoryBranchPicker, renderGitHistoryBrowser, selectGitHistoryRef, type GitHistoryState } from "./gitHistory";
 import type { DiffCommitSummary, GitHistoryPage } from "./protocol";
 import { setRenderDocument } from "./dom";
@@ -24,6 +24,7 @@ function controls(state: GitHistoryState) {
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   setRenderDocument(document);
   document.body.replaceChildren();
 });
@@ -78,6 +79,8 @@ describe("Git history browsing", () => {
   });
 
   it("retains query, caret and active ref across same-review rerenders but not navigation", () => {
+    // Removing jsdom's active node otherwise impersonates OS focus loss.
+    vi.spyOn(document, "hasFocus").mockReturnValue(true);
     const state = createGitHistoryState("/repo");
     state.branches = [
       { name: "refs/heads/topic", shortName: "topic", refKind: "branch", oid: "a".repeat(40) },
@@ -107,6 +110,22 @@ describe("Git history browsing", () => {
     expect(changed.trigger.getAttribute("aria-expanded")).toBe("false");
     changed.trigger.click();
     expect(changed.input.value).toBe("");
+  });
+
+  it("retains an inactive picker draft without moving focus from another input", () => {
+    const state = createGitHistoryState("/repo");
+    const old = mountPicker(state);
+    old.trigger.click();
+    old.type("topic");
+    const restore = preserveHistoryBranchPicker(document.body, false);
+    old.browser.remove();
+    const next = mountPicker(state);
+    const outside = document.createElement("input");
+    document.body.append(outside);
+    outside.focus();
+    restore?.();
+    expect(next.input.value).toBe("topic");
+    expect(document.activeElement).toBe(outside);
   });
 
   it("selects full local and remote refs only on click or Enter, with HEAD first", () => {

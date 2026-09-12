@@ -9,7 +9,7 @@ refs or checking anything out. The header always identifies the repository, bran
 After committing, Current changes may be empty; History remains useful. Repository snapshots
 are no longer created or used as diff bases.
 
-Ordinary entry into Diffs, a session change while that pane is active, or choosing
+Ordinary entry into Diffs, a session change while that pane is visible, or choosing
 another repository requests fresh status for the **selected actual repository**.
 Dirty index/worktree (including conflicts and nonignored untracked files) opens
 Current changes; clean opens History. `status.showUntrackedFiles` cannot hide
@@ -25,6 +25,10 @@ switches invalidate older decisions. Ordinary re-entry reevaluates a stored mode
 but retains its ref, selected immutable OID, file selections and comments; direct
 commit navigation, dedicated review sessions and Advanced Compare retain their
 existing explicit navigation behavior.
+
+Moving focus to another visible panel or window is not a new entry. Popout,
+redock and internal Dockview transfer retain the repository, viewed ref, pinned
+OID, file/stat selection, disclosures and independent scroll positions.
 
 The independent inline tool-card diffs still render OMP `result.details.diff`.
 OMP context checkpoint/rewind and native hashline editor snapshots are unrelated and
@@ -235,8 +239,19 @@ Fura version IDs and prohibit treating those IDs as Git refs.
 
 The UI retains filtering, file/stat views, lazy per-file patches, hunks, wider context,
 comments and agent questions. It refreshes after a turn settles, on panel re-entry, on
-window focus/visibility return and manually. Inactive views are marked stale. This is not
-a filesystem watcher; manual refresh remains available for external changes.
+window focus/visibility return and manually. Visible inactive panels accept summaries
+and lazy patches without reclaiming keyboard focus; hidden tabs and workspaces defer
+rendering and reads until visible. This is not a filesystem watcher, polling loop or
+automatic History Latest action; manual refresh remains available for external changes.
+After reconnect, the restored session list resumes stale visible ordinary reviews
+without changing the chosen mode or selected immutable commit.
+
+A same-target refresh keeps the last readable result until the replacement is ready,
+with an explicit refreshing or failure status. Actions bound to the retained comparison
+cannot submit stale anchors while it is retained. Changing repository, session, refs,
+commit or file cannot relabel old content as the new target. Normal Compare keeps its
+explicit repository/refs separate from a dedicated review workspace; background replies
+also preserve unsubmitted Compare controls and open branch-picker drafts.
 
 Opening a working-tree diff file in Code uses the selected canonical repository root, not
 the session's original cwd. Code Refresh retains that root and selected file. Code notes,

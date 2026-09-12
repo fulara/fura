@@ -191,10 +191,12 @@ test("Rust commit syntax and intraline retain context, comments, file bytes and 
     page.once("dialog", (dialog) => dialog.accept(second.repo));
     await review.getByRole("button", { name: "Add", exact: true }).click();
     await review.getByRole("combobox", { name: "Repository", exact: true }).selectOption(second.repo);
+    await review.getByRole("button", { name: "History", exact: true }).click();
     await expect(review.locator(".diff-commit-message")).toContainText(second.head);
     await expect(review.locator(".diff-intraline-add")).toHaveText("other");
     await expect(review).not.toContainText("HIGHLIGHT_ANCHOR_NOTE");
     await review.getByRole("combobox", { name: "Repository", exact: true }).selectOption(first.repo);
+    await review.getByRole("button", { name: "History", exact: true }).click();
     await expect(review.locator(".diff-intraline-add")).toHaveText("new");
     expect(readFileSync(path.join(first.repo, "lib.rs"), "utf8")).toBe(rustSource("WORKING_TREE_ONLY"));
     expect(git(first.repo, "rev-parse", "HEAD")).toBe(first.head);

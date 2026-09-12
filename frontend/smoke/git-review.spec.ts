@@ -406,7 +406,11 @@ test("ordinary entry chooses from the selected real repository and respects manu
       await expect(panel(page).getByRole("button", { name: "Refresh", exact: true })).toBeEnabled();
       await expect(mode()).toHaveText(previous!);
     }
-    await page.locator(".dv-tab:visible").filter({ hasText: "Code" }).click();
+    await panel(page).locator(".git-review-options > summary").click();
+    await panel(page).getByRole("button", { name: "Advanced Compare", exact: true }).click();
+    await page.locator("#cwdPickerDiffAgentSession").uncheck();
+    await page.locator("#cwdPickerCreate").click();
+    await expect(panel(page)).toBeHidden();
     await page.locator(".dv-tab:visible").filter({ hasText: "Git changes" }).click();
   };
   try {

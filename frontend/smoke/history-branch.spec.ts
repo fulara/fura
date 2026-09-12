@@ -157,6 +157,14 @@ async function advanced(page: Page, root: string, base: string, head: string) {
   await expect(page.locator("#cwdPickerDiffHead")).toHaveValue(head);
 }
 
+async function hideGitPanel(page: Page) {
+  await options(page);
+  await view(page).getByRole("button", { name: "Advanced Compare", exact: true }).click();
+  await page.locator("#cwdPickerDiffAgentSession").uncheck();
+  await page.locator("#cwdPickerCreate").click();
+  await expect(view(page)).toBeHidden();
+}
+
 type HistoryMessage = Extract<ServerMessage, { type: "git.history" }>;
 async function transport(page: Page) {
   // Observe delivery in the actual browser, so stale-reply assertions cannot pass
@@ -637,7 +645,7 @@ test("ordinary entry Compare cancellation rejects a delayed real working-tree pr
     await history(page); await choose(page, "refs/heads/topic", a.topic[34]);
     const restore = view(page).getByRole("button", { name: "Restore layout", exact: true });
     if (await restore.count()) await restore.click();
-    await page.locator(".dv-tab:visible").filter({ hasText: "Code" }).click();
+    await hideGitPanel(page);
     wire.hold = message => message.type === "sessionChanges.summary" && message.state.status === "ready"
       && message.state.review.currentCommitOid === null;
     await gitPanel(page);
@@ -667,7 +675,7 @@ test("ordinary entry preserves the selected History file through a clean status 
     await expect(file).toHaveClass(/active/);
     const restore = view(page).getByRole("button", { name: "Restore layout", exact: true });
     if (await restore.count()) await restore.click();
-    await page.locator(".dv-tab:visible").filter({ hasText: "Code" }).click();
+    await hideGitPanel(page);
     await gitPanel(page);
     await selected(page, a.main);
     await expect(file).toHaveClass(/active/);
