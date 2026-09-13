@@ -166,6 +166,11 @@ bun scripts/check-omp-rpc-contract.ts
 Restart existing OMP processes after upgrading; native addons stay loaded for the
 lifetime of each process.
 
+The current fork tracks OMP 18.1.19. Fura's BTW RPC still uses the main-context
+snapshot captured when the side question starts; upstream TUI BTW history and
+follow-ups do not enable persistent side conversations in Fura. The integration
+preserves both snapshot and structured-history support in OMP's side-turn pipeline.
+
 Environment overrides for `run-local-omp.sh`:
 
 | Variable | Default | Description |
@@ -252,6 +257,10 @@ OMP dependency/native build, home and agent directory. Snapshot SQLite
 credentials with the online backup API rather than copying a live database
 without its WAL. Preserve the configured model/provider and never reuse the
 production session store or an occupied test port.
+Remove inherited `FURA_*` listener/TLS settings as well; tool environment overrides
+may merge with the parent's environment rather than replace it. Construct the
+child's complete environment at the launcher boundary, then add only private
+test settings.
 Also remove inherited OMP session/profile and tool-bridge environment before
 starting the real smoke workload; changing `HOME` alone does not override
 `PI_CODING_AGENT_DIR`. For browser reconnect, reload the authenticated tab
