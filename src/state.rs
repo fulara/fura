@@ -595,6 +595,7 @@ pub(crate) struct BtwRequestRoute {
     pub(crate) owner_connection_id: u64,
     pub(crate) source_session_id: String,
     pub(crate) transport_session_id: String,
+    pub(crate) terminal: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1097,7 +1098,12 @@ impl SessionRuntimeState {
     }
 
     pub(crate) async fn remove_btw_request(&self, btw_id: &str) -> Option<BtwRequestRoute> {
-        self.btw_requests.write().await.remove(btw_id)
+        let route = self.btw_requests.write().await.remove(btw_id);
+        self.pending_btw_commands
+            .write()
+            .await
+            .retain(|_, command| command.btw_id != btw_id);
+        route
     }
 
     pub(crate) async fn insert_pending_btw_command(
@@ -1109,6 +1115,14 @@ impl SessionRuntimeState {
             .write()
             .await
             .insert(command_id, command);
+    }
+
+    pub(crate) async fn pending_btw_command(&self, command_id: &str) -> Option<PendingBtwCommand> {
+        self.pending_btw_commands
+            .read()
+            .await
+            .get(command_id)
+            .cloned()
     }
 
     pub(crate) async fn take_pending_btw_command(
@@ -1678,6 +1692,12 @@ pub(crate) async fn apply_get_state_update(
             .session_runtime
             .map_transport_to_session(transport_session_id, update.target_session_id.clone())
             .await;
+        crate::rpc::release_btw_requests_on_rebind(
+            state,
+            transport_session_id,
+            &update.target_session_id,
+        )
+        .await;
         state
             .session_runtime
             .set_remapped_session_metadata(

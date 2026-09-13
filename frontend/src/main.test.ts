@@ -2806,7 +2806,6 @@ describe("desktop cog options", () => {
     document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
     connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
 
-    expect(document.querySelector("#btwButton")).toBeNull();
     document.querySelector<HTMLButtonElement>("#workspaceOptionsToggle")?.click();
     const duplicateButton = document.querySelector<HTMLButtonElement>("#workspaceOptionsMenu #duplicateSessionButton");
     if (!duplicateButton) throw new Error("duplicate session action missing");
@@ -3416,6 +3415,538 @@ describe("desktop cog options", () => {
     expect(transcriptPanel.querySelector<HTMLElement>('[data-message-id="message-1"]')).toBe(untouchedBubble);
   });
 
+});
+
+describe("desktop transcript BTW tabs", () => {
+  async function openSource() {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+    activatePanel("transcript");
+    return connection;
+  }
+
+  function startSide(question: string) {
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+    input.value = question;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    const button = [...document.querySelectorAll<HTMLButtonElement>("#promptForm button")]
+      .find(item => item.textContent === "Ask on the side");
+    expect(button, "explicit side-question action beside the main composer").toBeDefined();
+    expect(button!.disabled).toBe(false);
+    button!.click();
+    return input;
+  }
+
+  function sideRequest(connection: FakeConnection) {
+    const request = [...connection.sent].reverse().find(message => message.type === "session.btw.start");
+    if (!request || request.type !== "session.btw.start") throw new Error("Side request missing");
+    return request;
+  }
+
+  function sideUpdate(connection: FakeConnection, state: Extract<ServerMessage, { type: "session.btw.update" }>["state"],
+    extra: Partial<Extract<ServerMessage, { type: "session.btw.update" }>> = {},
+    request = sideRequest(connection)) {
+    connection.emit({ type: "session.btw.update", targetClientId: request.clientId,
+      sourceSessionId: request.sessionId, requestId: request.requestId, state, ...extra });
+  }
+
+  function returnToConversation() {
+    const tab = [...document.querySelectorAll<HTMLButtonElement>('#testTranscriptPanel [role="tab"]')]
+      .find(button => button.textContent === "Conversation");
+    expect(tab).toBeDefined();
+    tab!.click();
+  }
+
+  it("opens closeable internal tabs without replacing the Transcript panel or injecting a main prompt", async () => {
+    const connection = await openSource();
+    const panel = document.querySelector("#testTranscriptPanel");
+    startSide("Why does this work?");
+    expect(connection.sent).toContainEqual(expect.objectContaining({
+      type: "session.btw.start", sessionId: "live", question: "Why does this work?",
+    }));
+    expect(connection.sent.some(message => message.type === "prompt.send" || message.type === "raw.rpc")).toBe(false);
+    expect(document.querySelector("#testTranscriptPanel")).toBe(panel);
+    const tabs = panel!.querySelectorAll('[role="tablist"] [role="tab"]');
+    expect([...tabs].map(tab => tab.textContent)).toEqual([
+      expect.stringContaining("Conversation"), expect.stringContaining("Why does this work?"),
+    ]);
+    expect(tabs[1].getAttribute("aria-selected")).toBe("true");
+    expect(panel!.querySelector('button[aria-label="Close Why does this work?"]')).not.toBeNull();
+    expect(panel!.querySelector('[data-message-id^="__pending_prompt:"]')).toBeNull();
+  });
+
+  it("hides main sending controls on a one-shot tab and restores the untouched main draft on return", async () => {
+    const connection = await openSource();
+    const input = startSide("Explain the boundary");
+    const form = document.querySelector<HTMLFormElement>("#promptForm")!;
+    expect(form.hidden).toBe(true);
+    expect(input.value).toBe("Explain the boundary");
+    const panel = document.querySelector("#testTranscriptPanel")!;
+    expect(panel.textContent).toMatch(/one-shot/i);
+    expect(panel.textContent).toMatch(/no follow-ups/i);
+    expect(panel.textContent).toMatch(/continuing this conversation is not supported by the current OMP integration/i);
+    expect(panel.querySelector("textarea, input")).toBeNull();
+    const back = [...panel.querySelectorAll<HTMLButtonElement>("button")]
+      .find(button => button.textContent === "Back to conversation");
+    expect(back).toBeDefined();
+    back!.click();
+    expect(form.hidden).toBe(false);
+    expect(input.value).toBe("Explain the boundary");
+    expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+  });
+
+  it("navigates the internal tablist with arrows Home and End without cancelling side work", async () => {
+    const connection = await openSource();
+    startSide("Zażółć 世界");
+    const tablist = document.querySelector('#testTranscriptPanel [role="tablist"]')!;
+    const selected = () => tablist.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')!;
+    const key = (value: string) => selected().dispatchEvent(new KeyboardEvent("keydown", { key: value, bubbles: true }));
+    selected().focus();
+    key("ArrowLeft");
+    expect(selected().textContent).toContain("Conversation");
+    expect(document.activeElement).toBe(selected());
+    key("End");
+    expect(selected().textContent).toContain("Zażółć 世界");
+    key("Home");
+    expect(selected().textContent).toContain("Conversation");
+    key("ArrowRight");
+    expect(selected().textContent).toContain("Zażółć 世界");
+    expect(tablist.querySelectorAll('[role="tab"][tabindex="0"]')).toHaveLength(1);
+    expect(connection.sent.some(message => String(message.type).includes("cancel") || message.type === "prompt.abort")).toBe(false);
+  });
+
+  it("consumes only the accepted draft and preserves a later edit even when its text matches the submission", async () => {
+    const connection = await openSource();
+    const input = startSide("Keep until ACK");
+    sideUpdate(connection, "started");
+    expect(input.value).toBe("Keep until ACK");
+    returnToConversation();
+    input.value = "new draft";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.value = "Keep until ACK";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    sideUpdate(connection, "accepted");
+    expect(input.value).toBe("Keep until ACK");
+    sideUpdate(connection, "completed", { answer: "Side only" });
+    sideUpdate(connection, "released");
+    startSide("Consume this exact draft");
+    sideUpdate(connection, "started");
+    expect(input.value).toBe("Consume this exact draft");
+    sideUpdate(connection, "accepted");
+    expect(input.value).toBe("");
+    sideUpdate(connection, "error", { error: "Provider unavailable" });
+    returnToConversation();
+    expect(input.value).toBe("Consume this exact draft");
+  });
+
+  it("keeps terminal text authoritative when completed precedes accepted and cleanup fails", async () => {
+    const connection = await openSource();
+    const input = startSide("Unicode 世界");
+    sideUpdate(connection, "streaming", { delta: "Long provisional response repeated repeated" });
+    sideUpdate(connection, "completed", { answer: "短い final" });
+    expect(document.querySelector(".btw-side:not([hidden]) .btw-answer")?.textContent).toBe("短い final");
+    expect(input.value).toBe("Unicode 世界");
+    expect(connection.sent).toContainEqual({ type: "session.btw.release", clientId: sideRequest(connection).clientId, requestId: sideRequest(connection).requestId });
+    sideUpdate(connection, "accepted");
+    expect(input.value).toBe("");
+    sideUpdate(connection, "streaming", { delta: "STALE DELTA" });
+    sideUpdate(connection, "release_error", { error: "Cleanup timed out" });
+    expect(document.querySelector(".btw-side:not([hidden]) .btw-answer")?.textContent).toBe("短い final");
+    expect(document.querySelector(".btw-side:not([hidden])")?.textContent).toContain("Completed");
+    expect(document.querySelector(".btw-cleanup-warning")?.textContent).toContain("Cleanup timed out");
+    expect(document.querySelector(".btw-cleanup-warning")?.textContent).toMatch(/reconnect/i);
+    returnToConversation();
+    input.value = "Next question";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(document.querySelector<HTMLButtonElement>("#btwButton")!.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>("#sendButton")!.disabled).toBe(false);
+  });
+
+  it("continues ingesting the hidden main transcript and restores its DOM scroll and draft without a main send", async () => {
+    const connection = await openSource();
+    const input = startSide("Side question");
+    const panel = document.querySelector("#testTranscriptPanel");
+    const main = panel!.querySelector<HTMLElement>(".btw-conversation")!;
+    sideUpdate(connection, "accepted");
+    returnToConversation();
+    input.value = "Unsent main draft";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    main.scrollTop = 123;
+    panel!.querySelector<HTMLButtonElement>('[role="tab"][aria-label="BTW: Side question"]')!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", {
+      isBusy: true, summary: summary("live", { status: "busy" }),
+      transcript: [{ kind: "message", id: "main-live", role: "assistant", blocks: [{ kind: "text", text: "Main keeps streaming" }], isNew: true }],
+    }) });
+    expect(main.hidden).toBe(true);
+    expect(main.textContent).toContain("Main keeps streaming");
+    expect(document.querySelector(".btw-side:not([hidden])")?.textContent).not.toContain("Main keeps streaming");
+    returnToConversation();
+    expect(document.querySelector("#testTranscriptPanel")).toBe(panel);
+    expect(panel!.querySelector(".btw-conversation")).toBe(main);
+    expect(main.scrollTop).toBe(123);
+    expect(input.value).toBe("Unsent main draft");
+    expect(connection.sent.some(message => message.type === "prompt.send" || message.type === "prompt.abort")).toBe(false);
+  });
+
+  it("preserves per-source selection and drafts through session and controller swaps with background completion badges", async () => {
+    const connection = await openSource();
+    const input = startSide("First source");
+    const first = sideRequest(connection);
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+    [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")]
+      .find(button => button.textContent?.includes("Session other"))!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+    startSide("Other source");
+    const second = sideRequest(connection);
+    expect(second.requestId).not.toBe(first.requestId);
+    sideUpdate(connection, "accepted", {}, first);
+    expect(input.value).toBe("Other source");
+    sideUpdate(connection, "completed", { answer: "Background answer" }, first);
+    sideUpdate(connection, "released", {}, first);
+    expect(document.querySelector("#sessionsList")?.textContent).toContain("BTW unread 1");
+    expect(document.querySelector("#sessionsList")?.textContent).toContain("BTW running 1");
+    document.querySelector<HTMLButtonElement>("#askFuraButton")!.click();
+    input.value = "Controller draft";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")]
+      .find(button => button.textContent?.includes("Session live"))!.click();
+    expect(document.querySelector(".btw-side:not([hidden]) .btw-answer")?.textContent).toBe("Background answer");
+    expect(document.querySelector("#sessionsList")?.textContent).not.toContain("BTW unread");
+    returnToConversation();
+    expect(input.value).toBe("");
+    [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")]
+      .find(button => button.textContent?.includes("Session other"))!.click();
+    expect(document.querySelector(".btw-side:not([hidden])")?.textContent).toContain("Other source");
+    returnToConversation();
+    expect(input.value).toBe("Other source");
+    document.querySelector<HTMLButtonElement>("#askFuraButton")!.click();
+    expect(input.value).toBe("Controller draft");
+    expect(connection.sent.some(message => message.type === "session.btw.cancel")).toBe(false);
+  });
+
+  it("closes only its running identity and blocks a new start until release is acknowledged", async () => {
+    const connection = await openSource();
+    const input = startSide("Close while queued");
+    const request = sideRequest(connection);
+    document.querySelector<HTMLButtonElement>('[aria-label="Close Close while queued"]')!.click();
+    expect(document.querySelector('[role="tablist"] [aria-selected="true"]')?.textContent).toBe("Conversation");
+    expect(document.querySelector(".btw-side:not([hidden])")).toBeNull();
+    expect(connection.sent).toContainEqual({ type: "session.btw.cancel", clientId: request.clientId, requestId: request.requestId });
+    expect(connection.sent).toContainEqual({ type: "session.btw.release", clientId: request.clientId, requestId: request.requestId });
+    expect(document.querySelector<HTMLButtonElement>("#btwButton")!.disabled).toBe(true);
+    sideUpdate(connection, "streaming", { delta: "Late hidden answer" });
+    expect(document.querySelector("#testTranscriptPanel")?.textContent).not.toContain("Late hidden answer");
+    sideUpdate(connection, "released");
+    expect(input.value).toBe("Close while queued");
+    expect(document.querySelector<HTMLButtonElement>("#btwButton")!.disabled).toBe(false);
+    expect(connection.sent.some(message => message.type === "prompt.abort")).toBe(false);
+  });
+
+  it("interrupts in-flight tabs on reconnect while retaining completed local answers and rejecting stale identities", async () => {
+    const connection = await openSource();
+    startSide("Finished");
+    sideUpdate(connection, "accepted");
+    sideUpdate(connection, "completed", { answer: "Keep completed locally" });
+    sideUpdate(connection, "released");
+    returnToConversation();
+    startSide("Interrupted");
+    const interrupted = sideRequest(connection);
+    sideUpdate(connection, "streaming", { delta: "Partial text" });
+    sideUpdate(connection, "completed", { sourceSessionId: "wrong", answer: "Wrong session" });
+    sideUpdate(connection, "completed", { targetClientId: "someone-else", answer: "Wrong owner" });
+    expect(document.querySelector(".btw-side:not([hidden]) .btw-answer")?.textContent).toBe("Partial text");
+    connection.options.onClose?.();
+    expect(document.querySelector(".btw-side:not([hidden])")?.textContent).toContain("will not resume");
+    connection.options.onOpen?.();
+    sideUpdate(connection, "completed", { answer: "Old socket final" }, interrupted);
+    expect(document.querySelector(".btw-side:not([hidden]) .btw-answer")?.textContent).toBe("Partial text");
+    expect(connection.sent.filter(message => message.type === "session.btw.start")).toHaveLength(2);
+    document.querySelector<HTMLButtonElement>('[role="tab"][aria-label="BTW: Finished"]')!.click();
+    expect(document.querySelector(".btw-side:not([hidden]) .btw-answer")?.textContent).toBe("Keep completed locally");
+    expect(document.querySelectorAll('.btw-tab-close')).toHaveLength(2);
+  });
+
+  it("preserves rejected questions and expanded snippet text without executing slash commands or attaching images", async () => {
+    const connection = await openSource();
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+    const snippet = "Safe snippet with <script>never execute</script> ".repeat(20);
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: { items: [], getData: () => snippet } });
+    input.dispatchEvent(paste);
+    expect(input.value).toContain("[Snippet");
+    document.querySelector<HTMLButtonElement>("#btwButton")!.click();
+    expect(sideRequest(connection).question).toContain(snippet.trim());
+    expect(sideRequest(connection).question).not.toMatch(/\[Snippet #?\d+/);
+    sideUpdate(connection, "error", { error: "No source history" });
+    sideUpdate(connection, "released");
+    returnToConversation();
+    expect(input.value).toContain("[Snippet");
+    expect(document.querySelector("#testTranscriptPanel script")).toBeNull();
+    startSide("/btw literal question");
+    expect(sideRequest(connection).question).toBe("/btw literal question");
+    expect(connection.sent.some(message => message.type === "prompt.send" || message.type === "raw.rpc")).toBe(false);
+  });
+
+  it("rejects image attachments while decoding and after paste without consuming the main draft", async () => {
+    const connection = await openSource();
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+    input.value = "Keep image draft";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    let reader: FileReader | undefined;
+    vi.spyOn(FileReader.prototype, "readAsDataURL").mockImplementation(function (this: FileReader) { reader = this; });
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: {
+      items: [{ type: "image/png", getAsFile: () => new File(["png"], "image.png", { type: "image/png" }) }], getData: () => "",
+    } });
+    input.dispatchEvent(paste);
+    expect(document.querySelector<HTMLButtonElement>("#btwButton")!.disabled).toBe(true);
+    expect(document.querySelector<HTMLButtonElement>("#btwButton")!.title).toContain("pending attachments");
+    document.querySelector<HTMLButtonElement>("#btwButton")!.click();
+    expect(connection.sent.some(message => message.type === "session.btw.start")).toBe(false);
+    Object.defineProperty(reader!, "result", { value: "data:image/png;base64,cG5n" });
+    reader!.onload?.(new ProgressEvent("load") as ProgressEvent<FileReader>);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(input.value).toContain("Keep image draft");
+    expect(input.value).toContain("[Image");
+    expect(document.querySelector<HTMLButtonElement>("#btwButton")!.disabled).toBe(true);
+    expect(connection.sent.some(message => message.type === "session.btw.start")).toBe(false);
+  });
+
+  it("rejects late generation after a source stop without changing main composer targeting", async () => {
+    const connection = await openSource();
+    const input = startSide("Before source rebind");
+    sideUpdate(connection, "streaming", { delta: "Captured partial" });
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live", { kind: "available", status: "available" })] });
+    sideUpdate(connection, "accepted");
+    sideUpdate(connection, "completed", { answer: "Stale after rebind" });
+    expect(document.querySelector(".btw-side:not([hidden]) .btw-answer")?.textContent).toBe("Captured partial");
+    expect(document.querySelector(".btw-side:not([hidden])")?.textContent).toContain("Source session stopped or changed");
+    returnToConversation();
+    expect(input.value).toBe("Before source rebind");
+    expect(document.querySelector<HTMLButtonElement>("#btwButton")!.disabled).toBe(true);
+  });
+
+  it("renders and copies in the adopted Transcript ownerDocument without moving focus to the main window", async () => {
+    const connection = await openSource();
+    const panel = document.querySelector<HTMLElement>("#testTranscriptPanel")!;
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const owner = frame.contentDocument!;
+    owner.body.append(owner.adoptNode(panel));
+    const copy = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(owner.defaultView!.navigator, "clipboard", { configurable: true, value: { writeText: copy } });
+    startSide("Popout question");
+    sideUpdate(connection, "completed", { answer: "Copy from popout" });
+    const copyButton = [...panel.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Copy answer")!;
+    expect(copyButton.ownerDocument).toBe(owner);
+    copyButton.click();
+    await Promise.resolve();
+    expect(copy).toHaveBeenCalledWith("Copy from popout");
+    const selected = panel.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')!;
+    selected.dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true }));
+    expect(owner.activeElement?.textContent).toBe("Conversation");
+    document.querySelector("#app")!.append(document.adoptNode(panel));
+    sideUpdate(connection, "released");
+    expect(panel.querySelector('[role="tab"]')?.ownerDocument).toBe(document);
+  });
+
+  describe("review regressions", () => {
+    it.each([false, true])("blocks deferred preset main sends and busy drafts while side-selected (busy=%s)", async busy => {
+      const connection = await openSource();
+      if (busy) connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { isBusy: true, summary: summary("live", { status: "busy" }) }) });
+      const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+      input.value = "/presets check";
+      document.querySelector<HTMLFormElement>("#promptForm")!.requestSubmit();
+      expect(connection.sent).toContainEqual({ type: "presets.refresh" });
+      startSide("One-shot, not a main prompt");
+      connection.emit({ type: "presets.list", presets: [{ name: "check", description: "", body: "MAIN PRESET MUST WAIT", defaults: {} }] });
+      expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+      expect(document.querySelector<HTMLElement>("#busyPromptOverlay")!.hidden).toBe(true);
+      expect(document.querySelector<HTMLElement>("#presetsOverlay")!.hidden).toBe(false);
+      expect(document.querySelector("#presetsBody")?.textContent).toContain("MAIN PRESET MUST WAIT");
+      returnToConversation();
+      expect(document.querySelector<HTMLElement>("#busyPromptOverlay")!.hidden).toBe(true);
+      document.querySelector<HTMLButtonElement>("#presetsActions .presets-primary")!.click();
+      if (busy) {
+        expect(document.querySelector<HTMLElement>("#busyPromptOverlay")!.hidden).toBe(false);
+        document.querySelector<HTMLButtonElement>("#busyPromptSteer")!.click();
+      }
+      expect(connection.sent).toContainEqual(expect.objectContaining({ type: "prompt.send", text: "MAIN PRESET MUST WAIT" }));
+    });
+
+    it("blocks existing diff preview sends until returning to Conversation", async () => {
+      const connection = await openSource();
+      const request = connection.sent.find(message => message.type === "sessionChanges.request");
+      if (!request || request.type !== "sessionChanges.request") throw new Error("Diff request missing");
+      const base = sessionChangesState("live");
+      if (base.status !== "ready") throw new Error("Ready diff missing");
+      const file = { oldPath: null, newPath: "src/main.ts" };
+      const patch = "diff --git a/src/main.ts b/src/main.ts\n@@ -1 +1 @@\n-old\n+new";
+      connection.emit({ type: "sessionChanges.summary", state: { ...base, targetClientId: request.clientId, diffId: request.diffId,
+        request: { ...base.request, clientId: request.clientId, diffId: request.diffId, detailMode: "filePatch", selectedFile: file },
+        comparison: { ...base.comparison, detailMode: "filePatch", selectedFile: file },
+        summary: { files: [{ ...file, status: "modified", added: 1, removed: 1 }], stat: null, truncated: false } } });
+      connection.emit({ type: "diff.content", content: { targetClientId: request.clientId, diffId: request.diffId,
+        scope: "sessionChanges", comparisonKey: "key", file, patch, rows: simpleDiffRows(patch), truncated: false, contextLines: 3, generatedAt: "now" } });
+      vi.spyOn(window, "prompt").mockReturnValue("Question for the main agent");
+      document.querySelector<HTMLButtonElement>("#testDiffPanel .diff-question-btn")!.click();
+      [...document.querySelectorAll<HTMLButtonElement>("#testDiffPanel button")]
+        .find(button => button.textContent === "Preview questions (1)")!.click();
+      expect(document.querySelector<HTMLElement>("#diffPreviewOverlay")!.hidden).toBe(false);
+      startSide("Side only");
+      document.querySelector<HTMLButtonElement>("#diffPreviewSend")!.click();
+      expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+      expect(document.querySelector<HTMLElement>("#busyPromptOverlay")!.hidden).toBe(true);
+      returnToConversation();
+      document.querySelector<HTMLButtonElement>("#diffPreviewSend")!.click();
+      expect(connection.sent).toContainEqual(expect.objectContaining({ type: "prompt.send", sessionId: "live" }));
+    });
+
+    it("blocks a queued busy-dialog dispatch after switching back to a side tab", async () => {
+      const connection = await openSource();
+      startSide("Side is read-only");
+      returnToConversation();
+      connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { isBusy: true, summary: summary("live", { status: "busy" }) }) });
+      const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+      input.value = "Queue for main";
+      document.querySelector<HTMLFormElement>("#promptForm")!.requestSubmit();
+      expect(document.querySelector<HTMLElement>("#busyPromptOverlay")!.hidden).toBe(false);
+      document.querySelector<HTMLButtonElement>('[role="tab"][aria-label="BTW: Side is read-only"]')!.click();
+      document.querySelector<HTMLButtonElement>("#busyPromptSteer")!.click();
+      expect(connection.sent.some(message => message.type === "prompt.send")).toBe(false);
+      expect(document.querySelector<HTMLElement>("#busyPromptOverlay")!.hidden).toBe(true);
+      returnToConversation();
+      expect(document.querySelector<HTMLElement>("#busyPromptOverlay")!.hidden).toBe(false);
+      document.querySelector<HTMLButtonElement>("#busyPromptSteer")!.click();
+      expect(connection.sent).toContainEqual(expect.objectContaining({ type: "prompt.send", text: "Queue for main", behavior: "steer" }));
+    });
+
+    it("preserves existing message controls and expanded tool output when opening the first side tab", async () => {
+      const connection = await openSource();
+      connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", { transcript: [
+        { kind: "message", id: "existing", role: "assistant", blocks: [{ kind: "text", text: "Stable answer" }], isNew: false },
+        { kind: "tool", toolCallId: "existing-tool", toolName: "bash", args: { command: "echo stable" },
+          isActive: false, isError: false, result: { text: "a\nb\nc" }, renderHash: "stable-tool" },
+      ] }) });
+      const copy = document.querySelector('#testTranscriptPanel [data-message-id="existing"] .message-actions button')!;
+      const disclosure = document.querySelector<HTMLDetailsElement>("#testTranscriptPanel .tool-result-details")!;
+      disclosure.open = true;
+      startSide("Do not rebuild the main transcript");
+      returnToConversation();
+      expect(document.querySelector('#testTranscriptPanel [data-message-id="existing"] .message-actions button')).toBe(copy);
+      expect(document.querySelector("#testTranscriptPanel .tool-result-details")).toBe(disclosure);
+      expect(disclosure.open).toBe(true);
+    });
+
+    it("keeps every current-source tab linked to a mounted labelled panel while inactive", async () => {
+      const connection = await openSource();
+      startSide("First retained result");
+      sideUpdate(connection, "completed", { answer: "One" });
+      sideUpdate(connection, "released");
+      returnToConversation();
+      startSide("Second retained result");
+      returnToConversation();
+      const tabs = document.querySelectorAll<HTMLElement>('#testTranscriptPanel [role="tab"]');
+      expect(tabs).toHaveLength(3);
+      for (const tab of tabs) {
+        const panel = tab.ownerDocument.getElementById(tab.getAttribute("aria-controls")!);
+        expect(panel, `mounted panel for ${tab.getAttribute("aria-label")}`).not.toBeNull();
+        expect(panel!.getAttribute("role")).toBe("tabpanel");
+        expect(panel!.getAttribute("aria-labelledby")).toBe(tab.id);
+        expect(panel!.hidden).toBe(tab.getAttribute("aria-selected") !== "true");
+      }
+    });
+
+    it("returns keyboard focus to visible Conversation when no prior transcript control was focused", async () => {
+      await openSource();
+      document.querySelector<HTMLTextAreaElement>("#promptInput")!.focus();
+      startSide("Keyboard return");
+      const panel = document.querySelector<HTMLElement>("#testTranscriptPanel")!;
+      const back = [...panel.querySelectorAll<HTMLButtonElement>(".btw-side:not([hidden]) button")]
+        .find(button => button.textContent === "Back to conversation")!;
+      back.focus();
+      back.click();
+      const active = panel.ownerDocument.activeElement as HTMLElement;
+      expect(active).not.toBe(panel.ownerDocument.body);
+      expect(active.closest("[hidden]")).toBeNull();
+      expect(panel.contains(active)).toBe(true);
+    });
+
+    it("moves focus to visible Transcript content after closing its last side tab", async () => {
+      await openSource();
+      startSide("Last tab");
+      const close = document.querySelector<HTMLButtonElement>('[aria-label="Close Last tab"]')!;
+      close.focus();
+      close.click();
+      const active = close.ownerDocument.activeElement as HTMLElement;
+      expect(active).not.toBe(close.ownerDocument.body);
+      expect(active.isConnected).toBe(true);
+      expect(active.closest("[hidden]")).toBeNull();
+      expect(document.querySelector("#testTranscriptPanel")!.contains(active)).toBe(true);
+    });
+
+    it("restores saved main scroll after a source switch while Conversation has no layout box", async () => {
+      const connection = await openSource();
+      startSide("A side");
+      returnToConversation();
+      const main = document.querySelector<HTMLElement>("#testTranscriptPanel .btw-conversation")!;
+      let actualScroll = 240;
+      Object.defineProperty(main, "scrollTop", { configurable: true,
+        get: () => main.hidden ? 0 : actualScroll,
+        set: value => { if (!main.hidden) actualScroll = value; } });
+      Object.defineProperty(main, "scrollHeight", { configurable: true, get: () => main.hidden ? 0 : 1000 });
+      Object.defineProperty(main, "clientHeight", { configurable: true, get: () => main.hidden ? 0 : 100 });
+      document.querySelector<HTMLButtonElement>('[role="tab"][aria-label="BTW: A side"]')!.click();
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")]
+        .find(button => button.textContent?.includes("Session other"))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")]
+        .find(button => button.textContent?.includes("Session live"))!.click();
+      returnToConversation();
+      expect(main.hidden).toBe(false);
+      expect(main.scrollTop).toBe(240);
+    });
+
+    it("shows the BTW prefix and full accessible Unicode question on its visibly truncated tab", async () => {
+      await openSource();
+      const question = "Zażółć 世界 ".repeat(12).trim();
+      startSide(question);
+      const tab = document.querySelector<HTMLElement>('#testTranscriptPanel [role="tab"][aria-selected="true"]')!;
+      expect(tab.textContent).toBe(`BTW: ${question}`);
+      expect(tab.getAttribute("aria-label")).toBe(`BTW: ${question}`);
+      expect(tab.title).toBe(question);
+    });
+
+    it("uses distinct owned tabpanel IDs when the same request renders in both desktop workspaces", async () => {
+      const connection = await openSource();
+      const normal = document.querySelector<HTMLElement>("#testTranscriptPanel")!;
+      const review = document.querySelector<HTMLElement>("#testReviewTranscriptPanel")!;
+      normal.removeAttribute("id");
+      review.removeAttribute("id");
+      startSide("Shared request, separate views");
+      connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live", {
+        summary: summary("live", { sessionMode: "diffReview", title: "diff: main..topic" }),
+      }) });
+      const normalTabs = normal.querySelectorAll<HTMLElement>('[role="tab"]');
+      const reviewTabs = review.querySelectorAll<HTMLElement>('[role="tab"]');
+      expect(normalTabs).toHaveLength(2);
+      expect(reviewTabs).toHaveLength(2);
+      for (const [container, tabs] of [[normal, normalTabs], [review, reviewTabs]] as const) {
+        for (const tab of tabs) {
+          const target = tab.ownerDocument.getElementById(tab.getAttribute("aria-controls")!);
+          expect(target).not.toBeNull();
+          expect(container.contains(target)).toBe(true);
+          expect(target!.getAttribute("aria-labelledby")).toBe(tab.id);
+        }
+      }
+      const ids = [...normalTabs, ...reviewTabs].map(tab => tab.id);
+      expect(new Set(ids).size).toBe(ids.length);
+    });
+  });
 });
 
 describe("desktop compaction indicator", () => {

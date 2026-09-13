@@ -904,6 +904,97 @@ h2 {
   max-width: 100%;
 }
 
+/* BTW is local navigation inside Transcript, never another Dockview panel. */
+.panel-scroll.btw-transcript {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  gap: 0;
+}
+
+.btw-tablist {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 0.25rem;
+  overflow-x: auto;
+  padding: 0.4rem;
+  border-bottom: 1px solid #343a46;
+}
+
+.btw-tab {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.btw-tab [role="tab"] {
+  max-width: 15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0.35rem 0.55rem;
+}
+
+.btw-tab [aria-selected="true"] {
+  background: var(--color-accent-soft);
+  border-color: var(--color-accent);
+}
+
+.btw-tab-close {
+  padding: 0.2rem 0.4rem;
+}
+
+.btw-tab-badge,
+.btw-session-badges {
+  color: var(--color-warning);
+  font-size: 0.72rem;
+}
+
+.btw-session-badges {
+  display: block;
+  padding: 0 0.75rem 0.3rem;
+}
+
+.btw-conversation,
+.btw-side {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: var(--gap-transcript);
+  padding: var(--pad-transcript);
+}
+
+.btw-side > button {
+  justify-self: start;
+}
+
+.btw-side h3,
+.btw-side p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.btw-explanation {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-small);
+}
+
+.btw-notice {
+  color: var(--color-warning);
+  padding: 0.5rem;
+  margin: 0;
+}
+
+.btw-transcript [hidden],
+.prompt-form[hidden] {
+  display: none;
+}
+
 
 
 .panel-content-diffs .panel-scroll {

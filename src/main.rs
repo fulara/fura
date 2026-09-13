@@ -5123,6 +5123,7 @@ pub(crate) mod tests {
                     target_client_id: "browser-1".to_string(),
                     owner_connection_id: 41,
                     source_session_id: "source-1".to_string(),
+                    terminal: false,
                     transport_session_id: "transport-1".to_string(),
                 },
             )
@@ -5185,6 +5186,7 @@ pub(crate) mod tests {
                     target_client_id: "browser-1".to_string(),
                     owner_connection_id: 41,
                     source_session_id: "source-1".to_string(),
+                    terminal: false,
                     transport_session_id: "transport-1".to_string(),
                 },
             )
@@ -5366,6 +5368,345 @@ pub(crate) mod tests {
         assert!(state.session_runtime.btw_request("btw-1").await.is_none());
     }
 
+    async fn start_test_btw(state: &AppState, commands: &mut mpsc::Receiver<Value>) -> Value {
+        assert!(
+            start_btw_request(
+                state,
+                41,
+                "browser-1".to_string(),
+                "source-1".to_string(),
+                "btw-1".to_string(),
+                "Why?".to_string(),
+            )
+            .await
+            .is_empty()
+        );
+        commands.try_recv().expect("native BTW start")
+    }
+
+    async fn reply_test_btw(state: &AppState, transport: &str, command: &Value, success: bool) {
+        apply_rpc_frame(
+            state,
+            transport,
+            &serde_json::json!({
+                "id": command["id"],
+                "type": "response",
+                "command": command["type"],
+                "success": success,
+                "data": { "btwId": "btw-1" },
+                "error": if success { Value::Null } else { Value::String("cleanup refused".into()) }
+            }),
+        )
+        .await;
+    }
+
+    fn assert_test_btw_event(event: &ServerMessage, expected: &str) {
+        assert!(server_message_visible_to_connection(event, 41));
+        assert!(!server_message_visible_to_connection(event, 42));
+        match event {
+            ServerMessage::SessionBtwUpdate {
+                target_client_id,
+                source_session_id,
+                request_id,
+                state,
+                ..
+            } => {
+                assert_eq!(target_client_id, "browser-1");
+                assert_eq!(source_session_id, "source-1");
+                assert_eq!(request_id, "btw-1");
+                assert_eq!(state, expected);
+            }
+            other => panic!("unexpected BTW event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn btw_rejected_start_reports_no_native_record_to_release() {
+        let state = test_state(16, None);
+        let mut commands = register_test_transport(&state, "transport-a", "source-1", 8).await;
+        let start = start_test_btw(&state, &mut commands).await;
+        let mut events = state.events.subscribe();
+        reply_test_btw(&state, "transport-a", &start, false).await;
+        assert_test_btw_event(&events.try_recv().expect("start rejection"), "error");
+        assert_test_btw_event(
+            &events.try_recv().expect("no accepted native record"),
+            "released",
+        );
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+        drop(commands);
+        let responses = start_btw_request(
+            &state,
+            41,
+            "browser-1".into(),
+            "source-1".into(),
+            "btw-1".into(),
+            "Why?".into(),
+        )
+        .await;
+        assert_test_btw_event(&responses[0], "error");
+        assert_test_btw_event(&responses[1], "released");
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn btw_native_session_rebind_releases_and_suppresses_old_generation() {
+        let state = test_state(32, None);
+        let mut commands = register_test_transport(&state, "transport-a", "source-1", 16).await;
+        let start = start_test_btw(&state, &mut commands).await;
+        reply_test_btw(&state, "transport-a", &start, true).await;
+        apply_rpc_frame(
+            &state,
+            "transport-a",
+            &serde_json::json!({
+                "type":"response","command":"get_state","success":true,
+                "data":{"sessionId":"forked","isStreaming":false}
+            }),
+        )
+        .await;
+        let mut release = None;
+        while let Ok(command) = commands.try_recv() {
+            if command["type"] == "btw_release" {
+                release = Some(command);
+            }
+        }
+        let release = release.expect("source identity transition releases original native record");
+        let mut events = state.events.subscribe();
+        apply_rpc_frame(
+            &state,
+            "transport-a",
+            &serde_json::json!({
+                "type":"btw_update","btwId":"btw-1","state":"completed","answer":"stale source"
+            }),
+        )
+        .await;
+        assert!(
+            events.try_recv().is_err(),
+            "old source update must not revive generation"
+        );
+        reply_test_btw(&state, "transport-a", &release, true).await;
+        assert_test_btw_event(
+            &events.try_recv().expect("rebind cleanup confirmed"),
+            "released",
+        );
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn btw_controls_keep_captured_transport_after_source_rebind() {
+        let state = test_state(16, None);
+        let mut original = register_test_transport(&state, "transport-a", "source-1", 8).await;
+        start_test_btw(&state, &mut original).await;
+        state
+            .session_runtime
+            .map_transport_to_session("transport-a", "forked".into())
+            .await;
+        let mut replacement = register_test_transport(&state, "transport-b", "source-1", 8).await;
+
+        for (kind, native) in [
+            (PendingBtwCommandKind::Cancel, "btw_cancel"),
+            (PendingBtwCommandKind::Release, "btw_release"),
+            (PendingBtwCommandKind::Promote, "btw_promote"),
+        ] {
+            assert!(
+                control_btw_request(&state, 41, "browser-1".into(), "btw-1".into(), kind)
+                    .await
+                    .is_empty()
+            );
+            assert!(
+                replacement.try_recv().is_err(),
+                "control must never reach rebound source"
+            );
+            assert_eq!(
+                original.try_recv().expect("control on captured transport")["type"],
+                native
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn btw_wrong_transport_updates_and_responses_cannot_claim_owner() {
+        let state = test_state(16, None);
+        let mut original = register_test_transport(&state, "transport-a", "source-1", 8).await;
+        let _other = register_test_transport(&state, "transport-b", "source-2", 8).await;
+        let start = start_test_btw(&state, &mut original).await;
+        let mut events = state.events.subscribe();
+        apply_rpc_frame(
+            &state,
+            "transport-b",
+            &serde_json::json!({
+                "type": "btw_update", "btwId": "btw-1", "state": "completed", "answer": "forged"
+            }),
+        )
+        .await;
+        assert!(events.try_recv().is_err(), "foreign update leaked to owner");
+        reply_test_btw(&state, "transport-b", &start, false).await;
+        assert!(
+            events.try_recv().is_err(),
+            "foreign error consumed owner's request"
+        );
+        reply_test_btw(&state, "transport-b", &start, true).await;
+        assert!(
+            events.try_recv().is_err(),
+            "foreign ACK consumed owner's request"
+        );
+        reply_test_btw(&state, "transport-a", &start, true).await;
+        assert_test_btw_event(
+            &events.try_recv().expect("real ACK remains correlated"),
+            "accepted",
+        );
+    }
+
+    #[tokio::test]
+    async fn btw_accepts_ack_after_terminal_and_releases_retained_result() {
+        let state = test_state(16, None);
+        let mut commands = register_test_transport(&state, "transport-a", "source-1", 8).await;
+        let start = start_test_btw(&state, &mut commands).await;
+        let mut events = state.events.subscribe();
+        for update in [
+            serde_json::json!({"type":"btw_update","btwId":"btw-1","state":"started","question":"Why?"}),
+            serde_json::json!({"type":"btw_update","btwId":"btw-1","state":"completed","answer":"Final"}),
+        ] {
+            apply_rpc_frame(&state, "transport-a", &update).await;
+            assert_test_btw_event(
+                &events.try_recv().expect("native update"),
+                update["state"].as_str().unwrap(),
+            );
+        }
+        reply_test_btw(&state, "transport-a", &start, true).await;
+        assert_test_btw_event(
+            &events.try_recv().expect("acceptance after terminal"),
+            "accepted",
+        );
+        assert!(state.session_runtime.btw_request("btw-1").await.is_some());
+        control_btw_request(
+            &state,
+            41,
+            "browser-1".into(),
+            "btw-1".into(),
+            PendingBtwCommandKind::Release,
+        )
+        .await;
+        let release = commands.try_recv().expect("release retained result");
+        reply_test_btw(&state, "transport-a", &release, true).await;
+        assert_test_btw_event(&events.try_recv().expect("confirmed release"), "released");
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+        apply_rpc_frame(
+            &state,
+            "transport-a",
+            &serde_json::json!({
+                "type":"btw_update","btwId":"btw-1","state":"streaming","delta":"late"
+            }),
+        )
+        .await;
+        assert!(events.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn btw_release_failure_preserves_terminal_route_for_retry() {
+        let state = test_state(16, None);
+        let mut commands = register_test_transport(&state, "transport-a", "source-1", 8).await;
+        let start = start_test_btw(&state, &mut commands).await;
+        reply_test_btw(&state, "transport-a", &start, true).await;
+        apply_rpc_frame(
+            &state,
+            "transport-a",
+            &serde_json::json!({
+                "type":"btw_update","btwId":"btw-1","state":"completed","answer":"Keep this answer"
+            }),
+        )
+        .await;
+        let mut events = state.events.subscribe();
+        control_btw_request(
+            &state,
+            41,
+            "browser-1".into(),
+            "btw-1".into(),
+            PendingBtwCommandKind::Release,
+        )
+        .await;
+        let release = commands.try_recv().expect("release");
+        reply_test_btw(&state, "transport-a", &release, false).await;
+        let failure = events.try_recv().expect("cleanup failure");
+        assert_test_btw_event(&failure, "release_error");
+        assert!(matches!(
+            failure,
+            ServerMessage::SessionBtwUpdate {
+                error: Some(_),
+                answer: None,
+                ..
+            }
+        ));
+        assert!(state.session_runtime.btw_request("btw-1").await.is_some());
+        assert!(
+            control_btw_request(
+                &state,
+                41,
+                "browser-1".into(),
+                "btw-1".into(),
+                PendingBtwCommandKind::Release
+            )
+            .await
+            .is_empty()
+        );
+        let retry = commands.try_recv().expect("retry release");
+        reply_test_btw(&state, "transport-a", &retry, true).await;
+        assert_test_btw_event(&events.try_recv().expect("retry confirmed"), "released");
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn btw_disconnect_releases_live_original_transport_after_rebind() {
+        let state = test_state(16, None);
+        let mut original = register_test_transport(&state, "transport-a", "source-1", 8).await;
+        start_test_btw(&state, &mut original).await;
+        state
+            .session_runtime
+            .map_transport_to_session("transport-a", "forked".into())
+            .await;
+        let mut replacement = register_test_transport(&state, "transport-b", "source-1", 8).await;
+        release_btw_requests_on_disconnect(&state, 41).await;
+        assert!(
+            replacement.try_recv().is_err(),
+            "disconnect must release original child"
+        );
+        let release = original.try_recv().expect("live native release");
+        assert_eq!(release["type"], "btw_release");
+        assert!(
+            state.session_runtime.btw_request("btw-1").await.is_some(),
+            "retain until native ACK"
+        );
+        reply_test_btw(&state, "transport-a", &release, true).await;
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn btw_dead_transport_release_reports_cleanup_error_and_forgets_route() {
+        let state = test_state(16, None);
+        let mut commands = register_test_transport(&state, "transport-a", "source-1", 8).await;
+        start_test_btw(&state, &mut commands).await;
+        drop(commands);
+        let responses = control_btw_request(
+            &state,
+            41,
+            "browser-1".into(),
+            "btw-1".into(),
+            PendingBtwCommandKind::Release,
+        )
+        .await;
+        assert_test_btw_event(&responses[0], "release_error");
+        assert!(state.session_runtime.btw_request("btw-1").await.is_none());
+        let mut events = state.events.subscribe();
+        apply_rpc_frame(
+            &state,
+            "transport-a",
+            &serde_json::json!({
+                "type":"btw_update","btwId":"btw-1","state":"completed","answer":"late"
+            }),
+        )
+        .await;
+        assert!(events.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn websocket_disconnect_releases_only_live_owned_btw_routes() {
         let state = test_state(8, None);
@@ -5378,6 +5719,7 @@ pub(crate) mod tests {
                         target_client_id: format!("browser-{owner_connection_id}"),
                         owner_connection_id,
                         source_session_id: "source-1".to_string(),
+                        terminal: false,
                         transport_session_id: "source-1".to_string(),
                     },
                 )

@@ -672,7 +672,21 @@ export type CodeLocation = {
 
 
 
+export type SessionBtwUpdate = {
+  type: "session.btw.update";
+  targetClientId: string;
+  sourceSessionId: string;
+  requestId: string;
+  state: "accepted" | "started" | "streaming" | "completed" | "cancelled" | "error" | "released" | "release_error";
+  question?: string | null;
+  delta?: string | null;
+  answer?: string | null;
+  canPromote?: boolean | null;
+  error?: string | null;
+};
+
 export type ServerMessage =
+  | SessionBtwUpdate
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
   | { type: "config.updated"; config: ServerConfig }
   | { type: "presets.list"; presets: PresetSummary[] }
@@ -735,6 +749,9 @@ export type PlanApprovalMode = "execute" | "compact" | "keep";
 
 export type GoalControlAction = "pause" | "resume" | "drop";
 export type ClientMessage =
+  | { type: "session.btw.start"; clientId: string; sessionId: string; requestId: string; question: string }
+  | { type: "session.btw.cancel"; clientId: string; requestId: string }
+  | { type: "session.btw.release"; clientId: string; requestId: string }
   | { type: "session.create"; requestId?: string; cwd?: string; name?: string; category?: string; sessionMode?: SessionMode; args?: string[]; worktree?: WorktreeCreateOptions; proposedModelId?: string }
   | { type: "session.setCategory"; sessionId: string; category?: string }
   | { type: "config.set"; showTools?: boolean; showEditDiffs?: boolean; thinkingVisibility?: ThinkingVisibilityMode; proposedModels?: ProposedModelConfig[] }

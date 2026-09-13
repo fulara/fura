@@ -166,10 +166,15 @@ bun scripts/check-omp-rpc-contract.ts
 Restart existing OMP processes after upgrading; native addons stay loaded for the
 lifetime of each process.
 
-The current fork tracks OMP 18.1.19. Fura's BTW RPC still uses the main-context
-snapshot captured when the side question starts; upstream TUI BTW history and
-follow-ups do not enable persistent side conversations in Fura. The integration
-preserves both snapshot and structured-history support in OMP's side-turn pipeline.
+The current fork tracks OMP 18.1.19. Desktop Fura exposes one-shot BTW through
+**Ask on the side** and closeable internal Transcript tabs, with a permanent
+Conversation tab while side results exist. Questions use the main-context snapshot
+captured at start; results remain only in browser memory. Upstream TUI BTW history
+and follow-ups do not enable continuing side conversations in Fura; that requires
+a richer backend contract, not an OMP upgrade alone. See
+[Transcript side questions](spec/transcript-btw.md) for ownership, draft, cleanup,
+and reconnect behavior. The integration preserves both snapshot and
+structured-history support in OMP's side-turn pipeline.
 
 Environment overrides for `run-local-omp.sh`:
 

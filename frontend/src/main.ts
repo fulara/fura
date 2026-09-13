@@ -7,6 +7,7 @@ import { formatContextUsage, formatCost, formatTokens, shortId, shortPath } from
 import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisibility, type ThinkingVisibilityMode } from "./uiPreferences";
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
 import { mkEl, reconcileChildren, requireElement, setRenderDocument } from "./dom";
+import { TranscriptBtw, BTW_TOOLTIP } from "./transcriptBtw";
 import { createGitDiffHighlighter } from "./gitDiffHighlight";
 import { renderRangeDiffOutput } from "./rangeDiff";
 import type { DiffHighlighter } from "./diffHighlight";
@@ -300,6 +301,7 @@ app.innerHTML = `
         <div class="prompt-actions">
           <button id="voiceButton" class="voice-button" type="button" aria-pressed="false" title="Hold to dictate. Alt+M starts while held.">Hold mic</button>
           <span id="voiceStatus" class="voice-status" aria-live="polite">voice idle</span>
+          <button id="btwButton" type="button">Ask on the side</button>
           <button id="sendButton" type="submit">Send</button>
         </div>
       </form>
@@ -630,6 +632,7 @@ const sessionMeta = requireElement<HTMLParagraphElement>("sessionMeta");
 const statusBar = requireElement<HTMLDivElement>("statusBar");
 const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
+const btwButton = requireElement<HTMLButtonElement>("btwButton");
 const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
 const editDiffVisibilityToggle = requireElement<HTMLButtonElement>("editDiffVisibilityToggle");
 const thinkingVisibilityToggle = requireElement<HTMLButtonElement>("thinkingVisibilityToggle");
@@ -772,6 +775,17 @@ let composerDraft = composerDrafts.get(composerDraftKey);
 const pendingDraftDeletions = new Set<string>();
 let voiceComposerDraft: VoiceSegmentDraft["composer"];
 let nextPendingAttachmentId = 1;
+const composerRevisions = new WeakMap<SessionComposerDraft, number>();
+const pendingImageReads = new WeakMap<SessionComposerDraft, number>();
+const btwDrafts = new Map<string, {
+  source: string;
+  draft: SessionComposerDraft;
+  revision: number;
+  text: string;
+  snippets: PendingSnippet[];
+  consumedRevision?: number;
+}>();
+let connectionEpoch = 0;
 
 let connection: FuraConnection | null = null;
 let activeSessionId: string | null = null;
@@ -818,6 +832,7 @@ let proposedModelSavePending = false;
 let proposedModelEditingId: string | null = null;
 let presetsView: "picker" | "run" | "editor" = "picker";
 let presetRunTarget: PresetSummary | null = null;
+let presetRunSessionId: string | null = null;
 let presetRunFromPicker = false;
 let presetRunValues: Record<string, string> = {};
 let presetEditorOriginalName: string | null = null;
@@ -923,6 +938,44 @@ const diffClientId = (() => {
   sessionStorage.setItem(key, next);
   return next;
 })();
+const transcriptBtw = new TranscriptBtw({
+  clientId: diffClientId,
+  send,
+  changed: () => {
+    markTranscriptViewDirty();
+    render();
+  },
+  accepted: requestId => {
+    const submitted = btwDrafts.get(requestId);
+    if (!submitted) return;
+    if (submitted.draft === composerDraft) saveComposerDraft();
+    if (!composerDrafts.isCurrent(submitted.source, submitted.draft)
+      || (composerRevisions.get(submitted.draft) ?? 0) !== submitted.revision
+      || submitted.draft.editorText !== submitted.text
+      || submitted.draft.images.length || pendingImageReads.get(submitted.draft)) return;
+    const wasCurrent = submitted.draft === composerDraft;
+    composerDrafts.clear(submitted.source);
+    submitted.draft = composerDrafts.get(submitted.source);
+    submitted.consumedRevision = submitted.revision + 1;
+    composerRevisions.set(submitted.draft, submitted.consumedRevision);
+    if (wasCurrent) {
+      composerDraft = submitted.draft;
+      showComposerDraft();
+    }
+  },
+  failed: requestId => {
+    const submitted = btwDrafts.get(requestId);
+    if (!submitted || submitted.consumedRevision === undefined) return;
+    if (submitted.draft === composerDraft) saveComposerDraft();
+    if (!composerDrafts.isCurrent(submitted.source, submitted.draft)
+      || composerRevisions.get(submitted.draft) !== submitted.consumedRevision
+      || submitted.draft.editorText || submitted.draft.images.length || pendingImageReads.get(submitted.draft)) return;
+    submitted.draft.editorText = submitted.text;
+    submitted.draft.snippets = submitted.snippets;
+    composerRevisions.set(submitted.draft, submitted.consumedRevision + 1);
+    if (submitted.draft === composerDraft) showComposerDraft();
+  },
+});
 
 function newDiffId(): string {
   return randomUuid();
@@ -1579,8 +1632,26 @@ diffPreviewSend.addEventListener("click", sendPromptPreviewDraft);
 diffPreviewOverlay.addEventListener("mousedown", event => {
   if (event.target === diffPreviewOverlay) closeDiffPreview();
 });
+btwButton.title = BTW_TOOLTIP;
+btwButton.addEventListener("click", () => {
+  syncBtwComposer();
+  if (btwButton.disabled || !activeSessionId) return;
+  saveComposerDraft();
+  const requestId = nextClientRequestId("btw");
+  const question = expandSnippetTokens(promptInput.value.trim()).trim();
+  btwDrafts.set(requestId, { source: activeSessionId, draft: composerDraft,
+    revision: composerRevisions.get(composerDraft) ?? 0, text: promptInput.value,
+    snippets: [...composerDraft.snippets] });
+  hidePalette();
+  transcriptBtw.start(activeSessionId, requestId, question);
+  desktopDockview?.activatePanel("transcript");
+  desktopDockview?.withPanel("transcript", container => {
+    container.querySelector<HTMLButtonElement>('[role="tab"][aria-selected="true"]')?.focus();
+  });
+});
 promptForm.addEventListener("submit", event => {
   event.preventDefault();
+  if (transcriptBtw.isSideSelected(workspaceMode === "session" ? activeSessionId : null)) return;
   const editorText = promptInput.value.trim();
   const text = expandSnippetTokens(editorText);
   const knownSlashCommand = findSlashCommand(editorText);
@@ -1662,6 +1733,8 @@ promptInput.addEventListener("paste", async event => {
   saveComposerDraft();
   const originKey = composerDraftKey;
   const origin = composerDraft;
+  pendingImageReads.set(origin, (pendingImageReads.get(origin) ?? 0) + imageItems.length);
+  syncBtwComposer();
 
   if (shouldCaptureSnippet) {
     const marker = createPendingMarker("Snippet");
@@ -1670,9 +1743,9 @@ promptInput.addEventListener("paste", async event => {
   }
 
   for (const item of imageItems) {
-    const file = item.getAsFile();
-    if (!file) continue;
     try {
+      const file = item.getAsFile();
+      if (!file) continue;
       const base64 = await blobToBase64(file);
       // Decoding can finish after a switch, send or deletion.
       if (!composerDrafts.isCurrent(originKey, origin)) continue;
@@ -1688,6 +1761,8 @@ promptInput.addEventListener("paste", async event => {
       }
     } catch {
       appendLog("Failed to read pasted image.");
+    } finally {
+      pendingImageReads.set(origin, Math.max(0, (pendingImageReads.get(origin) ?? 0) - 1));
     }
   }
   renderImagePreviews();
@@ -1695,6 +1770,8 @@ promptInput.addEventListener("paste", async event => {
 });
 promptInput.addEventListener("input", () => {
   saveComposerDraft();
+  composerRevisions.set(composerDraft, (composerRevisions.get(composerDraft) ?? 0) + 1);
+  syncBtwComposer();
   resetPromptHistoryNavigation();
   updatePalette();
   syncRollbackChatDraftWarning();
@@ -1757,10 +1834,17 @@ function connect(token: string): void {
   authSubmit.disabled = true;
   authStatus.textContent = "Connecting…";
   connection?.disconnect();
+  transcriptBtw.interrupt();
+  btwDrafts.clear();
+  const epoch = ++connectionEpoch;
   connection = createFuraConnection({
     auth: { type: "sessionCookie", token: bridgeToken },
     onStatus: setStatus,
     onOpen: () => {
+      if (epoch !== connectionEpoch) return;
+      transcriptBtw.interrupt();
+      btwDrafts.clear();
+      markTranscriptViewDirty();
       invalidateRollbackChat();
       hideAuthGate();
       // On (re)connect, defer transcript resync until the fresh `sessions.snapshot`
@@ -1772,6 +1856,10 @@ function connect(token: string): void {
       send({ type: "session.list" });
     },
     onClose: () => {
+      if (epoch !== connectionEpoch) return;
+      transcriptBtw.interrupt();
+      btwDrafts.clear();
+      markTranscriptViewDirty();
       if (pendingRangeDiff) {
         invalidateRangeDiff();
         rangeDiffError = "Connection closed while reading range-diff. Compare again to retry.";
@@ -1808,7 +1896,9 @@ function connect(token: string): void {
       showAuthGate(message);
       authTokenInput.select();
     },
-    onMessage: handleServerMessage,
+    onMessage: message => {
+      if (epoch === connectionEpoch) handleServerMessage(message);
+    },
     onLog: appendLog,
   });
   connection.connect();
@@ -1828,6 +1918,9 @@ function hideAuthGate(): void {
 }
 
 function saveComposerDraft(): void {
+  if (composerDraft.editorText !== promptInput.value) {
+    composerRevisions.set(composerDraft, (composerRevisions.get(composerDraft) ?? 0) + 1);
+  }
   composerDraft.editorText = promptInput.value;
 }
 
@@ -1842,6 +1935,24 @@ function switchComposerDraft(key: ComposerDraftKey): void {
   composerDraftKey = key;
   composerDraft = composerDrafts.get(key);
   showComposerDraft();
+}
+
+function syncBtwComposer(): void {
+  const source = workspaceMode === "session" ? activeSessionId : null;
+  const summary = source ? currentSessionSummary(source) : undefined;
+  const side = transcriptBtw.isSideSelected(source);
+  promptForm.hidden = side;
+  btwButton.hidden = workspaceMode !== "session";
+  const imagePending = Boolean(pendingImageReads.get(composerDraft));
+  btwButton.disabled = !source || side || !connection?.isOpen() || !summary
+    || summary.kind !== "managed" || !["idle", "busy"].includes(summary.status)
+    || transcriptBtw.isBlocked(source) || !expandSnippetTokens(promptInput.value.trim()).trim()
+    || composerDraft.images.length > 0 || imagePending || busyPromptDrafts.has(source)
+    || rollbackChatState?.phase === "applying";
+  btwButton.title = composerDraft.images.length || imagePending
+    ? "Text only. Remove images and wait for pending attachments before asking on the side."
+    : source && transcriptBtw.isBlocked(source)
+      ? "A side question is running or waiting for native cleanup." : BTW_TOOLTIP;
 }
 
 function activeWorkspaceKey(): string | null {
@@ -1914,6 +2025,13 @@ function handleServerMessage(message: ServerMessage): void {
   // Working-tree replies belong to the suspended workspace, never to a revision.
   if (codeRevision && message.type.startsWith("code.")) return;
   switch (message.type) {
+    case "session.btw.update": {
+      const tab = transcriptBtw.tabs.get(message.requestId);
+      if (!tab || message.targetClientId !== diffClientId || tab.sourceSessionId !== message.sourceSessionId) break;
+      transcriptBtw.update(message);
+      if (message.state === "released" || (tab.accepted && !tab.nativePending)) btwDrafts.delete(message.requestId);
+      break;
+    }
     case "hello":
       appendLog(`Connected to fura ${message.serverVersion} protocol ${message.protocolVersion}`);
       serverConfig = message.config;
@@ -1979,6 +2097,10 @@ function handleServerMessage(message: ServerMessage): void {
         ({ sessions, activeSessionId } = applySessionsSnapshot(message.sessions, activeSessionId));
         if (workspaceMode === "session" && !activeSessionId) switchComposerDraft(NO_SESSION_DRAFT);
         const liveSessionIds = new Set(message.sessions.map(session => session.sessionId));
+        for (const source of new Set([...transcriptBtw.tabs.values()].map(tab => tab.sourceSessionId))) {
+          const summary = message.sessions.find(session => session.sessionId === source);
+          if (!summary || !["idle", "busy", "starting"].includes(summary.status)) transcriptBtw.interrupt(source);
+        }
         // Absence alone is not deletion: only retire explicitly deleted sessions.
         for (const sessionId of pendingDraftDeletions) {
           if (liveSessionIds.has(sessionId)) continue;
@@ -2013,6 +2135,7 @@ function handleServerMessage(message: ServerMessage): void {
     case "session.snapshot": {
       const previousSnapshotProjection = projections.get(message.sessionId);
       ({ sessions, projections } = applySessionSnapshot(sessions, projections, message.sessionId, message.state));
+      if (!["idle", "busy", "starting"].includes(message.state.summary.status)) transcriptBtw.interrupt(message.sessionId);
       syncVisiblePlanReviewFromProjection(message.sessionId, message.state);
       syncPromptHistoryFromProjection(message.sessionId, message.state);
       const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
@@ -2055,6 +2178,7 @@ function handleServerMessage(message: ServerMessage): void {
       }
       ({ sessions, projections } = result);
       const projection = projections.get(message.sessionId);
+      if (projection && !["idle", "busy", "starting"].includes(projection.summary.status)) transcriptBtw.interrupt(message.sessionId);
       if (projection) {
         syncVisiblePlanReviewFromProjection(message.sessionId, projection);
         syncPromptHistoryFromProjection(message.sessionId, projection);
@@ -2532,6 +2656,8 @@ function handleServerMessage(message: ServerMessage): void {
       handlePlanReview(message);
       break;
     case "session.exited":
+      transcriptBtw.interrupt(message.sessionId);
+      markTranscriptViewDirty();
       appendLog(`Session ${message.sessionId} exited with code ${message.code ?? "unknown"}.`);
       render();
       break;
@@ -2901,6 +3027,7 @@ function sendPromptMessage(
   images: PendingImage[],
   behavior?: PromptBehavior,
 ): boolean {
+  if (transcriptBtw.rejectMainSend(sessionId)) return false;
   if (!send(createPromptSendMessage(sessionId, text, images, behavior))) return false;
   sessionNotices.delete(sessionId);
   addPromptToHistory(sessionId, text);
@@ -3153,13 +3280,16 @@ function replaceVoiceSegmentText(draft: VoiceSegmentDraft, text: string): void {
   draft.text = text;
   draft.end = draft.start + text.length;
   if (draft.composer) {
+    if (next !== draft.composer.draft.editorText) {
+      composerRevisions.set(draft.composer.draft, (composerRevisions.get(draft.composer.draft) ?? 0) + 1);
+    }
     draft.composer.draft.editorText = next;
     if (draft.composer.draft !== composerDraft) return;
   }
   draft.target.value = next;
   draft.target.selectionStart = draft.end;
   draft.target.selectionEnd = draft.end;
-  draft.target.focus();
+  if (draft.target !== promptInput || !promptForm.hidden) draft.target.focus();
 }
 
 function encodePcm16Base64(input: Float32Array, inputSampleRate: number, outputSampleRate: number): string {
@@ -3194,6 +3324,7 @@ function sendPromptWithBusyHandling(options: {
   snippets?: PendingSnippet[];
   onSend?: () => void;
 }): boolean {
+  if (transcriptBtw.rejectMainSend(options.sessionId)) return false;
   const projection = projections.get(options.sessionId);
   const commandText = options.editorText.trim();
   const knownSlashCommand = findSlashCommand(commandText);
@@ -3236,7 +3367,8 @@ function sendPromptWithBusyHandling(options: {
 function renderBusyPromptChoice(): void {
   const draft = activeSessionId ? busyPromptDrafts.get(activeSessionId)?.[0] : undefined;
   const compacting = Boolean(draft && projections.get(draft.sessionId)?.compacting);
-  const shouldShow = Boolean(workspaceMode === "session" && draft && draft.sessionId === activeSessionId && !compacting);
+  const shouldShow = Boolean(workspaceMode === "session" && draft && draft.sessionId === activeSessionId
+    && !compacting && !transcriptBtw.isSideSelected(draft.sessionId));
   const wasHidden = busyPromptOverlay.hidden;
 
   if (!draft || !shouldShow) {
@@ -3691,14 +3823,17 @@ function handleSessionDeleteClick(sessionId: string): void {
 
 function renderSessions(): void {
   renderCategoryFilter();
+  transcriptBtw.setVisibleSource(workspaceMode === "session" ? activeSessionId : null, desktopDockview?.isPanelVisible("transcript") ?? false);
+  const visible = visibleSessions();
   sessionListView.render({
     sessions,
-    visibleSessions: visibleSessions(),
+    visibleSessions: visible,
     selectedCategoryFilter,
     activeSessionId: workspaceMode === "session" ? activeSessionId : null,
     sessionGoalLabels: goalLabelsForSessions(),
     unreadSessionIds: unreadSessions,
   });
+  transcriptBtw.renderSessionBadges(sessionsList, visible.map(session => session.sessionId));
 }
 
 function syncToolVisibilityToggle(): void {
@@ -3940,8 +4075,9 @@ function openPresetsPicker(): void {
   renderPresets();
 }
 
-function openPresetRun(preset: PresetSummary, fromPicker: boolean): void {
+function openPresetRun(preset: PresetSummary, fromPicker: boolean, sessionId: string | null = activeSessionId): void {
   presetRunTarget = preset;
+  presetRunSessionId = sessionId;
   presetRunFromPicker = fromPicker;
   presetRunValues = {};
   for (const param of parsePresetParams(preset.body)) {
@@ -3993,7 +4129,7 @@ function resolvePendingPresetCommand(): void {
       runPreset(resolution.preset, {}, "send", command.sessionId);
       break;
     case "params":
-      openPresetRun(resolution.preset, false);
+      openPresetRun(resolution.preset, false, command.sessionId);
       break;
   }
 }
@@ -4004,6 +4140,13 @@ function runPreset(
   mode: "send" | "insert",
   sessionId: string | null = activeSessionId,
 ): void {
+  if (sessionId && transcriptBtw.rejectMainSend(sessionId)) {
+    openPresetRun(preset, false, sessionId);
+    presetRunValues = { ...values };
+    renderPresets();
+    presetsStatus.textContent = "Return to Conversation before using this preset. Your values are kept.";
+    return;
+  }
   const text = substitutePresetParams(preset.body, values);
   if (mode === "insert") {
     closePresetsOverlay();
@@ -4133,8 +4276,8 @@ function renderPresetRun(): void {
   previewLabel.textContent = "Preview";
   presetsBody.append(previewLabel, preview);
 
-  sendButton.addEventListener("click", () => runPreset(preset, presetRunValues, "send"));
-  insertButton.addEventListener("click", () => runPreset(preset, presetRunValues, "insert"));
+  sendButton.addEventListener("click", () => runPreset(preset, presetRunValues, "send", presetRunSessionId));
+  insertButton.addEventListener("click", () => runPreset(preset, presetRunValues, "insert", presetRunSessionId));
   if (presetRunFromPicker) {
     const back = document.createElement("button");
     back.type = "button";
@@ -4379,6 +4522,7 @@ function submitActiveCategory(): void {
 // Renders the workspace header, status bar, and busy prompt choice.
 // Drives re-render of the active Dockview panel via its stored element reference.
 function renderActiveSession(): void {
+  syncBtwComposer();
   const workspaceKey = activeWorkspaceKey();
   const sessionChanged = workspaceKey !== lastRenderedSessionId;
   lastRenderedSessionId = workspaceKey;
@@ -5174,8 +5318,10 @@ function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined
   if (!force && !transcriptPanelDirty && !sessionChanged) return;
 
   const rendered = desktopDockview.withPanel("transcript", container => {
-    if (workspaceMode === "controller") renderControllerTranscriptView(container, sessionChanged);
-    else renderTranscriptView(container, projection, sessionChanged);
+    transcriptBtw.render(container, workspaceMode === "session" ? activeSessionId : null, main => {
+      if (workspaceMode === "controller") renderControllerTranscriptView(main, sessionChanged);
+      else renderTranscriptView(main, projection, sessionChanged);
+    });
   });
   if (!rendered) return;
   transcriptPanelDirty = false;
@@ -6802,6 +6948,8 @@ function sendPromptPreviewDraft(): void {
   const transcriptDraft = transcriptPreviewDraft;
   const codeDraft = codePreviewDraft;
   const agentDraft = agentReviewDraft;
+  const target = agentDraft?.sessionId ?? codeDraft?.sessionId ?? diffDraft?.sessionId ?? transcriptDraft?.sessionId;
+  if (target && transcriptBtw.rejectMainSend(target)) return;
   if (agentDraft) {
     const instructions = diffPreviewText.value.trim();
     closeDiffPreview();
@@ -8283,6 +8431,10 @@ function initDesktopWorkspace(): void {
     },
     onPanelVisibilityChanged: (id: Parameters<DesktopDockview["withPanel"]>[0], visible: boolean) => {
       if (mode !== activeDesktopDockviewMode) return;
+      if (id === "transcript") {
+        transcriptBtw.setVisibleSource(workspaceMode === "session" ? activeSessionId : null, visible);
+        renderSessions();
+      }
       if (id === "diffs" || id === "sessionChanges") {
         const entering = visible && !diffsVisible;
         diffsVisible = visible;
@@ -8517,6 +8669,7 @@ function expandSnippetTokens(text: string): string {
 
 function renderImagePreviews(): void {
   saveComposerDraft();
+  syncBtwComposer();
   renderAttachmentPreviews(imagePreviews, composerDraft.images, composerDraft.snippets, {
     onRemoveImage: (index, image) => {
       composerDraft.images.splice(index, 1);
