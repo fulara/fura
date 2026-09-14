@@ -94,8 +94,9 @@ the selected immutable review. Older/Newer uses the loaded window, with Load old
 at its boundary. Deleted refs still permit existing pinned pages while their objects
 exist; refreshing a missing ref errors instead of falling back to HEAD. Detached or
 unborn checkout does not prevent browsing another valid branch.
-With focus inside History, `n` selects the next loaded row (older commit), and `p`
-the previous row (newer commit), without wrapping at the window boundaries.
+With focus inside History, `n` selects the next/newer commit toward the pinned tip
+(previous loaded row), and `p` the previous/older commit toward ancestors (next
+loaded row), without wrapping at the window boundaries.
 These shortcuts ignore editable fields, selects, modifiers and composition events;
 they work in docked and popped-out panels and retain focus through patch reloads.
 

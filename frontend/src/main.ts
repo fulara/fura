@@ -7091,7 +7091,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
     if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
     if ((event.target as Element).closest("input, textarea, select, [contenteditable], [role='textbox'], .git-review-options")) return;
     if (event.key !== "n" && event.key !== "p") return;
-    const button = root.querySelector<HTMLButtonElement>(`.git-commit-navigation button[aria-label="${event.key === "n" ? "Older commit" : "Newer commit"}"]`);
+    const button = root.querySelector<HTMLButtonElement>(`.git-commit-navigation button[aria-label="${event.key === "n" ? "Newer commit" : "Older commit"}"]`);
     if (!button || button.disabled) return;
     event.preventDefault();
     button.click();
@@ -7259,8 +7259,8 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
       button.type = "button";
       button.textContent = offset < 0 ? "↑" : "↓";
       button.setAttribute("aria-label", label);
-      button.title = `${label} (${offset < 0 ? "p" : "n"})`;
-      button.setAttribute("aria-keyshortcuts", offset < 0 ? "p" : "n");
+      button.title = `${label} (${offset < 0 ? "n" : "p"})`;
+      button.setAttribute("aria-keyshortcuts", offset < 0 ? "n" : "p");
       const target = index >= 0 ? history.page?.commits[index + offset] : undefined;
       button.disabled = !target;
       button.addEventListener("click", () => { if (target) selectGitCommit(sessionId, target.oid); });

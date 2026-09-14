@@ -123,7 +123,7 @@ async function history(page: Page) {
   await expect(branch(page)).toBeVisible();
 }
 async function selected(page: Page, oid: string) {
-  await expect(view(page).locator(".diff-commit-message")).toContainText(oid);
+  await expect(view(page).locator(".git-selected-commit-meta")).toContainText(oid);
 }
 async function choose(page: Page, ref: string, oid: string) {
   await pickBranch(page, ref);
@@ -233,6 +233,85 @@ function ready(wire: Wire, oid: string) {
 }
 
 test.beforeEach(({ page }) => page.on("pageerror", error => { throw error; }));
+
+test("History p/n follows commit chronology on a pinned non-HEAD branch without crossing input or page boundaries", async ({ page }, info) => {
+  const a = fixture("chronological"), wire = await transport(page);
+  try {
+    await authenticate(page); await createSession(page, a.root, `Chronological keys ${Date.now()}`); await history(page);
+    await choose(page, "refs/heads/topic", a.topic[34]);
+    const before = fingerprint(a.root);
+    await expect(rows(page)).toHaveCount(30);
+    expect(await rows(page).evaluateAll(elements => elements.map(element => element.getAttribute("data-commit-oid"))))
+      .toEqual(a.topic.slice(5).reverse());
+    await rows(page).nth(1).click();
+    await selected(page, a.topic[33]);
+    await view(page).locator(".diff-commit-message > summary").click();
+    await view(page).locator(".git-history-heading strong").click();
+    const check = async (oid: string) => {
+      await selected(page, oid);
+      await expect(view(page).locator('.git-history-commit[aria-pressed="true"]')).toHaveAttribute("data-commit-oid", oid);
+      await expect(view(page).locator(".diff-commit-message")).toHaveJSProperty("open", true);
+      await expect(branch(page)).toHaveAttribute("title", "refs/heads/topic");
+      expect(pages(wire).at(-1)!.page!.historyHeadOid).toBe(a.topic[34]);
+      expect(ready(wire, oid).comparison.repoRoot).toBe(a.root);
+      expect(await view(page).evaluate(element => element.contains(element.ownerDocument.activeElement))).toBe(true);
+    };
+    const pageRequests = () => wire.requests.filter(message => message.type === "git.history.request").length;
+    const pageCount = pageRequests();
+    await page.keyboard.press("n"); // topic 34 -> topic 35: newer, toward the pinned tip.
+    await check(a.topic[34]);
+    const newer = view(page).getByRole("button", { name: "Newer commit", exact: true });
+    await expect(newer).toBeDisabled();
+    await expect(newer).toHaveAttribute("title", "Newer commit (n)");
+    await expect(newer).toHaveAttribute("aria-keyshortcuts", "n");
+    await expect(view(page).getByRole("button", { name: "Older commit", exact: true })).toHaveAttribute("aria-keyshortcuts", "p");
+    await page.keyboard.press("n"); // No wrap at the newest commit.
+    await check(a.topic[34]);
+    await page.keyboard.press("p");
+    await check(a.topic[33]);
+    await page.keyboard.down("p");
+    await check(a.topic[32]);
+    await page.keyboard.down("p"); // Actual repeated keydown, without a keyup.
+    await check(a.topic[31]);
+    await page.keyboard.up("p");
+    await page.keyboard.press("n");
+    await check(a.topic[32]);
+    await page.keyboard.press("Control+n");
+    await page.keyboard.press("Shift+p");
+    await check(a.topic[32]);
+    await branch(page).click();
+    const filter = view(page).getByRole("combobox", { name: "Filter History branches", exact: true });
+    await filter.press("n"); await filter.press("p");
+    await expect(filter).toHaveValue("np");
+    await selected(page, a.topic[32]);
+    await filter.press("Escape");
+    await page.locator("#promptInput").fill("");
+    await page.locator("#promptInput").press("n"); await page.locator("#promptInput").press("p");
+    await expect(page.locator("#promptInput")).toHaveValue("np");
+    await selected(page, a.topic[32]);
+    expect(pageRequests()).toBe(pageCount);
+    await rows(page).last().click();
+    await selected(page, a.topic[5]); // Oldest loaded row, not the end of the branch.
+    await view(page).locator(".git-history-heading strong").click();
+    await expect(view(page).getByRole("button", { name: "Older commit", exact: true })).toBeDisabled();
+    await page.keyboard.press("p");
+    await check(a.topic[5]);
+    expect(pageRequests()).toBe(pageCount); // No automatic paging or Latest.
+    await view(page).getByRole("button", { name: "Load older commits", exact: true }).click();
+    await expect(rows(page)).toHaveCount(36);
+    await view(page).locator(".git-history-heading strong").click();
+    await page.keyboard.press("p"); await check(a.topic[4]);
+    await page.keyboard.press("n"); await check(a.topic[5]);
+    await rows(page).last().click(); await selected(page, a.initial);
+    await view(page).locator(".git-history-heading strong").click();
+    await page.keyboard.press("p"); await check(a.initial);
+    await expect(view(page).getByRole("button", { name: "End of history", exact: true })).toBeDisabled();
+    await page.keyboard.press("n"); await check(a.topic[0]);
+    expect(pageRequests()).toBe(pageCount + 1);
+    expect(fingerprint(a.root)).toEqual(before);
+    await page.screenshot({ path: info.outputPath("history-chronological-keys.png") });
+  } finally { a.cleanup(); }
+});
 
 test("History branch selector reads HEAD, local and remote commits without changing checkout, comments or immutable files", async ({ page }, info) => {
   test.setTimeout(120_000);
