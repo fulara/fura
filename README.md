@@ -166,7 +166,7 @@ bun scripts/check-omp-rpc-contract.ts
 Restart existing OMP processes after upgrading; native addons stay loaded for the
 lifetime of each process.
 
-The current fork tracks OMP 18.1.19. Desktop Fura exposes one-shot BTW through
+The current fork tracks OMP 18.1.20. Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
 captured at start; results remain only in browser memory. Upstream TUI BTW history
@@ -175,6 +175,12 @@ a richer backend contract, not an OMP upgrade alone. See
 [Transcript side questions](spec/transcript-btw.md) for ownership, draft, cleanup,
 and reconnect behavior. The integration preserves both snapshot and
 structured-history support in OMP's side-turn pipeline.
+
+The fork preserves Fura's BTW transition cleanup alongside upstream's separate
+session-generation and outer-transition barriers. Pending prompts cannot cross a
+committed fork/branch, while cancelled transitions retain the source context.
+Upstream Collab auto-hosting applies to interactive OMP sessions, not Fura's
+`rpc-ui` children; refreshing the submodule does not enable a second access channel.
 
 Environment overrides for `run-local-omp.sh`:
 
@@ -251,6 +257,14 @@ npm --prefix frontend run smoke
 python3 -m unittest scripts/test_smoke_process.py -v
 python3 -m unittest scripts/test_native_preflight.py -v
 ```
+
+The general Playwright config excludes the dedicated BTW and recency suites:
+their separate configs and launchers require different tokens and seeded sessions.
+Do not run them against the general mock server. For OMP browser tests on a host
+where full Chrome stops rendering background frames, use an installed
+`chrome-headless-shell` through `PUPPETEER_EXECUTABLE_PATH`; keep headful window
+tests separate. The fork normalizes headless-shell profiles like Chromium so
+explicit test profiles cannot silently fall back to a shared default profile.
 
 Use this launcher for mock smoke tests, not a production restart helper. For
 other isolated commands, `scripts/smoke_process.py --state-dir <private-dir>

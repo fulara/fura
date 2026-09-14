@@ -55,7 +55,7 @@ test("cached panels preserve interaction state across updates and document moves
       message("cache-tail", "Original streaming tail"),
     ];
     await publish();
-    const transcript = page.locator(".panel-content-transcript .panel-scroll:visible");
+    const transcript = page.locator(".panel-content-transcript .btw-conversation:visible");
     const anchor = transcript.locator('article[data-message-id="cache-anchor"]');
     const anchorNode = await anchor.elementHandle();
     await anchor.locator(".thinking-label").click();
@@ -67,6 +67,7 @@ test("cached panels preserve interaction state across updates and document moves
       selection?.removeAllRanges(); selection?.addRange(range);
     });
     await transcript.evaluate(element => { element.scrollTop = 320; });
+    await expect(transcript).toHaveJSProperty("scrollTop", 320);
     const focused = await page.locator(":focus").elementHandle();
     await publish(); // Metadata only: unchanged content must not discard interaction state.
     expect(await anchor.evaluate((element, previous) => element === previous, anchorNode)).toBe(true);

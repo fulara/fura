@@ -6,6 +6,8 @@ const baseURL = `http://127.0.0.1:${port}`;
 export default defineConfig({
   testDir: "./smoke",
   testMatch: "**/*.spec.ts",
+  // These suites require their own launchers, credentials and session fixtures.
+  testIgnore: ["**/transcript-btw*.spec.ts", "**/session-recency.spec.ts"],
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,

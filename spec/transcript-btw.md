@@ -45,6 +45,11 @@ Switching tabs never cancels. Closing hides/removes the side tab immediately. A 
 
 Disconnect interrupts in-flight tabs, keeps partial text and completed answers, and abandons old native controls. There is no replay, resume, automatic retry, or claim that the provider already stopped. The bridge owns disconnect cleanup. A fresh socket cannot apply an old request's events. Source stop, disappearance, or logical rebind interrupts its in-flight result and releases the original identity; later generation events are rejected.
 
+The OMP fork keeps session-generation settlement separate from outer transition
+readiness. Fura's pre-switch BTW reconciliation brackets the transition without
+replacing either upstream barrier. Fork and branch invalidate admitted prompt
+setup only at the commit boundary; a cancelled hook leaves the source prompt valid.
+
 ## Verification boundaries
 
 `frontend/src/main.test.ts` exercises the actual desktop DOM with the existing connection/Dockview harness: internal entry and tab structure, composer targeting, keyboard navigation, ACK/draft races, terminal replacement, main stream continuity, source/controller swaps, background badges, close/cleanup ordering, reconnect/stale ownership, snippets, image decoding, source stop, and adopted-document clipboard/focus. Main runs validation and isolated browser smoke; no provider or live-session verification is implied by these tests.
