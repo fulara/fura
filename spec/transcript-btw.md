@@ -2,6 +2,12 @@
 
 Desktop-only, one-shot BTW lives inside the existing Transcript panel. It does not create a Dockview tab, modal, side panel, controller conversation, main prompt, or durable session.
 
+Session-selected skill guidance is part of the captured native context, not a
+one-shot skill invocation or transcript message. Apply during a side request cannot
+replace its pinned snapshot or add side content to subsequent main requests.
+Native branch promotion inherits that captured selection; this does not expose
+promotion or continuation controls in Fura.
+
 ## Interaction
 
 - **Ask on the side** beside the main composer submits its text through `session.btw.start`. Existing snippet expansion supplies plain question text. Images and pending image decoding block this action without consuming the draft. The main Send path, slash commands, Steer, Follow-up, and raw RPC are not used.

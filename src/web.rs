@@ -251,6 +251,8 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::PromptSend { .. } => "prompt.send",
         ClientMessage::SessionRewindList { .. } => "session.rewind.list",
         ClientMessage::SessionRewindSelect { .. } => "session.rewind.select",
+        ClientMessage::SessionSkillsGet { .. } => "session.skills.get",
+        ClientMessage::SessionSkillsApply { .. } => "session.skills.apply",
         ClientMessage::PromptAbort { .. } => "prompt.abort",
         ClientMessage::SessionBtwStart { .. } => "session.btw.start",
         ClientMessage::SessionBtwCancel { .. } => "session.btw.cancel",
@@ -366,6 +368,19 @@ fn client_message_debug_fields(
                     Value::String(behavior.as_rpc_streaming_behavior().to_string()),
                 );
             }
+        }
+        ClientMessage::SessionSkillsGet {
+            session_id,
+            request_id,
+            ..
+        }
+        | ClientMessage::SessionSkillsApply {
+            session_id,
+            request_id,
+            ..
+        } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert("requestId".to_string(), Value::String(request_id.clone()));
         }
         ClientMessage::SessionRewindList {
             session_id,
@@ -677,6 +692,10 @@ pub(crate) async fn handle_socket(
     release_btw_requests_on_disconnect(&state, connection_id).await;
     state
         .session_runtime
+        .detach_session_skills_connection(connection_id)
+        .await;
+    state
+        .session_runtime
         .detach_rewind_connection(connection_id)
         .await;
     state
@@ -986,6 +1005,14 @@ pub(crate) fn server_message_visible_to_connection(
             target_connection_id,
             ..
         } => *target_connection_id == Some(connection_id),
+        ServerMessage::SessionSkillsResult {
+            target_connection_id,
+            ..
+        }
+        | ServerMessage::SessionSkillsError {
+            target_connection_id,
+            ..
+        } => *target_connection_id == Some(connection_id),
         ServerMessage::SessionRewindPoints {
             target_connection_id,
             ..
@@ -1229,6 +1256,8 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::SessionRewindPoints { .. } => "session.rewind.points",
         ServerMessage::SessionRewindResult { .. } => "session.rewind.result",
         ServerMessage::SessionRewindError { .. } => "session.rewind.error",
+        ServerMessage::SessionSkillsResult { .. } => "session.skills.result",
+        ServerMessage::SessionSkillsError { .. } => "session.skills.error",
         ServerMessage::SessionBtwUpdate { .. } => "session.btw.update",
         ServerMessage::SessionBtwPromoted { .. } => "session.btw.promoted",
         ServerMessage::ModelList { .. } => "model.list",
@@ -1403,6 +1432,21 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "session.rewind.error",
             request_id = %request_id,
             source_session_id = %source_session_id,
+            session_id = %session_id
+        ),
+        ServerMessage::SessionSkillsResult {
+            request_id,
+            session_id,
+            ..
+        }
+        | ServerMessage::SessionSkillsError {
+            request_id,
+            session_id,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = server_message_type(message),
+            request_id = %request_id,
             session_id = %session_id
         ),
         ServerMessage::SessionBtwUpdate {
@@ -1831,6 +1875,7 @@ mod tests {
             context_percent: None,
             plan_mode: None,
             goal_mode: None,
+            session_skills: None,
             pending_plan_review: None,
             pending_ask: None,
             todo_phases: Vec::new(),

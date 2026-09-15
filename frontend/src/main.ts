@@ -8,6 +8,7 @@ import { nextThinkingVisibilityMode, parseThinkingVisibilityMode, parseToolVisib
 import { createFuraConnection, type ConnectionStatus, type FuraConnection } from "./connection";
 import { mkEl, reconcileChildren, requireElement, setRenderDocument } from "./dom";
 import { TranscriptBtw, BTW_TOOLTIP } from "./transcriptBtw";
+import { createSessionSkillsView } from "./sessionSkillsView";
 import { createGitDiffHighlighter } from "./gitDiffHighlight";
 import { renderRangeDiffOutput } from "./rangeDiff";
 import type { DiffHighlighter } from "./diffHighlight";
@@ -301,6 +302,7 @@ app.innerHTML = `
         <div class="prompt-actions">
           <button id="voiceButton" class="voice-button" type="button" aria-pressed="false" title="Hold to dictate. Alt+M starts while held.">Hold mic</button>
           <span id="voiceStatus" class="voice-status" aria-live="polite">voice idle</span>
+          <button id="sessionSkillsButton" class="session-skills-button" type="button">Skills…</button>
           <button id="btwButton" type="button">Ask on the side</button>
           <button id="sendButton" type="submit">Send</button>
         </div>
@@ -633,6 +635,7 @@ const statusBar = requireElement<HTMLDivElement>("statusBar");
 const promptForm = requireElement<HTMLFormElement>("promptForm");
 const promptInput = requireElement<HTMLTextAreaElement>("promptInput");
 const btwButton = requireElement<HTMLButtonElement>("btwButton");
+const sessionSkillsButton = requireElement<HTMLButtonElement>("sessionSkillsButton");
 const toolVisibilityToggle = requireElement<HTMLButtonElement>("toolVisibilityToggle");
 const editDiffVisibilityToggle = requireElement<HTMLButtonElement>("editDiffVisibilityToggle");
 const thinkingVisibilityToggle = requireElement<HTMLButtonElement>("thinkingVisibilityToggle");
@@ -975,6 +978,21 @@ const transcriptBtw = new TranscriptBtw({
     composerRevisions.set(submitted.draft, submitted.consumedRevision + 1);
     if (submitted.draft === composerDraft) showComposerDraft();
   },
+});
+const sessionSkillsView = createSessionSkillsView(sessionSkillsButton, {
+  context: () => {
+    const sessionId = workspaceMode === "session" ? activeSessionId : null;
+    const summary = sessionId ? currentSessionSummary(sessionId) : undefined;
+    return {
+      sessionId,
+      state: sessionId ? projections.get(sessionId)?.sessionSkills : undefined,
+      ready: Boolean(connection?.isOpen() && summary?.kind === "managed"
+        && ["idle", "busy"].includes(summary.status) && rollbackChatState?.phase !== "applying"),
+      visible: workspaceMode === "session" && !transcriptBtw.isSideSelected(sessionId),
+    };
+  },
+  send,
+  requestId: () => nextClientRequestId("session-skills"),
 });
 
 function newDiffId(): string {
@@ -1834,6 +1852,7 @@ function connect(token: string): void {
   authSubmit.disabled = true;
   authStatus.textContent = "Connecting…";
   connection?.disconnect();
+  sessionSkillsView.close(false);
   transcriptBtw.interrupt();
   btwDrafts.clear();
   const epoch = ++connectionEpoch;
@@ -1842,6 +1861,7 @@ function connect(token: string): void {
     onStatus: setStatus,
     onOpen: () => {
       if (epoch !== connectionEpoch) return;
+      sessionSkillsView.close(false);
       transcriptBtw.interrupt();
       btwDrafts.clear();
       markTranscriptViewDirty();
@@ -1857,6 +1877,7 @@ function connect(token: string): void {
     },
     onClose: () => {
       if (epoch !== connectionEpoch) return;
+      sessionSkillsView.close(false);
       transcriptBtw.interrupt();
       btwDrafts.clear();
       markTranscriptViewDirty();
@@ -1953,6 +1974,7 @@ function syncBtwComposer(): void {
     ? "Text only. Remove images and wait for pending attachments before asking on the side."
     : source && transcriptBtw.isBlocked(source)
       ? "A side question is running or waiting for native cleanup." : BTW_TOOLTIP;
+  sessionSkillsView.sync();
 }
 
 function activeWorkspaceKey(): string | null {
@@ -2025,6 +2047,16 @@ function handleServerMessage(message: ServerMessage): void {
   // Working-tree replies belong to the suspended workspace, never to a revision.
   if (codeRevision && message.type.startsWith("code.")) return;
   switch (message.type) {
+    case "session.skills.result":
+    case "session.skills.error": {
+      const state = sessionSkillsView.receive(message);
+      const projection = projections.get(message.sessionId);
+      if (state && projection) {
+        projection.sessionSkills = state;
+        sessionSkillsView.sync();
+      }
+      break;
+    }
     case "session.btw.update": {
       const tab = transcriptBtw.tabs.get(message.requestId);
       if (!tab || message.targetClientId !== diffClientId || tab.sourceSessionId !== message.sourceSessionId) break;

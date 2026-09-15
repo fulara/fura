@@ -43,6 +43,23 @@ including persisted images in OMP's blob store, without merging unrelated branch
 The live transcript still follows OMP's current context; saved ancestry is not a
 separate archive endpoint.
 
+Desktop **Skills** configures an independent, durable selection for the live session.
+Search and checkboxes edit a staged set; **Apply** commits the complete set and
+**Cancel** changes nothing. Neither action sends a prompt or executes a skill task.
+The selector leaves the composer draft, images and snippets alone.
+
+Selected definitions are pinned snapshots. They survive compaction and reopening;
+forks inherit the selection at their branch point and rewind restores that point's
+selection. Changed or missing source files do not silently replace pinned guidance:
+Apply explicitly refreshes selected definitions, and missing selections can be removed.
+Conflicting or uncertain results require **Reload** before another Apply.
+
+The UI separates the confirmed selection from the snapshot active in an in-flight
+request. Apply during work affects the next main request preparation, not the
+request already sent. BTW captures its own selection without contaminating the
+main conversation. Guidance is user-level context, not enforced model output;
+referenced scripts and other resources are not pinned. This selector is desktop-only.
+
 ## Git changes
 
 The Git changes panel separates **Current changes** (unstaged, staged and nonignored

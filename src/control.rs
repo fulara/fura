@@ -398,6 +398,7 @@ async fn ensure_controller_session(state: &AppState) -> Result<String, String> {
         Some(cwd),
         Vec::new(),
         None,
+        None,
     )
     .await
     .map_err(|error| format!("failed to start Fura controller: {error}"))?;

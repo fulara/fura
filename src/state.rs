@@ -569,6 +569,7 @@ pub(crate) struct SessionRuntimeState {
     /// `/compact` requests routed through OMP's builtin slash-command handler, keyed by RPC command id.
     pub(crate) pending_compaction_commands: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) pending_rewind_rpcs: Arc<RwLock<HashMap<String, PendingRewindRpc>>>,
+    pub(crate) pending_session_skills: Arc<RwLock<HashMap<String, PendingSessionSkills>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -666,12 +667,24 @@ impl PendingRewindRpc {
     }
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PendingSessionSkills {
+    pub(crate) target_connection_id: Option<u64>,
+    pub(crate) request_id: String,
+    pub(crate) session_id: String,
+    pub(crate) journal_session_id: String,
+    pub(crate) transport_session_id: String,
+    pub(crate) stdin: mpsc::Sender<Value>,
+    pub(crate) command: &'static str,
+}
+
 pub(crate) struct RemovedRpcTransport {
     pub(crate) handle: RpcSessionHandle,
     pub(crate) target_session_id: String,
     pub(crate) btw_requests: Vec<(String, BtwRequestRoute)>,
     pub(crate) rewind_requests: Vec<PendingRewindRpc>,
     pub(crate) session_forks: Vec<PendingSessionFork>,
+    pub(crate) session_skills: Vec<PendingSessionSkills>,
 }
 
 impl SessionRuntimeState {
@@ -696,6 +709,7 @@ impl SessionRuntimeState {
             pending_btw_commands: Arc::new(RwLock::new(HashMap::new())),
             pending_compaction_commands: Arc::new(RwLock::new(HashMap::new())),
             pending_rewind_rpcs: Arc::new(RwLock::new(HashMap::new())),
+            pending_session_skills: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -719,6 +733,13 @@ impl SessionRuntimeState {
         transport_session_id: &str,
         target_session_id: String,
     ) {
+        self.pending_session_skills
+            .write()
+            .await
+            .retain(|_, pending| {
+                pending.transport_session_id != transport_session_id
+                    || pending.session_id == target_session_id
+            });
         self.rpc_session_targets
             .write()
             .await
@@ -793,13 +814,40 @@ impl SessionRuntimeState {
                 .filter_map(|id| pending.remove(&id))
                 .collect()
         };
+        let session_skills = self
+            .take_session_skills_for_transport(transport_session_id)
+            .await;
         Some(RemovedRpcTransport {
             handle,
             target_session_id,
             btw_requests,
             rewind_requests,
             session_forks,
+            session_skills,
         })
+    }
+
+    pub(crate) async fn take_session_skills_for_transport(
+        &self,
+        transport_session_id: &str,
+    ) -> Vec<PendingSessionSkills> {
+        let mut pending = self.pending_session_skills.write().await;
+        let ids = pending
+            .iter()
+            .filter(|(_, route)| route.transport_session_id == transport_session_id)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        ids.into_iter()
+            .filter_map(|id| pending.remove(&id))
+            .collect()
+    }
+
+    pub(crate) async fn detach_session_skills_connection(&self, connection_id: u64) {
+        for pending in self.pending_session_skills.write().await.values_mut() {
+            if pending.target_connection_id == Some(connection_id) {
+                pending.target_connection_id = None;
+            }
+        }
     }
 
     pub(crate) async fn target_session_id_for_transport(
@@ -1383,6 +1431,7 @@ pub(crate) struct RpcRecordState {
     pub(crate) plan_mode: Option<Option<PlanModeProjection>>,
     pub(crate) goal_mode: Option<Option<GoalModeProjection>>,
     pub(crate) todo_phases: Option<Vec<TodoPhaseProjection>>,
+    pub(crate) session_skills: Option<crate::SessionSkillsState>,
 }
 
 pub(crate) fn apply_rpc_state_to_record(record: &mut SessionRecord, state: RpcRecordState) {
@@ -1392,6 +1441,9 @@ pub(crate) fn apply_rpc_state_to_record(record: &mut SessionRecord, state: RpcRe
         SessionStatus::Idle
     };
     record.is_compacting = state.is_compacting;
+    record.session_skills = state
+        .session_skills
+        .filter(|skills| skills.session_id == record.id);
     if let Some(name) = state.session_name
         && (record.title.is_none() || record.title.as_deref() != Some(&name))
     {
@@ -1434,7 +1486,14 @@ pub(crate) async fn apply_get_state_update(
     state: &AppState,
     transport_session_id: &str,
     update: RpcStateUpdate,
-) {
+) -> bool {
+    let Some(source_stdin) = state
+        .session_runtime
+        .stdin_for_transport(transport_session_id)
+        .await
+    else {
+        return false;
+    };
     let target_changed = update.target_session_id != update.current_session_id;
     let pending_create = if target_changed {
         state
@@ -1485,6 +1544,17 @@ pub(crate) async fn apply_get_state_update(
     } else {
         None
     };
+    // Disk IO may outlive stop/reopen. Pin the original child and routing identity
+    // through publication and remapping; stop removes the child under this write lock.
+    let transports = state.session_runtime.rpc_sessions.read().await;
+    let targets = state.session_runtime.rpc_session_targets.read().await;
+    if !transports
+        .get(transport_session_id)
+        .is_some_and(|handle| handle.stdin.same_channel(&source_stdin))
+        || targets.get(transport_session_id) != Some(&update.current_session_id)
+    {
+        return false;
+    }
 
     state
         .events
@@ -1512,6 +1582,7 @@ pub(crate) async fn apply_get_state_update(
                         record.continuation_pending = false;
                         record.kind = SessionKind::Available;
                         record.streaming_message = None;
+                        record.session_skills = None;
                         record.live_message_ids.clear();
                         while let Some(index) = record
                             .messages
@@ -1627,6 +1698,7 @@ pub(crate) async fn apply_get_state_update(
                             context_percent: None,
                             plan_mode: None,
                             goal_mode: None,
+                            session_skills: None,
                             pending_plan_review: None,
                             pending_ask: None,
                             available_commands: Vec::new(),
@@ -1667,6 +1739,19 @@ pub(crate) async fn apply_get_state_update(
             ((), messages)
         })
         .await;
+    drop(targets);
+    if target_changed {
+        state
+            .session_runtime
+            .clear_pending_rpc_message_pages_for_transport(transport_session_id)
+            .await;
+        state
+            .session_runtime
+            .map_transport_to_session(transport_session_id, update.target_session_id.clone())
+            .await;
+    }
+    // Subsequent helpers may acquire transport locks themselves.
+    drop(transports);
 
     let (target_category, target_mode) = if target_changed {
         let sessions = state.sessions.read().await;
@@ -1684,14 +1769,6 @@ pub(crate) async fn apply_get_state_update(
             .await;
     }
     if target_changed {
-        state
-            .session_runtime
-            .clear_pending_rpc_message_pages_for_transport(transport_session_id)
-            .await;
-        state
-            .session_runtime
-            .map_transport_to_session(transport_session_id, update.target_session_id.clone())
-            .await;
         crate::rpc::release_btw_requests_on_rebind(
             state,
             transport_session_id,
@@ -1718,6 +1795,7 @@ pub(crate) async fn apply_get_state_update(
             warn!(%error, "failed to save remapped session metadata");
         }
     }
+    true
 }
 
 impl Default for SessionRuntimeState {
@@ -1869,6 +1947,7 @@ mod tests {
         record.session_file = Some(path.to_string_lossy().into_owned());
         record.reconcile_persisted_recency(discovered.last_message_at, discovered.file_stamp);
         state.sessions.write().await.insert("s1".into(), record);
+        let _commands = crate::tests::register_test_transport(&state, "s1", "s1", 8).await;
         // Hold publication, but let get_state read and finish its old disk scan.
         let publication = state.events.gate.lock().await;
         let update_state = state.clone();
@@ -1893,6 +1972,7 @@ mod tests {
                         plan_mode: None,
                         goal_mode: None,
                         todo_phases: None,
+                        session_skills: None,
                     },
                 },
             )

@@ -1,4 +1,4 @@
-use crate::{RpcAvailableSlashCommand, Timestamp};
+use crate::{RpcAvailableSlashCommand, SessionSkillsState, Timestamp};
 use std::{
     collections::HashSet,
     io::{self, Write},
@@ -87,6 +87,8 @@ pub(crate) struct SessionRecord {
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<PlanModeProjection>,
     pub(crate) goal_mode: Option<GoalModeProjection>,
+    #[serde(skip)]
+    pub(crate) session_skills: Option<SessionSkillsState>,
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
     /// Raw OMP extension UI request awaiting a user response (the agent `ask` flow),
     /// or `None` when the session is not waiting on one. Carried verbatim so the
@@ -270,6 +272,7 @@ impl SessionRecord {
             plan_mode: self.plan_mode.clone(),
             pending_plan_review: self.pending_plan_review.clone(),
             goal_mode: self.goal_mode.clone(),
+            session_skills: self.session_skills.clone(),
             todo_phases: self.effective_todo_phases(),
             pending_ask: self.projected_pending_ask(),
             available_commands: self.available_commands.clone(),
@@ -356,6 +359,8 @@ pub(crate) struct SessionProjection {
     pub(crate) plan_mode: Option<PlanModeProjection>,
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
     pub(crate) goal_mode: Option<GoalModeProjection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session_skills: Option<SessionSkillsState>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) pending_ask: Option<Value>,
     pub(crate) available_commands: Vec<RpcAvailableSlashCommand>,
@@ -380,6 +385,8 @@ pub(crate) struct SessionProjectionDelta {
     pub(crate) plan_mode: Option<PlanModeProjection>,
     pub(crate) pending_plan_review: Option<PendingPlanReviewProjection>,
     pub(crate) goal_mode: Option<GoalModeProjection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) session_skills: Option<SessionSkillsState>,
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) pending_ask: Option<Value>,
     pub(crate) available_commands: Vec<RpcAvailableSlashCommand>,
@@ -408,6 +415,7 @@ impl SessionProjectionDelta {
             plan_mode: projection.plan_mode.clone(),
             pending_plan_review: projection.pending_plan_review.clone(),
             goal_mode: projection.goal_mode.clone(),
+            session_skills: projection.session_skills.clone(),
             todo_phases: projection.todo_phases.clone(),
             pending_ask: projection.pending_ask.clone(),
             available_commands: projection.available_commands.clone(),
@@ -1008,6 +1016,7 @@ mod tests {
             context_percent: Some(10.0),
             plan_mode: None,
             goal_mode: None,
+            session_skills: None,
             pending_plan_review: None,
             pending_ask: None,
             todo_phases: Vec::new(),
@@ -1299,6 +1308,7 @@ mod tests {
             context_percent: None,
             plan_mode: None,
             goal_mode: None,
+            session_skills: None,
             pending_plan_review: None,
             pending_ask: None,
             todo_phases: Vec::new(),

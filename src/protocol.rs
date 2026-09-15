@@ -31,6 +31,46 @@ pub(crate) struct SessionRewindPoint {
     pub(crate) image_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionSkillDescriptor {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) hash: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum SessionSkillStatus {
+    Available,
+    Changed,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionSkillCatalogEntry {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) description: String,
+    pub(crate) status: SessionSkillStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionSkillsState {
+    pub(crate) session_id: String,
+    pub(crate) journal_session_id: String,
+    pub(crate) revision: String,
+    pub(crate) selected: Vec<SessionSkillDescriptor>,
+    pub(crate) active_revision: String,
+    pub(crate) active: Vec<SessionSkillDescriptor>,
+    pub(crate) pending: bool,
+    pub(crate) applying: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) error: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub(crate) enum PromptBehavior {
     #[serde(rename = "steer")]
@@ -774,6 +814,20 @@ pub(crate) enum ClientMessage {
         images: Option<Vec<PromptImagePayload>>,
         behavior: Option<PromptBehavior>,
     },
+    #[serde(rename = "session.skills.get")]
+    SessionSkillsGet {
+        request_id: String,
+        session_id: String,
+        journal_session_id: String,
+    },
+    #[serde(rename = "session.skills.apply")]
+    SessionSkillsApply {
+        request_id: String,
+        session_id: String,
+        journal_session_id: String,
+        expected_revision: String,
+        skill_ids: Vec<String>,
+    },
     #[serde(rename = "session.rewind.list")]
     SessionRewindList {
         session_id: String,
@@ -1138,6 +1192,26 @@ pub(crate) enum ServerMessage {
         request_id: String,
         source_session_id: String,
         message: String,
+    },
+    #[serde(rename = "session.skills.result")]
+    SessionSkillsResult {
+        #[serde(skip)]
+        target_connection_id: Option<u64>,
+        request_id: String,
+        session_id: String,
+        state: SessionSkillsState,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        catalog: Option<Vec<SessionSkillCatalogEntry>>,
+    },
+    #[serde(rename = "session.skills.error")]
+    SessionSkillsError {
+        #[serde(skip)]
+        target_connection_id: Option<u64>,
+        request_id: String,
+        session_id: String,
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state: Option<SessionSkillsState>,
     },
     #[serde(rename = "session.rewind.points")]
     SessionRewindPoints {

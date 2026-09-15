@@ -87,6 +87,7 @@ export function applySessionDelta(
     planMode: delta.planMode,
     pendingPlanReview: delta.pendingPlanReview,
     goalMode: delta.goalMode,
+    sessionSkills: delta.sessionSkills,
     todoPhases: delta.todoPhases,
     pendingAsk: delta.pendingAsk,
     availableCommands: delta.availableCommands,

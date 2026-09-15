@@ -142,6 +142,38 @@ pub(crate) async fn handle_client_message_for_connection(
             images,
             behavior,
         } => send_prompt(state, session_id, text, images, behavior).await,
+        ClientMessage::SessionSkillsGet {
+            request_id,
+            session_id,
+            journal_session_id,
+        } => {
+            handle_session_skills(
+                state,
+                owner_connection_id,
+                request_id,
+                session_id,
+                journal_session_id,
+                None,
+            )
+            .await
+        }
+        ClientMessage::SessionSkillsApply {
+            request_id,
+            session_id,
+            journal_session_id,
+            expected_revision,
+            skill_ids,
+        } => {
+            handle_session_skills(
+                state,
+                owner_connection_id,
+                request_id,
+                session_id,
+                journal_session_id,
+                Some((expected_revision, skill_ids)),
+            )
+            .await
+        }
         ClientMessage::SessionRewindList {
             session_id,
             request_id,
@@ -588,6 +620,117 @@ pub(crate) async fn handle_client_message_for_connection(
         } => handle_session_handoff(state, session_id, name, custom_instructions).await,
     }
 }
+async fn handle_session_skills(
+    state: &AppState,
+    owner_connection_id: u64,
+    request_id: String,
+    session_id: String,
+    journal_session_id: String,
+    selection: Option<(String, Vec<String>)>,
+) -> Vec<ServerMessage> {
+    let current = state
+        .sessions
+        .read()
+        .await
+        .get(&session_id)
+        .map(|record| (record.kind, record.status, record.session_skills.clone()));
+    let skills = current.as_ref().and_then(|(_, _, skills)| skills.clone());
+    let error = |message: String| {
+        vec![ServerMessage::SessionSkillsError {
+            target_connection_id: Some(owner_connection_id),
+            request_id: request_id.clone(),
+            session_id: session_id.clone(),
+            message,
+            state: skills.clone(),
+        }]
+    };
+    if !current.as_ref().is_some_and(|(kind, status, _)| {
+        *kind == SessionKind::Managed && matches!(status, SessionStatus::Idle | SessionStatus::Busy)
+    }) || state
+        .session_runtime
+        .pending_create(&session_id)
+        .await
+        .is_some()
+    {
+        return error("Session skills require an initialized live session.".to_string());
+    }
+    let Some(current_skills) = skills.as_ref() else {
+        return error("This OMP runtime does not support session skills.".to_string());
+    };
+    if current_skills.session_id != session_id
+        || current_skills.journal_session_id != journal_session_id
+    {
+        return error(
+            "The session identity changed. Refresh session skills before applying.".to_string(),
+        );
+    }
+    let Some(transport_session_id) = rpc_transport_session_id(state, &session_id).await else {
+        return error("This session has no live OMP process.".to_string());
+    };
+    let Some(stdin) = state
+        .session_runtime
+        .stdin_for_transport(&transport_session_id)
+        .await
+    else {
+        return error("This session has no live OMP process.".to_string());
+    };
+    if stdin.is_closed() || rpc_session_target_id(state, &transport_session_id).await != session_id
+    {
+        return error("The original OMP process is no longer available.".to_string());
+    }
+    let command_id = next_rpc_id();
+    let command = match selection {
+        Some((expected_revision, skill_ids)) => OmpRpcCommand::SetSessionSkills {
+            id: command_id.clone(),
+            session_id: session_id.clone(),
+            journal_session_id: journal_session_id.clone(),
+            expected_revision,
+            skill_ids,
+        },
+        None => OmpRpcCommand::GetSessionSkills {
+            id: command_id.clone(),
+            session_id: session_id.clone(),
+            journal_session_id: journal_session_id.clone(),
+        },
+    };
+    let command_name = match &command {
+        OmpRpcCommand::SetSessionSkills { .. } => "set_session_skills",
+        _ => "get_session_skills",
+    };
+    state
+        .session_runtime
+        .pending_session_skills
+        .write()
+        .await
+        .insert(
+            command_id.clone(),
+            PendingSessionSkills {
+                target_connection_id: Some(owner_connection_id),
+                request_id: request_id.clone(),
+                session_id: session_id.clone(),
+                journal_session_id,
+                transport_session_id,
+                stdin: stdin.clone(),
+                command: command_name,
+            },
+        );
+    // Send only to the captured child, never resolve/resume a different session after an await.
+    if stdin.send(command.into_value()).await.is_err()
+        && state
+            .session_runtime
+            .pending_session_skills
+            .write()
+            .await
+            .remove(&command_id)
+            .is_some()
+    {
+        return error(
+            "The original OMP process disconnected before the request was sent.".to_string(),
+        );
+    }
+    Vec::new()
+}
+
 fn session_fork_error(
     target_connection_id: Option<u64>,
     request_id: String,
@@ -1259,6 +1402,7 @@ pub(crate) async fn create_session(
         Some(session_cwd.clone()),
         args,
         None,
+        None,
     )
     .await
     {
@@ -1619,6 +1763,7 @@ pub(crate) async fn handle_model_catalog_list_command(
         Some(default_cwd),
         Vec::new(),
         None,
+        None,
     )
     .await
     {
@@ -1686,6 +1831,7 @@ pub(crate) fn opened_session_record(
         context_percent: existing.and_then(|record| record.context_percent),
         plan_mode: existing.and_then(|record| record.plan_mode.clone()),
         goal_mode: existing.and_then(|record| record.goal_mode.clone()),
+        session_skills: None,
         pending_plan_review: existing.and_then(|record| record.pending_plan_review.clone()),
         pending_ask: None,
         available_commands: Vec::new(),
@@ -1734,29 +1880,18 @@ pub(crate) async fn open_session(state: &AppState, session_file: String) -> Vec<
         sessions.insert(session_id.clone(), record);
     }
 
-    let transport_session_id = {
-        if state.session_runtime.contains_transport(&session_id).await {
-            Uuid::new_v4().to_string()
-        } else {
-            session_id.clone()
-        }
-    };
+    // Transport identity belongs to one child incarnation, not the durable session.
+    let transport_session_id = Uuid::new_v4().to_string();
 
     let spawn_result = spawn_rpc_child(
         state.clone(),
-        transport_session_id.clone(),
+        transport_session_id,
         discovered.cwd,
         Vec::new(),
         Some(session_file.clone()),
+        Some(session_id.clone()),
     )
     .await;
-
-    if spawn_result.is_ok() {
-        state
-            .session_runtime
-            .map_transport_to_session(&transport_session_id, session_id.clone())
-            .await;
-    }
 
     if let Err(error) = spawn_result {
         error!(session_id = %session_id, %error, "failed to open RPC session");
@@ -1817,6 +1952,12 @@ pub(crate) async fn stop_session(state: &AppState, session_id: String) -> Vec<Se
             state,
             removed.session_forks,
             "The OMP session was stopped before duplication completed.",
+        )
+        .await;
+        fail_removed_session_skills(
+            state,
+            removed.session_skills,
+            "The OMP session was stopped.",
         )
         .await;
     }
@@ -1881,6 +2022,12 @@ pub(crate) async fn delete_session(
             state,
             removed.session_forks,
             "The OMP session was deleted before duplication completed.",
+        )
+        .await;
+        fail_removed_session_skills(
+            state,
+            removed.session_skills,
+            "The OMP session was deleted.",
         )
         .await;
     }
@@ -4170,6 +4317,7 @@ mod review_comment_tests {
             context_percent: None,
             plan_mode: None,
             goal_mode: None,
+            session_skills: None,
             pending_plan_review: None,
             pending_ask: None,
             available_commands: Vec::new(),

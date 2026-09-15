@@ -220,6 +220,26 @@ export type RpcAvailableSlashCommand = {
   /** Origin: "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file". */
   source: string;
 };
+export type SessionSkillDescriptor = { id: string; name: string; hash: string };
+export type SessionSkillCatalogEntry = {
+  id: string;
+  name: string;
+  description: string;
+  status: "available" | "changed" | "missing";
+};
+export type SessionSkillsIdentity = { sessionId: string; journalSessionId: string };
+export type SessionSkillsState = SessionSkillsIdentity & {
+  revision: string;
+  selected: SessionSkillDescriptor[];
+  activeRevision: string;
+  active: SessionSkillDescriptor[];
+  pending: boolean;
+  applying: boolean;
+  error?: string;
+};
+export type SessionSkillsApplyRequest = SessionSkillsIdentity & { expectedRevision: string; skillIds: string[] };
+export type SessionSkillsCatalogResult = { state: SessionSkillsState; catalog: SessionSkillCatalogEntry[] };
+
 export type SessionProjection = {
   summary: SessionSummary;
   transcript: TranscriptEntry[];
@@ -235,6 +255,7 @@ export type SessionProjection = {
   planMode?: PlanModeProjection | null;
   pendingPlanReview?: PendingPlanReviewProjection | null;
   goalMode?: GoalModeProjection | null;
+  sessionSkills?: SessionSkillsState;
   todoPhases: TodoPhase[];
   pendingAsk?: PendingAskProjection | null;
   /** Dynamic slash-command palette from OMP. Always present on the wire; optional here so
@@ -259,6 +280,7 @@ export type SessionProjectionDelta = {
   planMode?: PlanModeProjection | null;
   pendingPlanReview?: PendingPlanReviewProjection | null;
   goalMode?: GoalModeProjection | null;
+  sessionSkills?: SessionSkillsState;
   todoPhases: TodoPhase[];
   pendingAsk?: PendingAskProjection | null;
   availableCommands?: RpcAvailableSlashCommand[];
@@ -692,6 +714,8 @@ export type SessionBtwUpdate = {
 
 export type ServerMessage =
   | SessionBtwUpdate
+  | { type: "session.skills.result"; requestId: string; sessionId: string; state: SessionSkillsState; catalog?: SessionSkillCatalogEntry[] }
+  | { type: "session.skills.error"; requestId: string; sessionId: string; message: string; state?: SessionSkillsState }
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
   | { type: "config.updated"; config: ServerConfig }
   | { type: "presets.list"; presets: PresetSummary[] }
@@ -754,6 +778,8 @@ export type PlanApprovalMode = "execute" | "compact" | "keep";
 
 export type GoalControlAction = "pause" | "resume" | "drop";
 export type ClientMessage =
+  | ({ type: "session.skills.get"; requestId: string } & SessionSkillsIdentity)
+  | ({ type: "session.skills.apply"; requestId: string } & SessionSkillsApplyRequest)
   | { type: "session.btw.start"; clientId: string; sessionId: string; requestId: string; question: string }
   | { type: "session.btw.cancel"; clientId: string; requestId: string }
   | { type: "session.btw.release"; clientId: string; requestId: string }

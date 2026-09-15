@@ -644,6 +644,7 @@ pub(crate) mod tests {
             context_percent: None,
             plan_mode: None,
             goal_mode: None,
+            session_skills: None,
             pending_plan_review: None,
             pending_ask: None,
             available_commands: Vec::new(),
@@ -799,6 +800,7 @@ pub(crate) mod tests {
                 plan_mode: None,
                 goal_mode: Some(None),
                 todo_phases: None,
+                session_skills: None,
             },
         );
 
@@ -833,6 +835,7 @@ pub(crate) mod tests {
                 })),
                 goal_mode: None,
                 todo_phases: None,
+                session_skills: None,
             },
         );
 
@@ -871,6 +874,7 @@ pub(crate) mod tests {
                 })),
                 goal_mode: None,
                 todo_phases: None,
+                session_skills: None,
             },
         );
 
@@ -1319,7 +1323,8 @@ pub(crate) mod tests {
             },
         )
         .await;
-        map_test_transport(&state, "transport-session", "transport-session").await;
+        let _commands =
+            register_test_transport(&state, "transport-session", "transport-session", 8).await;
 
         let mut events = state.events.subscribe();
         apply_rpc_frame(
@@ -1408,7 +1413,8 @@ pub(crate) mod tests {
             .write()
             .await
             .extend([(transport.id.clone(), transport), (saved.id.clone(), saved)]);
-        map_test_transport(&state, "transport-session", "transport-session").await;
+        let _commands =
+            register_test_transport(&state, "transport-session", "transport-session", 8).await;
         let mut events = state.events.subscribe();
 
         apply_rpc_frame(
@@ -1458,7 +1464,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
-        map_test_transport(&state, "transport", "s1").await;
+        let _commands = register_test_transport(&state, "transport", "s1", 8).await;
         let mut events = state.events.subscribe();
         let mut previous_seq = None;
         let populated = serde_json::json!({
@@ -1749,6 +1755,18 @@ pub(crate) mod tests {
                 get_available_commands_command("cmd-available-commands-1".to_string())
             }
             "command-get-state" => get_state_command("cmd-state-1".to_string()),
+            "command-get-session-skills" => serde_json::json!(OmpRpcCommand::GetSessionSkills {
+                id: "cmd-skills-get-1".to_string(),
+                session_id: "session-1".to_string(),
+                journal_session_id: "journal-session-1".to_string(),
+            }),
+            "command-set-session-skills" => serde_json::json!(OmpRpcCommand::SetSessionSkills {
+                id: "cmd-skills-set-1".to_string(),
+                session_id: "session-1".to_string(),
+                journal_session_id: "journal-session-1".to_string(),
+                expected_revision: "revision-1".to_string(),
+                skill_ids: vec!["/tmp/skills/review/SKILL.md".to_string()],
+            }),
             "command-get-branch-messages" => {
                 get_branch_messages_command("cmd-branch-messages-1".to_string())
             }
@@ -3233,6 +3251,669 @@ pub(crate) mod tests {
             other => panic!("unexpected third event: {other:?}"),
         }
     }
+    fn session_skills_fixture(session_id: &str, journal_id: &str, revision: &str) -> Value {
+        serde_json::json!({
+            "sessionId": session_id, "journalSessionId": journal_id, "revision": revision,
+            "selected": [], "activeRevision": revision, "active": [],
+            "pending": false, "applying": false
+        })
+    }
+
+    async fn session_skills_seed(state: &AppState, transport: &str, skills: Value) {
+        apply_rpc_frame(
+            state,
+            transport,
+            &serde_json::json!({
+                "type": "response", "command": "get_state", "success": true,
+                "data": {"sessionId": skills["sessionId"], "sessionSkills": skills}
+            }),
+        )
+        .await;
+    }
+
+    async fn session_skills_dispatch(
+        state: &AppState,
+        client: u64,
+        request: Value,
+    ) -> Vec<ServerMessage> {
+        handle_client_message_for_connection(
+            state,
+            serde_json::from_value(request).expect("session skills client message"),
+            client,
+        )
+        .await
+    }
+
+    fn session_skills_request(kind: &str, request_id: &str) -> Value {
+        serde_json::json!({
+            "type": kind, "requestId": request_id, "sessionId": "s1",
+            "journalSessionId": "journal-1", "expectedRevision": "r1",
+            "skillIds": ["/skills/review/SKILL.md"]
+        })
+    }
+
+    #[tokio::test]
+    async fn session_skills_busy_apply_routes_cas_without_prompt_and_targets_each_client() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+        let original = session_skills_fixture("s1", "journal-1", "r1");
+        session_skills_seed(&state, "transport", original.clone()).await;
+        state.sessions.write().await.get_mut("s1").unwrap().status = SessionStatus::Busy;
+        let mut events = state.events.subscribe();
+        for (client, kind, request_id) in [
+            (41, "session.skills.get", "get"),
+            (42, "session.skills.apply", "apply"),
+        ] {
+            assert!(
+                session_skills_dispatch(&state, client, session_skills_request(kind, request_id))
+                    .await
+                    .is_empty()
+            );
+        }
+        let get = commands.try_recv().expect("native GET");
+        let apply = commands.try_recv().expect("native full-set Apply");
+        assert_eq!(get["type"], "get_session_skills");
+        assert_eq!(apply["type"], "set_session_skills");
+        assert_eq!(apply["sessionId"], "s1");
+        assert_eq!(apply["journalSessionId"], "journal-1");
+        assert_eq!(apply["expectedRevision"], "r1");
+        assert_eq!(
+            apply["skillIds"],
+            serde_json::json!(["/skills/review/SKILL.md"])
+        );
+        assert!(commands.try_recv().is_err());
+        assert!(state.sessions.read().await["s1"].messages.is_empty());
+        apply_rpc_frame(&state, "transport", &serde_json::json!({
+            "type": "response", "id": get["id"], "command": get["type"], "success": true,
+            "data": {"state": original, "catalog": [{
+                "id": "/skills/review/SKILL.md", "name": "Review", "description": "Review changes",
+                "status": "available", "body": "must not reach browser"
+            }]}
+        })).await;
+        let mut next = session_skills_fixture("s1", "journal-1", "r2");
+        next["selected"] =
+            serde_json::json!([{"id": "/skills/review/SKILL.md", "name": "Review", "hash": "abc"}]);
+        next["activeRevision"] = serde_json::json!("r1");
+        next["pending"] = serde_json::json!(true);
+        apply_rpc_frame(&state, "transport", &serde_json::json!({
+            "type": "response", "id": apply["id"], "command": apply["type"], "success": true, "data": next
+        })).await;
+        let mut replies = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            let wire = serde_json::to_value(&event).unwrap();
+            if wire["type"] == "session.skills.result" {
+                let client = if wire["requestId"] == "get" { 41 } else { 42 };
+                assert!(server_message_visible_to_connection(&event, client));
+                assert!(!server_message_visible_to_connection(
+                    &event,
+                    if client == 41 { 42 } else { 41 }
+                ));
+                assert!(wire.get("targetConnectionId").is_none());
+                replies.push(wire);
+            }
+        }
+        assert_eq!(replies.len(), 2);
+        assert!(replies[0]["catalog"][0].get("body").is_none());
+        assert!(replies[1].get("catalog").is_none());
+        let projection = state.sessions.read().await["s1"].projection();
+        assert_eq!(
+            serde_json::to_value(&projection).unwrap()["sessionSkills"],
+            next
+        );
+        assert_eq!(
+            serde_json::to_value(SessionProjectionDelta::from_projection_replace_tail(
+                0,
+                &projection
+            ))
+            .unwrap()["sessionSkills"],
+            next
+        );
+    }
+
+    #[tokio::test]
+    async fn session_skills_rejects_unavailable_startup_and_stale_journal_without_spawning() {
+        for mode in ["unsupported", "starting", "disconnected", "journal"] {
+            let state = test_state(16, None);
+            state
+                .sessions
+                .write()
+                .await
+                .insert("s1".into(), test_record());
+            let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+            if mode != "unsupported" {
+                session_skills_seed(
+                    &state,
+                    "transport",
+                    session_skills_fixture("s1", "journal-1", "r1"),
+                )
+                .await;
+            }
+            if mode == "starting" {
+                state.sessions.write().await.get_mut("s1").unwrap().status =
+                    SessionStatus::Starting;
+            }
+            if mode == "disconnected" {
+                state.session_runtime.remove_transport("transport").await;
+            }
+            let mut request = session_skills_request("session.skills.apply", mode);
+            if mode == "journal" {
+                request["journalSessionId"] = serde_json::json!("old-journal");
+            }
+            let replies = session_skills_dispatch(&state, 41, request).await;
+            assert_eq!(replies.len(), 1, "{mode}");
+            assert!(server_message_visible_to_connection(&replies[0], 41));
+            assert!(!server_message_visible_to_connection(&replies[0], 42));
+            let reply = serde_json::to_value(&replies[0]).unwrap();
+            assert_eq!(reply["type"], "session.skills.error", "{mode}");
+            assert_eq!(reply["sessionId"], "s1");
+            assert!(commands.try_recv().is_err(), "{mode}");
+            assert!(state.sessions.read().await["s1"].messages.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn session_skills_native_events_authoritative_and_unsupported_absent() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let _commands = register_test_transport(&state, "transport", "s1", 8).await;
+        let original = session_skills_fixture("s1", "journal-1", "r1");
+        session_skills_seed(&state, "transport", original).await;
+        let next = session_skills_fixture("s1", "journal-1", "r2");
+        apply_rpc_frame(
+            &state,
+            "transport",
+            &serde_json::json!({
+                "type": "session_skills_updated", "sessionSkills": next
+            }),
+        )
+        .await;
+        assert_eq!(
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap()["sessionSkills"],
+            next
+        );
+        for stale in [
+            session_skills_fixture("old", "journal-1", "old"),
+            session_skills_fixture("s1", "other-journal", "old"),
+        ] {
+            apply_rpc_frame(
+                &state,
+                "transport",
+                &serde_json::json!({
+                    "type": "session_skills_updated", "sessionSkills": stale
+                }),
+            )
+            .await;
+        }
+        assert_eq!(
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap()["sessionSkills"],
+            next
+        );
+        apply_rpc_frame(&state, "transport", &serde_json::json!({
+            "type": "response", "command": "get_state", "success": true, "data": {"sessionId": "s1"}
+        })).await;
+        let projection = state.sessions.read().await["s1"].projection();
+        assert!(
+            serde_json::to_value(&projection)
+                .unwrap()
+                .get("sessionSkills")
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(SessionProjectionDelta::from_projection_replace_tail(
+                0,
+                &projection
+            ))
+            .unwrap()
+            .get("sessionSkills")
+            .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn session_skills_wrong_transport_cannot_consume_response_and_failure_preserves_state() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+        let _other = register_test_transport(&state, "other", "other", 8).await;
+        let original = session_skills_fixture("s1", "journal-1", "r1");
+        session_skills_seed(&state, "transport", original.clone()).await;
+        assert!(
+            session_skills_dispatch(
+                &state,
+                41,
+                session_skills_request("session.skills.apply", "apply")
+            )
+            .await
+            .is_empty()
+        );
+        let command = commands.try_recv().unwrap();
+        let mut events = state.events.subscribe();
+        let error = serde_json::json!({
+            "type": "response", "id": command["id"], "command": command["type"], "success": false, "error": "CAS conflict"
+        });
+        apply_rpc_frame(&state, "other", &error).await;
+        assert!(events.try_recv().is_err());
+        apply_rpc_frame(&state, "transport", &error).await;
+        let event = events.try_recv().expect("source-scoped error");
+        assert!(server_message_visible_to_connection(&event, 41));
+        assert!(!server_message_visible_to_connection(&event, 42));
+        let wire = serde_json::to_value(event).unwrap();
+        assert_eq!(wire["type"], "session.skills.error");
+        assert_eq!(wire["state"], original);
+        assert_eq!(
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap()["sessionSkills"],
+            original
+        );
+    }
+
+    #[tokio::test]
+    async fn session_skills_remap_clear_rejects_late_results_errors_and_events() {
+        let state = test_state(64, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "transport", "s1", 16).await;
+        session_skills_seed(
+            &state,
+            "transport",
+            session_skills_fixture("s1", "journal-1", "r1"),
+        )
+        .await;
+        for (client, request) in [(41, "first"), (42, "second")] {
+            assert!(
+                session_skills_dispatch(
+                    &state,
+                    client,
+                    session_skills_request("session.skills.get", request)
+                )
+                .await
+                .is_empty()
+            );
+        }
+        let first = commands.try_recv().unwrap();
+        let second = commands.try_recv().unwrap();
+        let current = session_skills_fixture("cleared", "journal-1", "clear-generation");
+        session_skills_seed(&state, "transport", current.clone()).await;
+        let mut events = state.events.subscribe();
+        for frame in [
+            serde_json::json!({"type": "response", "id": first["id"], "command": first["type"], "success": true, "data": {
+                "state": session_skills_fixture("s1", "journal-1", "r1"), "catalog": []}}),
+            serde_json::json!({"type": "response", "id": second["id"], "command": second["type"], "success": false, "error": "old failure"}),
+            serde_json::json!({"type": "session_skills_updated", "sessionSkills": session_skills_fixture("s1", "journal-1", "r1")}),
+        ] {
+            apply_rpc_frame(&state, "transport", &frame).await;
+        }
+        assert!(
+            events.try_recv().is_err(),
+            "late native frames must be silent"
+        );
+        assert_eq!(
+            serde_json::to_value(state.sessions.read().await["cleared"].projection()).unwrap()["sessionSkills"],
+            current
+        );
+    }
+
+    #[tokio::test]
+    async fn session_skills_conflict_uses_native_state_without_claiming_apply_success() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+        session_skills_seed(
+            &state,
+            "transport",
+            session_skills_fixture("s1", "journal-1", "r1"),
+        )
+        .await;
+        assert!(
+            session_skills_dispatch(
+                &state,
+                41,
+                session_skills_request("session.skills.apply", "apply")
+            )
+            .await
+            .is_empty()
+        );
+        let command = commands.try_recv().unwrap();
+        let current = session_skills_fixture("s1", "journal-1", "another-client-revision");
+        let mut events = state.events.subscribe();
+        apply_rpc_frame(
+            &state,
+            "transport",
+            &serde_json::json!({
+                "type": "response", "id": command["id"], "command": command["type"],
+                "success": false, "error": "CAS conflict", "data": {"state": current}
+            }),
+        )
+        .await;
+        let mut errors = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            let wire = serde_json::to_value(event).unwrap();
+            assert_ne!(wire["type"], "session.skills.result");
+            if wire["type"] == "session.skills.error" {
+                errors.push(wire);
+            }
+        }
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0]["state"], current);
+        assert_eq!(
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap()["sessionSkills"],
+            current
+        );
+    }
+
+    #[tokio::test]
+    async fn session_skills_disconnected_client_does_not_receive_another_clients_result() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+        session_skills_seed(
+            &state,
+            "transport",
+            session_skills_fixture("s1", "journal-1", "r1"),
+        )
+        .await;
+        assert!(
+            session_skills_dispatch(
+                &state,
+                41,
+                session_skills_request("session.skills.apply", "same-request-id")
+            )
+            .await
+            .is_empty()
+        );
+        assert!(
+            session_skills_dispatch(
+                &state,
+                42,
+                session_skills_request("session.skills.get", "same-request-id")
+            )
+            .await
+            .is_empty()
+        );
+        let apply = commands.try_recv().unwrap();
+        let get = commands.try_recv().unwrap();
+        state
+            .session_runtime
+            .detach_session_skills_connection(41)
+            .await;
+        let current = session_skills_fixture("s1", "journal-1", "r2");
+        let mut events = state.events.subscribe();
+        for frame in [
+            serde_json::json!({"type": "response", "id": apply["id"], "command": apply["type"], "success": true, "data": current}),
+            serde_json::json!({"type": "response", "id": get["id"], "command": get["type"], "success": true, "data": {"state": current, "catalog": []}}),
+        ] {
+            apply_rpc_frame(&state, "transport", &frame).await;
+        }
+        let mut results = 0;
+        while let Ok(event) = events.try_recv() {
+            if serde_json::to_value(&event).unwrap()["type"] == "session.skills.result" {
+                assert!(server_message_visible_to_connection(&event, 42));
+                assert!(!server_message_visible_to_connection(&event, 41));
+                results += 1;
+            }
+        }
+        assert_eq!(results, 1);
+        assert_eq!(
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap()["sessionSkills"],
+            current
+        );
+    }
+
+    #[tokio::test]
+    async fn session_skills_replaced_transport_and_foreign_journal_cannot_project_late_responses() {
+        for mode in ["transport", "journal", "provider"] {
+            let state = test_state(32, None);
+            state
+                .sessions
+                .write()
+                .await
+                .insert("s1".into(), test_record());
+            let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+            let original = session_skills_fixture("s1", "journal-1", "r1");
+            session_skills_seed(&state, "transport", original.clone()).await;
+            assert!(
+                session_skills_dispatch(
+                    &state,
+                    41,
+                    session_skills_request("session.skills.get", "get")
+                )
+                .await
+                .is_empty()
+            );
+            let command = commands.try_recv().unwrap();
+            let _replacement = if mode == "transport" {
+                Some(register_test_transport(&state, "transport", "s1", 8).await)
+            } else {
+                None
+            };
+            let mut invalid = session_skills_fixture("s1", "journal-1", "late");
+            if mode == "journal" {
+                invalid["journalSessionId"] = serde_json::json!("other-journal");
+            }
+            if mode == "provider" {
+                invalid["sessionId"] = serde_json::json!("other-provider");
+            }
+            let mut events = state.events.subscribe();
+            for failed in [false, true] {
+                apply_rpc_frame(&state, "transport", &serde_json::json!({
+                    "type": "response", "id": command["id"], "command": command["type"],
+                    "success": !failed, "error": "stale error", "data": {"state": invalid, "catalog": []}
+                })).await;
+            }
+            assert!(events.try_recv().is_err(), "{mode}");
+            assert_eq!(
+                serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap()["sessionSkills"],
+                original,
+                "{mode}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_skills_stopped_transport_fails_pending_request_only_to_owner() {
+        let state = test_state(32, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_record());
+        let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+        session_skills_seed(
+            &state,
+            "transport",
+            session_skills_fixture("s1", "journal-1", "r1"),
+        )
+        .await;
+        assert!(
+            session_skills_dispatch(
+                &state,
+                41,
+                session_skills_request("session.skills.get", "get")
+            )
+            .await
+            .is_empty()
+        );
+        let command = commands.try_recv().unwrap();
+        let mut events = state.events.subscribe();
+        stop_session(&state, "s1".into()).await;
+        let mut errors = 0;
+        while let Ok(event) = events.try_recv() {
+            if serde_json::to_value(&event).unwrap()["type"] == "session.skills.error" {
+                assert!(server_message_visible_to_connection(&event, 41));
+                assert!(!server_message_visible_to_connection(&event, 42));
+                errors += 1;
+            }
+        }
+        assert_eq!(errors, 1);
+        apply_rpc_frame(&state, "transport", &serde_json::json!({
+            "type": "response", "id": command["id"], "command": command["type"], "success": false, "error": "late error"
+        })).await;
+        assert!(events.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_skills_reopen_ignores_old_stdout_and_accepts_current_child_events() {
+        async fn stop_and_wait(state: &AppState) {
+            let mut events = state.events.subscribe();
+            stop_session(state, "s1".into()).await;
+            // Wait for both the requested stop and actual child exit before reopening.
+            tokio::time::timeout(Duration::from_secs(5), async {
+                let mut exits = 0;
+                while exits < 2 {
+                    if matches!(
+                        events.recv().await.unwrap(),
+                        ServerMessage::SessionExited { .. }
+                    ) {
+                        exits += 1;
+                    }
+                }
+            })
+            .await
+            .expect("private RPC child must terminate");
+        }
+        let root = tempfile::TempDir::new().unwrap();
+        let session_file = root.path().join("session.jsonl");
+        write_test_session(
+            &session_file,
+            "s1",
+            "Reopen",
+            root.path().to_str().unwrap(),
+            "Original message",
+        );
+        let mut state = test_state(64, None);
+        state.session_root = root.path().to_path_buf();
+        state.rpc_config = Arc::new(RpcConfig {
+            program: "/bin/sh".into(),
+            args: vec!["-c".into(), "while IFS= read -r line; do :; done".into()],
+        });
+        let session_file = session_file.to_string_lossy().into_owned();
+        assert!(open_session(&state, session_file.clone()).await.is_empty());
+        let old_transport = rpc_transport_session_id(&state, "s1").await.unwrap();
+        let mut old_skills = session_skills_fixture("s1", "journal-1", "before-stop");
+        old_skills["selected"] =
+            serde_json::json!([{"id": "/old/SKILL.md", "name": "Old", "hash": "old"}]);
+        old_skills["active"] = old_skills["selected"].clone();
+        old_skills["error"] = serde_json::json!("retired child error");
+        session_skills_seed(&state, &old_transport, old_skills.clone()).await;
+        let stale_state_line = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "response", "command": "get_state", "success": true,
+                "data": {"sessionId": "s1", "sessionFile": session_file, "sessionSkills": old_skills}
+            })
+        );
+        let cache = state.session_catalog_cache.clone();
+        let (locked_tx, locked_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let cache_holder = tokio::task::spawn_blocking(move || {
+            let _guard = cache.lock().unwrap_or_else(|error| error.into_inner());
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        locked_rx.await.unwrap();
+        let mut old_state_response = Box::pin(read_rpc_stdout(
+            state.clone(),
+            old_transport.clone(),
+            BufReader::new(stale_state_line.as_bytes()),
+        ));
+        // Admit the live source, then suspend its get_state disk scan across stop/reopen.
+        std::future::poll_fn(|cx| {
+            assert!(old_state_response.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        stop_and_wait(&state).await;
+        assert!(open_session(&state, session_file).await.is_empty());
+        let current_transport = rpc_transport_session_id(&state, "s1").await.unwrap();
+        let reopened = session_skills_fixture("s1", "journal-1", "reopened");
+        session_skills_seed(&state, &current_transport, reopened.clone()).await;
+        release_tx.send(()).unwrap();
+        cache_holder.await.unwrap();
+        old_state_response.await;
+        let after_old_state =
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap();
+        // The same frame must also be rejected when first received after retirement.
+        read_rpc_stdout(
+            state.clone(),
+            old_transport.clone(),
+            BufReader::new(stale_state_line.as_bytes()),
+        )
+        .await;
+        let after_retired_state =
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap();
+        let stale_line = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session_skills_updated",
+                "sessionSkills": old_skills
+            })
+        );
+        read_rpc_stdout(
+            state.clone(),
+            old_transport,
+            BufReader::new(stale_line.as_bytes()),
+        )
+        .await;
+        let after_old_stdout =
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap();
+        let current = session_skills_fixture("s1", "journal-1", "current-child-update");
+        let current_line = format!(
+            "{}\n",
+            serde_json::json!({
+                "type": "session_skills_updated", "sessionSkills": current
+            })
+        );
+        read_rpc_stdout(
+            state.clone(),
+            current_transport,
+            BufReader::new(current_line.as_bytes()),
+        )
+        .await;
+        let after_current_stdout =
+            serde_json::to_value(state.sessions.read().await["s1"].projection()).unwrap();
+        stop_and_wait(&state).await;
+        assert_eq!(
+            after_old_state["sessionSkills"], reopened,
+            "get_state admitted before stop must revalidate its source after awaited disk IO"
+        );
+        assert_eq!(
+            after_retired_state["sessionSkills"], reopened,
+            "retired get_state must not restore an old session projection"
+        );
+        assert_eq!(
+            after_old_stdout["sessionSkills"], reopened,
+            "retired stdout must not overwrite the reopened same-journal cache"
+        );
+        assert_eq!(
+            after_current_stdout["sessionSkills"], current,
+            "current child events must still update the reopened session"
+        );
+    }
+
     #[tokio::test]
     async fn slash_fork_sends_rpc_fork_command() {
         let state = test_state(8, None);
@@ -4109,7 +4790,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), record);
-        map_test_transport(&state, "transport-1", "s1").await;
+        let _commands = register_test_transport(&state, "transport-1", "s1", 8).await;
 
         apply_rpc_frame(
             &state,
@@ -5746,6 +6427,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn rpc_stdout_does_not_forward_raw_frames_by_default() {
         let state = test_state(8, None);
+        let _commands = register_test_transport(&state, "transport-1", "transport-1", 8).await;
         let mut events = state.events.subscribe();
         let input = b"{\"type\":\"ready\"}\n";
 
@@ -5765,6 +6447,7 @@ pub(crate) mod tests {
     async fn rpc_stdout_forwards_raw_frames_when_enabled() {
         let mut state = test_state(8, None);
         state.forward_raw_frames = true;
+        let _commands = register_test_transport(&state, "transport-1", "transport-1", 8).await;
         let mut events = state.events.subscribe();
         let input = b"{\"type\":\"ready\"}\n";
 
@@ -7594,6 +8277,7 @@ pub(crate) mod tests {
         record.created_at = Timestamp::from_rpc(&serde_json::json!(100)).unwrap();
         record.last_message_at = Timestamp::from_rpc(&serde_json::json!(500));
         state.sessions.write().await.insert("s1".into(), record);
+        let _commands = register_test_transport(&state, "s1", "s1", 8).await;
         apply_rpc_frame(
             &state,
             "s1",
@@ -8219,8 +8903,10 @@ pub(crate) mod tests {
             );
             assert!(record.streaming_message.is_some());
             assert_eq!(record.messages[2].role, MessageRole::User);
-            assert_eq!(serde_json::to_value(&record.messages[2]).unwrap()["skillInvocation"]["prompt"],
-                "fix /skill:foo");
+            assert_eq!(
+                serde_json::to_value(&record.messages[2]).unwrap()["skillInvocation"]["prompt"],
+                "fix /skill:foo"
+            );
             let mut uncorrelated = skill.clone();
             uncorrelated["details"] = serde_json::json!({});
             let ordinary_skill = map_omp_message(&uncorrelated).unwrap();
@@ -8262,23 +8948,45 @@ pub(crate) mod tests {
         // and consuming the second identity must not clear the first by text/FIFO.
         let mut notice_record = test_record();
         notice_record.id = "s3".into();
-        state.sessions.write().await.insert("s3".into(), notice_record);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s3".into(), notice_record);
         let mut commands = register_test_transport(&state, "s3", "s3", 8).await;
         let mut requests = Vec::new();
         for _ in 0..2 {
-            assert!(send_prompt(&state, "s3".into(), "/skill:foo same".into(), None, None).await.is_empty());
+            assert!(
+                send_prompt(&state, "s3".into(), "/skill:foo same".into(), None, None)
+                    .await
+                    .is_empty()
+            );
             requests.push(commands.recv().await.unwrap());
         }
         let first_id = requests[0]["clientMessageId"].as_str().unwrap();
         let second_id = requests[1]["clientMessageId"].as_str().unwrap();
         for request in &requests {
-            apply_rpc_frame(&state, "s3", &serde_json::json!({
-                "type":"response","command":"prompt","id":request["id"],"success":true,
-                "data":{"agentInvoked":true}
-            })).await;
+            apply_rpc_frame(
+                &state,
+                "s3",
+                &serde_json::json!({
+                    "type":"response","command":"prompt","id":request["id"],"success":true,
+                    "data":{"agentInvoked":true}
+                }),
+            )
+            .await;
         }
-        assert_eq!(state.sessions.read().await["s3"].messages.iter().map(|message| message.id.clone()).collect::<Vec<_>>(),
-            [format!("__command_notice:{first_id}"), format!("__command_notice:{second_id}")]);
+        assert_eq!(
+            state.sessions.read().await["s3"]
+                .messages
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>(),
+            [
+                format!("__command_notice:{first_id}"),
+                format!("__command_notice:{second_id}")
+            ]
+        );
         let consumed = serde_json::json!({"type":"message_end","message":{
             "role":"custom","customType":"skill-prompt","display":true,"attribution":"user",
             "details":{"clientMessageId":second_id,"name":"foo","prompt":"/skill:foo same","args":"same"},
@@ -8287,16 +8995,34 @@ pub(crate) mod tests {
         for _ in 0..2 {
             apply_rpc_frame(&state, "s3", &consumed).await;
         }
-        assert_eq!(state.sessions.read().await["s3"].messages.iter().map(|message| message.id.clone()).collect::<Vec<_>>(),
-            [format!("__command_notice:{first_id}"), format!("prompt:{second_id}")]);
+        assert_eq!(
+            state.sessions.read().await["s3"]
+                .messages
+                .iter()
+                .map(|message| message.id.clone())
+                .collect::<Vec<_>>(),
+            [
+                format!("__command_notice:{first_id}"),
+                format!("prompt:{second_id}")
+            ]
+        );
         for command in ["get_messages", "get_messages_page"] {
             let history_state = test_state(8, None);
-            history_state.sessions.write().await.insert("s1".into(), test_record());
+            history_state
+                .sessions
+                .write()
+                .await
+                .insert("s1".into(), test_record());
             let request_id = register_test_history_request(&history_state, "s1").await;
-            apply_rpc_frame(&history_state, "s1", &serde_json::json!({
-                "type":"response","command":command,"id":request_id,"success":true,
-                "data":{"messages":[consumed["message"]],"totalMessages":1,"nextCursor":null}
-            })).await;
+            apply_rpc_frame(
+                &history_state,
+                "s1",
+                &serde_json::json!({
+                    "type":"response","command":command,"id":request_id,"success":true,
+                    "data":{"messages":[consumed["message"]],"totalMessages":1,"nextCursor":null}
+                }),
+            )
+            .await;
             let historical = history_state.sessions.read().await["s1"].messages[0].clone();
             let mut live = state.sessions.read().await["s3"].messages[1].clone();
             live.is_new = false;
@@ -9426,6 +10152,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("s1".to_string(), test_record());
+        let _commands = register_test_transport(&state, "s1", "s1", 8).await;
 
         apply_rpc_response(
             &state,
@@ -9481,7 +10208,8 @@ pub(crate) mod tests {
             },
         )
         .await;
-        map_test_transport(&state, "transport-session", "transport-session").await;
+        let mut commands =
+            register_test_transport(&state, "transport-session", "transport-session", 8).await;
         let mut events = state.events.subscribe();
 
         apply_rpc_response(
@@ -9543,12 +10271,19 @@ pub(crate) mod tests {
             state.session_runtime.session_mode("omp-session").await,
             Some(SessionMode::DiffReview),
         );
+        // Discard the native history refresh queued by the identity rebind.
+        while commands.try_recv().is_ok() {}
+        let rejected = handle_client_message(&state, ClientMessage::PromptSend {
+            session_id: "transport-session".into(),
+            text: "Must not reach the agent".into(),
+            images: None,
+            behavior: None,
+        }).await;
         assert!(
-            rpc_transport_session_id(&state, "transport-session")
-                .await
-                .is_none(),
+            matches!(rejected.as_slice(), [ServerMessage::Error { .. }]),
             "frontend actions must use the real OMP session id, not the transport id"
         );
+        assert!(commands.try_recv().is_err(), "hidden transport IDs must not dispatch frontend prompts");
 
         match events.recv().await.expect("target snapshot event") {
             ServerMessage::SessionSnapshot { session_id, state } => {
@@ -9576,6 +10311,17 @@ pub(crate) mod tests {
             }
             other => panic!("unexpected second event: {other:?}"),
         }
+
+        let accepted = handle_client_message(&state, ClientMessage::PromptSend {
+            session_id: "omp-session".into(),
+            text: "Continue the visible conversation".into(),
+            images: None,
+            behavior: None,
+        }).await;
+        assert!(accepted.is_empty());
+        let prompt = commands.try_recv().expect("visible session prompt reaches its live child");
+        assert_eq!(prompt["type"], "prompt");
+        assert_eq!(prompt["message"], "Continue the visible conversation");
     }
 
     #[tokio::test]
@@ -9632,7 +10378,7 @@ pub(crate) mod tests {
             .write()
             .await
             .insert("old-session".to_string(), previous);
-        map_test_transport(&state, "old-session", "old-session").await;
+        let _commands = register_test_transport(&state, "old-session", "old-session", 8).await;
         state
             .session_runtime
             .set_pending_session_name(

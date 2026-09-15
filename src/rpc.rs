@@ -175,6 +175,183 @@ pub(crate) async fn fail_removed_session_forks(
     }
 }
 
+fn session_skills_error(
+    pending: &PendingSessionSkills,
+    message: impl Into<String>,
+    skills: Option<SessionSkillsState>,
+) -> ServerMessage {
+    ServerMessage::SessionSkillsError {
+        target_connection_id: pending.target_connection_id,
+        request_id: pending.request_id.clone(),
+        session_id: pending.session_id.clone(),
+        message: message.into(),
+        state: skills,
+    }
+}
+
+pub(crate) async fn fail_removed_session_skills(
+    state: &AppState,
+    requests: Vec<PendingSessionSkills>,
+    message: &str,
+) {
+    for pending in requests {
+        if pending.target_connection_id.is_some() {
+            let _ = state
+                .events
+                .emit(state, session_skills_error(&pending, message, None))
+                .await;
+        }
+    }
+}
+
+async fn handle_session_skills_response(state: &AppState, transport: &str, frame: &Value) -> bool {
+    let command = value_str(frame, "command").or_else(|| value_str(frame, "requestType"));
+    let is_skills = matches!(command, Some("get_session_skills" | "set_session_skills"));
+    let Some(id) = value_str(frame, "id") else {
+        return is_skills;
+    };
+    let pending = state
+        .session_runtime
+        .pending_session_skills
+        .read()
+        .await
+        .get(id)
+        .cloned();
+    let Some(pending) = pending else {
+        return is_skills;
+    };
+    // A foreign child cannot consume another child's pending request, including errors.
+    if pending.transport_session_id != transport {
+        return true;
+    }
+    let transports = state.session_runtime.rpc_sessions.read().await;
+    let targets = state.session_runtime.rpc_session_targets.read().await;
+    if !transports
+        .get(transport)
+        .is_some_and(|handle| handle.stdin.same_channel(&pending.stdin))
+        || targets.get(transport) != Some(&pending.session_id)
+    {
+        state
+            .session_runtime
+            .pending_session_skills
+            .write()
+            .await
+            .remove(id);
+        return true;
+    }
+    state
+        .session_runtime
+        .pending_session_skills
+        .write()
+        .await
+        .remove(id);
+    let failed = value_str(frame, "status") == Some("error")
+        || frame.get("success").and_then(Value::as_bool) == Some(false);
+    let payload = frame.get("data").or_else(|| frame.get("result"));
+    let mut catalog = None;
+    let mut error = failed.then(|| rpc_error_message(frame));
+    let skills = if command != Some(pending.command) {
+        error = Some("OMP returned an unexpected session skills response.".to_string());
+        None
+    } else if failed {
+        payload
+            .and_then(|data| data.get("state"))
+            .cloned()
+            .and_then(|value| serde_json::from_value::<SessionSkillsState>(value).ok())
+    } else if pending.command == "get_session_skills" {
+        rpc_response_data_as::<OmpSessionSkillsResponse>(frame).map(|result| {
+            catalog = Some(result.catalog);
+            result.state
+        })
+    } else {
+        rpc_response_data_as::<SessionSkillsState>(frame)
+    };
+    if skills.as_ref().is_some_and(|skills| {
+        skills.session_id != pending.session_id
+            || skills.journal_session_id != pending.journal_session_id
+    }) {
+        return true;
+    }
+    if skills.is_none() && error.is_none() {
+        error = Some("OMP returned invalid session skills state.".to_string());
+    }
+    // Keep transport identity locked until the source cache and its targeted reply are committed.
+    state
+        .events
+        .coordinate_sessions_and_emit(state, |sessions| {
+            let Some(record) = sessions.get_mut(&pending.session_id) else {
+                return ((), Vec::new());
+            };
+            if record.kind != SessionKind::Managed
+                || !record.session_skills.as_ref().is_some_and(|current| {
+                    current.session_id == pending.session_id
+                        && current.journal_session_id == pending.journal_session_id
+                })
+            {
+                return ((), Vec::new());
+            }
+            let mut messages = Vec::new();
+            if let Some(skills) = skills {
+                record.session_skills = Some(skills);
+                messages.push(ServerMessage::SessionSnapshot {
+                    session_id: pending.session_id.clone(),
+                    state: record.projection(),
+                });
+            }
+            if pending.target_connection_id.is_some() {
+                messages.push(if let Some(error) = error {
+                    session_skills_error(&pending, error, record.session_skills.clone())
+                } else {
+                    ServerMessage::SessionSkillsResult {
+                        target_connection_id: pending.target_connection_id,
+                        request_id: pending.request_id,
+                        session_id: pending.session_id,
+                        state: record
+                            .session_skills
+                            .clone()
+                            .expect("validated native skills state"),
+                        catalog,
+                    }
+                });
+            }
+            ((), messages)
+        })
+        .await;
+    true
+}
+
+async fn apply_session_skills_event(state: &AppState, transport: &str, skills: SessionSkillsState) {
+    let transports = state.session_runtime.rpc_sessions.read().await;
+    let targets = state.session_runtime.rpc_session_targets.read().await;
+    if !transports.contains_key(transport) || targets.get(transport) != Some(&skills.session_id) {
+        return;
+    }
+    state
+        .events
+        .coordinate_sessions_and_emit(state, |sessions| {
+            let Some(record) = sessions.get_mut(&skills.session_id) else {
+                return ((), Vec::new());
+            };
+            if record.kind != SessionKind::Managed
+                || !record.session_skills.as_ref().is_some_and(|current| {
+                    current.session_id == skills.session_id
+                        && current.journal_session_id == skills.journal_session_id
+                })
+            {
+                return ((), Vec::new());
+            }
+            record.session_skills = Some(skills);
+            (
+                (),
+                vec![ServerMessage::SessionSnapshot {
+                    session_id: record.id.clone(),
+                    state: record.projection(),
+                }],
+            )
+        })
+        .await;
+}
+
 pub(crate) async fn fail_removed_rewind_requests(
     state: &AppState,
     rewind_requests: Vec<PendingRewindRpc>,
@@ -208,6 +385,7 @@ async fn stop_transport(state: &AppState, transport_session_id: &str) {
         .await
     {
         let _ = removed.handle.stop.send(());
+        fail_removed_session_skills(state, removed.session_skills, "The OMP session closed.").await;
         fail_removed_btw_requests(
             state,
             removed.btw_requests,
@@ -728,6 +906,7 @@ pub(crate) async fn spawn_rpc_child(
     cwd: Option<String>,
     session_args: Vec<String>,
     resume_session_file: Option<String>,
+    initial_target_session_id: Option<String>,
 ) -> anyhow::Result<()> {
     let mut args = state.rpc_config.args.clone();
     args.extend(session_args);
@@ -781,6 +960,12 @@ pub(crate) async fn spawn_rpc_child(
             },
         )
         .await;
+    if let Some(target_session_id) = initial_target_session_id {
+        state
+            .session_runtime
+            .map_transport_to_session(&session_id, target_session_id)
+            .await;
+    }
 
     let write_session_id = session_id.clone();
     tokio::spawn(async move {
@@ -841,6 +1026,8 @@ pub(crate) async fn spawn_rpc_child(
             .map(|removed| removed.target_session_id.clone())
             .unwrap_or_else(|| session_id.clone());
         if let Some(removed) = removed_transport {
+            fail_removed_session_skills(&state, removed.session_skills, "The OMP session exited.")
+                .await;
             fail_removed_btw_requests(
                 &state,
                 removed.btw_requests,
@@ -936,6 +1123,9 @@ pub(crate) async fn read_rpc_stdout<R>(state: AppState, session_id: String, read
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    let Some(source_stdin) = state.session_runtime.stdin_for_transport(&session_id).await else {
+        return;
+    };
     let mut lines = reader.lines();
     let mut decoder = RpcFrameDecoder::default();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -950,9 +1140,23 @@ where
 
         match decoder.push_line(&line) {
             Ok(Some(frame)) => {
+                if !state
+                    .session_runtime
+                    .stdin_for_transport(&session_id)
+                    .await
+                    .is_some_and(|current| current.same_channel(&source_stdin))
+                {
+                    break;
+                }
                 log_rpc_frame(&session_id, &frame);
                 apply_rpc_frame(&state, &session_id, &frame).await;
-                if state.forward_raw_frames {
+                if state.forward_raw_frames
+                    && state
+                        .session_runtime
+                        .stdin_for_transport(&session_id)
+                        .await
+                        .is_some_and(|current| current.same_channel(&source_stdin))
+                {
                     let raw_session_id = rpc_session_target_id(&state, &session_id).await;
                     let _ = state
                         .events
@@ -1096,6 +1300,7 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             | OmpRpcFrame::ToolExecutionEnd { .. }
             | OmpRpcFrame::PlanReview { .. }
             | OmpRpcFrame::GoalUpdated { .. }
+            | OmpRpcFrame::SessionSkillsUpdated { .. }
             | OmpRpcFrame::HostToolResult { .. }
             | OmpRpcFrame::HostToolUpdate { .. }
             | OmpRpcFrame::HostUriRequest { .. }
@@ -1112,6 +1317,9 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         return;
     }
     match typed_frame {
+        OmpRpcFrame::SessionSkillsUpdated { session_skills } => {
+            apply_session_skills_event(state, session_id, session_skills).await;
+        }
         OmpRpcFrame::Ready(ready) => {
             mark_status_and_broadcast(state, &target_session_id, SessionStatus::Idle).await;
             if let Err(message) =
@@ -1286,14 +1494,14 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         let mut changed_message_index = record.messages.len();
                         if let Some(id) = omp_submission_client_message_id(&source_message) {
                             let pending_id = format!("__pending_prompt:{id}");
-                            let skill_notice_id = transcript_message.skill_invocation.as_ref()
+                            let skill_notice_id = transcript_message
+                                .skill_invocation
+                                .as_ref()
                                 .map(|_| format!("__command_notice:{id}"));
-                            if let Some(index) = record
-                                .messages
-                                .iter()
-                                .position(|existing| existing.id == pending_id
-                                    || skill_notice_id.as_deref() == Some(existing.id.as_str()))
-                            {
+                            if let Some(index) = record.messages.iter().position(|existing| {
+                                existing.id == pending_id
+                                    || skill_notice_id.as_deref() == Some(existing.id.as_str())
+                            }) {
                                 remove_record_message(record, index);
                                 changed_message_index = index;
                             }
@@ -2000,6 +2208,34 @@ async fn apply_omp_session_state(
     data: OmpSessionState,
 ) -> String {
     let target_session_id = data.session_id.clone();
+    let identity_changed = state
+        .sessions
+        .read()
+        .await
+        .get(&current_session_id)
+        .is_some_and(|record| {
+            target_session_id != current_session_id
+                || record
+                    .session_skills
+                    .as_ref()
+                    .map(|skills| skills.journal_session_id.as_str())
+                    != data
+                        .session_skills
+                        .as_ref()
+                        .map(|skills| skills.journal_session_id.as_str())
+        });
+    if identity_changed {
+        let pending = state
+            .session_runtime
+            .take_session_skills_for_transport(transport_session_id)
+            .await;
+        fail_removed_session_skills(
+            state,
+            pending,
+            "The session identity changed. Refresh session skills.",
+        )
+        .await;
+    }
     let model = data.model.as_ref().and_then(model_display_name);
     let context_tokens = data.context_usage.as_ref().and_then(|usage| usage.tokens);
     let context_window = data
@@ -2007,11 +2243,11 @@ async fn apply_omp_session_state(
         .as_ref()
         .and_then(|usage| usage.context_window);
     let context_percent = data.context_usage.as_ref().and_then(|usage| usage.percent);
-    apply_get_state_update(
+    if !apply_get_state_update(
         state,
         transport_session_id,
         RpcStateUpdate {
-            current_session_id,
+            current_session_id: current_session_id.clone(),
             target_session_id: target_session_id.clone(),
             record_state: RpcRecordState {
                 is_streaming: data.is_streaming,
@@ -2026,10 +2262,14 @@ async fn apply_omp_session_state(
                 plan_mode: Some(map_plan_mode_state_projection(data.plan_mode.as_ref())),
                 goal_mode: Some(map_goal_mode_state_projection(data.goal_mode.as_ref())),
                 todo_phases: Some(data.todo_phases),
+                session_skills: data.session_skills,
             },
         },
     )
-    .await;
+    .await
+    {
+        return current_session_id;
+    }
     broadcast_sessions_snapshot(state).await;
     target_session_id
 }
@@ -2486,6 +2726,9 @@ async fn handle_btw_response(
 }
 
 pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
+    if handle_session_skills_response(state, session_id, frame).await {
+        return;
+    }
     let command = value_str(frame, "command").or_else(|| value_str(frame, "requestType"));
     let status = value_str(frame, "status");
     let success = frame.get("success").and_then(|value| value.as_bool());

@@ -11,6 +11,11 @@ pub(crate) enum OmpRpcFrame {
     Ready(OmpRpcReadyFrame),
     #[serde(rename = "response")]
     Response(OmpRpcResponseFrame),
+    #[serde(rename = "session_skills_updated")]
+    SessionSkillsUpdated {
+        #[serde(rename = "sessionSkills")]
+        session_skills: crate::SessionSkillsState,
+    },
     #[serde(rename = "agent_start")]
     AgentStart,
     #[serde(rename = "agent_end")]
@@ -244,9 +249,16 @@ pub(crate) struct OmpSessionState {
     pub(crate) queued_message_count: usize,
     pub(crate) plan_mode: Option<OmpPlanModeState>,
     pub(crate) goal_mode: Option<OmpGoalModeState>,
+    pub(crate) session_skills: Option<crate::SessionSkillsState>,
     #[serde(default)]
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
     pub(crate) context_usage: Option<OmpContextUsage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct OmpSessionSkillsResponse {
+    pub(crate) state: crate::SessionSkillsState,
+    pub(crate) catalog: Vec<crate::SessionSkillCatalogEntry>,
 }
 
 #[allow(dead_code)]
@@ -416,6 +428,20 @@ pub(crate) struct OmpAvailableCommandsResponse {
 pub(crate) enum OmpRpcCommand {
     #[serde(rename = "get_state")]
     GetState { id: String },
+    #[serde(rename = "get_session_skills")]
+    GetSessionSkills {
+        id: String,
+        session_id: String,
+        journal_session_id: String,
+    },
+    #[serde(rename = "set_session_skills")]
+    SetSessionSkills {
+        id: String,
+        session_id: String,
+        journal_session_id: String,
+        expected_revision: String,
+        skill_ids: Vec<String>,
+    },
     #[serde(rename = "negotiate_protocol")]
     NegotiateProtocol {
         id: String,

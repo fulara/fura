@@ -36,12 +36,10 @@ fn is_user_skill_invocation(value: &Value) -> bool {
 pub(crate) fn omp_submission_client_message_id(value: &Value) -> Option<&str> {
     match value.get("role").and_then(Value::as_str) {
         Some("user") => value.get("clientMessageId").and_then(Value::as_str),
-        Some("custom") if is_user_skill_invocation(value) => {
-            value
-                .get("details")?
-                .get("clientMessageId")
-                .and_then(Value::as_str)
-        }
+        Some("custom") if is_user_skill_invocation(value) => value
+            .get("details")?
+            .get("clientMessageId")
+            .and_then(Value::as_str),
         _ => None,
     }
 }
@@ -592,7 +590,11 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
         return None;
     }
 
-    let role = if is_skill { MessageRole::User } else { parse_role(role_str) };
+    let role = if is_skill {
+        MessageRole::User
+    } else {
+        parse_role(role_str)
+    };
 
     let blocks = if let Some(content) = value.get("content") {
         content_to_blocks(content)
@@ -627,8 +629,13 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
     };
 
     let skill_invocation = is_skill.then(|| {
-        let detail = |key| value.get("details").and_then(|details| details.get(key))
-            .and_then(Value::as_str).map(str::to_owned);
+        let detail = |key| {
+            value
+                .get("details")
+                .and_then(|details| details.get(key))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
         crate::session::SkillInvocation {
             name: detail("name"),
             prompt: detail("prompt"),
@@ -740,7 +747,6 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
 mod tests {
     use super::*;
 
-
     fn skill_message() -> Value {
         serde_json::json!({
             "role":"custom", "customType":"skill-prompt", "display":true, "attribution":"user",
@@ -761,9 +767,12 @@ mod tests {
         assert_eq!(mapped.id, "prompt:submitted");
         assert_eq!(mapped.blocks, content_to_blocks(&raw["content"]));
         let dto = serde_json::to_value(&mapped).unwrap();
-        assert_eq!(dto["skillInvocation"], serde_json::json!({
-            "name":"review", "prompt":"Sprawdź /skill:review\n  dokładnie", "args":"Sprawdź\n  dokładnie"
-        }));
+        assert_eq!(
+            dto["skillInvocation"],
+            serde_json::json!({
+                "name":"review", "prompt":"Sprawdź /skill:review\n  dokładnie", "args":"Sprawdź\n  dokładnie"
+            })
+        );
         assert_eq!(project_omp_transcript(&[raw]).0, vec![mapped]);
     }
 
@@ -781,24 +790,42 @@ mod tests {
             let mut other = raw.clone();
             other[field] = value;
             let projected = map_omp_message(&other).unwrap();
-            assert!(serde_json::to_value(&projected).unwrap().get("skillInvocation").is_none());
+            assert!(
+                serde_json::to_value(&projected)
+                    .unwrap()
+                    .get("skillInvocation")
+                    .is_none()
+            );
             assert_eq!(projected.blocks, content_to_blocks(&other["content"]));
         }
-        for display in [serde_json::json!(false), Value::Null, serde_json::json!("true")] {
+        for display in [
+            serde_json::json!(false),
+            Value::Null,
+            serde_json::json!("true"),
+        ] {
             raw["display"] = display;
             assert!(map_omp_message(&raw).is_none());
         }
         raw["display"] = serde_json::json!(true);
         for (details, expected) in [
-            (serde_json::json!({"name":"review", "args":"legacy"}), serde_json::json!({"name":"review", "args":"legacy"})),
-            (serde_json::json!({"name":42, "prompt":false, "args":[]}), serde_json::json!({})),
+            (
+                serde_json::json!({"name":"review", "args":"legacy"}),
+                serde_json::json!({"name":"review", "args":"legacy"}),
+            ),
+            (
+                serde_json::json!({"name":42, "prompt":false, "args":[]}),
+                serde_json::json!({}),
+            ),
             (Value::Null, serde_json::json!({})),
         ] {
             raw["details"] = details;
             let projected = map_omp_message(&raw).unwrap();
             assert_eq!(projected.role, MessageRole::User);
             assert_eq!(projected.blocks, content_to_blocks(&raw["content"]));
-            assert_eq!(serde_json::to_value(projected).unwrap()["skillInvocation"], expected);
+            assert_eq!(
+                serde_json::to_value(projected).unwrap()["skillInvocation"],
+                expected
+            );
         }
     }
 
@@ -817,8 +844,13 @@ mod tests {
         let mut second = original.clone();
         second["details"]["clientMessageId"] = serde_json::json!("second");
         let projected = project_omp_transcript(&[original.clone(), second, original]).0;
-        assert_eq!(projected.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(),
-            ["prompt:submitted", "prompt:second"]);
+        assert_eq!(
+            projected
+                .iter()
+                .map(|message| message.id.as_str())
+                .collect::<Vec<_>>(),
+            ["prompt:submitted", "prompt:second"]
+        );
         let mut legacy = skill_message();
         legacy["content"] = serde_json::json!("Saved expansion");
         legacy["details"] = serde_json::json!({"name":"review"});
@@ -826,7 +858,10 @@ mod tests {
         previous_shape["attribution"] = Value::Null;
         let previous = project_omp_transcript(&[previous_shape]).0.remove(0);
         let upgraded = project_omp_transcript(&[legacy]).0.remove(0);
-        assert_eq!(upgraded.id, previous.id, "User presentation must not rename legacy fallback ids");
+        assert_eq!(
+            upgraded.id, previous.id,
+            "User presentation must not rename legacy fallback ids"
+        );
     }
     #[test]
     fn map_omp_message_preserves_missing_id_for_live_streaming() {

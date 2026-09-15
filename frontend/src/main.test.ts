@@ -369,6 +369,250 @@ describe("skill invocation prompt history", () => {
   });
 });
 
+describe("desktop session skills", () => {
+  const alpha = { id: "/skills/alpha/SKILL.md", name: "Alpha", hash: "alpha-hash" };
+  const beta = { id: "/skills/beta/SKILL.md", name: "Beta", hash: "beta-hash" };
+  const missing = { id: "/skills/missing/SKILL.md", name: "Missing", hash: "missing-hash" };
+  const state = (overrides = {}) => ({
+    sessionId: "live", journalSessionId: "journal-live", revision: "epoch:0",
+    selected: [alpha], activeRevision: "epoch:0", active: [alpha],
+    pending: false, applying: false, ...overrides,
+  });
+  const catalog = [
+    { id: alpha.id, name: alpha.name, description: "First guidance", status: "available" },
+    { id: beta.id, name: beta.name, description: "Second guidance", status: "changed" },
+    { id: missing.id, name: missing.name, description: "Pinned definition", status: "missing" },
+  ];
+  const button = (id: string, owner = document) => {
+    const element = owner.querySelector<HTMLButtonElement>(`#${id}`);
+    expect(element, id).not.toBeNull();
+    return element!;
+  };
+  const frame = (connection: FakeConnection, type: string) => {
+    const message = [...connection.sent].reverse().find(message => message.type === type);
+    expect(message, type).toBeDefined();
+    return message as unknown as { type: string; requestId: string; sessionId: string; journalSessionId: string; expectedRevision?: string; skillIds?: string[] };
+  };
+  const emit = (connection: FakeConnection, message: unknown) => connection.emit(message as ServerMessage);
+  const answer = (connection: FakeConnection, request = frame(connection, "session.skills.get"), next = state()) =>
+    emit(connection, { type: "session.skills.result", requestId: request.requestId, sessionId: request.sessionId, state: next, catalog });
+  const checkbox = (id: string, owner = document) => {
+    const input = [...owner.querySelectorAll<HTMLInputElement>('#sessionSkillsList input[type="checkbox"]')].find(input => input.value === id);
+    expect(input, id).toBeDefined();
+    return input!;
+  };
+  async function setup(next = state()) {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    emit(connection, { type: "session.snapshot", sessionId: "live", state: { ...projection("live"), sessionSkills: next } });
+    connection.sent.length = 0;
+    return connection;
+  }
+  function open(connection: FakeConnection, next = state()) {
+    button("sessionSkillsButton").click();
+    const request = frame(connection, "session.skills.get");
+    expect(request).toEqual({ type: "session.skills.get", requestId: expect.any(String), sessionId: "live", journalSessionId: "journal-live" });
+    answer(connection, request, next);
+  }
+
+  it("stages searchable multi-selection and cancels without changing the composer or sending config", async () => {
+    const connection = await setup();
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+    input.value = "Keep this exact draft";
+    input.setSelectionRange(5, 9);
+    input.focus();
+    open(connection);
+    expect(document.activeElement?.id).toBe("sessionSkillsSearch");
+    checkbox(beta.id).click();
+    expect(checkbox(alpha.id).checked).toBe(true);
+    expect(checkbox(beta.id).checked).toBe(true);
+    const search = document.querySelector<HTMLInputElement>("#sessionSkillsSearch")!;
+    search.value = "second";
+    search.dispatchEvent(new Event("input", { bubbles: true }));
+    expect(document.querySelectorAll('#sessionSkillsList input[type="checkbox"]')).toHaveLength(1);
+    expect(checkbox(beta.id).checked).toBe(true);
+    button("sessionSkillsCancel").click();
+    expect(connection.sent.map(message => message.type)).toEqual(["session.skills.get"]);
+    expect(input.value).toBe("Keep this exact draft");
+    expect([input.selectionStart, input.selectionEnd]).toEqual([5, 9]);
+    expect(document.activeElement).toBe(input);
+  });
+
+  it("applies exactly one full-set CAS config and distinguishes pending from active until projection", async () => {
+    const connection = await setup();
+    open(connection);
+    checkbox(beta.id).click();
+    button("sessionSkillsApply").click();
+    button("sessionSkillsApply").click();
+    const request = frame(connection, "session.skills.apply");
+    expect(request).toEqual({ type: "session.skills.apply", requestId: expect.any(String),
+      sessionId: "live", journalSessionId: "journal-live", expectedRevision: "epoch:0", skillIds: [alpha.id, beta.id] });
+    expect(connection.sent.filter(message => message.type !== ("session.skills.get" as string))).toEqual([request]);
+    const pending = state({ revision: "epoch:1", selected: [alpha, beta], pending: true });
+    emit(connection, { type: "session.skills.result", requestId: request.requestId, sessionId: "live", state: pending });
+    expect(button("sessionSkillsButton").textContent).toMatch(/pending.*1.*2/i);
+    expect(button("sessionSkillsButton").title).toMatch(/current[^;]*Alpha/i);
+    expect(button("sessionSkillsButton").title).toMatch(/next.*Beta/i);
+    expect(button("sessionSkillsButton").title).not.toMatch(/current[^;]*Beta/i);
+    emit(connection, { type: "session.delta", sessionId: "live", state: {
+      ...projection("live"), transcriptReplaceFrom: 0, transcriptAppend: [], baseSeq: 0, seq: 1,
+      sessionSkills: { ...pending, active: [alpha, beta], activeRevision: "epoch:1", pending: false },
+    } });
+    expect(button("sessionSkillsButton").textContent).not.toMatch(/pending|next/i);
+    expect(button("sessionSkillsButton").textContent).toContain("Beta");
+    expect(connection.sent.some(message => message.type === "prompt.send" || message.type === "config.set")).toBe(false);
+  });
+
+  it("allows unchanged refresh and removal of missing pinned selections including an empty set", async () => {
+    const initial = state({ selected: [missing], active: [missing] });
+    const connection = await setup(initial);
+    open(connection, initial);
+    button("sessionSkillsApply").click();
+    const refresh = frame(connection, "session.skills.apply");
+    expect(refresh.skillIds).toEqual([missing.id]);
+    emit(connection, { type: "session.skills.error", requestId: refresh.requestId, sessionId: "live", message: "Definition is missing", state: initial });
+    expect(document.querySelector("#sessionSkillsStatus")?.textContent).toContain("Definition is missing");
+    checkbox(missing.id).click();
+    button("sessionSkillsApply").click();
+    expect(frame(connection, "session.skills.apply").skillIds).toEqual([]);
+  });
+
+  it("keeps the staged draft on revision conflict and requires explicit reload before another Apply", async () => {
+    const connection = await setup();
+    open(connection);
+    checkbox(beta.id).click();
+    button("sessionSkillsApply").click();
+    const request = frame(connection, "session.skills.apply");
+    const newer = state({ revision: "epoch:2", selected: [], active: [] });
+    emit(connection, { type: "session.skills.error", requestId: request.requestId, sessionId: "live", message: "Revision conflict", state: newer });
+    expect(checkbox(alpha.id).checked).toBe(true);
+    expect(checkbox(beta.id).checked).toBe(true);
+    expect(button("sessionSkillsApply").disabled).toBe(true);
+    expect(document.querySelector("#sessionSkillsCurrent")?.textContent).toMatch(/none/i);
+    button("sessionSkillsReload").click();
+    answer(connection, frame(connection, "session.skills.get"), newer);
+    expect(checkbox(alpha.id).checked).toBe(true);
+    expect(checkbox(beta.id).checked).toBe(true);
+    button("sessionSkillsApply").click();
+    expect(frame(connection, "session.skills.apply").expectedRevision).toBe("epoch:2");
+  });
+
+  it("rejects mismatched request and journal replies, then closes on session switch and ignores old replies", async () => {
+    const connection = await setup();
+    button("sessionSkillsButton").click();
+    const request = frame(connection, "session.skills.get");
+    answer(connection, { ...request, requestId: "unrelated" }, state({ selected: [beta] }));
+    answer(connection, request, state({ journalSessionId: "wrong-journal", selected: [beta] }));
+    expect(document.querySelectorAll('#sessionSkillsList input[type="checkbox"]')).toHaveLength(0);
+    answer(connection, request);
+    emit(connection, { type: "session.snapshot", sessionId: "other", state: { ...projection("other"), sessionSkills: state({ sessionId: "other", journalSessionId: "journal-other", selected: [], active: [] }) } });
+    const other = [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(button => button.textContent?.includes("Session other"))!;
+    other.click();
+    expect(document.querySelector<HTMLDialogElement>("#sessionSkillsDialog")?.open ?? false).toBe(false);
+    answer(connection, request, state({ selected: [beta], active: [beta] }));
+    expect(button("sessionSkillsButton").textContent).not.toContain("Beta");
+  });
+
+  it("invalidates pending requests on journal remap and disconnect without treating old ACKs as active", async () => {
+    const connection = await setup();
+    open(connection);
+    checkbox(beta.id).click();
+    button("sessionSkillsApply").click();
+    const request = frame(connection, "session.skills.apply");
+    emit(connection, { type: "session.snapshot", sessionId: "live", state: { ...projection("live"), sessionSkills: state({ journalSessionId: "replacement", revision: "new:0", selected: [], active: [] }) } });
+    answer(connection, request, state({ selected: [beta], active: [beta] }));
+    expect(button("sessionSkillsButton").textContent).not.toContain("Beta");
+    connection.options.onClose?.();
+    answer(connection, request, state({ selected: [beta], active: [beta] }));
+    expect(button("sessionSkillsButton").textContent).not.toContain("Beta");
+  });
+
+  it("shows unsupported and native unavailable state rather than a false empty active set", async () => {
+    const connection = await setup();
+    emit(connection, { type: "session.snapshot", sessionId: "live", state: projection("live") });
+    expect(button("sessionSkillsButton").disabled).toBe(true);
+    expect(button("sessionSkillsButton").title).toMatch(/unsupported|not support/i);
+    emit(connection, { type: "session.snapshot", sessionId: "live", state: { ...projection("live"), sessionSkills: state({ error: "Persistence indeterminate", selected: [], active: [] }) } });
+    expect(button("sessionSkillsButton").textContent).toMatch(/unavailable/i);
+    button("sessionSkillsButton").click();
+    answer(connection, frame(connection, "session.skills.get"), state({ error: "Persistence indeterminate", selected: [], active: [] }));
+    expect(document.querySelector("#sessionSkillsStatus")?.textContent).toContain("Persistence indeterminate");
+    expect(button("sessionSkillsApply").disabled).toBe(true);
+  });
+
+  it("uses the composer ownerDocument and returns focus on Escape with image and snippet attachments intact", async () => {
+    const connection = await setup();
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+    input.value = "Keep attachments ";
+    const snippet = "Snippet content ".repeat(100);
+    const snippetPaste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(snippetPaste, "clipboardData", { value: { items: [], getData: () => snippet } });
+    input.dispatchEvent(snippetPaste);
+    let reader: FileReader | undefined;
+    vi.spyOn(FileReader.prototype, "readAsDataURL").mockImplementation(function (this: FileReader) { reader = this; });
+    const paste = new Event("paste", { bubbles: true, cancelable: true });
+    Object.defineProperty(paste, "clipboardData", { value: {
+      items: [{ type: "image/png", getAsFile: () => new File(["png"], "image.png", { type: "image/png" }) }], getData: () => "",
+    } });
+    input.dispatchEvent(paste);
+    Object.defineProperty(reader!, "result", { value: "data:image/png;base64,cG5n" });
+    reader!.onload?.(new ProgressEvent("load") as ProgressEvent<FileReader>);
+    await Promise.resolve();
+    await Promise.resolve();
+    const before = input.value;
+    expect(before).toContain("[Snippet");
+    expect(before).toContain("[Image");
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const owner = iframe.contentDocument!;
+    const dialogPrototype = Object.getPrototypeOf(owner.createElement("dialog")) as HTMLDialogElement;
+    dialogPrototype.showModal = HTMLDialogElement.prototype.showModal;
+    dialogPrototype.close = HTMLDialogElement.prototype.close;
+    owner.body.append(owner.adoptNode(document.querySelector("#promptForm")!));
+    input.focus();
+    button("sessionSkillsButton", owner).click();
+    answer(connection);
+    const dialog = owner.querySelector<HTMLDialogElement>("#sessionSkillsDialog")!;
+    expect(dialog).not.toBeNull();
+    expect(owner.activeElement?.id).toBe("sessionSkillsSearch");
+    checkbox(beta.id, owner).click();
+    dialog.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    expect(owner.activeElement).toBe(input);
+    expect(input.value).toBe(before);
+    expect(connection.sent.map(message => message.type)).toEqual(["session.skills.get"]);
+    document.body.append(document.adoptNode(owner.querySelector("#promptForm")!));
+    iframe.remove();
+    document.querySelector<HTMLFormElement>("#promptForm")!.requestSubmit();
+    expect(connection.sent.find(message => message.type === "prompt.send")).toMatchObject({
+      text: expect.stringContaining(snippet.trim()), images: [{ data: "cG5n", mimeType: "image/png" }],
+    });
+  });
+  it("retires an open popout dialog when its composer moves back and rejects the old catalog reply", async () => {
+    const connection = await setup();
+    const iframe = document.createElement("iframe");
+    document.body.append(iframe);
+    const owner = iframe.contentDocument!;
+    const dialogPrototype = Object.getPrototypeOf(owner.createElement("dialog")) as HTMLDialogElement;
+    dialogPrototype.showModal = HTMLDialogElement.prototype.showModal;
+    dialogPrototype.close = HTMLDialogElement.prototype.close;
+    owner.body.append(owner.adoptNode(document.querySelector("#promptForm")!));
+    button("sessionSkillsButton", owner).click();
+    const old = frame(connection, "session.skills.get");
+    document.body.append(document.adoptNode(owner.querySelector("#promptForm")!));
+    iframe.remove();
+    button("sessionSkillsButton").click();
+    const fresh = frame(connection, "session.skills.get");
+    expect(fresh.requestId).not.toBe(old.requestId);
+    expect(document.querySelector<HTMLDialogElement>("#sessionSkillsDialog")?.open).toBe(true);
+    answer(connection, old, state({ selected: [beta] }));
+    expect(document.querySelectorAll('#sessionSkillsList input[type="checkbox"]')).toHaveLength(0);
+    answer(connection, fresh);
+    expect(checkbox(alpha.id).checked).toBe(true);
+    expect(checkbox(beta.id).checked).toBe(false);
+  });
+});
+
 describe("ordinary Diffs entry default", () => {
   function activate(id: string) {
     if (id !== "diffs") setPanelVisible("diffs", false);

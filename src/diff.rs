@@ -3548,6 +3548,7 @@ mod tests {
             context_percent: None,
             plan_mode: None,
             goal_mode: None,
+            session_skills: None,
             pending_plan_review: None,
             pending_ask: None,
             available_commands: Vec::new(),
