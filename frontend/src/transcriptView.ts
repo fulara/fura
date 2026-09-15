@@ -60,6 +60,7 @@ function transcriptMessageRenderSignature(message: TranscriptMessage): string {
     message.timestamp ?? null,
     message.isNew,
     message.blocks,
+    message.skillInvocation ?? null,
   ])}`;
 }
 
@@ -74,6 +75,39 @@ export function messageText(message: TranscriptMessage): string {
     })
     .filter(Boolean)
     .join("\n\n");
+}
+
+export function messagePromptText(message: TranscriptMessage): string {
+  const skill = message.skillInvocation;
+  if (!skill) return messageText(message);
+  if (skill.prompt?.trim()) return skill.prompt;
+  if (!skill.name?.trim()) return "";
+  return `/skill:${skill.name}${skill.args ? ` ${skill.args}` : ""}`;
+}
+
+function messageCopyLabel(message: TranscriptMessage, expanded: boolean): string {
+  if (expanded) return "Copy expanded content";
+  if (!message.skillInvocation) return "Copy";
+  return message.skillInvocation.prompt?.trim() ? "Copy command" : "Copy reconstructed command";
+}
+
+function renderMessageCopyButton(article: HTMLElement, expanded: boolean): HTMLButtonElement {
+  const copy = article.ownerDocument.createElement("button");
+  copy.type = "button";
+  copy.className = expanded ? "skill-copy-expanded" : "message-copy";
+  const message = renderedMessageState.get(article)!.message;
+  copy.textContent = messageCopyLabel(message, expanded);
+  copy.hidden = !expanded && !!message.skillInvocation && !messagePromptText(message);
+  copy.addEventListener("click", async () => {
+    const current = renderedMessageState.get(article)!.message;
+    const owner = article.ownerDocument;
+    const copied = await copyTextToClipboard(expanded ? messageText(current) : messagePromptText(current), owner);
+    copy.textContent = copied ? "Copied" : "Copy failed";
+    (owner.defaultView ?? window).setTimeout(() => {
+      copy.textContent = messageCopyLabel(renderedMessageState.get(article)!.message, expanded);
+    }, 900);
+  });
+  return copy;
 }
 
 type RenderMessageOptions = {
@@ -119,23 +153,12 @@ export function renderMessage(message: TranscriptMessage, options: RenderMessage
   syncMessageHeading(heading, message);
   const actions = mkEl("div");
   actions.className = "message-actions";
-  const copy = mkEl("button");
-  copy.type = "button";
-  copy.textContent = "Copy";
-  copy.addEventListener("click", async () => {
-    const owner = article.ownerDocument;
-    const copied = await copyTextToClipboard(messageText(renderedMessageState.get(article)?.message ?? message), owner);
-    copy.textContent = copied ? "Copied" : "Copy failed";
-    (owner.defaultView ?? window).setTimeout(() => {
-      copy.textContent = "Copy";
-    }, 900);
-  });
-  actions.append(copy);
+  actions.append(renderMessageCopyButton(article, false));
   if (options.review?.onStart) {
     const review = mkEl("button");
     review.type = "button";
     review.className = "message-review-toggle";
-    review.textContent = options.review.active ? "Reviewing" : "Review";
+    review.textContent = options.review.active ? "Reviewing" : message.skillInvocation ? "Review expanded content" : "Review";
     review.setAttribute("aria-pressed", options.review.active ? "true" : "false");
     review.disabled = options.review.active;
     review.addEventListener("click", () => {
@@ -162,8 +185,16 @@ export function updateRenderedMessage(article: HTMLElement, message: TranscriptM
   article.dataset.messageId = message.id;
   const heading = header.firstElementChild;
   if (heading) syncMessageHeading(heading as HTMLElement, message);
+  const copy = header.querySelector<HTMLButtonElement>(".message-copy");
+  if (copy) {
+    copy.textContent = messageCopyLabel(message, false);
+    copy.hidden = !!message.skillInvocation && !messagePromptText(message);
+  }
+  const review = header.querySelector<HTMLButtonElement>(".message-review-toggle");
+  if (review) review.textContent = options.review?.active ? "Reviewing" : message.skillInvocation ? "Review expanded content" : "Review";
+  const expanded = article.querySelector<HTMLDetailsElement>(".skill-expanded")?.open ?? false;
   while (header.nextSibling) header.nextSibling.remove();
-  appendMessageContent(article, message, options);
+  appendMessageContent(article, message, options, expanded);
   return article;
 }
 
@@ -172,6 +203,12 @@ function syncMessageHeading(heading: HTMLElement, message: TranscriptMessage): v
   const roleLabel = mkEl("strong");
   roleLabel.textContent = isCommandNoticeMessage(message) ? "Command" : message.role === "user" ? "You" : message.role;
   heading.append(roleLabel);
+  if (message.skillInvocation) {
+    const skill = mkEl("span");
+    skill.className = "message-skill-label";
+    skill.textContent = message.skillInvocation.name ? `Skill ${message.skillInvocation.name}` : "Skill";
+    heading.append(skill);
+  }
   appendEventTimestamp(heading, message.timestamp);
   if (isPendingPromptMessage(message)) {
     const pending = mkEl("span");
@@ -189,7 +226,7 @@ function visibleMessageBlocks(message: TranscriptMessage, options: RenderMessage
     .filter(({ block }) => options.thinkingVisibilityMode !== "hidden" || block.kind === "text" || block.kind === "image");
 }
 
-function appendMessageContent(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions): void {
+function appendMessageContent(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions, expanded = false): void {
   const visibleBlocks = visibleMessageBlocks(message, options);
   if (visibleBlocks.length === 0) {
     article.hidden = true;
@@ -199,6 +236,8 @@ function appendMessageContent(article: HTMLElement, message: TranscriptMessage, 
 
   if (options.review?.active) {
     article.append(renderTranscriptReviewBody(message, options.review));
+  } else if (message.skillInvocation) {
+    appendSkillContent(article, message, options, expanded);
   } else {
     for (const { block, index } of visibleBlocks) {
       article.append(renderBlock(block, message.isNew, message.id, index, {
@@ -206,6 +245,42 @@ function appendMessageContent(article: HTMLElement, message: TranscriptMessage, 
       }));
     }
   }
+}
+
+function appendSkillContent(article: HTMLElement, message: TranscriptMessage, options: RenderMessageOptions, expanded: boolean): void {
+  const command = messagePromptText(message);
+  if (command) {
+    const prompt = mkEl("pre");
+    prompt.className = "skill-command";
+    prompt.textContent = command;
+    article.append(prompt);
+  }
+  if (!message.skillInvocation?.prompt?.trim()) {
+    const fallback = mkEl("p");
+    fallback.className = "skill-command-fallback";
+    fallback.textContent = command ? "Reconstructed command · original formatting unavailable" : "Original command unavailable";
+    article.append(fallback);
+  }
+  for (const { block, index } of visibleMessageBlocks(message, options)) {
+    if (block.kind === "image") {
+      article.append(renderBlock(block, message.isNew, message.id, index, options));
+    }
+  }
+  const details = mkEl("details");
+  details.className = "skill-expanded";
+  details.open = expanded;
+  const summary = mkEl("summary");
+  summary.textContent = "Show expanded content";
+  details.append(summary, renderMessageCopyButton(article, true));
+  const showContent = () => {
+    if (!details.open || details.querySelector("pre")) return;
+    const pre = details.ownerDocument.createElement("pre");
+    pre.textContent = messageText({ ...message, blocks: message.blocks.filter(block => block.kind !== "image") });
+    details.append(pre);
+  };
+  details.addEventListener("toggle", showContent);
+  showContent();
+  article.append(details);
 }
 
 function renderTranscriptReviewBody(message: TranscriptMessage, review: RenderMessageReviewOptions): HTMLElement {

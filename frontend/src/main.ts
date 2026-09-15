@@ -134,7 +134,7 @@ import {
 } from "./askCard";
 import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
 import { captureDiffFilterFocus, captureDiffViewScroll, restoreDiffFilterFocus, restoreDiffViewScroll } from "./diffViewDom";
-import { messageText, renderMarkdown, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
+import { messagePromptText, renderMarkdown, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import { setTextileRedmineRootUrl } from "./textileRendering";
 import {
   buildTranscriptReviewPrompt,
@@ -3061,8 +3061,10 @@ function syncPromptHistoryFromProjection(sessionId: string, projection: SessionP
 
   for (const entry of projection.transcript) {
     if (entry.kind !== "message" || entry.role !== "user" || seenIds.has(entry.id)) continue;
+    const prompt = messagePromptText(entry);
+    if (!prompt.trim()) continue;
     seenIds.add(entry.id);
-    addPromptToHistory(sessionId, messageText(entry));
+    addPromptToHistory(sessionId, prompt);
   }
 }
 

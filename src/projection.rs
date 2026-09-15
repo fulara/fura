@@ -26,14 +26,17 @@ fn hash_json<T: Serialize>(hasher: &mut blake3::Hasher, value: &T) {
         .expect("projected message id JSON serialization cannot fail");
 }
 
+fn is_user_skill_invocation(value: &Value) -> bool {
+    value.get("role").and_then(Value::as_str) == Some("custom")
+        && value.get("customType").and_then(Value::as_str) == Some("skill-prompt")
+        && value.get("attribution").and_then(Value::as_str) == Some("user")
+        && value.get("display").and_then(Value::as_bool) == Some(true)
+}
+
 pub(crate) fn omp_submission_client_message_id(value: &Value) -> Option<&str> {
     match value.get("role").and_then(Value::as_str) {
         Some("user") => value.get("clientMessageId").and_then(Value::as_str),
-        Some("custom")
-            if value.get("customType").and_then(Value::as_str) == Some("skill-prompt")
-                && value.get("attribution").and_then(Value::as_str) == Some("user")
-                && value.get("display").and_then(Value::as_bool) == Some(true) =>
-        {
+        Some("custom") if is_user_skill_invocation(value) => {
             value
                 .get("details")?
                 .get("clientMessageId")
@@ -74,7 +77,14 @@ fn projected_message_id_from_message(
     hasher.update(b";ordinal=");
     hasher.update(&(visible_ordinal as u64).to_le_bytes());
     hasher.update(b";role=");
-    hash_json(&mut hasher, &message.role);
+    // Skill cards used to render as Assistant. Keep their persisted fallback
+    // identity stable across the presentation upgrade.
+    let identity_role = if message.skill_invocation.is_some() {
+        MessageRole::Assistant
+    } else {
+        message.role
+    };
+    hash_json(&mut hasher, &identity_role);
     // Do not include timestamp: live handling may synthesize one for display when the
     // persisted frame has none, while historical replay cannot reconstruct that value.
     hasher.update(b";blocks=");
@@ -523,6 +533,7 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
         .get("role")
         .and_then(|r| r.as_str())
         .unwrap_or("assistant");
+    let is_skill = is_user_skill_invocation(value);
 
     // Role-specific dispatch before generic content extraction.
     match role_str {
@@ -556,7 +567,7 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
             }
             // The envelope is model-facing, but `display: true` is user-facing. For an
             // unknown future event, preserve its occurrence without exposing the prompt.
-            if contains_model_only_system_notice(value) {
+            if !is_skill && contains_model_only_system_notice(value) {
                 let custom_type = custom_type.trim();
                 let text = if custom_type.is_empty() {
                     "System event".to_string()
@@ -581,7 +592,7 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
         return None;
     }
 
-    let role = parse_role(role_str);
+    let role = if is_skill { MessageRole::User } else { parse_role(role_str) };
 
     let blocks = if let Some(content) = value.get("content") {
         content_to_blocks(content)
@@ -615,13 +626,26 @@ pub(crate) fn map_omp_message(value: &Value) -> Option<TranscriptMessage> {
         blocks
     };
 
-    Some(TranscriptMessage::new(
-        upstream_message_id(value),
+    let skill_invocation = is_skill.then(|| {
+        let detail = |key| value.get("details").and_then(|details| details.get(key))
+            .and_then(Value::as_str).map(str::to_owned);
+        crate::session::SkillInvocation {
+            name: detail("name"),
+            prompt: detail("prompt"),
+            args: detail("args"),
+        }
+    });
+    let mut message = TranscriptMessage {
+        id: upstream_message_id(value),
         role,
         blocks,
-        value_timestamp(value),
-        false, // caller sets true for live message_end events
-    ))
+        skill_invocation,
+        timestamp: value_timestamp(value),
+        is_new: false, // caller sets true for live message_end events
+        render_hash: String::new(),
+    };
+    message.refresh_render_hash();
+    Some(message)
 }
 
 pub(crate) fn parse_role(role: &str) -> MessageRole {
@@ -716,6 +740,94 @@ pub(crate) fn content_to_blocks(value: &Value) -> Vec<ContentBlock> {
 mod tests {
     use super::*;
 
+
+    fn skill_message() -> Value {
+        serde_json::json!({
+            "role":"custom", "customType":"skill-prompt", "display":true, "attribution":"user",
+            "details":{"name":"review", "prompt":"Sprawdź /skill:review\n  dokładnie",
+                "args":"Sprawdź\n  dokładnie", "clientMessageId":"submitted",
+                "path":"/deleted/SKILL.md", "lineCount":200},
+            "content":[{"type":"text","text":"<system-notice>\nSaved expanded instructions\n</system-notice>"},
+                {"type":"image","mimeType":"image/png","data":"YWJj"}],
+            "timestamp":1770000005000_u64
+        })
+    }
+
+    #[test]
+    fn skill_invocation_projects_user_metadata_without_replacing_expanded_blocks() {
+        let raw = skill_message();
+        let mapped = map_omp_message(&raw).unwrap();
+        assert_eq!(mapped.role, MessageRole::User);
+        assert_eq!(mapped.id, "prompt:submitted");
+        assert_eq!(mapped.blocks, content_to_blocks(&raw["content"]));
+        let dto = serde_json::to_value(&mapped).unwrap();
+        assert_eq!(dto["skillInvocation"], serde_json::json!({
+            "name":"review", "prompt":"Sprawdź /skill:review\n  dokładnie", "args":"Sprawdź\n  dokładnie"
+        }));
+        assert_eq!(project_omp_transcript(&[raw]).0, vec![mapped]);
+    }
+
+    #[test]
+    fn skill_invocation_requires_exact_source_and_preserves_legacy_content() {
+        let mut raw = skill_message();
+        raw["content"] = serde_json::json!("Saved legacy expansion /skill:review");
+        for (field, value) in [
+            ("role", serde_json::json!("user")),
+            ("role", serde_json::json!("hookMessage")),
+            ("customType", serde_json::json!("unknown")),
+            ("attribution", serde_json::json!("agent")),
+            ("attribution", Value::Null),
+        ] {
+            let mut other = raw.clone();
+            other[field] = value;
+            let projected = map_omp_message(&other).unwrap();
+            assert!(serde_json::to_value(&projected).unwrap().get("skillInvocation").is_none());
+            assert_eq!(projected.blocks, content_to_blocks(&other["content"]));
+        }
+        for display in [serde_json::json!(false), Value::Null, serde_json::json!("true")] {
+            raw["display"] = display;
+            assert!(map_omp_message(&raw).is_none());
+        }
+        raw["display"] = serde_json::json!(true);
+        for (details, expected) in [
+            (serde_json::json!({"name":"review", "args":"legacy"}), serde_json::json!({"name":"review", "args":"legacy"})),
+            (serde_json::json!({"name":42, "prompt":false, "args":[]}), serde_json::json!({})),
+            (Value::Null, serde_json::json!({})),
+        ] {
+            raw["details"] = details;
+            let projected = map_omp_message(&raw).unwrap();
+            assert_eq!(projected.role, MessageRole::User);
+            assert_eq!(projected.blocks, content_to_blocks(&raw["content"]));
+            assert_eq!(serde_json::to_value(projected).unwrap()["skillInvocation"], expected);
+        }
+    }
+
+    #[test]
+    fn skill_invocation_metadata_updates_render_hash_without_changing_identity() {
+        let original = skill_message();
+        let before = map_omp_message(&original).unwrap();
+        for field in ["name", "prompt", "args"] {
+            let mut changed = original.clone();
+            changed["details"][field] = serde_json::json!("changed");
+            let after = map_omp_message(&changed).unwrap();
+            assert_eq!(after.id, before.id);
+            assert_eq!(after.blocks, before.blocks);
+            assert_ne!(after.render_hash, before.render_hash, "{field}");
+        }
+        let mut second = original.clone();
+        second["details"]["clientMessageId"] = serde_json::json!("second");
+        let projected = project_omp_transcript(&[original.clone(), second, original]).0;
+        assert_eq!(projected.iter().map(|message| message.id.as_str()).collect::<Vec<_>>(),
+            ["prompt:submitted", "prompt:second"]);
+        let mut legacy = skill_message();
+        legacy["content"] = serde_json::json!("Saved expansion");
+        legacy["details"] = serde_json::json!({"name":"review"});
+        let mut previous_shape = legacy.clone();
+        previous_shape["attribution"] = Value::Null;
+        let previous = project_omp_transcript(&[previous_shape]).0.remove(0);
+        let upgraded = project_omp_transcript(&[legacy]).0.remove(0);
+        assert_eq!(upgraded.id, previous.id, "User presentation must not rename legacy fallback ids");
+    }
     #[test]
     fn map_omp_message_preserves_missing_id_for_live_streaming() {
         let value = serde_json::json!({

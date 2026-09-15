@@ -28,6 +28,11 @@ export type TranscriptMessage = {
   timestamp?: number | null;
   isNew: boolean;
   renderHash?: string;
+  skillInvocation?: {
+    name?: string;
+    prompt?: string;
+    args?: string;
+  };
 };
 
 export type AgentProgress = {

@@ -2501,6 +2501,49 @@ h2 {
   color: #c7cedc;
 }
 
+.message-skill-label {
+  color: #aeb7ff;
+  font-size: 0.75rem;
+  text-transform: none;
+  overflow-wrap: anywhere;
+}
+
+.skill-command-fallback {
+  margin: 0;
+  padding: 0 0.85rem 0.6rem;
+  color: #8d98ad;
+  font-size: 0.75rem;
+}
+
+.skill-expanded {
+  border-top: 1px solid #343a46;
+}
+
+.skill-expanded > summary {
+  padding: 0.6rem 0.85rem;
+  color: #9ba8bf;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.skill-expanded > summary:focus-visible {
+  outline: 2px solid #7f8cff;
+  outline-offset: -2px;
+}
+
+.skill-copy-expanded {
+  margin: 0 0.85rem;
+  font-size: 0.75rem;
+}
+
+@media (hover: none) {
+  .message:has(.skill-expanded) .message-actions {
+    position: static;
+    opacity: 1;
+    flex-wrap: wrap;
+  }
+}
+
 
 .message.message-reviewing {
   border: 1px solid rgba(109, 124, 255, 0.62);

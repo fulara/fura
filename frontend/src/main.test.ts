@@ -339,6 +339,36 @@ async function createPendingHarness() {
   return { connection: connections[0] };
 }
 
+describe("skill invocation prompt history", () => {
+  it("recalls original or labeled-reconstructable commands, never unknown expanded instructions", async () => {
+    const { connection } = await createHarness();
+    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
+    const original = "Proszę /skill:develop-fura sprawdź\n  cały formularz";
+    const base = { kind: "message" as const, role: "user" as const, isNew: false };
+    connection.emit({
+      type: "session.snapshot", sessionId: "live",
+      state: projection("live", { transcript: [
+        { ...base, id: "ordinary", blocks: [{ kind: "text", text: "ordinary earlier prompt" }] },
+        { ...base, id: "legacy", blocks: [{ kind: "text", text: "legacy expanded instructions" }],
+          skillInvocation: { name: "legacy", args: "first\n  second" } },
+        { ...base, id: "original", blocks: [{ kind: "text", text: "original expanded instructions" }],
+          skillInvocation: { name: "develop-fura", prompt: original } },
+        { ...base, id: "unknown", blocks: [{ kind: "text", text: "unknown expanded instructions" }],
+          skillInvocation: { args: "no name and no original" } },
+      ] }),
+    });
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+    const up = () => input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    up();
+    expect(input.value).toBe(original);
+    up();
+    expect(input.value).toBe("/skill:legacy first\n  second");
+    up();
+    expect(input.value).toBe("ordinary earlier prompt");
+  });
+});
+
 describe("ordinary Diffs entry default", () => {
   function activate(id: string) {
     if (id !== "diffs") setPanelVisible("diffs", false);

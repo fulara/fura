@@ -30,6 +30,19 @@ exact submission into the conversation. This is optimistic transcript state, not
 an OMP queue listing. Fura reconciles by `clientMessageId`, including skill expansion
 and history refresh; an RPC acknowledgement or queue count alone does not clear it.
 
+## Skills
+
+User-invoked `/skill:name` prompts appear as compact user cards, separate from
+assistant answers. The original command and effective expanded content have
+separate copy actions; expansion is explicit and attached images remain visible.
+Prompt-history recall uses known original input, not reconstructed skill bodies.
+Review retains the full effective content. Hidden autoload messages stay hidden.
+
+Saved-session replay restores skill messages from the active journal ancestry,
+including persisted images in OMP's blob store, without merging unrelated branches.
+The live transcript still follows OMP's current context; saved ancestry is not a
+separate archive endpoint.
+
 ## Git changes
 
 The Git changes panel separates **Current changes** (unstaged, staged and nonignored

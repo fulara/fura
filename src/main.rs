@@ -8157,7 +8157,7 @@ pub(crate) mod tests {
         let skill = serde_json::json!({
             "id":"upstream-skill", "role":"custom", "customType":"skill-prompt",
             "display":true, "attribution":"user",
-            "details":{"clientMessageId":"skill"},
+            "details":{"clientMessageId":"skill","name":"foo","prompt":"fix /skill:foo","args":"fix"},
             "content":"Expanded skill instructions", "timestamp":1770000005000_u64
         });
         for (field, value) in [
@@ -8218,6 +8218,9 @@ pub(crate) mod tests {
                 vec!["__pending_prompt:other", "prior", "prompt:skill"]
             );
             assert!(record.streaming_message.is_some());
+            assert_eq!(record.messages[2].role, MessageRole::User);
+            assert_eq!(serde_json::to_value(&record.messages[2]).unwrap()["skillInvocation"]["prompt"],
+                "fix /skill:foo");
             let mut uncorrelated = skill.clone();
             uncorrelated["details"] = serde_json::json!({});
             let ordinary_skill = map_omp_message(&uncorrelated).unwrap();
@@ -8254,6 +8257,52 @@ pub(crate) mod tests {
         let recovered = initial.projection().transcript;
         assert!(replace_record_transcript(&mut initial, messages, cards));
         assert_eq!(initial.projection().transcript, recovered);
+
+        // Identical slash requests have separate notices. ACK is not consumption,
+        // and consuming the second identity must not clear the first by text/FIFO.
+        let mut notice_record = test_record();
+        notice_record.id = "s3".into();
+        state.sessions.write().await.insert("s3".into(), notice_record);
+        let mut commands = register_test_transport(&state, "s3", "s3", 8).await;
+        let mut requests = Vec::new();
+        for _ in 0..2 {
+            assert!(send_prompt(&state, "s3".into(), "/skill:foo same".into(), None, None).await.is_empty());
+            requests.push(commands.recv().await.unwrap());
+        }
+        let first_id = requests[0]["clientMessageId"].as_str().unwrap();
+        let second_id = requests[1]["clientMessageId"].as_str().unwrap();
+        for request in &requests {
+            apply_rpc_frame(&state, "s3", &serde_json::json!({
+                "type":"response","command":"prompt","id":request["id"],"success":true,
+                "data":{"agentInvoked":true}
+            })).await;
+        }
+        assert_eq!(state.sessions.read().await["s3"].messages.iter().map(|message| message.id.clone()).collect::<Vec<_>>(),
+            [format!("__command_notice:{first_id}"), format!("__command_notice:{second_id}")]);
+        let consumed = serde_json::json!({"type":"message_end","message":{
+            "role":"custom","customType":"skill-prompt","display":true,"attribution":"user",
+            "details":{"clientMessageId":second_id,"name":"foo","prompt":"/skill:foo same","args":"same"},
+            "content":"Same expanded instructions","timestamp":1770000005000_u64
+        }});
+        for _ in 0..2 {
+            apply_rpc_frame(&state, "s3", &consumed).await;
+        }
+        assert_eq!(state.sessions.read().await["s3"].messages.iter().map(|message| message.id.clone()).collect::<Vec<_>>(),
+            [format!("__command_notice:{first_id}"), format!("prompt:{second_id}")]);
+        for command in ["get_messages", "get_messages_page"] {
+            let history_state = test_state(8, None);
+            history_state.sessions.write().await.insert("s1".into(), test_record());
+            let request_id = register_test_history_request(&history_state, "s1").await;
+            apply_rpc_frame(&history_state, "s1", &serde_json::json!({
+                "type":"response","command":command,"id":request_id,"success":true,
+                "data":{"messages":[consumed["message"]],"totalMessages":1,"nextCursor":null}
+            })).await;
+            let historical = history_state.sessions.read().await["s1"].messages[0].clone();
+            let mut live = state.sessions.read().await["s3"].messages[1].clone();
+            live.is_new = false;
+            live.refresh_render_hash();
+            assert_eq!(historical, live, "{command} must use the live skill mapper");
+        }
     }
 
     #[tokio::test]

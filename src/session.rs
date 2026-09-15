@@ -682,12 +682,25 @@ fn push_tool_entry(transcript: &mut Vec<TranscriptEntry>, card: &ToolCard) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SkillInvocation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) args: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TranscriptMessage {
     pub(crate) id: String,
     pub(crate) role: MessageRole,
     pub(crate) blocks: Vec<ContentBlock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skill_invocation: Option<SkillInvocation>,
     /// Event timestamp. `None` means the upstream persisted record did not preserve
     /// a precise event time.
     pub(crate) timestamp: Option<Timestamp>,
@@ -709,6 +722,7 @@ impl TranscriptMessage {
             id,
             role,
             blocks,
+            skill_invocation: None,
             timestamp,
             is_new,
             render_hash: String::new(),
@@ -724,6 +738,7 @@ impl TranscriptMessage {
         hash_json_field(&mut hasher, "id", &self.id);
         hash_json_field(&mut hasher, "role", &self.role);
         hash_json_field(&mut hasher, "blocks", &self.blocks);
+        hash_json_field(&mut hasher, "skillInvocation", &self.skill_invocation);
         hash_json_field(&mut hasher, "timestamp", &self.timestamp);
         hash_json_field(&mut hasher, "isNew", &self.is_new);
         self.render_hash = hasher.finalize().to_hex().to_string();

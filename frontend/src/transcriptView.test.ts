@@ -2,6 +2,170 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import hljs from "highlight.js/lib/common";
 import { messageText, renderBlock, renderCodeBlock, renderMarkdown, renderMessage, updateRenderedMessage } from "./transcriptView";
 import type { TranscriptMessage } from "./protocol";
+import { setRenderDocument } from "./dom";
+import { transcriptReviewLines } from "./transcriptReview";
+
+describe("skill invocation cards", () => {
+  const expanded = "# Skill instructions\n\nKeep <script>alert(1)</script> as text.\nLast instruction";
+  function skill(skillInvocation: { name?: string; prompt?: string; args?: string } = {
+    name: "develop-fura", prompt: "/skill:develop-fura Check the form", args: "Check the form",
+  }): TranscriptMessage {
+    return {
+      id: "prompt:skill-1", role: "user", isNew: false,
+      blocks: [{ kind: "text", text: expanded }],
+      skillInvocation,
+    };
+  }
+  const options = { thinkingVisibilityMode: "auto" as const };
+  function button(node: HTMLElement, label: string): HTMLButtonElement {
+    const found = [...node.querySelectorAll<HTMLButtonElement>("button")].find(item => item.textContent === label);
+    if (!found) throw new Error(`Missing ${label} button`);
+    return found;
+  }
+  function expand(node: HTMLElement): HTMLDetailsElement {
+    const details = node.querySelector<HTMLDetailsElement>("details");
+    if (!details) throw new Error("Missing expanded content disclosure");
+    details.open = true;
+    details.dispatchEvent(new Event("toggle"));
+    return details;
+  }
+
+  afterEach(() => {
+    setRenderDocument(document);
+    document.querySelectorAll("iframe").forEach(frame => frame.remove());
+    vi.useRealTimers();
+  });
+
+  it("shows the complete embedded multiline command as inert text, not the expanded instructions", async () => {
+    const prompt = `Przejrzyj <img src=x onerror=alert(1)> /skill:develop-fura\n  pełne argumenty ${"x".repeat(300)}\nkoniec`;
+    const message = skill({ name: "develop-fura", prompt, args: "not the original layout" });
+    const node = renderMessage(message, options);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    expect(node.querySelector("strong")?.textContent).toBe("You");
+    expect(node.querySelector(".message-heading")?.textContent).toContain("Skill develop-fura");
+    expect(node.querySelector(".skill-command")?.textContent).toBe(prompt);
+    expect(node.querySelector("details")?.open).toBe(false);
+    expect(node.textContent).not.toContain(expanded);
+    expect(node.querySelector("img, script")).toBeNull();
+    button(node, "Copy command").click();
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith(prompt);
+    expect(messageText(message)).toBe(expanded);
+  });
+
+  it("keeps images outside the disclosure and copies the saved expanded content separately", async () => {
+    const message = skill();
+    message.blocks.push({ kind: "image", mimeType: "image/png", data: "abc", alt: "Attached chart" });
+    const node = renderMessage(message, options);
+    const image = node.querySelector<HTMLImageElement>(".image-block img");
+    expect(image?.getAttribute("src")).toBe("data:image/png;base64,abc");
+    expect(image?.closest("details")).toBeNull();
+    const details = expand(node);
+    expect(details.querySelector("pre")?.textContent).toBe(expanded);
+    expect(details.querySelector("script, a, img")).toBeNull();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    button(details, "Copy expanded content").click();
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith(`${expanded}\n\n[Image: image/png]`);
+  });
+
+  it("labels reconstructed legacy commands and preserves all recorded arguments", async () => {
+    const args = "pierwsza linia\n  druga linia\n<script>literal</script>";
+    const node = renderMessage(skill({ name: "legacy", args }), options);
+    expect(node.querySelector(".skill-command")?.textContent).toBe(`/skill:legacy ${args}`);
+    expect(node.textContent).toMatch(/reconstructed/i);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    button(node, "Copy reconstructed command").click();
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith(`/skill:legacy ${args}`);
+  });
+
+  it("does not invent a command when neither its original nor skill name is known", () => {
+    const node = renderMessage(skill({ args: "not enough to reconstruct" }), options);
+    expect(node.querySelector(".skill-command")).toBeNull();
+    expect(node.textContent).toMatch(/original command unavailable/i);
+    expect([...node.querySelectorAll<HTMLButtonElement>("header button")].some(item => !item.hidden && /command/i.test(item.textContent ?? ""))).toBe(false);
+    expect(expand(node).querySelector("pre")?.textContent).toBe(expanded);
+  });
+
+  it("does not infer skill cards or hide ordinary projected text from skill-looking content", () => {
+    const message: TranscriptMessage = {
+      id: "ordinary", role: "user", isNew: false,
+      blocks: [{ kind: "text", text: "/skill:unknown regular prompt\nskill-prompt display:false" }],
+    };
+    const node = renderMessage(message, options);
+    expect(node.hidden).toBe(false);
+    expect(node.querySelector("details")).toBeNull();
+    expect(node.querySelector(".text-block")?.textContent).toContain("/skill:unknown regular prompt");
+    expect(button(node, "Copy")).toBeDefined();
+  });
+
+  it.each([false, true])("updates metadata-only content and Copy while retaining disclosure state (renderHash %s)", async hashed => {
+    const message = skill({ name: "old", prompt: "/skill:old first" });
+    if (hashed) message.renderHash = "old-metadata";
+    const node = renderMessage(message, options);
+    expand(node);
+    const copy = button(node, "Copy command");
+    const updated = { ...message, skillInvocation: { name: "new", prompt: "/skill:new\nsecond" } };
+    if (hashed) updated.renderHash = "new-metadata";
+    updateRenderedMessage(node, updated, options);
+    expect(node.querySelector(".skill-command")?.textContent).toBe("/skill:new\nsecond");
+    expect(node.querySelector(".message-heading")?.textContent).toContain("Skill new");
+    expect(node.querySelector("details")?.open).toBe(true);
+    expect(node.querySelector("details pre")?.textContent).toBe(expanded);
+    expect(button(node, "Copy command")).toBe(copy);
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    copy.click();
+    await Promise.resolve();
+    expect(writeText).toHaveBeenCalledWith("/skill:new\nsecond");
+  });
+
+  it("reviews expanded Markdown and source with consistent line anchors", () => {
+    const message = skill();
+    const onStart = vi.fn();
+    const node = renderMessage(message, { ...options, review: { active: false, comments: [], onStart } });
+    button(node, "Review expanded content").click();
+    expect(onStart).toHaveBeenCalledWith(message);
+    const onAddComment = vi.fn();
+    const review = renderMessage(message, { ...options, review: { active: true, comments: [], onAddComment } });
+    expect(review.querySelector(".transcript-review-markdown-preview h1")?.textContent).toBe("Skill instructions");
+    expect(review.querySelector(".transcript-review-markdown-preview")?.textContent).not.toContain("/skill:develop-fura");
+    expect([...review.querySelectorAll(".transcript-review-gutter")].map(item => item.textContent))
+      .toEqual(transcriptReviewLines(message).map(line => String(line.lineNumber)));
+    button(review, "Source").click();
+    review.querySelector<HTMLButtonElement>(".transcript-review-lines .transcript-review-comment-btn")?.click();
+    expect(onAddComment).toHaveBeenCalledWith(message, { lineNumber: 1, text: "# Skill instructions" });
+  });
+
+  it("creates lazy expanded content and uses clipboard fallback in the adopted popout document", async () => {
+    const frame = document.createElement("iframe");
+    document.body.append(frame);
+    const owner = frame.contentDocument!;
+    setRenderDocument(owner);
+    const node = renderMessage(skill(), options);
+    owner.body.append(node);
+    setRenderDocument(document);
+    const copied: string[] = [];
+    Object.defineProperty(frame.contentWindow!.navigator, "clipboard", {
+      configurable: true, value: { writeText: vi.fn().mockRejectedValue(new Error("Document is not focused")) },
+    });
+    Object.assign(owner, { execCommand: vi.fn(() => {
+      copied.push(owner.querySelector("textarea")?.value ?? "");
+      return true;
+    }) });
+    const details = expand(node);
+    expect(details.querySelector("pre")?.ownerDocument).toBe(owner);
+    button(details, "Copy expanded content").click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(copied).toEqual([expanded]);
+    expect(owner.querySelector("textarea")).toBeNull();
+  });
+});
 
 describe("messageText", () => {
   it("preserves text, image placeholders, and thinking while omitting redacted thinking", () => {

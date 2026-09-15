@@ -590,32 +590,195 @@ impl<'de> serde::Deserialize<'de> for PromptTitleContent {
 }
 
 pub(crate) fn read_session_file_messages(path: &Path) -> (Vec<TranscriptMessage>, Vec<ToolCard>) {
+    read_session_file_messages_with_blobs(path, &omp_blob_dir())
+}
+
+fn omp_blob_dir() -> PathBuf {
+    let home = env::var_os("HOME").map(PathBuf::from).unwrap_or_default();
+    let config = env::var_os("PI_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ".omp".into());
+    let profile = env::var("OMP_PROFILE")
+        .or_else(|_| env::var("PI_PROFILE"))
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| {
+            !value.is_empty()
+                && value != "default"
+                && value != "."
+                && value != ".."
+                && !value.ends_with('.')
+                && value.len() <= 64
+                && value.bytes().all(|byte| {
+                    byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+                })
+        });
+    let mut root = home.join(config);
+    if let Some(profile) = &profile {
+        root = root.join("profiles").join(profile);
+    }
+    let default_agent = root.join("agent");
+    let agent = if profile.is_none() {
+        env::var_os("PI_CODING_AGENT_DIR")
+            .filter(|value| !value.is_empty())
+            .filter(|value| {
+                // A parent's named profile exports its derived agent directory.
+                // Explicit default mode must not keep that inherited override.
+                env::var("PI_PROFILE")
+                    .ok()
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| {
+                        !name.is_empty()
+                            && name != "default"
+                            && !name.contains(['/', '\\'])
+                            && name != "."
+                            && name != ".."
+                    })
+                    .is_none_or(|name| {
+                        value != root.join("profiles").join(name).join("agent").as_os_str()
+                    })
+            })
+            .map(PathBuf::from)
+            .unwrap_or_else(|| default_agent.clone())
+    } else {
+        default_agent.clone()
+    };
+    // Match OMP utils/dirs.ts: migrated XDG data flattens the agent/ prefix.
+    if cfg!(any(target_os = "linux", target_os = "macos"))
+        && agent == default_agent
+        && let Some(data) = env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty())
+    {
+        let mut migrated = PathBuf::from(data).join("omp");
+        if let Some(profile) = profile {
+            migrated = migrated.join("profiles").join(profile);
+        }
+        if migrated.exists() {
+            return migrated.join("blobs");
+        }
+    }
+    agent.join("blobs")
+}
+
+fn read_session_file_messages_with_blobs(
+    path: &Path,
+    blobs_dir: &Path,
+) -> (Vec<TranscriptMessage>, Vec<ToolCard>) {
     let Ok(file) = fs::File::open(path) else {
         return (Vec::new(), Vec::new());
     };
-    let reader = StdBufReader::new(file);
-    let mut message_values: Vec<Value> = Vec::new();
-    for (i, line) in reader.lines().enumerate() {
-        if i == 0 {
-            continue; // skip session header
-        }
-        let Ok(line) = line else {
-            continue;
-        };
+    let mut entries = Vec::new();
+    let mut by_id = HashMap::new();
+    for line in StdBufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
         let Ok(entry) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
-        if entry.get("type").and_then(|v| v.as_str()) == Some("message")
-            && let Some(mut message) = entry.get("message").cloned()
-        {
-            if let Some(object) = message.as_object_mut()
-                && !object.contains_key("timestamp")
-                && let Some(timestamp) = entry.get("timestamp").and_then(Timestamp::from_rpc)
-            {
-                object.insert("timestamp".to_string(), Value::from(timestamp.millis()));
-            }
-            message_values.push(message);
+        let Some(kind) = entry.get("type").and_then(Value::as_str) else {
+            continue;
+        };
+        if matches!(kind, "" | "session" | "title") {
+            continue;
         }
+        if let Some(id) = entry.get("id").and_then(Value::as_str) {
+            by_id.insert(id.to_owned(), entries.len());
+        }
+        entries.push(entry);
+    }
+
+    // OMP resumes from the last journal entry, following parentId to the root.
+    // Only old linear records lacking parentId inherit their preceding entry.
+    let mut branch = Vec::new();
+    let mut seen = HashSet::new();
+    let mut current = entries.len().checked_sub(1);
+    while let Some(index) = current {
+        if !seen.insert(index) {
+            break;
+        }
+        branch.push(index);
+        current = match entries[index].get("parentId") {
+            Some(Value::String(parent)) => by_id.get(parent).copied(),
+            Some(_) => None,
+            None => index.checked_sub(1),
+        };
+    }
+
+    // Available is persisted history on that ancestry, not OMP's compacted
+    // session.messages/model context. Preserve precompaction records; never
+    // manufacture invocations from compaction or branch summaries.
+    let mut message_values = Vec::new();
+    for index in branch.into_iter().rev() {
+        let Value::Object(mut entry) = entries[index].take() else {
+            continue;
+        };
+        let mut message = match entry.get("type").and_then(Value::as_str) {
+            Some("message") => {
+                let Some(Value::Object(mut message)) = entry.remove("message") else {
+                    continue;
+                };
+                if !message.contains_key("timestamp")
+                    && let Some(timestamp) = entry.get("timestamp").and_then(Timestamp::from_rpc)
+                {
+                    message.insert("timestamp".to_owned(), Value::from(timestamp.millis()));
+                }
+                Value::Object(message)
+            }
+            Some("custom_message") => {
+                if !matches!(
+                    entry.get("content"),
+                    Some(Value::String(_) | Value::Array(_))
+                ) {
+                    continue;
+                }
+                // OMP creates a custom message without copying the journal entry
+                // id. Preserve its details-based submission identity instead.
+                entry.retain(|key, _| {
+                    matches!(
+                        key.as_str(),
+                        "customType"
+                            | "content"
+                            | "display"
+                            | "details"
+                            | "attribution"
+                            | "timestamp"
+                    )
+                });
+                entry.insert("role".to_owned(), Value::String("custom".to_owned()));
+                Value::Object(entry)
+            }
+            _ => continue,
+        };
+        if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
+            for block in content {
+                if block.get("type").and_then(Value::as_str) != Some("image") {
+                    continue;
+                }
+                let Some(hash) = block
+                    .get("data")
+                    .and_then(Value::as_str)
+                    .and_then(|data| data.strip_prefix("blob:sha256:"))
+                else {
+                    continue;
+                };
+                // OMP's canonical hash parser is also its blob-path traversal guard.
+                if hash.len() != 64
+                    || !hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                {
+                    continue;
+                }
+                match fs::read(blobs_dir.join(hash)) {
+                    Ok(bytes) => {
+                        block["data"] = Value::String(base64::Engine::encode(
+                            &base64::engine::general_purpose::STANDARD,
+                            bytes,
+                        ));
+                    }
+                    Err(error) => warn!(hash, %error, "Unable to load persisted image blob"),
+                }
+            }
+        }
+        message_values.push(message);
     }
     project_omp_transcript(&message_values)
 }
@@ -688,6 +851,138 @@ mod recency_tests {
             .unwrap()
             .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_nanos(nanos)))
             .unwrap();
+    }
+
+    #[test]
+    fn available_skill_history_uses_active_branch_and_saved_content_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("skills.jsonl");
+        let ordinary = json!({"role":"user","content":"Start here","timestamp":100});
+        let saved = json!({
+            "role":"custom","customType":"skill-prompt","display":true,"attribution":"user",
+            "details":{"name":"removed-skill","args":"saved args","prompt":"/skill:removed-skill saved args",
+                "clientMessageId":"saved","path":root.path().join("missing/SKILL.md")},
+            "content":[{"type":"text","text":"Historical expansion, not current SKILL.md"},
+                {"type":"image","mimeType":"image/png","data":"YWJj"}],
+            "timestamp":200
+        });
+        let mut disk_skill = saved.clone();
+        disk_skill.as_object_mut().unwrap().remove("role");
+        disk_skill["type"] = json!("custom_message");
+        disk_skill["id"] = json!("skill");
+        disk_skill["parentId"] = json!("start");
+        write_session(
+            &path,
+            "s",
+            json!(10),
+            &[
+                json!({"type":"message","id":"start","parentId":null,"message":ordinary}),
+                disk_skill,
+                json!({"type":"custom_message","id":"abandoned-skill","parentId":"skill",
+                "customType":"skill-prompt","display":true,"attribution":"user",
+                "details":{"name":"wrong","clientMessageId":"wrong"},"content":"Wrong branch"}),
+                json!({"type":"message","id":"abandoned-answer","parentId":"abandoned-skill",
+                "message":{"role":"assistant","content":"Wrong answer"}}),
+                json!({"type":"branch_summary","id":"rewind","parentId":"skill","summary":"/skill:not-a-card"}),
+                json!({"type":"compaction","id":"compact","parentId":"rewind",
+                "firstKeptEntryId":"skill","summary":"/skill:also-not-a-card"}),
+                json!({"type":"custom_message","id":"hidden","parentId":"compact",
+                "customType":"skill-prompt","display":false,"attribution":"agent","content":"Autoload"}),
+                json!({"type":"message","id":"answer","parentId":"hidden",
+                "message":{"role":"assistant","content":"Active answer","timestamp":300}}),
+                json!({"type":"title","title":"This prelude-style line is not a journal leaf"}),
+            ],
+        );
+        let original_bytes = fs::read(&path).unwrap();
+        let (messages, cards) = read_session_file_messages(&path);
+        // Available history is the persisted active ancestry, including records before
+        // compaction. It does not reconstruct cards from summaries or alter OMP context.
+        let expected = project_omp_transcript(&[
+            ordinary,
+            saved,
+            json!({"role":"assistant","content":"Active answer","timestamp":300}),
+        ]);
+        assert_eq!(messages, expected.0);
+        assert_eq!(cards, expected.1);
+        assert_eq!(
+            serde_json::to_value(&messages[1]).unwrap()["skillInvocation"]["prompt"],
+            "/skill:removed-skill saved args"
+        );
+        assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    }
+
+    #[test]
+    fn available_skill_history_handles_legacy_missing_parents_and_explicit_roots() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("legacy.jsonl");
+        let old_skill = json!({"type":"custom_message","id":"legacy","customType":"skill-prompt",
+            "display":true,"content":"Old unattributed content","timestamp":200,
+            "details":{"name":"legacy"}});
+        write_session(
+            &path,
+            "s",
+            json!(10),
+            &[user("start", 100), old_skill.clone()],
+        );
+        let messages = read_session_file_messages(&path).0;
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].role, crate::MessageRole::Assistant);
+        assert!(
+            serde_json::to_value(&messages[1])
+                .unwrap()
+                .get("skillInvocation")
+                .is_none()
+        );
+        for parent in [Value::Null, json!("missing-parent")] {
+            let mut detached = old_skill.clone();
+            detached["parentId"] = parent;
+            write_session(&path, "s", json!(10), &[user("start", 100), detached]);
+            let messages = read_session_file_messages(&path).0;
+            assert_eq!(messages.len(), 1);
+            assert_eq!(
+                messages[0].blocks,
+                crate::content_to_blocks(&old_skill["content"])
+            );
+        }
+    }
+
+    #[test]
+    fn available_skill_blob_images_resolve_only_canonical_image_references_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let blobs = root.path().join("blobs");
+        fs::create_dir(&blobs).unwrap();
+        let hash = "a".repeat(64);
+        let bytes = b"persisted image bytes";
+        fs::write(blobs.join(&hash), bytes).unwrap();
+        fs::write(root.path().join("secret"), b"not an image").unwrap();
+        let reference = format!("blob:sha256:{hash}");
+        let missing = format!("blob:sha256:{}", "b".repeat(64));
+        let path = root.path().join("skill.jsonl");
+        write_session(
+            &path,
+            "s",
+            json!(10),
+            &[json!({
+                "type":"custom_message","id":"skill","parentId":null,"customType":"skill-prompt",
+                "display":true,"attribution":"user","details":{"name":"saved","prompt":"/skill:saved"},
+                "content":[{"type":"text","text":reference},
+                    {"type":"image","mimeType":"image/png","data":reference},
+                    {"type":"image","mimeType":"image/png","data":missing},
+                    {"type":"image","mimeType":"image/png","data":"blob:sha256:../secret"}]
+            })],
+        );
+        let before = fs::read(&path).unwrap();
+        let messages = read_session_file_messages_with_blobs(&path, &blobs).0;
+        let projected = serde_json::to_value(&messages[0]).unwrap();
+        assert_eq!(projected["blocks"][0]["text"], reference);
+        assert_eq!(
+            projected["blocks"][1]["data"],
+            base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+        );
+        assert_eq!(projected["blocks"][2]["data"], missing);
+        assert_eq!(projected["blocks"][3]["data"], "blob:sha256:../secret");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(fs::read(blobs.join(hash)).unwrap(), bytes);
     }
 
     #[test]

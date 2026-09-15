@@ -1286,10 +1286,13 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                         let mut changed_message_index = record.messages.len();
                         if let Some(id) = omp_submission_client_message_id(&source_message) {
                             let pending_id = format!("__pending_prompt:{id}");
+                            let skill_notice_id = transcript_message.skill_invocation.as_ref()
+                                .map(|_| format!("__command_notice:{id}"));
                             if let Some(index) = record
                                 .messages
                                 .iter()
-                                .position(|existing| existing.id == pending_id)
+                                .position(|existing| existing.id == pending_id
+                                    || skill_notice_id.as_deref() == Some(existing.id.as_str()))
                             {
                                 remove_record_message(record, index);
                                 changed_message_index = index;
