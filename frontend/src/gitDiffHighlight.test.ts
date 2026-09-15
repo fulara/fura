@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createGitDiffHighlighter } from "./gitDiffHighlight";
 import type { DiffRow } from "./protocol";
 
@@ -27,8 +27,12 @@ function render(rows: DiffRow[]): HTMLElement[] {
   });
 }
 
+afterEach(() => vi.restoreAllMocks());
+
 describe("Git diff highlighting adapter", () => {
   it("adds both visual layers without changing immutable wire rows or selected text", () => {
+    // This checks composition, not the CPU-load-dependent work-budget fallback.
+    vi.spyOn(performance, "now").mockReturnValue(0);
     const rows = [line('-let name = "old";', "remove"), line('+let name = "new";', "add")];
     for (const row of rows) {
       if (row.type === "line") Object.freeze(row.location);

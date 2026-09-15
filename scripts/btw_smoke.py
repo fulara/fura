@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -76,13 +77,24 @@ def main():
     server = None
     test_process = None
     code = 1
+
+    def interrupted(signum, _frame):
+        raise KeyboardInterrupt(signum)
+
+    signals = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+    for signum in signals:
+        signal.signal(signum, interrupted)
     try:
         saved_out, saved_err = os.dup(1), os.dup(2)
         try:
             with (runtime / f"bridge-{generation}.log").open("wb") as log:
                 os.dup2(log.fileno(), 1)
                 os.dup2(log.fileno(), 2)
-                server = OwnedProcess(command, runtime / f"server-{generation}", cwd=runtime / "cwd", env=environment)
+                previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+                try:
+                    server = OwnedProcess(command, runtime / f"server-{generation}", cwd=runtime / "cwd", env=environment)
+                finally:
+                    signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         finally:
             os.dup2(saved_out, 1)
             os.dup2(saved_err, 2)
@@ -114,9 +126,17 @@ def main():
         browser_command = [node, str(REPO / "frontend/node_modules/@playwright/test/cli.js"), "test", "--config", "playwright.btw.config.ts"]
         if args.test_filter:
             browser_command += ["--grep", args.test_filter]
-        test_process = OwnedProcess(browser_command, runtime / f"browser-{generation}", cwd=REPO / "frontend", env=environment)
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+        try:
+            test_process = OwnedProcess(browser_command, runtime / f"browser-{generation}", cwd=REPO / "frontend", env=environment)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         code = test_process.wait(timeout=900)
+    except KeyboardInterrupt as error:
+        code = 128 + (error.args[0] if error.args else signal.SIGINT)
     finally:
+        for signum in signals:
+            signal.signal(signum, signal.SIG_IGN)
         if test_process is not None:
             test_process.cleanup()
         if server is not None:

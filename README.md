@@ -166,7 +166,7 @@ bun scripts/check-omp-rpc-contract.ts
 Restart existing OMP processes after upgrading; native addons stay loaded for the
 lifetime of each process.
 
-The current fork tracks OMP 18.1.20. Desktop Fura exposes one-shot BTW through
+The current fork tracks OMP 18.2.0. Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
 captured at start; results remain only in browser memory. Upstream TUI BTW history
@@ -181,6 +181,14 @@ session-generation and outer-transition barriers. Pending prompts cannot cross a
 committed fork/branch, while cancelled transitions retain the source context.
 Upstream Collab auto-hosting applies to interactive OMP sessions, not Fura's
 `rpc-ui` children; refreshing the submodule does not enable a second access channel.
+
+OMP 18.2.0 preserves the typed skill prompt input through RPC; Fura's client
+message identity remains attached through skill expansion and queued consumption.
+The fork still needs its process-identity/ancestor protection, kernel cleanup,
+BTW lifecycle and explicit headless-shell profile patches: upstream's fail-closed
+Eval startup and Chrome-only managed installer address different concerns.
+Upstream model-substitution warnings and skill chips are TUI features, not
+automatically enabled Fura UI.
 
 Environment overrides for `run-local-omp.sh`:
 
@@ -212,19 +220,6 @@ FURA_TLS_KEY=/path/to/<machine>.<tailnet>.ts.net.key \
 ```
 
 
-### Detached restart helper
-
-```bash
-./restart-fura.sh
-```
-
-Defaults to restarting `./run-local-omp.sh` in the background. Pass a different launcher if needed, for example:
-
-```bash
-./restart-fura.sh run-local-with-tailscale.sh
-./restart-fura.sh --dry-run run-mock-rpc.sh -- --bind 127.0.0.1:38888
-```
-
 ### Mock RPC (no OMP required)
 
 ```bash
@@ -246,6 +241,9 @@ its group. If ownership cannot be verified, it refuses cleanup and leaves the
 temporary directory and ownership record for inspection.
 The supervisor inherits blocked cleanup signals until its handlers are installed,
 so immediate cleanup is safe even for direct `OwnedProcess` callers.
+The BTW browser gate also handles TERM/INT/HUP and protects both ownership
+handoffs; termination must clean up its private server and worker without
+touching existing processes. Its regression uses disposable sentinels only.
 If startup fails after spawning but before ownership is established, the
 launcher also retains the temporary directory and reports its path. Inspect
 these resources manually; a PID record alone never authorizes termination.

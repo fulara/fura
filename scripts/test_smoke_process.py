@@ -263,6 +263,50 @@ class OwnedProcessLifecycle(unittest.TestCase):
                 runner.terminate()
                 runner.wait(timeout=10)
 
+    def test_btw_termination_reaps_owned_server_and_worker(self):
+        command, ready = self.workload()
+        binary = self.directory / "server"
+        binary.write_text(f"#!{sys.executable}\n" + command[2])
+        binary.chmod(0o700)
+        static = self.directory / "static"
+        static.mkdir()
+        (static / "index.html").touch()
+        runtime = self.directory / "runtime"
+        (runtime / "sessions").mkdir(parents=True)
+        tools = self.directory / "bin"
+        tools.mkdir()
+        for name in ("node", "lsof"):
+            executable = tools / name
+            executable.write_text("#!/bin/sh\nexit 0\n")
+            executable.chmod(0o700)
+        # An unfixed launcher inherits ignored TERM, so RED cannot orphan its
+        # supervisor: the final SIGINT still enters Python's verified cleanup.
+        source = (
+            "import runpy, signal, sys\n"
+            "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "sys.argv.pop(0)\n"
+            "signal.signal(signal.SIGINT, signal.default_int_handler)\n"
+            f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
+            "runpy.run_path(sys.argv[0], run_name='__main__')\n"
+        )
+        runner = subprocess.Popen(
+            [sys.executable, "-c", source, str(ROOT / "scripts/btw_smoke.py"),
+             "--binary", str(binary), "--static-dir", str(static),
+             "--runtime", str(runtime), "--evidence", str(self.directory / "evidence"),
+             "--mode", "mock"],
+            env={**os.environ, "PATH": f"{tools}:{os.environ['PATH']}"},
+            start_new_session=True,
+        )
+        try:
+            pids = self.await_ready(ready)
+            runner.send_signal(signal.SIGTERM)
+            self.assertEqual(runner.wait(timeout=10), 143)
+            self.assert_gone(pids)
+        finally:
+            if runner.poll() is None:
+                runner.send_signal(signal.SIGINT)
+                runner.wait(timeout=10)
+
 
 if __name__ == "__main__":
     unittest.main()
