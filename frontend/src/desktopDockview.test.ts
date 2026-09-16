@@ -20,7 +20,9 @@ type MockGroup = {
   size: number;
   activePanel?: MockPanel;
   headerActions?: HTMLElement;
-  api: { setConstraints(value: { minimumWidth: number }): void };
+  api: { location: { type: "grid" }; close(): void; onDidLocationChange(listener: () => void): { dispose(): void }; setConstraints(value: { minimumWidth: number }): void };
+  model: { closePanel(panel: MockPanel): void; closeAllPanels(): void; onDidAddPanel(listener: () => void): { dispose(): void }; onDidRemovePanel(listener: (event: { panel: MockPanel }) => void): { dispose(): void } };
+  addDisposables(...disposables: Array<{ dispose(): void }>): void;
 };
 
 type MockDockviewInstance = {
@@ -59,7 +61,12 @@ const dockviewMock = vi.hoisted(() => {
       const reference = options.position?.referencePanel ? this.getGroupPanel(options.position.referencePanel) : undefined;
       const group: MockGroup = options.position?.direction === "within" && reference
         ? reference.group
-        : { id: `${options.id}-group`, panels: [], size: 0, api: { setConstraints: vi.fn() } };
+        : {
+          id: `${options.id}-group`, panels: [], size: 0,
+          api: { location: { type: "grid" }, close() {}, onDidLocationChange: () => ({ dispose() {} }), setConstraints: vi.fn() },
+          model: { closePanel() {}, closeAllPanels() {}, onDidAddPanel: () => ({ dispose() {} }), onDidRemovePanel: () => ({ dispose() {} }) },
+          addDisposables() {},
+        };
       const visibilityListeners = new Set<(event: { isVisible: boolean }) => void>();
       const onDidVisibilityChange = (listener: (event: { isVisible: boolean }) => void) => {
         visibilityListeners.add(listener);

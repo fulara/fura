@@ -8,6 +8,8 @@ export default defineConfig({
   testMatch: "**/*.spec.ts",
   // These suites require their own launchers, credentials and session fixtures.
   testIgnore: ["**/transcript-btw*.spec.ts", "**/session-recency.spec.ts"],
+  // Adapter-only cases require an external build exposing real Dockview instances.
+  grepInvert: /@adapter/,
   fullyParallel: false,
   workers: 1,
   timeout: 60_000,

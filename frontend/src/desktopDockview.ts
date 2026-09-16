@@ -1,5 +1,6 @@
 import "dockview-core/dist/styles/dockview.css";
-import { DockviewComponent, themeDark, type SerializedDockview } from "dockview-core";
+import { DockviewComponent, themeDark } from "dockview-core";
+import type { DockviewGroupPanel, IDockviewPanel, SerializedDockview } from "dockview-core";
 import { captureDiffViewScroll, restoreDiffViewScroll } from "./diffViewDom";
 
 export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare";
@@ -43,6 +44,8 @@ type DesktopPanelShell = {
   scroll: HTMLDivElement;
 };
 
+type PanelReturnLocation = { group: DockviewGroupPanel; order: string[] };
+
 
 export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDockview {
   const panelEls: Partial<Record<DesktopDockviewPanelId, HTMLElement>> = {};
@@ -53,6 +56,90 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   const watchedDocuments = new WeakSet<Document>();
   const pendingScrollRestores = new Map<DesktopDockviewPanelId, () => void>();
   let visibilityQueued = false;
+  let shuttingDown = false;
+  let layoutSaveTimer: number | undefined;
+  const returnLocations = new WeakMap<IDockviewPanel, PanelReturnLocation>();
+  const guardedGroups = new WeakSet<DockviewGroupPanel>();
+  win.addEventListener("beforeunload", () => {
+    if (api.isDisposed || shuttingDown) return;
+    shuttingDown = true;
+    win.clearTimeout(layoutSaveTimer);
+    // Save return positions before Dockview closes its windows. Do not move
+    // content or reopen anything while the owning application is shutting down.
+    const data: PersistedDockviewLayout = {
+      version: 1,
+      layout: dockedLayout(api.toJSON(), id => returnLocations.get(api.getGroupPanel(id)!)),
+    };
+    storage(win).setItem(options.storageKey, JSON.stringify(data));
+  }, { capture: true });
+
+  function mainGroup(group: DockviewGroupPanel): boolean {
+    return api.groups.includes(group) && group.api.location.type !== "popout";
+  }
+
+  function returnPanels(panels: IDockviewPanel[]): void {
+    if (shuttingDown || api.isDisposed) return;
+    const locations = panels.map(panel => ({ panel, origin: returnLocations.get(panel) }));
+    const selected = panels.filter(panel => panel.api.isVisible);
+    for (const { panel, origin } of locations) {
+      if (api.getGroupPanel(panel.id) !== panel) continue;
+      const target = origin && mainGroup(origin.group) ? origin.group
+        : mainGroup(panel.group) ? panel.group
+        : api.groups.find(group => group.api.location.type === "grid") ?? api.addGroup();
+      // A popup can collect tabs detached at different times. Use the fullest
+      // original ordering so later departures do not erase earlier tab slots.
+      const order = locations.filter(entry => entry.origin?.group === origin?.group)
+        .reduce((best, entry) => (entry.origin?.order.length ?? 0) > best.length ? entry.origin!.order : best, origin?.order ?? []);
+      const originalIndex = order.indexOf(panel.id);
+      const next = order.slice(originalIndex + 1).find(id => target.panels.some(candidate => candidate.id === id));
+      const previous = order.slice(0, originalIndex).reverse().find(id => target.panels.some(candidate => candidate.id === id));
+      const remaining = target.panels.filter(candidate => candidate !== panel);
+      const index = next ? remaining.findIndex(candidate => candidate.id === next)
+        : previous ? remaining.findIndex(candidate => candidate.id === previous) + 1
+        : Math.min(Math.max(originalIndex, 0), remaining.length);
+      if (panel.group !== target || target.panels.indexOf(panel) !== index) {
+        panel.api.moveTo({ group: target, index, skipSetActive: true });
+      }
+      if (!target.api.isVisible) target.api.setVisible(true);
+    }
+    for (const panel of selected) {
+      if (api.getGroupPanel(panel.id) === panel) panel.group.model.openPanel(panel, { skipSetGroupActive: true });
+    }
+    notifyVisibility();
+  }
+
+  function closePanelFromUser(panel: IDockviewPanel): void {
+    if (shuttingDown || panel.api.location.type !== "popout") return;
+    if (panel.group.size === 1) {
+      panel.api.getWindow().close();
+    } else {
+      const restore = preserveTransferScroll(desktopPanelId(panel.id)!);
+      returnPanels([panel]);
+      restore();
+    }
+  }
+
+  function guardGroup(group: DockviewGroupPanel): void {
+    if (guardedGroups.has(group)) return;
+    guardedGroups.add(group);
+    let order = group.panels.map(panel => panel.id);
+    // Dockview 5.2 has no cancellable close event. Adapt only user-close
+    // entry points; removePanel/removeGroup remain available to transfers,
+    // layout restoration and intentional application teardown.
+    const close = () => {
+      if (!shuttingDown && group.api.location.type === "popout") group.api.getWindow().close();
+    };
+    group.api.close = close;
+    group.model.closeAllPanels = close;
+    group.model.closePanel = closePanelFromUser;
+    group.addDisposables(
+      group.model.onDidAddPanel(() => { order = group.panels.map(panel => panel.id); }),
+      group.model.onDidRemovePanel(({ panel }) => {
+        if (group.api.location.type !== "popout") returnLocations.set(panel, { group, order });
+        order = group.panels.map(candidate => candidate.id);
+      }),
+    );
+  }
 
   function workspaceVisible(): boolean {
     return !options.host.classList.contains("workspace-panel-host")
@@ -97,20 +184,40 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     });
     doc.addEventListener("visibilitychange", refresh);
     popWin.addEventListener("beforeunload", () => {
-      const restores = api.panels.filter(panel => panel.api.getWindow() === popWin)
+      // The initial about:blank window can retain its listener after navigation.
+      // Only the loaded document may schedule a return correction.
+      if (shuttingDown || api.isDisposed || popWin.document !== doc) return;
+      const panels = api.panels.filter(panel => panel.api.getWindow() === popWin);
+      const restores = panels
         .map(panel => desktopPanelId(panel.id))
         .filter((id): id is DesktopDockviewPanelId => id !== null)
         .map(preserveTransferScroll);
-      // Capture precedes Dockview's close listener; the main document's next
-      // layout runs after native dispatch and the synchronous redock.
-      win.requestAnimationFrame(() => { for (const restore of restores) restore(); });
+      // Native close transfers synchronously without disposing content. Correct
+      // only its destination/order afterwards, never recreate removed panels.
+      queueMicrotask(() => {
+        if (shuttingDown || api.isDisposed) return;
+        returnPanels(panels);
+        for (const restore of restores) restore();
+      });
     }, { capture: true });
   }
 
   function preserveTransferScroll(id: DesktopDockviewPanelId): () => void {
     const container = panelEls[id];
     const snapshot = container && captureDiffViewScroll(container);
+    const focused = container?.ownerDocument.activeElement;
+    const scroll = container ? [container, ...container.querySelectorAll<HTMLElement>("*")]
+      .filter(element => element.scrollTop !== 0 || element.scrollLeft !== 0)
+      .map(element => ({ element, top: element.scrollTop, left: element.scrollLeft })) : [];
     return () => {
+      if (shuttingDown || !container || panelEls[id] !== container) return;
+      for (const { element, top, left } of scroll) {
+        element.scrollTop = top;
+        element.scrollLeft = left;
+      }
+      if (workspaceVisible() && focused && container.contains(focused)) {
+        (focused as HTMLElement).focus({ preventScroll: true });
+      }
       if (!container || !snapshot) return;
       pendingScrollRestores.get(id)?.();
       const view = container.ownerDocument.defaultView;
@@ -140,8 +247,30 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
 
   const api = new DockviewComponent(options.host, {
     theme: themeDark,
+    defaultTabComponent: "workspace",
+    createTabComponent() {
+      const element = owner.createElement("div");
+      element.className = "dv-default-tab";
+      const title = owner.createElement("div");
+      title.className = "dv-default-tab-content";
+      element.append(title);
+      let listener: { dispose(): void } | undefined;
+      return {
+        element,
+        init(params) {
+          title.textContent = params.title;
+          listener = params.api.onDidTitleChange(event => { title.textContent = event.title; });
+        },
+        dispose() { listener?.dispose(); },
+      };
+    },
     createRightHeaderActionComponent(group) {
+      guardGroup(group);
       const element = createPanelToolbar(owner, () => {
+        if (group.api.location.type === "popout") {
+          group.api.getWindow().close();
+          return;
+        }
         const panel = group.activePanel && api.getGroupPanel(group.activePanel.id);
         const panelId = panel && desktopPanelId(panel.id);
         if (!panel || !panelId) return;
@@ -161,7 +290,16 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
           notifyVisibility();
         });
       });
-      return { element, init() {}, dispose() {} };
+      const button = element.querySelector<HTMLButtonElement>("button")!;
+      const update = () => {
+        const returning = group.api.location.type === "popout";
+        button.className = returning ? "panel-return-btn" : "panel-popout-btn";
+        button.textContent = returning ? "Return to main" : "Pop out";
+        button.title = returning ? "Return to main" : "Open panel in a separate window";
+      };
+      const listener = group.api.onDidLocationChange(update);
+      update();
+      return { element, init() {}, dispose() { listener.dispose(); } };
     },
     createComponent(componentOptions) {
       const panelId = desktopPanelId(componentOptions.name);
@@ -221,10 +359,11 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     queueMicrotask(() => { for (const restore of restores) restore(); });
   });
 
-  let layoutSaveTimer: number | undefined;
   api.onDidLayoutChange(() => {
+    if (shuttingDown || api.isDisposed) return;
     win.clearTimeout(layoutSaveTimer);
     layoutSaveTimer = win.setTimeout(() => {
+      if (shuttingDown || api.isDisposed) return;
       const data: PersistedDockviewLayout = { version: 1, layout: api.toJSON() };
       storage(win).setItem(options.storageKey, JSON.stringify(data));
     }, 300);
@@ -319,6 +458,71 @@ function createPanelToolbar(owner: Document, onPopout: () => void): HTMLElement 
   return toolbar;
 }
 
+function dockedLayout(
+  layout: SerializedDockview,
+  originFor?: (id: string) => PanelReturnLocation | undefined,
+): SerializedDockview {
+  const popouts = layout.popoutGroups ?? [];
+  if (popouts.length === 0) return layout;
+  type Node = SerializedDockview["grid"]["root"];
+  type Group = Exclude<Node["data"], Node[]>;
+  type Target = { group: Group; node?: Node };
+  const groups = new Map<string, Target>();
+  const orders = new Map<Group, string[]>();
+  function visit(node: Node): void {
+    if (Array.isArray(node.data)) node.data.forEach(visit);
+    else groups.set(node.data.id, { group: node.data, node });
+  }
+  visit(layout.grid.root);
+  for (const floating of layout.floatingGroups ?? []) {
+    groups.set(floating.data.id, { group: floating.data });
+  }
+  for (const popout of popouts) {
+    let fallback: Target | undefined;
+    const active = layout.activeGroup === popout.data.id;
+    for (const id of popout.data.views) {
+      const origin = originFor?.(id);
+      let target = (origin && groups.get(origin.group.id))
+        || (popout.gridReferenceGroup && groups.get(popout.gridReferenceGroup));
+      if (!target) {
+        if (!fallback) {
+          const group: Group = { ...popout.data, views: [], activeView: undefined };
+          const node: Node = { type: "leaf", data: group };
+          const root = layout.grid.root;
+          if (Array.isArray(root.data)) root.data.push(node);
+          else layout.grid.root = { type: "branch", data: [root, node], size: root.size };
+          fallback = { group, node };
+          groups.set(group.id, fallback);
+        }
+        target = fallback;
+      }
+      if (!target.group.views.includes(id)) target.group.views.push(id);
+      if (origin?.group.id === target.group.id && origin.order.length > (orders.get(target.group)?.length ?? 0)) {
+        orders.set(target.group, origin.order);
+      }
+      if (id === popout.data.activeView) {
+        target.group.activeView ??= id;
+        if (active) {
+          target.group.activeView = id;
+          layout.activeGroup = target.group.id;
+        }
+      }
+      if (target.node) target.node.visible = true;
+    }
+  }
+  // Merge every popup first: a later, shorter snapshot must not erase slots
+  // captured before earlier tabs left this same group.
+  for (const [group, order] of orders) {
+    group.views.sort((a, b) => {
+      const left = order.indexOf(a);
+      const right = order.indexOf(b);
+      return (left < 0 ? order.length : left) - (right < 0 ? order.length : right);
+    });
+  }
+  delete layout.popoutGroups;
+  return layout;
+}
+
 function restoreOrCreateLayout(
   api: DockviewComponent,
   store: Storage,
@@ -332,7 +536,7 @@ function restoreOrCreateLayout(
     try {
       const data = JSON.parse(stored) as PersistedDockviewLayout;
       if (data.version === 1 && data.layout) {
-        api.fromJSON(data.layout);
+        api.fromJSON(dockedLayout(data.layout));
         layoutRestored = true;
       }
     } catch {

@@ -106,6 +106,38 @@ delete action remain separate. Unread reserves space beside the delete action.
 Keyed rows retain DOM identity, focus and scroll position when activity reorders
 the list, including documents belonging to popout windows.
 
+### Desktop workspace panel lifetime
+
+Top-level Dockview panels (Transcript, Goal, Code, Tools, Git changes/Diff and
+opened Compare) are not user-closeable anywhere in the main workspace, including
+floating groups. Tabs have no destructive close action. The adapter guards panel
+and group user-close entry points, without blocking dragging, selection, transfers,
+explicit internal `closePanel`, removal or disposal. Dockview 5.2 has no cancellable
+close event; dependency upgrades must recheck these entry points.
+
+Detached groups show **Return to main** instead of another Pop out action. This
+button, group close and native popup-window close return the group through
+Dockview's native redock. An individual popup panel-close request returns only
+that panel. Existing content instances survive; original main groups and tab
+positions are preferred, with a deterministic main-workspace fallback when the
+target is gone. Tabs collected from different origins return to their own
+surviving groups. Normal and diff-review workspaces retain separate ownership.
+
+Transfer preserves content, draft, review identity, comments, preferences and
+scroll; it does not cancel pending diff/Compare responses or restart History
+smart-entry. BTW conversation subtabs remain independently closeable.
+
+Ordinary layout saves retain native popup geometry. Main-page shutdown saves
+return positions synchronously, without moving content, reopening windows or
+showing a confirmation dialog. Reload restores detached panels into the owning
+main workspace; legacy saved popup layouts are normalized too, including optional
+Compare panels. This does not add draft/content persistence across reload.
+
+Real-library lifecycle regressions cover close versus teardown and saved layout
+round trips. Default browser smoke runs the black-box cases in `panel-close.spec.ts`;
+`@adapter` cases require an external instrumented build exposing actual Dockview
+instances and are excluded from the ordinary smoke configuration.
+
 ### Session ordering
 
 Desktop and mobile sort by `lastMessageAt` descending, then `createdAt`

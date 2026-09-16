@@ -870,7 +870,8 @@ h2 {
   padding: 0 0.2rem;
 }
 
-.panel-popout-btn {
+.panel-popout-btn,
+.panel-return-btn {
   min-height: 24px;
   font-size: 0.6875rem;
   padding: 0.1rem 0.3rem;
@@ -880,7 +881,8 @@ h2 {
   border-color: transparent;
 }
 
-.panel-popout-btn:hover:not(:disabled) {
+.panel-popout-btn:hover:not(:disabled),
+.panel-return-btn:hover:not(:disabled) {
   color: #c7cedc;
   border-color: #343a46;
   background: #1a1f2a;

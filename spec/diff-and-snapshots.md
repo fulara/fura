@@ -20,8 +20,8 @@ This is one decision per entry, correlated with that entry's session and diff
 request. While status is loading/unknown, neither mode is presented as selected;
 loading or the actual diagnostic remains visible with manual navigation available.
 Manual mode/commit/Compare navigation cancels a pending decision. Background
-refreshes do not change the chosen mode. Close/reopen and repository/session
-switches invalidate older decisions. Ordinary re-entry reevaluates a stored mode
+refreshes do not change the chosen mode. Intentional panel teardown/recreation and
+repository/session switches invalidate older decisions. Ordinary re-entry reevaluates a stored mode
 but retains its ref, selected immutable OID, file selections and comments; direct
 commit navigation, dedicated review sessions and Advanced Compare retain their
 existing explicit navigation behavior.
@@ -29,6 +29,9 @@ existing explicit navigation behavior.
 Moving focus to another visible panel or window is not a new entry. Popout,
 redock and internal Dockview transfer retain the repository, viewed ref, pinned
 OID, file/stat selection, disclosures and independent scroll positions.
+Top-level docked panels cannot be user-closed; native popup close and **Return to
+main** redock existing content rather than invoking panel teardown (see
+[workspace panel lifetime](ui-preferences.md#desktop-workspace-panel-lifetime)).
 
 The independent inline tool-card diffs still render OMP `result.details.diff`.
 OMP context checkpoint/rewind and native hashline editor snapshots are unrelated and
