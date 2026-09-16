@@ -53,6 +53,23 @@ describe("Git diff highlighting adapter", () => {
     expect(nodes[1].querySelector(".hljs-keyword")?.textContent).toBe("pub");
   });
 
+  it("renders the same canonical context anchor with side-specific multiline syntax", () => {
+    vi.spyOn(performance, "now").mockReturnValue(0);
+    const rows = [
+      line("-/* adapter old context", "remove"),
+      line("+// adapter new context", "add"),
+      line(" pub fn adapter_shared_context() {}", "context"),
+    ];
+    const highlighter = createGitDiffHighlighter(rows, document);
+    const old = document.createElement("code");
+    const current = document.createElement("code");
+    highlighter.renderLine(2, old, "left");
+    highlighter.renderLine(2, current, "right");
+    expect(old.querySelector(".hljs-comment")?.textContent).toContain("pub fn adapter_shared_context");
+    expect(current.querySelector(".hljs-keyword")?.textContent).toBe("pub");
+    expect(old.textContent).toBe(current.textContent);
+  });
+
   it("does not intraline-pair unknown hunk identities or malformed wire prefixes", () => {
     const missing = render([line("-let x = 1;", "remove", null), line("+let x = 2;", "add", null)]);
     expect(missing.every((node) => !node.querySelector(".diff-intraline-add, .diff-intraline-remove"))).toBe(true);

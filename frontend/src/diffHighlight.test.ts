@@ -73,6 +73,44 @@ describe("diff syntax and intraline composition", () => {
     expect(nodes[4].querySelector(".hljs-keyword")?.textContent).toBe("pub");
   });
 
+  it("renders shared context in each side's syntax state without changing unified output", () => {
+    vi.spyOn(performance, "now").mockReturnValue(0);
+    const rows = [
+      row("-/* old-only split context", "remove"),
+      row("+// new-only split context", "add"),
+      row(" pub fn shared_split_context() {}"),
+    ];
+    const highlighter = createDiffHighlighter(rows, document);
+    const old = document.createElement("code");
+    const current = document.createElement("code");
+    const unified = document.createElement("code");
+    highlighter.renderLine(2, old, "left");
+    highlighter.renderLine(2, current, "right");
+    highlighter.renderLine(2, unified);
+    expect(old.querySelector(".hljs-comment")?.textContent).toContain("pub fn shared_split_context");
+    expect(old.querySelector(".hljs-keyword")).toBeNull();
+    expect(current.querySelector(".hljs-keyword")?.textContent).toBe("pub");
+    expect(unified.innerHTML).toBe(current.innerHTML);
+    expect([old, current, unified].map((node) => node.textContent)).toEqual(Array(3).fill(rows[2].text));
+  });
+
+  it("uses a rename's old language for old context and preserves safe plain fallback on that side", () => {
+    vi.spyOn(performance, "now").mockReturnValue(0);
+    const rows = [{ ...row(" pub fn renamed_split_context() {}"), newPath: "new.txt" }];
+    const highlighter = createDiffHighlighter(rows, document);
+    const old = document.createElement("code");
+    const current = document.createElement("code");
+    highlighter.renderLine(0, old, "left");
+    highlighter.renderLine(0, current, "right");
+    expect(old.querySelector(".hljs-keyword")?.textContent).toBe("pub");
+    expect(current.querySelector(".diff-syntax")).toBeNull();
+    const oversized = row(` <img src=x onerror=alert(1)>${"x".repeat(DIFF_HIGHLIGHT_LIMITS.maxLineCodeUnits)}`);
+    const plain = createDiffHighlighter([oversized], document);
+    plain.renderLine(0, old, "left");
+    expect(old.textContent).toBe(oversized.text);
+    expect(old.querySelector("img, [onerror], .diff-syntax")).toBeNull();
+  });
+
   it("treats object-prototype extension names as unknown languages", () => {
     const rows = [row("+let value = 1;", "add", "file.constructor"), row("+let value = 2;", "add", "file.__proto__")];
     const nodes = render(rows);

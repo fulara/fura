@@ -10,6 +10,7 @@ import { mkEl, reconcileChildren, requireElement, setRenderDocument } from "./do
 import { TranscriptBtw, BTW_TOOLTIP } from "./transcriptBtw";
 import { createSessionSkillsView } from "./sessionSkillsView";
 import { createGitDiffHighlighter } from "./gitDiffHighlight";
+import { splitDiffRows } from "./diffLayout";
 import { renderRangeDiffOutput } from "./rangeDiff";
 import type { DiffHighlighter } from "./diffHighlight";
 import {
@@ -908,6 +909,7 @@ let activeReviewCommentComposer: ActiveReviewCommentComposer | null = null;
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
+let diffLayout: "unified" | "split" = sessionStorage.getItem("fura.diff.layout") === "split" ? "split" : "unified";
 type CachedDiffPatch = { patch: string; truncated: boolean; rows: DiffRow[]; contextLines: number };
 const diffPatchCache = new Map<string, CachedDiffPatch>();
 const pendingDiffFilePatches = new Map<string, PendingDiffFilePatchRequest>();
@@ -7085,6 +7087,8 @@ function retainReadableDiff(container: HTMLElement, annotationKey: string, targe
   for (const button of root.querySelectorAll<HTMLButtonElement>(".diffs-main-body button, .git-detail-toolbar > .diffs-actions:not(.git-commit-navigation) button")) {
     button.disabled = true;
   }
+  const layout = root.querySelector<HTMLSelectElement>(".diff-layout-select");
+  if (layout) layout.disabled = true;
   return true;
 }
 
@@ -7098,6 +7102,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const scroll = captureDiffViewScroll(container);
   const focused = Boolean(activeSessionId && diffPanelHasFocus(activeSessionId, container));
   const filterFocus = focused ? captureDiffFilterFocus(container) : null;
+  const layoutFocused = focused && scroll?.target === target && container.ownerDocument.activeElement?.classList.contains("diff-layout-select");
   const sameSessionRerender = lastDiffsRenderedSessionId === activeSessionId;
   lastDiffsRenderedSessionId = activeSessionId;
   lastDiffsRenderedProjectionPresent = Boolean(projection);
@@ -7162,6 +7167,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   }
   restoreBranchPicker?.();
   restoreDiffFilterFocus(container, filterFocus);
+  if (layoutFocused) container.querySelector<HTMLSelectElement>(".diff-layout-select")?.focus({ preventScroll: true });
   restoreDiffViewScroll(container, scroll);
 }
 
@@ -7513,6 +7519,10 @@ function renderRangeDiffCompare(container: HTMLElement): void {
   const form = mkEl("form");
   form.className = "range-compare-controls";
   form.append(compareModeSelector(() => rangeDiffInputs.repoRoot));
+  const layoutNote = mkEl("p");
+  layoutNote.className = "diff-layout-note";
+  layoutNote.textContent = "Range-diff is a diff of patches; Unified only. Side by side applies to File diff.";
+  form.append(layoutNote);
   const fields = {} as Record<"repoRoot" | "base" | "old" | "new", HTMLInputElement>;
   for (const [key, title] of [["repoRoot", "Repository"], ["base", "Base"], ["old", "Old"], ["new", "New"]] as const) {
     const label = mkEl("label");
@@ -7571,6 +7581,8 @@ function renderComparePanel(container: HTMLElement): void {
   if (compareMode === "files" && retainReadableDiff(container, "compareDiff", target)) return;
   const scroll = captureDiffViewScroll(container);
   const filterFocus = diffPanelHasFocus("compareDiff", container) ? captureDiffFilterFocus(container) : null;
+  const layoutFocused = scroll?.target === target && diffPanelHasFocus("compareDiff", container)
+    && container.ownerDocument.activeElement?.classList.contains("diff-layout-select");
   const previous = container.querySelector<HTMLElement>(".compare-view");
   const controls = previous?.dataset.reviewTarget === target
     ? previous.querySelector<HTMLElement>(".compare-diff-controls") : null;
@@ -7655,6 +7667,7 @@ function renderComparePanel(container: HTMLElement): void {
   root.dataset.diffReady = String(diffPatchReady("compareDiff", compareDiffState));
   root.dataset.comparisonKey = compareDiffState.comparison.comparisonKey;
   restoreDiffFilterFocus(container, filterFocus);
+  if (layoutFocused) container.querySelector<HTMLSelectElement>(".diff-layout-select")?.focus({ preventScroll: true });
   restoreDiffViewScroll(container, scroll);
 }
 
@@ -7727,6 +7740,29 @@ function requestWiderDiffContext(annotationKey: string, state: DiffReviewableSta
   requestDiffContent(annotationKey, state, scope, requestMode, Math.min(currentContext + 10, 200));
 }
 
+
+function diffLayoutSelector(): HTMLSelectElement {
+  const select = mkEl("select");
+  select.className = "diff-layout-select";
+  select.setAttribute("aria-label", "Diff layout");
+  for (const [value, label] of [["unified", "Unified"], ["split", "Side by side"]] as const) {
+    const option = mkEl("option");
+    option.value = value;
+    option.textContent = label;
+    select.append(option);
+  }
+  select.value = diffLayout;
+  select.addEventListener("change", () => {
+    diffLayout = select.value === "split" ? "split" : "unified";
+    sessionStorage.setItem("fura.diff.layout", diffLayout);
+    // Presentation only: leave requests, repository/ref selection and anchors intact.
+    markDiffsViewDirty();
+    markComparePanelDirty();
+    if (activeSessionId) renderDiffsViewIfVisible(activeSessionId);
+    renderComparePanelIfVisible();
+  });
+  return select;
+}
 
 function renderReviewableDiff(
   annotationKey: string,
@@ -7856,6 +7892,7 @@ function renderReviewableDiffMainContent(
     }
   });
   toolbar.append(payloadToggle);
+  toolbar.append(diffLayoutSelector());
   if (requestMode === "compareDiff") {
   const firstCommit = state.review.commits[0]?.oid ?? null;
   const stepBtn = mkEl("button");
@@ -8082,6 +8119,8 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
   if (root.dataset.refreshRetained || root.dataset.comparisonKey !== state.comparison.comparisonKey) return false;
   const container = root.parentElement!;
   const scroll = captureDiffViewScroll(container);
+  const layoutFocused = diffPanelHasFocus(annotationKey, container)
+    && root.ownerDocument.activeElement?.classList.contains("diff-layout-select");
   setRenderDocument(root.ownerDocument);
   const selectedFilePath = sessionChangesSelectedFiles.get(annotationKey) ?? null;
   updateDesktopModifiedFileSelection(root, selectedFilePath);
@@ -8107,6 +8146,7 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
   root.dataset.reviewTarget = diffReviewTarget(annotationKey);
   root.dataset.diffReady = String(diffPatchReady(annotationKey, state));
   restoreDiffViewScroll(container, scroll);
+  if (layoutFocused) root.querySelector<HTMLSelectElement>(".diff-layout-select")?.focus({ preventScroll: true });
   if (annotationKey === "compareDiff") comparePanelDirty = false;
   else diffPanelDirty = false;
   return true;
@@ -8360,49 +8400,116 @@ function renderReviewCommentsSection(
 
 function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: DiffRow[], annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff"): void {
   const diff = mkEl("div");
-  diff.className = "diff-lines";
+  diff.className = `diff-lines${diffLayout === "split" ? " diff-lines-split" : ""}`;
   const fragment = diff.ownerDocument.createDocumentFragment();
   const highlighter = createGitDiffHighlighter(rows, diff.ownerDocument);
-  for (let index = 0; index < rows.length; index++) {
-    appendDiffRow(fragment, rows[index], annotationKey, state, annotations, comments, key, allowPromptActions, requestMode, highlighter, index);
+  if (diffLayout === "unified") {
+    for (let index = 0; index < rows.length; index++) {
+      appendDiffRow(fragment, rows[index], annotationKey, state, annotations, comments, key, allowPromptActions, requestMode, highlighter, index);
+    }
+  } else {
+    const layout = splitDiffRows(rows);
+    const headings = mkEl("div");
+    headings.className = "diff-split-head";
+    for (const label of ["Old / removed", "New / added"]) {
+      const heading = mkEl("span");
+      heading.textContent = label;
+      headings.append(heading);
+    }
+    fragment.append(headings);
+    if (layout.every(row => row.type === "full") || layout.some(row => row.type === "full" && rows[row.index].type === "line")) {
+      const note = mkEl("p");
+      note.className = "diff-layout-note";
+      note.textContent = "No supported two-sided text for some patch content; metadata and unanchored lines remain unified.";
+      fragment.append(note);
+    }
+    for (const row of layout) {
+      if (row.type === "full") {
+        appendDiffRow(fragment, rows[row.index], annotationKey, state, annotations, comments, key, allowPromptActions, requestMode, highlighter, row.index);
+        continue;
+      }
+      const pair = mkEl("div");
+      pair.className = "diff-split-row";
+      for (const side of ["left", "right"] as const) {
+        const cell = mkEl("div");
+        cell.className = "diff-split-cell";
+        cell.dataset.diffSide = side;
+        const source = row[side];
+        if (source === null) {
+          cell.classList.add("diff-split-gap");
+          cell.setAttribute("role", "img");
+          cell.setAttribute("aria-label", "No line");
+        } else {
+          appendDiffRow(cell, rows[source.index], annotationKey, state, annotations, comments, key, allowPromptActions, requestMode, highlighter, source.index, side);
+          if (source.noteIndex !== undefined) {
+            const note = mkEl("div");
+            note.className = "diff-no-newline";
+            const original = rows[source.noteIndex];
+            note.textContent = original.type === "meta" ? original.text : "";
+            cell.append(note);
+          }
+        }
+        pair.append(cell);
+      }
+      fragment.append(pair);
+    }
   }
   diff.append(fragment);
   container.append(diff);
 }
 
-function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff", highlighter: DiffHighlighter, index: number): void {
+function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff", highlighter: DiffHighlighter, index: number, displaySide?: "left" | "right"): void {
   if (row.type === "line") {
-    const lineComments = reviewCommentsForDiffLocation(comments, key, row.location);
-    const lineQuestions = annotationsForDiffLocation(annotations, key, row.location).filter(annotation => annotation.kind === "question");
+    // Context has one canonical review anchor (right). Its old-side copy is read-only.
+    const displayOnly = displaySide === "left" && row.location.kind === "context";
+    const lineComments = displayOnly ? [] : reviewCommentsForDiffLocation(comments, key, row.location);
+    const lineQuestions = displayOnly ? [] : annotationsForDiffLocation(annotations, key, row.location).filter(annotation => annotation.kind === "question");
     const lineWrap = mkEl("div");
     lineWrap.className = "diff-line-wrap";
     const line = mkEl("div");
     line.className = `diff-line diff-line-${row.location.kind}`;
-    const commentBtn = mkEl("button");
-    commentBtn.type = "button";
-    commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
-    commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
-    commentBtn.disabled = !allowPromptActions;
-    commentBtn.title = allowPromptActions ? "Comment on this diff line" : "Comments require a session changes review";
-    commentBtn.addEventListener("click", () => startDiffCommentComposer(annotationKey, state, row.location));
+    if (!displayOnly) {
+      const commentBtn = mkEl("button");
+      commentBtn.type = "button";
+      commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
+      commentBtn.textContent = lineComments.length > 0 ? String(lineComments.length) : "+";
+      commentBtn.disabled = !allowPromptActions;
+      commentBtn.title = allowPromptActions ? "Comment on this diff line" : "Comments require a session changes review";
+      commentBtn.addEventListener("click", () => startDiffCommentComposer(annotationKey, state, row.location));
+      line.append(commentBtn);
+    } else {
+      const spacer = mkEl("span");
+      spacer.className = "diff-comment-spacer";
+      spacer.setAttribute("aria-hidden", "true");
+      line.append(spacer);
+      line.title = "Shared context; use the new-side controls to comment or ask a question.";
+    }
     const gutter = mkEl("span");
     gutter.className = "diff-gutter";
-    gutter.textContent = String(row.location.newLine ?? row.location.oldLine ?? "");
+    gutter.textContent = String(displaySide === "left" ? row.location.oldLine ?? "" : row.location.newLine ?? row.location.oldLine ?? "");
     const content = mkEl("div");
     content.className = "diff-line-content";
     const text = mkEl("code");
-    highlighter.renderLine(index, text);
+    highlighter.renderLine(index, text, displaySide);
     content.append(text);
-    const questionBtn = mkEl("button");
-    questionBtn.type = "button";
-    questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
-    questionBtn.textContent = lineQuestions.length > 0 ? String(lineQuestions.length) : "?";
-    questionBtn.disabled = !allowPromptActions;
-    questionBtn.title = allowPromptActions ? "Ask the agent about this diff line" : "Questions require a session changes review";
-    questionBtn.addEventListener("click", () => askDiffQuestion(annotationKey, state, row.location));
-    line.append(commentBtn, gutter, content, questionBtn);
+    line.append(gutter, content);
+    if (!displayOnly) {
+      const questionBtn = mkEl("button");
+      questionBtn.type = "button";
+      questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
+      questionBtn.textContent = lineQuestions.length > 0 ? String(lineQuestions.length) : "?";
+      questionBtn.disabled = !allowPromptActions;
+      questionBtn.title = allowPromptActions ? "Ask the agent about this diff line" : "Questions require a session changes review";
+      questionBtn.addEventListener("click", () => askDiffQuestion(annotationKey, state, row.location));
+      line.append(questionBtn);
+    } else {
+      const spacer = mkEl("span");
+      spacer.className = "diff-question-spacer";
+      spacer.setAttribute("aria-hidden", "true");
+      line.append(spacer);
+    }
     lineWrap.append(line);
-    const showComposer = isReviewCommentCreateComposer(annotationKey, key, row.location);
+    const showComposer = !displayOnly && isReviewCommentCreateComposer(annotationKey, key, row.location);
     if (lineComments.length > 0 || lineQuestions.length > 0 || showComposer) {
       const thread = mkEl("div");
       thread.className = "diff-inline-comments";

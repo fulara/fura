@@ -10,7 +10,7 @@ export type DiffHighlightRow = {
   newPath: string | null;
 };
 
-export type DiffHighlighter = { renderLine(index: number, target: HTMLElement): void };
+export type DiffHighlighter = { renderLine(index: number, target: HTMLElement, side?: "left" | "right"): void };
 
 export const DIFF_HIGHLIGHT_LIMITS = {
   maxRows: 2000,
@@ -26,7 +26,15 @@ export const DIFF_HIGHLIGHT_LIMITS = {
 
 type SyntaxRange = ChangedRange & { classes: string };
 type Decoration = { syntax: SyntaxRange[]; changed: ChangedRange[] };
-type Fragment = { start: number; end: number; units: number; plain: boolean; done: boolean; lines: Map<number, Decoration> };
+type Fragment = {
+  start: number;
+  end: number;
+  units: number;
+  plain: boolean;
+  done: boolean;
+  lines: Map<number, Decoration>;
+  oldSyntax?: Map<number, SyntaxRange[]> | null;
+};
 const syntaxCache = new Map<string, { ranges: SyntaxRange[]; bytes: number }>();
 let syntaxCacheBytes = 0;
 
@@ -137,6 +145,7 @@ export function createDiffHighlighter(rows: readonly DiffHighlightRow[], owner: 
       }
       const newSyntax = newLanguage ? decorateSide(after, newLanguage, rows, owner, deadline) : null;
       const oldSyntax = oldLanguage ? decorateSide(before, oldLanguage, rows, owner, deadline) : null;
+      group.oldSyntax = oldSyntax;
       for (let index = group.start; index < group.end; index++) {
         const syntax = rows[index].kind === "remove" ? oldSyntax?.get(index) : newSyntax?.get(index);
         if (syntax) group.lines.set(index, { syntax, changed: [] });
@@ -168,7 +177,7 @@ export function createDiffHighlighter(rows: readonly DiffHighlightRow[], owner: 
     }
   }
   return {
-    renderLine(index, target) {
+    renderLine(index, target, side) {
       const row = rows[index];
       const group = fragments[index];
       if (!row || !group) {
@@ -176,7 +185,9 @@ export function createDiffHighlighter(rows: readonly DiffHighlightRow[], owner: 
         return;
       }
       if (!group.done) prepare(group);
-      const decoration = group.lines.get(index);
+      const oldContext = side === "left" && row.kind === "context";
+      const syntax = oldContext ? group.oldSyntax?.get(index) : undefined;
+      const decoration = oldContext ? (syntax ? { syntax, changed: [] } : undefined) : group.lines.get(index);
       if (!decoration) {
         plain.renderLine(index, target);
         return;

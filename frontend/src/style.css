@@ -2035,6 +2035,56 @@ h2 {
   gap: 0.2rem;
 }
 
+.diff-layout-select {
+  width: auto;
+  border: 1px solid #343a46;
+  border-radius: 0.35rem;
+  background: #111318;
+  color: #d7dae4;
+  padding: 0.2rem 0.4rem;
+  max-width: 100%;
+}
+
+.diff-layout-note, .diff-no-newline {
+  color: #9ca9be;
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+
+.range-compare-controls > .diff-layout-note {
+  grid-column: 1 / -1;
+  order: 1;
+  margin: 0;
+}
+
+/* Narrow docked panes scroll horizontally instead of crushing source columns. */
+.diff-lines-split { min-width: 48rem; }
+
+.diff-split-row, .diff-split-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+}
+
+.diff-split-head {
+  color: #aebcd0;
+  background: #171b24;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.diff-split-head > span { padding: 0.3rem 0.5rem; }
+.diff-split-cell { min-width: 0; }
+.diff-split-cell:first-child { border-right: 1px solid #343a46; }
+.diff-split-gap {
+  min-height: 1.45em;
+  background: repeating-linear-gradient(135deg, transparent, transparent 5px, rgba(139, 148, 158, 0.07) 5px, rgba(139, 148, 158, 0.07) 7px);
+}
+.diff-no-newline { padding: 0.1rem 0.5rem; }
+.diff-question-spacer { width: 2rem; }
+
 .diff-comment-btn, .diff-question-btn { min-height: 18px; }
 
 .diff-line {

@@ -45,5 +45,5 @@ export function createGitDiffHighlighter(rows: readonly DiffRow[], owner: Docume
     });
   }
   const highlighter = createDiffHighlighter(normalized, owner);
-  return { renderLine: (index, target) => highlighter.renderLine(indices[index], target) };
+  return { renderLine: (index, target, side) => highlighter.renderLine(indices[index], target, side) };
 }

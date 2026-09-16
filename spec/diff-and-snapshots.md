@@ -132,6 +132,39 @@ Pop out lives in the Dockview tab header, not in a separate content toolbar.
 In All files view it reloads the aggregate patch; with one file selected it reloads
 that file. Expanding context never silently changes the file selection.
 
+## Diff layout
+
+The desktop patch toolbar offers **Unified** (default) and **Side by side** for
+Current changes, History and ordinary ref Compare. One presentation preference is
+shared by these panes and retained in the main window's `sessionStorage`
+(`fura.diff.layout`), including refresh, reload, focus and popout/redock. It does
+not change repository, session, refs, selected commit/file or checkout, and does
+not initiate a new comparison.
+
+Split puts old/removals on the left and new/additions on the right, with separate
+line numbers and syntax state. Context shares a visual row; consecutive removal
+and addition runs align by position only within the same paths and hunk. This is
+layout, not a claim that unequal changes are semantic pairs. Wrapped lines and
+comment threads keep the next pair aligned. Striped, labelled **No line** cells
+have no source text, gutter or actions; an actual blank source line keeps its
+number. Metadata stays full-width. No-newline markers stay with the preceding
+source side. Binary/unsupported or unanchored patch content remains unified with
+a fallback explanation; no content outside the supplied hunks is invented.
+
+Narrow docked panes scroll the patch horizontally rather than crushing source
+columns; expanding or popping out the pane shows both columns together.
+
+
+Review actions keep the original canonical row and immutable comparison/path
+identity. Shared context has one canonical right-side anchor: its left copy is
+display-only, while the right copy retains comments/questions. Removed and added
+lines retain their respective old/new anchors. File Copy uses the original
+committed content, never the displayed DOM.
+
+Native range-diff remains unified and explicitly explains the limitation: it
+compares patches, not two file versions. Transcript edit cards keep their existing
+layout; there is no separate mobile redesign.
+
 ## Diff highlighting
 
 Git/commit rows and recorded edit-card patches share a presentation-only tokenizer,
@@ -142,8 +175,8 @@ unknown paths stay plain. No language autodetection or current-file content is f
 Line backgrounds remain subtle; syntax owns the foreground. Intraline emphasis applies
 only to a single removed/added pair within one contiguous fragment, with an unambiguous
 word-level alignment and at least half of the longer line unchanged. Whole blocks are
-never paired by index. Words/whitespace runs are atomic; grapheme boundaries preserve
-Unicode and the original UTF-16 source offsets.
+never paired by index for intraline emphasis. Words/whitespace runs are atomic;
+grapheme boundaries preserve Unicode and the original UTF-16 source offsets.
 
 Old/new sides have independent multiline context. Hunks, path/language changes, elisions
 and unproven numbered gaps reset it. Expanding context changes the complete-text cache
