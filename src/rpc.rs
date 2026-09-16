@@ -1251,6 +1251,31 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
     if is_controller_transport(state, session_id).await {
         match typed_frame {
             OmpRpcFrame::Ready(_) => {}
+            OmpRpcFrame::Notice { level, message } => {
+                let run = state.bridge_controller.read().await.active_run.clone();
+                if let Some(run) = run {
+                    let _ = state
+                        .events
+                        .emit(
+                            state,
+                            ServerMessage::ControlStatus {
+                                target_client_id: Some(run.target_client_id),
+                                status: ControlStatusProjection {
+                                    status: if matches!(level, NoticeLevel::Error) {
+                                        "error"
+                                    } else {
+                                        "working"
+                                    }
+                                    .to_string(),
+                                    message: Some(message),
+                                },
+                            },
+                        )
+                        .await;
+                } else {
+                    warn!(transport_session_id = %session_id, %message, "OMP controller notice without active client");
+                }
+            }
             OmpRpcFrame::AgentStart => {
                 let run = state.bridge_controller.read().await.active_run.clone();
                 if let Some(run) = run {
@@ -1317,6 +1342,12 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
         return;
     }
     match typed_frame {
+        OmpRpcFrame::Notice { level, message } => {
+            let _ = state
+                .events
+                .emit(state, notice(target_session_id, level, message))
+                .await;
+        }
         OmpRpcFrame::SessionSkillsUpdated { session_skills } => {
             apply_session_skills_event(state, session_id, session_skills).await;
         }

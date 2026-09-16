@@ -28,6 +28,7 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   { name: "vibe", description: "TUI vibe mode", support: "tui-only" },
   { name: "queue", description: "TUI post-yield message queue", support: "tui-only" },
   { name: "pause", description: "TUI global agent pause screen", support: "tui-only" },
+  { name: "delete", description: "Use Fura session deletion controls instead", support: "tui-only" },
   { name: "plan", description: "Toggle plan mode or start planning with a prompt", usage: "[prompt]", support: "supported" },
   { name: "fast", description: "Toggle priority service tier", support: "supported" },
   { name: "browser", description: "Toggle browser headless/visible mode", support: "supported" },

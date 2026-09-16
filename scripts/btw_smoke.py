@@ -137,10 +137,12 @@ def main():
     finally:
         for signum in signals:
             signal.signal(signum, signal.SIG_IGN)
-        if test_process is not None:
-            test_process.cleanup()
-        if server is not None:
-            server.cleanup(grace=3)
+        try:
+            if test_process is not None:
+                test_process.cleanup()
+        finally:
+            if server is not None:
+                server.cleanup(grace=3)
         (evidence / f"runner-{generation}.json").write_text(json.dumps({"mode": args.mode, "baseURL": base,
             "exit_code": code, "owned_processes_cleaned": True, "production_launchers_used": False,
             "native_os_focus_verified": False}, indent=2))

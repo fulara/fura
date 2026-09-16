@@ -193,10 +193,12 @@ git submodule update --remote vendor/oh-my-pi
 bun scripts/check-omp-rpc-contract.ts
 ```
 
-Restart existing OMP processes after upgrading; native addons stay loaded for the
-lifetime of each process.
+Native addons stay loaded for each process's lifetime. Refreshing shared sources
+without restarting does not deploy the new runtime: newly loaded workers may
+refuse an older addon. Build a matching addon and restart only during an explicit
+deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.2.0. Desktop Fura exposes one-shot BTW through
+The current fork tracks OMP 18.2.1. Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
 captured at start; results remain only in browser memory. Upstream TUI BTW history
@@ -219,6 +221,14 @@ BTW lifecycle and explicit headless-shell profile patches: upstream's fail-close
 Eval startup and Chrome-only managed installer address different concerns.
 Upstream model-substitution warnings and skill chips are TUI features, not
 automatically enabled Fura UI.
+
+Fura surfaces OMP persistence `notice` errors through existing session notices
+(or the originating Ask Fura controller status), rather than silently dropping
+them. `/delete` remains TUI-only; use Fura's existing deletion controls.
+RPC plan approval suppresses compact's automatic continuation because approval
+dispatches its own execution turn. Prompt correlation and upstream user/agent
+attribution are preserved together. The fork also retains P2 skill ancestry
+validation and user-invoked skill attachment resolution.
 
 Environment overrides for `run-local-omp.sh`:
 
@@ -268,9 +278,21 @@ uses its own home, session store, XDG directories, process group and session.
 An occupied port fails startup; an existing server is never reused. Cleanup
 checks the retained supervisor identity and ownership record before signalling
 its group. If ownership cannot be verified, it refuses cleanup and leaves the
-temporary directory and ownership record for inspection.
+temporary directory and ownership record for inspection. Successful cleanup
+also retains nonsecret `process.json`, `exit.json` (when the command exited),
+and `cleanup.json`; the mock launcher prints their directory while deleting
+private workload data and build outputs.
 The supervisor inherits blocked cleanup signals until its handlers are installed,
-so immediate cleanup is safe even for direct `OwnedProcess` callers.
+and a pipe handoff prevents workload execution before ownership is established.
+Failed handoffs close the pipe and let the supervisor exit without signaling.
+Observed descendants that escape the owned group are reported in `cleanup.json`,
+never targeted by PID discovery. Cleanup stops the verified group, then fails
+while observed survivors remain; repeated cleanup cannot silently forget them.
+This is process-group ownership, not OS containment: polling cannot prove the
+absence of an unobserved fast double-fork/`setsid` escape. In particular, real OMP
+eval kernels and launched daemons can create separate sessions. Use a disposable
+container/VM for arbitrary detaching workloads rather than treating group cleanup
+as proof that every descendant is gone.
 The BTW browser gate also handles TERM/INT/HUP and protects both ownership
 handoffs; termination must clean up its private server and worker without
 touching existing processes. Its regression uses disposable sentinels only.

@@ -43,6 +43,7 @@ class MockLauncherIsolation(unittest.TestCase):
                 env={**os.environ, "PATH":f"{directory}:{os.environ['PATH']}",
                      "FURA_ENV_FILE":str(config), "FURA_SKIP_FRONTEND_BUILD":"1",
                      "FURA_SMOKE_PORT":str(port),
+                     "TMPDIR": str(directory),
                      **{key: "fixture-only" for key in (
                          "PI_CODING_AGENT_DIR", "PI_SESSION_FILE", "PI_ARTIFACTS_DIR",
                          "PI_TOOL_BRIDGE_URL", "PI_TOOL_BRIDGE_TOKEN", "PI_TOOL_BRIDGE_SESSION",
@@ -56,6 +57,12 @@ class MockLauncherIsolation(unittest.TestCase):
             self.assertNotEqual(child["sid"], os.getsid(0))
             self.assertNotEqual(child["home"], os.environ["HOME"])
             self.assertEqual(child["parent_context"], [], "mock workload must not inherit OMP state or capabilities")
+            retained = Path(child["home"]).parent / "process"
+            self.assertTrue((retained / "process.json").is_file())
+            cleanup = json.loads((retained / "cleanup.json").read_text())
+            self.assertTrue(cleanup["group_cleaned"])
+            self.assertEqual(cleanup["remaining_observed_descendants"], [])
+            self.assertFalse(Path(child["home"]).exists(), "private workload data should be removed")
 
     def test_partial_startup_failure_preserves_ownership_evidence(self):
         with tempfile.TemporaryDirectory(prefix="fura-startup-regression-") as temp:
@@ -156,6 +163,12 @@ class OwnedProcessLifecycle(unittest.TestCase):
         self.assertEqual(self.owned.wait(timeout=5), 0)
         self.owned.cleanup()
         self.assert_gone(pids)
+        self.assertEqual(json.loads(self.owned.pid_file.read_text()), self.owned.record)
+        cleanup = json.loads((self.owned.directory / "cleanup.json").read_text())
+        self.assertTrue(cleanup["group_cleaned"])
+        self.assertEqual(cleanup["remaining_observed_descendants"], [])
+        with self.assertRaises(OwnershipError):
+            OwnedProcess([sys.executable, "-c", "pass"], self.owned.directory)
 
     def test_timeout_reaps_command_and_worker(self):
         pids = self.start()
@@ -168,6 +181,77 @@ class OwnedProcessLifecycle(unittest.TestCase):
         supervisor = self.owned.process
         self.assertEqual(self.owned.wait(timeout=5), 127)
         self.assertIsNotNone(supervisor.returncode)
+
+    def test_failed_ownership_handoff_never_starts_workload(self):
+        marker = self.directory / "must-not-start"
+        popen = subprocess.Popen
+        anchors = []
+
+        def capture(command, **kwargs):
+            child = popen(command, **kwargs)
+            if "--supervisor" in command:
+                anchors.append(child)
+            return child
+
+        try:
+            with patch("scripts.smoke_process.subprocess.Popen", side_effect=capture), \
+                    patch.object(OwnedProcess, "_verified_group", side_effect=OwnershipError("handoff refused")):
+                with self.assertRaises(OwnershipError):
+                    OwnedProcess(
+                        [sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).touch()"],
+                        self.directory / "process",
+                    )
+            self.assertEqual(anchors[0].wait(timeout=5), 0)
+            self.assertFalse(marker.exists(), "unowned workload must not execute")
+        finally:
+            # RED against the ungated implementation stops only the exact
+            # supervisor we spawned. The dummy workload exits by itself.
+            for child in anchors:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+
+    def test_detached_worker_is_reported_without_pid_signaling(self):
+        ready = self.directory / "escaped-ready.json"
+        release = self.directory / "escaped-release"
+        worker = (
+            "import pathlib, time\n"
+            f"release = pathlib.Path({str(release)!r})\n"
+            "deadline = time.monotonic() + 15\n"
+            "while not release.exists() and time.monotonic() < deadline: time.sleep(.01)\n"
+        )
+        source = (
+            "import json, os, pathlib, subprocess, sys\n"
+            f"child = subprocess.Popen([sys.executable, '-c', {worker!r}], start_new_session=True)\n"
+            f"pathlib.Path({str(ready)!r}).write_text(json.dumps([os.getpid(), child.pid]))\n"
+            "child.wait()\n"
+        )
+        self.owned = OwnedProcess([sys.executable, "-c", source], self.directory / "process")
+        pids = self.await_ready(ready)
+        escaped_pid = json.loads(ready.read_text())[1]
+        try:
+            with self.assertRaises(OwnershipError):
+                self.owned.cleanup()
+            self.assert_gone({pid: expected for pid, expected in pids.items() if pid != escaped_pid})
+            self.assertEqual(identity(process_table()[escaped_pid]), pids[escaped_pid])
+            report = json.loads((self.owned.directory / "cleanup.json").read_text())
+            self.assertTrue(report["group_cleaned"])
+            self.assertEqual(
+                [row["pid"] for row in report["remaining_observed_descendants"]], [escaped_pid],
+            )
+            # The worker is now reparented. Repeated cleanup must still refuse
+            # PID-only signaling rather than forget it or claim complete cleanup.
+            with self.assertRaises(OwnershipError):
+                self.owned.cleanup()
+            self.assertEqual(identity(process_table()[escaped_pid]), pids[escaped_pid])
+        finally:
+            # No discovered PID is ever signaled, including during a safe RED.
+            release.touch()
+            self.assert_gone(pids)
+        self.owned.cleanup()
+        self.assertEqual(
+            json.loads((self.owned.directory / "cleanup.json").read_text())["remaining_observed_descendants"], [],
+        )
 
     def test_cleanup_signal_before_supervisor_bootstrap_preserves_anchor(self):
         ready = self.directory / "bootstrap-ready"

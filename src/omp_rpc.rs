@@ -11,6 +11,11 @@ pub(crate) enum OmpRpcFrame {
     Ready(OmpRpcReadyFrame),
     #[serde(rename = "response")]
     Response(OmpRpcResponseFrame),
+    #[serde(rename = "notice")]
+    Notice {
+        level: crate::NoticeLevel,
+        message: String,
+    },
     #[serde(rename = "session_skills_updated")]
     SessionSkillsUpdated {
         #[serde(rename = "sessionSkills")]

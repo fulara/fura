@@ -4438,6 +4438,50 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn rpc_persistence_notice_reaches_logical_session_without_changing_lifecycle() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        map_test_transport(&state, "transport-1", "s1").await;
+        let before = state.sessions.read().await["s1"].projection();
+        let mut events = state.events.subscribe();
+
+        apply_rpc_frame(
+            &state,
+            "transport-1",
+            &serde_json::json!({
+                "type": "notice",
+                "level": "error",
+                "message": "Session persistence failed: disk full",
+                "source": "session-persistence"
+            }),
+        )
+        .await;
+
+        match events
+            .try_recv()
+            .expect("persistence failure must reach the browser")
+        {
+            ServerMessage::SessionNotice {
+                session_id,
+                level,
+                text,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert!(matches!(level, NoticeLevel::Error));
+                assert_eq!(text, "Session persistence failed: disk full");
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        let after = state.sessions.read().await["s1"].projection();
+        assert_eq!(before.summary.status, after.summary.status);
+        assert_eq!(before.pending_ask, after.pending_ask);
+    }
+
+    #[tokio::test]
     async fn notify_extension_ui_request_emits_session_notice() {
         let state = test_state(8, None);
         state
@@ -4734,6 +4778,69 @@ pub(crate) mod tests {
         let record = sessions.get("s1").expect("session");
         assert_eq!(record.effective_status(), SessionStatus::Idle);
         assert!(!record.continuation_pending);
+    }
+
+    #[tokio::test]
+    async fn controller_persistence_notice_targets_its_client_without_settling_the_run() {
+        let state = test_state(8, None);
+        {
+            let mut controller = state.bridge_controller.write().await;
+            controller.transport_session_id = Some("controller-transport".to_string());
+            controller.active_run = Some(BridgeControllerRun {
+                target_client_id: "client-1".to_string(),
+                conversation_id: "conversation-1".to_string(),
+                active_session_id: Some("s1".to_string()),
+                prompt_started_at: Timestamp::now(),
+            });
+        }
+        let mut events = state.events.subscribe();
+        apply_rpc_frame(
+            &state,
+            "controller-transport",
+            &serde_json::json!({
+                "type": "notice", "level": "error", "message": "Session save failed",
+                "source": "session-persistence"
+            }),
+        )
+        .await;
+        match events
+            .try_recv()
+            .expect("controller error must reach its owner")
+        {
+            ServerMessage::ControlStatus {
+                target_client_id,
+                status,
+            } => {
+                assert_eq!(target_client_id.as_deref(), Some("client-1"));
+                assert_eq!(status.status, "error");
+                assert_eq!(status.message.as_deref(), Some("Session save failed"));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        assert!(state.bridge_controller.read().await.active_run.is_some());
+        assert!(
+            events.try_recv().is_err(),
+            "no session-wide error broadcast"
+        );
+    }
+
+    #[tokio::test]
+    async fn tui_delete_is_intercepted_without_deleting_or_forwarding() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut commands = register_test_transport(&state, "transport-1", "s1", 8).await;
+        let responses = handle_slash_command(&state, "s1".to_string(), "/delete")
+            .await
+            .expect("TUI delete must not fall through to OMP");
+        assert!(matches!(&responses[..], [ServerMessage::SessionNotice {
+            session_id, level: NoticeLevel::Warning, ..
+        }] if session_id == "s1"));
+        assert!(state.sessions.read().await.contains_key("s1"));
+        assert!(commands.try_recv().is_err(), "no destructive RPC command");
     }
 
     #[tokio::test]
@@ -10273,17 +10380,24 @@ pub(crate) mod tests {
         );
         // Discard the native history refresh queued by the identity rebind.
         while commands.try_recv().is_ok() {}
-        let rejected = handle_client_message(&state, ClientMessage::PromptSend {
-            session_id: "transport-session".into(),
-            text: "Must not reach the agent".into(),
-            images: None,
-            behavior: None,
-        }).await;
+        let rejected = handle_client_message(
+            &state,
+            ClientMessage::PromptSend {
+                session_id: "transport-session".into(),
+                text: "Must not reach the agent".into(),
+                images: None,
+                behavior: None,
+            },
+        )
+        .await;
         assert!(
             matches!(rejected.as_slice(), [ServerMessage::Error { .. }]),
             "frontend actions must use the real OMP session id, not the transport id"
         );
-        assert!(commands.try_recv().is_err(), "hidden transport IDs must not dispatch frontend prompts");
+        assert!(
+            commands.try_recv().is_err(),
+            "hidden transport IDs must not dispatch frontend prompts"
+        );
 
         match events.recv().await.expect("target snapshot event") {
             ServerMessage::SessionSnapshot { session_id, state } => {
@@ -10312,14 +10426,20 @@ pub(crate) mod tests {
             other => panic!("unexpected second event: {other:?}"),
         }
 
-        let accepted = handle_client_message(&state, ClientMessage::PromptSend {
-            session_id: "omp-session".into(),
-            text: "Continue the visible conversation".into(),
-            images: None,
-            behavior: None,
-        }).await;
+        let accepted = handle_client_message(
+            &state,
+            ClientMessage::PromptSend {
+                session_id: "omp-session".into(),
+                text: "Continue the visible conversation".into(),
+                images: None,
+                behavior: None,
+            },
+        )
+        .await;
         assert!(accepted.is_empty());
-        let prompt = commands.try_recv().expect("visible session prompt reaches its live child");
+        let prompt = commands
+            .try_recv()
+            .expect("visible session prompt reaches its live child");
         assert_eq!(prompt["type"], "prompt");
         assert_eq!(prompt["message"], "Continue the visible conversation");
     }

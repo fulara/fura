@@ -55,7 +55,7 @@ OMP (`--mode rpc-ui`) advertises and runs slash commands:
 - **Interactive commands without safe Fura projection state** still return a notice. Most are
   `handleTui`-only: `settings`, `copy`, `hotkeys`, `extensions`, `agents`, `branch`, `tree`,
   `login`, `logout`, `mcp`, `ssh`, `resume`, `btw`, `background`, `debug`, `memory`, `exit`,
-  `quit`, `q`, `marketplace`, `plugins`, `reload-plugins`, `force`, `vibe`, `queue`, `pause`.
+  `quit`, `q`, `marketplace`, `plugins`, `reload-plugins`, `force`, `vibe`, `queue`, `pause`, `delete`.
   `/move` has an OMP server-side `handle` in v16.2, but Fura keeps it blocked until OMP RPC exposes authoritative cwd after the move.
 
 ## Desktop palette + commands popup (frontend)

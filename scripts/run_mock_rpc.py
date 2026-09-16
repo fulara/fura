@@ -60,13 +60,13 @@ def main():
     for signum in signals:
         signal.signal(signum, interrupted)
     try:
-        signal.pthread_sigmask(signal.SIG_BLOCK, signals)
+        previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, signals)
         try:
             owned = OwnedProcess([sys.executable, __file__, "--workload", str(directory),
                                   str(port), *sys.argv[1:]], directory / "process", cwd=directory,
                                  env=environment)
         finally:
-            signal.pthread_sigmask(signal.SIG_UNBLOCK, signals)
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
         return owned.wait()
     except KeyboardInterrupt as error:
         return 128 + error.args[0]
@@ -78,9 +78,18 @@ def main():
             # ownership. Keep evidence; never guess which PID to stop.
             print(f"smoke startup failed; inspect retained resources at {directory}", file=sys.stderr)
         else:
-            owned.cleanup()
-            # A refused cleanup raises before deletion: retain its ownership record.
-            shutil.rmtree(directory)
+            try:
+                owned.cleanup()
+            finally:
+                print(f"smoke ownership evidence retained at {directory / 'process'}", file=sys.stderr)
+            # Retain nonsecret ownership/exit/cleanup evidence, not build outputs
+            # or the private home. Refused cleanup raises before any deletion.
+            for path in directory.iterdir():
+                if path != owned.directory:
+                    if path.is_dir() and not path.is_symlink():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
 
 
 if __name__ == "__main__":

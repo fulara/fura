@@ -2208,7 +2208,7 @@ pub(crate) async fn handle_slash_command(
         "settings" | "copy" | "hotkeys" | "extensions" | "agents" | "branch" | "tree" | "login"
         | "logout" | "mcp" | "ssh" | "resume" | "btw" | "background" | "bg" | "debug"
         | "memory" | "move" | "exit" | "quit" | "q" | "marketplace" | "plugins"
-        | "reload-plugins" | "force" | "vibe" | "queue" | "pause" => vec![notice(
+        | "reload-plugins" | "force" | "vibe" | "queue" | "pause" | "delete" => vec![notice(
             session_id,
             NoticeLevel::Warning,
             format!(
