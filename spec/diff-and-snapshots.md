@@ -165,6 +165,42 @@ Native range-diff remains unified and explicitly explains the limitation: it
 compares patches, not two file versions. Transcript edit cards keep their existing
 layout; there is no separate mobile redesign.
 
+## Ignore whitespace in ordinary patches
+
+The patch toolbar's **Ignore whitespace** checkbox defaults off and applies in
+both Unified and Side by side. Current changes (staged/unstaged), pinned History
+commits and ordinary ref/WORKTREE Compare share the main window's
+`sessionStorage` preference `fura.diff.ignoreWhitespace`; refresh, focus, layout
+changes, reload and popout/redock retain it.
+
+The backend generates patches with native Git `--ignore-all-space` (`-w`).
+It ignores whitespace when comparing lines, not arbitrary added/deleted blank
+lines. An EOF-newline-only difference can disappear, as it does in native Git.
+The existing restored-WORKTREE libgit2 path uses its equivalent whitespace
+option; new/untracked additions retain their contents. Nothing trims source text
+or hides diff rows heuristically.
+
+File lists, statistics, version fingerprints and `workingTreeDirty` remain
+unfiltered. The UI says so while filtering, and an empty file or aggregate patch
+shows an explicit no-patch-changes message without removing the changed file or
+claiming a clean worktree. Ordinary smart-entry still uses actual Git status.
+Copy file retains the original committed bytes, including whitespace.
+
+Each toggle replaces the ordinary request with a new `diffId` while preserving
+repository, refs, selected commit/file and History branch. `ignoreWhitespace`
+defaults false in requests, is echoed in request/comparison/content identities,
+and must match the prepared comparison on lazy content reads. Patch caches are
+mode-separated; old summary/content/error replies cannot replace the active
+request. Completion alone cannot settle a generation before its summary.
+While refreshing, a retained patch explicitly identifies its previous whitespace
+mode and disables old review actions; the checkbox remains usable for reversal.
+
+The source `comparisonKey` does not change just because the filter changes.
+Comments keep their original side, line numbers and text; notes absent from the
+filtered patch remain accessible in the review summary rather than being
+re-anchored. Agent-review patch regeneration uses that review's whitespace mode.
+The separate native Range-diff checkbox remains independent and nonpersistent.
+
 ## Diff highlighting
 
 Git/commit rows and recorded edit-card patches share a presentation-only tokenizer,
@@ -328,7 +364,7 @@ commits retain native output; there are no links, comments, file actions or comm
 Text nodes prevent HTML execution; unsupported terminal controls are stripped.
 Unfamiliar textual output remains plain text rather than being heuristically parsed.
 
-The Range-diff-only **Ignore whitespace** checkbox defaults off and passes
+The separate Range-diff **Ignore whitespace** checkbox defaults off and passes
 `--ignore-all-space` to the final native `range-diff` command. It does not filter
 the DOM, normalize patches or change commit matching/statuses: an indentation-only
 pair can retain `!` with no body; only native `=` receives `(no change)`.
@@ -336,7 +372,8 @@ Substantive edits, added/removed commits and blank-line changes follow native Gi
 Toggling preserves repository/refs, cancels the previous request and immediately
 recomputes. The echoed option is part of result identity; old or mismatched-mode
 responses cannot replace the current output. There is no durable preference.
-File diff is unaffected, and raw-patch preflight limits remain unchanged.
+Its state does not change ordinary File diff filtering, and raw-patch preflight
+limits remain unchanged.
 
 All three refs resolve to full commit OIDs before comparison. Results show repository,
 input refs and pinned OIDs. The read-only Git runner disables external diff, pagers,

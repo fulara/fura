@@ -910,6 +910,7 @@ const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
 let diffLayout: "unified" | "split" = sessionStorage.getItem("fura.diff.layout") === "split" ? "split" : "unified";
+let diffIgnoreWhitespace = sessionStorage.getItem("fura.diff.ignoreWhitespace") === "true";
 type CachedDiffPatch = { patch: string; truncated: boolean; rows: DiffRow[]; contextLines: number };
 const diffPatchCache = new Map<string, CachedDiffPatch>();
 const pendingDiffFilePatches = new Map<string, PendingDiffFilePatchRequest>();
@@ -1001,8 +1002,8 @@ function newDiffId(): string {
   return randomUuid();
 }
 
-function diffPatchCacheKey(comparisonKey: string, filePath: string | null): string {
-  return `${comparisonKey}\0${filePath ?? ""}`;
+function diffPatchCacheKey(comparisonKey: string, filePath: string | null, ignoreWhitespace = diffIgnoreWhitespace): string {
+  return `${comparisonKey}\0${filePath ?? ""}\0${ignoreWhitespace}`;
 }
 
 function patchCacheComparisonKey(cacheKey: string): string {
@@ -2289,6 +2290,12 @@ function handleServerMessage(message: ServerMessage): void {
       ) {
         break;
       }
+      if (state.status === "ready" && (state.comparison.ignoreWhitespace ?? false) !== diffIgnoreWhitespace) {
+        diffLoadingSessions.delete(state.sessionId);
+        diffErrors.set(state.sessionId, "Diff response did not match the requested whitespace mode. Refresh to retry.");
+        renderDiffsViewIfVisible(state.sessionId);
+        break;
+      }
       const entryProbe = pendingDiffEntry?.sessionId === state.sessionId && pendingDiffEntry.diffId === state.diffId;
       diffLoadingSessions.delete(state.sessionId);
       diffErrors.delete(state.sessionId);
@@ -2353,6 +2360,12 @@ function handleServerMessage(message: ServerMessage): void {
     case "compareDiff.summary": {
       const state = message.state;
       if (state.targetClientId !== diffClientId || compareDiffId !== state.diffId) break;
+      if ((state.comparison.ignoreWhitespace ?? false) !== diffIgnoreWhitespace) {
+        compareDiffLoading = false;
+        diffErrors.set("compareDiff", "Diff response did not match the requested whitespace mode. Compare again.");
+        renderComparePanelIfVisible();
+        break;
+      }
       compareDiffState = state;
       invalidatePendingCodeRevision("compareDiff", state);
       compareDiffLoading = false;
@@ -2374,11 +2387,12 @@ function handleServerMessage(message: ServerMessage): void {
     }
     case "diff.content": {
       const content = message.content;
-      if (content.targetClientId !== diffClientId) break;
+      if (content.targetClientId !== diffClientId || (content.ignoreWhitespace ?? false) !== diffIgnoreWhitespace) break;
       const filePath = content.file?.newPath ?? null;
       if (content.scope === "compareDiff") {
-        if (compareDiffId !== content.diffId || compareDiffState?.comparison.comparisonKey !== content.comparisonKey) break;
-        rememberDiffPatch(diffPatchCacheKey(content.comparisonKey, filePath), { patch: content.patch, truncated: content.truncated, rows: content.rows, contextLines: content.contextLines });
+        if (compareDiffId !== content.diffId || compareDiffState?.comparison.comparisonKey !== content.comparisonKey
+          || (compareDiffState.comparison.ignoreWhitespace ?? false) !== (content.ignoreWhitespace ?? false)) break;
+        rememberDiffPatch(diffPatchCacheKey(content.comparisonKey, filePath, content.ignoreWhitespace ?? false), { patch: content.patch, truncated: content.truncated, rows: content.rows, contextLines: content.contextLines });
         clearPendingDiffFilePatch("compareDiff", content.diffId);
         if (diffFilePatchErrors.get("compareDiff")?.filePath === filePath) diffFilePatchErrors.delete("compareDiff");
         const activeDiffReviewSessionId = activeSessionId && projections.get(activeSessionId)?.summary.sessionMode === "diffReview"
@@ -2402,11 +2416,12 @@ function handleServerMessage(message: ServerMessage): void {
           !sessionId ||
           currentSessionChangesRequest?.diffId !== content.diffId ||
           state?.status !== "ready" ||
-          state.comparison.comparisonKey !== content.comparisonKey
+          state.comparison.comparisonKey !== content.comparisonKey ||
+          (state.comparison.ignoreWhitespace ?? false) !== (content.ignoreWhitespace ?? false)
         ) {
           break;
         }
-        rememberDiffPatch(diffPatchCacheKey(content.comparisonKey, filePath), { patch: content.patch, truncated: content.truncated, rows: content.rows, contextLines: content.contextLines });
+        rememberDiffPatch(diffPatchCacheKey(content.comparisonKey, filePath, content.ignoreWhitespace ?? false), { patch: content.patch, truncated: content.truncated, rows: content.rows, contextLines: content.contextLines });
         clearPendingDiffFilePatch(sessionId, content.diffId);
         if (diffFilePatchErrors.get(sessionId)?.filePath === filePath) diffFilePatchErrors.delete(sessionId);
         markDiffsViewDirty();
@@ -2420,6 +2435,7 @@ function handleServerMessage(message: ServerMessage): void {
       if (message.targetClientId !== diffClientId) break;
       if (message.scope === "compareDiff") {
         if (compareDiffId !== message.diffId) break;
+        if (message.type === "diff.complete" && compareDiffState?.diffId !== message.diffId) break;
         compareDiffLoading = false;
         if (message.type === "diff.cancelled") clearPendingDiffFilePatch("compareDiff", message.diffId);
         const activeDiffReviewSessionId = activeSessionId && projections.get(activeSessionId)?.summary.sessionMode === "diffReview"
@@ -2432,6 +2448,7 @@ function handleServerMessage(message: ServerMessage): void {
       } else {
         const currentRequest = currentSessionChangesRequest;
         if (currentRequest?.diffId !== message.diffId) break;
+        if (message.type === "diff.complete" && sessionChangesStates.get(currentRequest.sessionId)?.diffId !== message.diffId) break;
         diffLoadingSessions.delete(currentRequest.sessionId);
         if (message.type === "diff.cancelled") clearPendingDiffFilePatch(currentRequest.sessionId, message.diffId);
         markDiffsViewDirty();
@@ -6012,6 +6029,7 @@ function requestSessionChangesRefresh(
     changeKind,
     currentCommitOid: !entryDefault && history.view === "history" ? history.selectedOid : null,
     selectedFile: null,
+    ignoreWhitespace: diffIgnoreWhitespace,
   });
   if (!sent) {
     if (currentSessionChangesRequest?.diffId === diffId) currentSessionChangesRequest = null;
@@ -6079,6 +6097,7 @@ function requestCompareDiff(overrides: { repoRoot?: string; base?: string; head?
     detailMode: comparePayloadKind,
     currentCommitOid: compareCommitOid,
     selectedFile: null,
+    ignoreWhitespace: diffIgnoreWhitespace,
   });
   if (!sent) {
     if (compareDiffId === diffId) compareDiffId = null;
@@ -6219,7 +6238,8 @@ function requestActiveDiffState(options: { refreshExisting?: boolean } = {}): vo
   if (projection.summary.sessionMode === "diffReview") {
     const request = diffReviewRequestForSummary(projection.summary);
     if (!request || compareDiffLoading) return;
-    if (!options.refreshExisting && !staleSessionChanges.has(activeSessionId) && compareStateMatchesDiffReview(request)) return;
+    if (!options.refreshExisting && !staleSessionChanges.has(activeSessionId) && compareStateMatchesDiffReview(request)
+      && (compareDiffState?.comparison.ignoreWhitespace ?? false) === diffIgnoreWhitespace) return;
     staleSessionChanges.delete(activeSessionId);
     requestDiffReviewState(activeSessionId, projection.summary);
     return;
@@ -6229,7 +6249,8 @@ function requestActiveDiffState(options: { refreshExisting?: boolean } = {}): vo
   if (!history.page && history.requestId === null && !history.error) requestGitHistory(activeSessionId);
   const selectedCommit = history.view === "history" ? history.selectedOid : null;
   const selectionChanged = state?.status === "ready" &&
-    (state.selectedRepoId !== history.repoRoot || (state.review.currentCommitOid ?? null) !== selectedCommit);
+    (state.selectedRepoId !== history.repoRoot || (state.review.currentCommitOid ?? null) !== selectedCommit
+      || (state.comparison.ignoreWhitespace ?? false) !== diffIgnoreWhitespace);
   if (!state) {
     staleSessionChanges.delete(activeSessionId);
     requestSessionChanges(activeSessionId);
@@ -7041,7 +7062,7 @@ function diffReviewTarget(annotationKey: string): string {
 }
 
 function diffPatchReady(annotationKey: string, state: DiffReviewableState | null): boolean {
-  return Boolean(state && (state.comparison.detailMode !== "filePatch"
+  return Boolean(state && (state.comparison.ignoreWhitespace ?? false) === diffIgnoreWhitespace && (state.comparison.detailMode !== "filePatch"
     || diffPatchCache.has(diffPatchCacheKey(state.comparison.comparisonKey, sessionChangesSelectedFiles.get(annotationKey) ?? null))));
 }
 
@@ -7078,8 +7099,13 @@ function retainReadableDiff(container: HTMLElement, annotationKey: string, targe
   }
   status.className = `diff-refresh-status${failure ? " diffs-error" : ""}`;
   status.setAttribute("role", failure ? "alert" : "status");
-  status.textContent = failure ? `Refresh failed: ${failure} Showing previous result.`
-    : "Refreshing… Showing previous result.";
+  const previousMode = root.dataset.ignoreWhitespace === "true" ? "ignored" : "included";
+  const modeChanged = (root.dataset.ignoreWhitespace === "true") !== diffIgnoreWhitespace;
+  const previousResult = `Showing previous result${modeChanged ? ` (whitespace ${previousMode})` : ""}.`;
+  status.textContent = failure ? `Refresh failed: ${failure} ${previousResult}`
+    : `${modeChanged ? "Updating whitespace mode" : "Refreshing"}… ${previousResult}`;
+  const whitespace = root.querySelector<HTMLInputElement>(".diff-ignore-whitespace");
+  if (whitespace) whitespace.checked = diffIgnoreWhitespace;
   const refresh = root.querySelector<HTMLButtonElement>('button[aria-label="Refresh"]');
   if (refresh) refresh.disabled = !failure;
   // Old content is readable, but must not submit mutable review actions under
@@ -7103,6 +7129,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const focused = Boolean(activeSessionId && diffPanelHasFocus(activeSessionId, container));
   const filterFocus = focused ? captureDiffFilterFocus(container) : null;
   const layoutFocused = focused && scroll?.target === target && container.ownerDocument.activeElement?.classList.contains("diff-layout-select");
+  const whitespaceFocused = focused && scroll?.target === target && container.ownerDocument.activeElement?.classList.contains("diff-ignore-whitespace");
   const sameSessionRerender = lastDiffsRenderedSessionId === activeSessionId;
   lastDiffsRenderedSessionId = activeSessionId;
   lastDiffsRenderedProjectionPresent = Boolean(projection);
@@ -7156,6 +7183,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   const state = stateForDiffFileFilter(activeSessionId);
   root.dataset.diffReady = String(diffPatchReady(activeSessionId, state));
   root.dataset.comparisonKey = state?.comparison.comparisonKey ?? "";
+  root.dataset.ignoreWhitespace = String(state?.comparison.ignoreWhitespace ?? false);
   const options = container.querySelector<HTMLDetailsElement>(".git-review-options");
   if (options) options.open = optionsOpen;
   const commit = container.querySelector<HTMLDetailsElement>(".diff-commit-message");
@@ -7168,6 +7196,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   restoreBranchPicker?.();
   restoreDiffFilterFocus(container, filterFocus);
   if (layoutFocused) container.querySelector<HTMLSelectElement>(".diff-layout-select")?.focus({ preventScroll: true });
+  if (whitespaceFocused) container.querySelector<HTMLInputElement>(".diff-ignore-whitespace")?.focus({ preventScroll: true });
   restoreDiffViewScroll(container, scroll);
 }
 
@@ -7583,6 +7612,8 @@ function renderComparePanel(container: HTMLElement): void {
   const filterFocus = diffPanelHasFocus("compareDiff", container) ? captureDiffFilterFocus(container) : null;
   const layoutFocused = scroll?.target === target && diffPanelHasFocus("compareDiff", container)
     && container.ownerDocument.activeElement?.classList.contains("diff-layout-select");
+  const whitespaceFocused = scroll?.target === target && diffPanelHasFocus("compareDiff", container)
+    && container.ownerDocument.activeElement?.classList.contains("diff-ignore-whitespace");
   const previous = container.querySelector<HTMLElement>(".compare-view");
   const controls = previous?.dataset.reviewTarget === target
     ? previous.querySelector<HTMLElement>(".compare-diff-controls") : null;
@@ -7666,8 +7697,10 @@ function renderComparePanel(container: HTMLElement): void {
   renderReviewableDiff("compareDiff", compareDiffState, sidebarTop, sidebar, main, false, "compareDiff");
   root.dataset.diffReady = String(diffPatchReady("compareDiff", compareDiffState));
   root.dataset.comparisonKey = compareDiffState.comparison.comparisonKey;
+  root.dataset.ignoreWhitespace = String(compareDiffState.comparison.ignoreWhitespace ?? false);
   restoreDiffFilterFocus(container, filterFocus);
   if (layoutFocused) container.querySelector<HTMLSelectElement>(".diff-layout-select")?.focus({ preventScroll: true });
+  if (whitespaceFocused) container.querySelector<HTMLInputElement>(".diff-ignore-whitespace")?.focus({ preventScroll: true });
   restoreDiffViewScroll(container, scroll);
 }
 
@@ -7682,6 +7715,7 @@ function renderDiffMessage(main: HTMLElement, message: string, error: boolean): 
 }
 
 function requestDiffContent(annotationKey: string, state: DiffReviewableState, filePath: string | null, requestMode: "sessionChanges" | "compareDiff", contextLines?: number): void {
+  if ((state.comparison.ignoreWhitespace ?? false) !== diffIgnoreWhitespace) return;
   const file = filePath ? state.summary.files.find(candidate => candidate.newPath === filePath) : null;
   if (filePath && !file) return;
   const key = comparisonKey(state);
@@ -7698,6 +7732,7 @@ function requestDiffContent(annotationKey: string, state: DiffReviewableState, f
       comparisonKey: key,
       selectedFile: file ? { oldPath: file.oldPath ?? null, newPath: file.newPath } : null,
       contextLines,
+      ignoreWhitespace: diffIgnoreWhitespace,
     });
     if (sent) return;
     clearPendingDiffFilePatch(annotationKey, compareDiffId);
@@ -7724,6 +7759,7 @@ function requestDiffContent(annotationKey: string, state: DiffReviewableState, f
     comparisonKey: key,
     selectedFile: file ? { oldPath: file.oldPath ?? null, newPath: file.newPath } : null,
     contextLines,
+    ignoreWhitespace: diffIgnoreWhitespace,
   });
   if (sent) return;
   clearPendingDiffFilePatch(annotationKey, diffId);
@@ -7762,6 +7798,38 @@ function diffLayoutSelector(): HTMLSelectElement {
     renderComparePanelIfVisible();
   });
   return select;
+}
+
+function diffWhitespaceToggle(): HTMLLabelElement {
+  const label = mkEl("label");
+  label.className = "checkbox-row diff-whitespace-control";
+  label.title = "Git -w (--ignore-all-space): ignores whitespace when comparing lines, not added/deleted blank lines. File list and statistics remain unfiltered.";
+  const input = mkEl("input");
+  input.type = "checkbox";
+  input.className = "diff-ignore-whitespace";
+  input.checked = diffIgnoreWhitespace;
+  input.addEventListener("change", () => {
+    diffIgnoreWhitespace = input.checked;
+    sessionStorage.setItem("fura.diff.ignoreWhitespace", String(diffIgnoreWhitespace));
+    markDiffsViewDirty();
+    markComparePanelDirty();
+    if (activeSessionId) {
+      if (isSessionChangesPanelVisible()) {
+        staleSessionChanges.delete(activeSessionId);
+        const summary = projections.get(activeSessionId)?.summary;
+        if (summary?.sessionMode === "diffReview") requestDiffReviewState(activeSessionId, summary);
+        else requestSessionChangesRefresh(activeSessionId, { refreshHistory: false });
+      } else {
+        staleSessionChanges.add(activeSessionId);
+        clearCurrentSessionChangesRequest("payloadChanged");
+      }
+    }
+    // Hidden normal Compare retains its explicit refs/file and refreshes on return.
+    if (normalCompareContext) normalCompareNeedsRefresh = true;
+    if (activeDesktopDockviewMode === "normal") renderComparePanelIfVisible();
+  });
+  label.append(input, "Ignore whitespace");
+  return label;
 }
 
 function renderReviewableDiff(
@@ -7892,7 +7960,7 @@ function renderReviewableDiffMainContent(
     }
   });
   toolbar.append(payloadToggle);
-  toolbar.append(diffLayoutSelector());
+  toolbar.append(diffLayoutSelector(), diffWhitespaceToggle());
   if (requestMode === "compareDiff") {
   const firstCommit = state.review.commits[0]?.oid ?? null;
   const stepBtn = mkEl("button");
@@ -8015,6 +8083,12 @@ function renderReviewableDiffMainContent(
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
+  if (diffIgnoreWhitespace) {
+    const note = mkEl("p");
+    note.className = "diff-whitespace-note";
+    note.textContent = "Ignoring whitespace (Git -w). File list and statistics still show all changes.";
+    body.append(note);
+  }
   const totals = mkEl("p");
   totals.className = "git-diff-totals";
   totals.textContent = `${state.summary.files.length} changed file${state.summary.files.length === 1 ? "" : "s"} · +${state.summary.files.reduce((sum, file) => sum + file.added, 0)} −${state.summary.files.reduce((sum, file) => sum + file.removed, 0)}`;
@@ -8052,7 +8126,9 @@ function renderReviewableDiffMainContent(
       if (renderedRows.length === 0) {
         const empty = mkEl("p");
         empty.className = "empty diffs-empty";
-        empty.textContent = "No changes for this comparison.";
+        empty.textContent = diffIgnoreWhitespace
+          ? "No patch changes remain with Ignore whitespace enabled."
+          : "No changes for this comparison.";
         body.append(empty);
       } else {
         renderDiffRows(body, annotationKey, reviewState, renderedRows, annotations, comments, key, allowPromptActions, requestMode);
@@ -8069,7 +8145,16 @@ function renderReviewableDiffMainContent(
   } else {
     renderedRows = cachedPatch.rows;
     const reviewState = { ...state, patch: cachedPatch.patch, patchRows: cachedPatch.rows, patchContextLines: cachedPatch.contextLines };
-    renderDiffRows(body, annotationKey, reviewState, renderedRows, annotations, comments, key, allowPromptActions, requestMode);
+    if (renderedRows.length === 0) {
+      const empty = mkEl("p");
+      empty.className = "empty diffs-empty";
+      empty.textContent = diffIgnoreWhitespace
+        ? "No patch changes remain with Ignore whitespace enabled."
+        : "No patch changes for this file.";
+      body.append(empty);
+    } else {
+      renderDiffRows(body, annotationKey, reviewState, renderedRows, annotations, comments, key, allowPromptActions, requestMode);
+    }
   }
   renderReviewCommentsSection(
     body,
@@ -8083,11 +8168,13 @@ function renderReviewableDiffMainContent(
 }
 
 function stateForDiffFileFilter(annotationKey: string): DiffReviewableState | null {
-  if (annotationKey === "compareDiff") return compareDiffState?.diffId === compareDiffId ? compareDiffState : null;
+  if (annotationKey === "compareDiff") return compareDiffState?.diffId === compareDiffId
+    && (compareDiffState.comparison.ignoreWhitespace ?? false) === diffIgnoreWhitespace ? compareDiffState : null;
   const projection = projections.get(annotationKey);
   if (projection?.summary.sessionMode === "diffReview") {
     const request = diffReviewRequestForSummary(projection.summary);
-    return request && compareDiffState?.diffId === compareDiffId && compareStateMatchesDiffReview(request) ? compareDiffState : null;
+    return request && compareDiffState?.diffId === compareDiffId && compareStateMatchesDiffReview(request)
+      && (compareDiffState.comparison.ignoreWhitespace ?? false) === diffIgnoreWhitespace ? compareDiffState : null;
   }
   const state = sessionChangesStates.get(annotationKey);
   const history = gitReviewFor(annotationKey);
@@ -8096,6 +8183,7 @@ function stateForDiffFileFilter(annotationKey: string): DiffReviewableState | nu
     && state.selectedRepoId === history.repoRoot
     && (state.review.currentCommitOid ?? null) === (history.view === "history" ? history.selectedOid : null)
     && state.comparison.detailMode === (sessionChangesPayloadKinds.get(annotationKey) ?? DEFAULT_SESSION_CHANGES_DETAIL_MODE)
+    && (state.comparison.ignoreWhitespace ?? false) === diffIgnoreWhitespace
     && state.request.scope === "sessionChanges" && state.request.changeKind === (sessionChangesKinds.get(annotationKey) ?? "unstaged")
     ? state : null;
 }
@@ -8121,6 +8209,8 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
   const scroll = captureDiffViewScroll(container);
   const layoutFocused = diffPanelHasFocus(annotationKey, container)
     && root.ownerDocument.activeElement?.classList.contains("diff-layout-select");
+  const whitespaceFocused = diffPanelHasFocus(annotationKey, container)
+    && root.ownerDocument.activeElement?.classList.contains("diff-ignore-whitespace");
   setRenderDocument(root.ownerDocument);
   const selectedFilePath = sessionChangesSelectedFiles.get(annotationKey) ?? null;
   updateDesktopModifiedFileSelection(root, selectedFilePath);
@@ -8145,8 +8235,10 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
   }
   root.dataset.reviewTarget = diffReviewTarget(annotationKey);
   root.dataset.diffReady = String(diffPatchReady(annotationKey, state));
+  root.dataset.ignoreWhitespace = String(state.comparison.ignoreWhitespace ?? false);
   restoreDiffViewScroll(container, scroll);
   if (layoutFocused) root.querySelector<HTMLSelectElement>(".diff-layout-select")?.focus({ preventScroll: true });
+  if (whitespaceFocused) root.querySelector<HTMLInputElement>(".diff-ignore-whitespace")?.focus({ preventScroll: true });
   if (annotationKey === "compareDiff") comparePanelDirty = false;
   else diffPanelDirty = false;
   return true;

@@ -1915,6 +1915,7 @@ pub(crate) struct ActiveReviewContext {
     pub(crate) comparison_key: String,
     pub(crate) left_tree_or_commit: String,
     pub(crate) right_tree_or_commit: String,
+    pub(crate) ignore_whitespace: bool,
     pub(crate) patch_override: Option<String>,
     pub(crate) previous_host_tools: Vec<Value>,
     pub(crate) set_host_tools_command_id: String,

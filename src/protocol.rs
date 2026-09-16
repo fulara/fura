@@ -510,6 +510,8 @@ pub(crate) enum DiffRequestIdentity {
         current_commit_oid: Option<String>,
         selected_file: Option<DiffFileSelector>,
         context_lines: Option<u32>,
+        #[serde(default)]
+        ignore_whitespace: bool,
     },
     CompareDiff {
         client_id: String,
@@ -522,6 +524,8 @@ pub(crate) enum DiffRequestIdentity {
         current_commit_oid: Option<String>,
         selected_file: Option<DiffFileSelector>,
         context_lines: Option<u32>,
+        #[serde(default)]
+        ignore_whitespace: bool,
     },
 }
 
@@ -537,6 +541,8 @@ pub(crate) struct DiffComparisonIdentity {
     pub(crate) current_commit_oid: Option<String>,
     pub(crate) selected_file: Option<DiffFileSelector>,
     pub(crate) context_lines: u32,
+    #[serde(default)]
+    pub(crate) ignore_whitespace: bool,
     pub(crate) generated_at: String,
     pub(crate) comparison_key: String,
     pub(crate) displayed_patch_range: Option<DisplayedPatchRange>,
@@ -610,6 +616,7 @@ pub(crate) struct DiffContentState {
     pub(crate) truncated: bool,
     pub(crate) rows: Vec<DiffRow>,
     pub(crate) context_lines: u32,
+    pub(crate) ignore_whitespace: bool,
     pub(crate) generated_at: String,
 }
 
@@ -926,6 +933,8 @@ pub(crate) enum ClientMessage {
         current_commit_oid: Option<String>,
         selected_file: Option<DiffFileSelector>,
         context_lines: Option<u32>,
+        #[serde(default)]
+        ignore_whitespace: bool,
     },
     #[serde(rename = "git.history.request")]
     GitHistoryRequest {
@@ -975,6 +984,8 @@ pub(crate) enum ClientMessage {
         current_commit_oid: Option<String>,
         selected_file: Option<DiffFileSelector>,
         context_lines: Option<u32>,
+        #[serde(default)]
+        ignore_whitespace: bool,
     },
     #[serde(rename = "diff.cancel")]
     DiffCancel {
@@ -992,6 +1003,8 @@ pub(crate) enum ClientMessage {
         comparison_key: String,
         selected_file: Option<DiffFileSelector>,
         context_lines: Option<u32>,
+        #[serde(default)]
+        ignore_whitespace: bool,
     },
     #[serde(rename = "diff.reviewWorktree.ensure")]
     DiffReviewWorktreeEnsure {

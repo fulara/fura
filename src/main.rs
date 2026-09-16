@@ -7289,6 +7289,7 @@ pub(crate) mod tests {
                 current_commit_oid: Some(ref commit_oid),
                 selected_file: Some(ref selected_file),
                 context_lines: Some(12),
+                ignore_whitespace: false,
             } if client_id == "client-1"
                 && diff_id == "550e8400-e29b-41d4-a716-446655440000"
                 && repo_root == "/repo"

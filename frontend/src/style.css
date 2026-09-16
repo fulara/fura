@@ -2045,6 +2045,17 @@ h2 {
   max-width: 100%;
 }
 
+.diff-whitespace-control {
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+
+.diff-whitespace-note {
+  color: #9ca9be;
+  font-size: 0.75rem;
+  margin: 0.15rem 0;
+}
+
 .diff-layout-note, .diff-no-newline {
   color: #9ca9be;
   font-size: 0.75rem;

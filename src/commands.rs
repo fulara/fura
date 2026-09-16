@@ -346,6 +346,7 @@ pub(crate) async fn handle_client_message_for_connection(
             current_commit_oid,
             selected_file,
             context_lines,
+            ignore_whitespace,
         } => {
             handle_session_changes_request(
                 state,
@@ -359,6 +360,7 @@ pub(crate) async fn handle_client_message_for_connection(
                     current_commit_oid,
                     selected_file,
                     context_lines,
+                    ignore_whitespace,
                 },
             )
             .await
@@ -447,6 +449,7 @@ pub(crate) async fn handle_client_message_for_connection(
             current_commit_oid,
             selected_file,
             context_lines,
+            ignore_whitespace,
         } => {
             handle_compare_diff_request(
                 state,
@@ -461,6 +464,7 @@ pub(crate) async fn handle_client_message_for_connection(
                     current_commit_oid,
                     selected_file,
                     context_lines,
+                    ignore_whitespace,
                 },
             )
             .await
@@ -473,6 +477,7 @@ pub(crate) async fn handle_client_message_for_connection(
             comparison_key,
             selected_file,
             context_lines,
+            ignore_whitespace,
         } => {
             handle_diff_content_request(
                 state,
@@ -484,6 +489,7 @@ pub(crate) async fn handle_client_message_for_connection(
                     comparison_key,
                     selected_file,
                     context_lines,
+                    ignore_whitespace,
                 },
             )
             .await
@@ -3181,6 +3187,7 @@ pub(crate) async fn handle_review_agent_review_start(
     let set_host_tools_command_id = next_rpc_id();
     let prompt_command_id = next_rpc_id();
     let context = ActiveReviewContext {
+        ignore_whitespace: review_state.comparison.ignore_whitespace,
         id: context_id.clone(),
         session_id: session_id.clone(),
         repo_root: review_state.comparison.repo_root.clone(),
@@ -3399,6 +3406,7 @@ async fn add_agent_review_comment(
         &context.right_tree_or_commit,
         &selector,
         3,
+        context.ignore_whitespace,
     )
     .await
     {
@@ -3611,8 +3619,13 @@ fn review_prompt(context_id: &str, state: &DiffReviewableState, instructions: &s
         }
         _ => "Inspect the displayed Git refs and their diff.",
     };
+    let whitespace = if state.comparison.ignore_whitespace {
+        "Inspect patches with Git --ignore-all-space (-w). File lists and statistics remain unfiltered; a listed file can have no patch after this filter."
+    } else {
+        "Include whitespace differences when inspecting patches."
+    };
     let inspection = format!(
-        "{inspection} Use git --no-replace-objects for inspection: Fura reviews stored commit objects, ignoring replacement refs. Disable signature display, external diff and textconv; do not execute configured clean/process filters."
+        "{inspection} {whitespace} Use git --no-replace-objects for inspection: Fura reviews stored commit objects, ignoring replacement refs. Disable signature display, external diff and textconv; do not execute configured clean/process filters."
     );
     format!(
         "You are reviewing the full Fura diff comparison, not just the currently selected file. This is repository state, not proof of changes authored by this session.\n\nReview context id: {context_id}\nRepository: {}\nComparison key: {}\nBase: {}\nHead: {}\nLeft version identity: {}\nRight version identity: {}\nFiles in summary: {}\nCurrent commit: {}\nReview worktree status: {}\nReview instructions:\n{}\n\n{inspection} Version identities may be opaque Fura fingerprints, not Git refs. Do not write files or mutate Git state during this review. When you find an issue, call fura_add_review_comment with this reviewContextId, the repo-relative path, side, line, and comment body. Fura will validate the displayed patch version and resolve the exact diff anchor; do not invent line numbers. If the repository changes, refresh the review rather than reusing old anchors.",
@@ -4361,6 +4374,7 @@ mod review_comment_tests {
     fn reviewable_state(patch: &str) -> DiffReviewableState {
         DiffReviewableState {
             comparison: DiffComparisonIdentity {
+                ignore_whitespace: false,
                 repo_root: "/repo".to_string(),
                 base: DiffEndpoint::WorkingTree,
                 head: DiffEndpoint::WorkingTree,
@@ -4644,6 +4658,7 @@ mod review_comment_tests {
         state.active_review_contexts.write().await.insert(
             "ctx".to_string(),
             ActiveReviewContext {
+                ignore_whitespace: false,
                 id: "ctx".to_string(),
                 session_id: "s1".to_string(),
                 repo_root: "/repo".to_string(),
@@ -4688,6 +4703,102 @@ mod review_comment_tests {
     }
 
     #[tokio::test]
+    async fn ordinary_whitespace_agent_comments_use_review_mode_and_original_lines() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let repo = Repository::init(temp.path()).unwrap();
+        let signature = git2::Signature::now("Test", "test@example.invalid").unwrap();
+        let commit = |space: &str, mixed: &str| {
+            let mut tree = repo.treebuilder(None).unwrap();
+            for (path, text) in [("space.txt", space), ("mixed.txt", mixed)] {
+                tree.insert(path, repo.blob(text.as_bytes()).unwrap(), 0o100644)
+                    .unwrap();
+            }
+            let tree = repo.find_tree(tree.write().unwrap()).unwrap();
+            let parent = repo.head().ok().and_then(|head| head.peel_to_commit().ok());
+            let parents: Vec<_> = parent.iter().collect();
+            repo.commit(
+                Some("HEAD"),
+                &signature,
+                &signature,
+                "review",
+                &tree,
+                &parents,
+            )
+            .unwrap()
+        };
+        let base = commit("one two\n", "alpha beta\nold value\n");
+        let head = commit("one\t two  \n", "alpha\t beta  \nnew value\n");
+        let state = crate::tests::test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".into(), test_session_record("s1"));
+        state.active_review_contexts.write().await.insert(
+            "ctx".into(),
+            ActiveReviewContext {
+                id: "ctx".into(),
+                session_id: "s1".into(),
+                repo_root: temp.path().display().to_string(),
+                comparison_key: "source-comparison".into(),
+                left_tree_or_commit: base.to_string(),
+                right_tree_or_commit: head.to_string(),
+                ignore_whitespace: true,
+                patch_override: None,
+                previous_host_tools: Vec::new(),
+                set_host_tools_command_id: "set-host".into(),
+                prompt_command_id: "prompt".into(),
+            },
+        );
+        let comment_args = |path: &str, line: u32| {
+            json!({
+                "reviewContextId": "ctx", "path": path, "side": "right",
+                "line": line, "body": "Review this",
+            })
+        };
+        assert!(
+            add_agent_review_comment(&state, "s1", comment_args("space.txt", 1))
+                .await
+                .is_err()
+        );
+        add_agent_review_comment(&state, "s1", comment_args("mixed.txt", 2))
+            .await
+            .unwrap();
+        let comments = list_comments(
+            &state.review_comment_db_path,
+            "s1",
+            Some("source-comparison"),
+        )
+        .unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].anchor.new_line, Some(2));
+        assert_eq!(comments[0].anchor.text, "+new value");
+        state
+            .active_review_contexts
+            .write()
+            .await
+            .get_mut("ctx")
+            .unwrap()
+            .ignore_whitespace = false;
+        add_agent_review_comment(&state, "s1", comment_args("space.txt", 1))
+            .await
+            .unwrap();
+        let comments = list_comments(
+            &state.review_comment_db_path,
+            "s1",
+            Some("source-comparison"),
+        )
+        .unwrap();
+        assert!(
+            comments
+                .iter()
+                .any(|comment| comment.anchor.new_path == "space.txt"
+                    && comment.anchor.new_line == Some(1)
+                    && comment.anchor.text == "+one\t two  ")
+        );
+    }
+
+    #[tokio::test]
     async fn review_host_tool_new_file_comment_uses_null_old_path() {
         let state = crate::tests::test_state(8, None);
         state
@@ -4699,6 +4810,7 @@ mod review_comment_tests {
         state.active_review_contexts.write().await.insert(
             "ctx".to_string(),
             ActiveReviewContext {
+                ignore_whitespace: false,
                 id: "ctx".to_string(),
                 session_id: "s1".to_string(),
                 repo_root: "/repo".to_string(),
@@ -4745,6 +4857,7 @@ mod review_comment_tests {
         state.active_review_contexts.write().await.insert(
             "ctx".to_string(),
             ActiveReviewContext {
+                ignore_whitespace: false,
                 id: "ctx".to_string(),
                 session_id: "s1".to_string(),
                 repo_root: "/repo".to_string(),
@@ -4788,6 +4901,7 @@ mod review_comment_tests {
         state.active_review_contexts.write().await.insert(
             "ctx".to_string(),
             ActiveReviewContext {
+                ignore_whitespace: false,
                 id: "ctx".to_string(),
                 session_id: "s1".to_string(),
                 repo_root: "/repo".to_string(),

@@ -413,6 +413,7 @@ export type DiffRequestIdentity =
       currentCommitOid?: string | null;
       selectedFile?: DiffFileSelector | null;
       contextLines?: number | null;
+      ignoreWhitespace?: boolean;
     }
   | {
       scope: "compareDiff";
@@ -426,6 +427,7 @@ export type DiffRequestIdentity =
       currentCommitOid?: string | null;
       selectedFile?: DiffFileSelector | null;
       contextLines?: number | null;
+      ignoreWhitespace?: boolean;
     };
 
 export type DiffComparisonIdentity = {
@@ -438,6 +440,7 @@ export type DiffComparisonIdentity = {
   currentCommitOid?: string | null;
   selectedFile?: DiffFileSelector | null;
   contextLines: number;
+  ignoreWhitespace?: boolean;
   generatedAt: string;
   comparisonKey: string;
   displayedPatchRange?: DisplayedPatchRange | null;
@@ -510,6 +513,7 @@ export type DiffContentState = {
   generatedAt: string;
   rows: DiffRow[];
   contextLines: number;
+  ignoreWhitespace?: boolean;
 };
 
 export type DiffReviewableState = {
@@ -813,14 +817,14 @@ export type ClientMessage =
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }
-  | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; changeKind: GitChangeKind; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
+  | { type: "sessionChanges.request"; clientId: string; diffId: string; sessionId: string; repoId?: string | null; changeKind: GitChangeKind; detailMode: DiffDetailMode; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null; ignoreWhitespace?: boolean }
   | { type: "git.history.request"; clientId: string; requestId: string; sessionId: string; repoId?: string | null; historyRef?: string | null; cursor?: string | null }
   | { type: "git.file.request"; clientId: string; requestId: string; repoRoot: string; commitOid: string; path: string }
   | { type: "git.rangeDiff.request"; clientId: string; requestId: string; repoRoot: string; base: string; old: string; new: string; ignoreWhitespace: boolean }
   | { type: "git.rangeDiff.cancel"; requestId: string }
   | { type: "sessionRepos.update"; sessionId: string; action: SessionRepoAction; path: string }
-  | { type: "compareDiff.request"; clientId: string; diffId: string; repoRoot: string; base: DiffRefInput; head: DiffRefInput; detailMode: DiffDetailMode; mergeBase?: boolean; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
-  | { type: "diff.content.request"; clientId: string; diffId: string; scope: DiffScope; sessionId?: string | null; comparisonKey: string; selectedFile?: DiffFileSelector | null; contextLines?: number | null }
+  | { type: "compareDiff.request"; clientId: string; diffId: string; repoRoot: string; base: DiffRefInput; head: DiffRefInput; detailMode: DiffDetailMode; mergeBase?: boolean; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null; ignoreWhitespace?: boolean }
+  | { type: "diff.content.request"; clientId: string; diffId: string; scope: DiffScope; sessionId?: string | null; comparisonKey: string; selectedFile?: DiffFileSelector | null; contextLines?: number | null; ignoreWhitespace?: boolean }
   | { type: "diff.cancel"; clientId: string; diffId: string; scope: DiffScope; reason?: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed" }
   | { type: "diff.reviewWorktree.ensure"; sourceRepoRoot: string; target?: DiffCheckoutTarget | null }
   | { type: "diff.reviewWorktree.checkout"; worktreeId: string; ref: DiffCheckoutTarget }

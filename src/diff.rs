@@ -39,6 +39,7 @@ pub(crate) struct DiffSessionChangesRequest {
     pub(crate) current_commit_oid: Option<String>,
     pub(crate) selected_file: Option<DiffFileSelector>,
     pub(crate) context_lines: Option<u32>,
+    pub(crate) ignore_whitespace: bool,
 }
 
 pub(crate) struct DiffCompareRequest {
@@ -52,6 +53,7 @@ pub(crate) struct DiffCompareRequest {
     pub(crate) current_commit_oid: Option<String>,
     pub(crate) selected_file: Option<DiffFileSelector>,
     pub(crate) context_lines: Option<u32>,
+    pub(crate) ignore_whitespace: bool,
 }
 
 pub(crate) struct DiffContentRequest {
@@ -62,6 +64,7 @@ pub(crate) struct DiffContentRequest {
     pub(crate) comparison_key: String,
     pub(crate) selected_file: Option<DiffFileSelector>,
     pub(crate) context_lines: Option<u32>,
+    pub(crate) ignore_whitespace: bool,
 }
 
 struct DiffViewOptions {
@@ -69,6 +72,7 @@ struct DiffViewOptions {
     current_commit_oid: Option<String>,
     selected_file: Option<DiffFileSelector>,
     context_lines: Option<u32>,
+    ignore_whitespace: bool,
 }
 
 pub(crate) async fn handle_session_changes_request(
@@ -85,6 +89,7 @@ pub(crate) async fn handle_session_changes_request(
         current_commit_oid,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = request;
     if let Err(error) = validate_diff_id(&diff_id) {
         return vec![diff_error(
@@ -97,6 +102,7 @@ pub(crate) async fn handle_session_changes_request(
         )];
     }
     let request = DiffRequestIdentity::SessionChanges {
+        ignore_whitespace,
         client_id: client_id.clone(),
         diff_id: diff_id.clone(),
         session_id: session_id.clone(),
@@ -110,6 +116,7 @@ pub(crate) async fn handle_session_changes_request(
     start_session_changes_generation_job(
         state,
         DiffSessionChangesRequest {
+            ignore_whitespace,
             client_id,
             diff_id,
             session_id,
@@ -141,6 +148,7 @@ pub(crate) async fn handle_compare_diff_request(
         current_commit_oid,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = request;
     if let Err(error) = validate_diff_id(&diff_id) {
         return vec![diff_error(
@@ -153,6 +161,7 @@ pub(crate) async fn handle_compare_diff_request(
         )];
     }
     let request = DiffRequestIdentity::CompareDiff {
+        ignore_whitespace,
         client_id: client_id.clone(),
         diff_id: diff_id.clone(),
         repo_root: repo_root.clone(),
@@ -167,6 +176,7 @@ pub(crate) async fn handle_compare_diff_request(
     start_compare_generation_job(
         state,
         DiffCompareRequest {
+            ignore_whitespace,
             client_id,
             diff_id,
             repo_root,
@@ -213,6 +223,7 @@ pub(crate) async fn handle_diff_content_request(
         comparison_key,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = request;
     if let Err(error) = validate_diff_id(&diff_id) {
         return vec![diff_error(
@@ -240,7 +251,9 @@ pub(crate) async fn handle_diff_content_request(
             anyhow!("diff summary is not ready for content loading"),
         )];
     };
-    if prepared.comparison.comparison_key != comparison_key {
+    if prepared.comparison.comparison_key != comparison_key
+        || prepared.comparison.ignore_whitespace != ignore_whitespace
+    {
         return vec![diff_error(
             Some(client_id),
             Some(diff_id),
@@ -256,6 +269,7 @@ pub(crate) async fn handle_diff_content_request(
     start_diff_content_job(
         state,
         DiffContentRequest {
+            ignore_whitespace,
             client_id,
             diff_id,
             scope,
@@ -598,6 +612,7 @@ async fn start_session_changes_generation_job(
         current_commit_oid,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = options;
     let generation_token = next_diff_job_token(state).await;
     let job_state = state.clone();
@@ -609,6 +624,7 @@ async fn start_session_changes_generation_job(
         let result = build_session_changes_summary(
             &job_state,
             DiffSessionChangesRequest {
+                ignore_whitespace,
                 client_id: job_client_id.clone(),
                 diff_id: job_diff_id.clone(),
                 session_id: session_id.clone(),
@@ -736,6 +752,7 @@ async fn start_compare_generation_job(
         current_commit_oid,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = options;
     let generation_token = next_diff_job_token(state).await;
     let job_state = state.clone();
@@ -747,6 +764,7 @@ async fn start_compare_generation_job(
         let result = build_compare_summary(
             &job_state,
             DiffCompareRequest {
+                ignore_whitespace,
                 client_id: job_client_id.clone(),
                 diff_id: job_diff_id.clone(),
                 repo_root: repo_root.clone(),
@@ -883,10 +901,12 @@ async fn build_session_changes_summary(
         current_commit_oid,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = options;
     let (repos, selected_repo_id, prepared) = prepare_session_changes_diff(
         state,
         DiffSessionChangesRequest {
+            ignore_whitespace,
             client_id: client_id.clone(),
             diff_id: diff_id.clone(),
             session_id: session_id.clone(),
@@ -951,6 +971,7 @@ async fn prepare_session_changes_diff(
         current_commit_oid,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = options;
     let candidates = crate::session_repos::session_repo_candidates(state, &session_id).await?;
     if candidates.is_empty() {
@@ -986,6 +1007,7 @@ async fn prepare_session_changes_diff(
             detail_mode,
             selected_file,
             context_lines,
+            ignore_whitespace,
         )
         .await?;
         return Ok((candidates, selected.id, prepared));
@@ -999,6 +1021,7 @@ async fn prepare_session_changes_diff(
         detail_mode,
         selected_file,
         context_lines,
+        ignore_whitespace,
     )
     .await?;
     Ok((candidates, selected.id, prepared))
@@ -1057,10 +1080,12 @@ async fn prepare_git_changes(
     detail_mode: DiffDetailMode,
     selected_file: Option<DiffFileSelector>,
     context_lines: Option<u32>,
+    ignore_whitespace: bool,
 ) -> anyhow::Result<PreparedDiff> {
     let DisplayedPatchRange { base, head } = range;
     let (left, right) = revisions;
     let comparison = DiffComparisonIdentity {
+        ignore_whitespace,
         repo_root: repo_root.display().to_string(),
         base,
         head,
@@ -1233,7 +1258,8 @@ async fn restored_worktree_diff(
     let mut opts = git2::DiffOptions::new();
     opts.disable_pathspec_match(true)
         .pathspec(path)
-        .include_typechange(true);
+        .include_typechange(true)
+        .ignore_whitespace(options.contains(&"--ignore-all-space"));
     if let Some(context) = options
         .iter()
         .find_map(|option| option.strip_prefix("--unified="))
@@ -1634,6 +1660,7 @@ async fn generate_patch(
     file: Option<&DiffFileSelector>,
     context_lines: u32,
     limit: usize,
+    ignore_whitespace: bool,
 ) -> anyhow::Result<(String, bool)> {
     validate_mutable_identity(repo, left, right).await?;
     let kind = mutable_kind(right)?;
@@ -1658,10 +1685,12 @@ async fn generate_patch(
         "--unified={}",
         normalize_diff_context_lines(Some(context_lines))
     );
+    let options = [context.as_str(), "--ignore-all-space"];
+    let options = &options[..if ignore_whitespace { 2 } else { 1 }];
     let (mut patch, mut truncated) = if kind == Some("untracked") {
         (String::new(), false)
     } else {
-        run_range_diff(repo, left, right, &[&context], &paths, limit).await?
+        run_range_diff(repo, left, right, options, &paths, limit).await?
     };
     if matches!(kind, Some("untracked" | "worktree")) && !truncated {
         let restored = if kind == Some("worktree") {
@@ -1765,6 +1794,7 @@ async fn build_compare_summary(
         current_commit_oid,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = options;
     let (refs, prepared) = prepare_compare_diff(
         state,
@@ -1772,6 +1802,7 @@ async fn build_compare_summary(
         base,
         head,
         DiffViewOptions {
+            ignore_whitespace,
             detail_mode,
             current_commit_oid,
             selected_file,
@@ -1850,6 +1881,7 @@ async fn prepare_diff_range(
         current_commit_oid,
         selected_file,
         context_lines,
+        ignore_whitespace,
     } = view;
     let range_base_oid =
         effective_merge_base_oid(&repo_root, &base_resolved, &head_resolved, merge_base).await?;
@@ -1910,6 +1942,7 @@ async fn prepare_diff_range(
         detail_mode
     );
     let comparison = DiffComparisonIdentity {
+        ignore_whitespace,
         repo_root: repo_root.display().to_string(),
         base: range_base_endpoint,
         head: range_head_endpoint,
@@ -2131,6 +2164,7 @@ async fn generate_aggregate_patch(
     left_tree_or_commit: &str,
     right_tree_or_commit: &str,
     context_lines: u32,
+    ignore_whitespace: bool,
 ) -> anyhow::Result<(String, bool)> {
     generate_patch(
         repo_root,
@@ -2139,6 +2173,7 @@ async fn generate_aggregate_patch(
         None,
         context_lines,
         MAX_DIFF_BYTES,
+        ignore_whitespace,
     )
     .await
 }
@@ -2157,6 +2192,7 @@ async fn send_diff_content_for_prepared(
         context_lines,
         ..
     } = request;
+    let ignore_whitespace = prepared.comparison.ignore_whitespace;
     let context_lines =
         normalize_diff_context_lines(context_lines).max(prepared.comparison.context_lines);
     let result = match file.as_ref() {
@@ -2167,6 +2203,7 @@ async fn send_diff_content_for_prepared(
                 &prepared.right_tree_or_commit,
                 file,
                 context_lines,
+                ignore_whitespace,
             )
             .await
         }
@@ -2176,6 +2213,7 @@ async fn send_diff_content_for_prepared(
                 &prepared.left_tree_or_commit,
                 &prepared.right_tree_or_commit,
                 context_lines,
+                ignore_whitespace,
             )
             .await
         }
@@ -2189,6 +2227,7 @@ async fn send_diff_content_for_prepared(
                     state,
                     ServerMessage::DiffContent {
                         content: DiffContentState {
+                            ignore_whitespace,
                             target_client_id: client_id,
                             diff_id,
                             scope,
@@ -2232,6 +2271,7 @@ pub(crate) async fn generate_file_patch(
     right_tree_or_commit: &str,
     file: &DiffFileSelector,
     context_lines: u32,
+    ignore_whitespace: bool,
 ) -> anyhow::Result<(String, bool)> {
     generate_patch(
         repo_root,
@@ -2240,6 +2280,7 @@ pub(crate) async fn generate_file_patch(
         Some(file),
         context_lines,
         MAX_DIFF_FILE_PATCH_BYTES,
+        ignore_whitespace,
     )
     .await
 }
@@ -2253,7 +2294,7 @@ pub(crate) fn parse_diff_rows(diff_text: &str) -> Vec<DiffRow> {
     let mut new_line = 0_u32;
     let mut combined = false;
 
-    for text in diff_text.split('\n') {
+    for text in diff_text.split_terminator('\n') {
         if let Some(path) = text
             .strip_prefix("diff --cc ")
             .or_else(|| text.strip_prefix("diff --combined "))
@@ -2928,6 +2969,7 @@ async fn prepare_commit_review(
     detail_mode: DiffDetailMode,
     selected_file: Option<DiffFileSelector>,
     context_lines: Option<u32>,
+    ignore_whitespace: bool,
 ) -> anyhow::Result<PreparedDiff> {
     let commit = read_commit_summary(&repo_root, oid).await?;
     let parent = commit.parent_oids.first().cloned();
@@ -2953,6 +2995,7 @@ async fn prepare_commit_review(
         detail_mode,
         selected_file,
         context_lines,
+        ignore_whitespace,
     )
     .await?;
     prepared.comparison.current_commit_oid = Some(commit.oid.clone());
@@ -2982,7 +3025,7 @@ async fn generate_diff(
         let summary = build_summary_payload(repo_root, left, &right).await?;
         Ok((summary.stat.unwrap_or_default(), summary.truncated))
     } else {
-        generate_aggregate_patch(repo_root, left, &right, DEFAULT_DIFF_CONTEXT_LINES).await
+        generate_aggregate_patch(repo_root, left, &right, DEFAULT_DIFF_CONTEXT_LINES, false).await
     }
 }
 
@@ -3481,6 +3524,7 @@ pub(crate) async fn read_git_file(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
     use std::{collections::HashSet, fs, process::Command as StdCommand};
     use tempfile::TempDir;
 
@@ -3565,6 +3609,7 @@ mod tests {
         let responses = handle_session_changes_request(
             state,
             DiffSessionChangesRequest {
+                ignore_whitespace: false,
                 client_id: "test-client".into(),
                 diff_id,
                 session_id: session_id.into(),
@@ -3621,6 +3666,507 @@ mod tests {
         (temp, repo, base_oid, head_oid)
     }
 
+    async fn whitespace_json_response(state: &AppState, request: Value, kind: &str) -> Value {
+        let mut events = state.events.subscribe();
+        let direct = crate::commands::handle_client_message(
+            state,
+            serde_json::from_value(request).expect("valid client request"),
+        )
+        .await;
+        assert!(direct.is_empty(), "unexpected direct response: {direct:?}");
+        time::timeout(Duration::from_secs(20), async {
+            loop {
+                let event = serde_json::to_value(events.recv().await.expect("diff event")).unwrap();
+                assert_ne!(event["type"], "diff.error", "{event}");
+                if event["type"] == kind {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("diff response timeout")
+    }
+
+    async fn assert_whitespace_dispatch(
+        state: &AppState,
+        repo: &Path,
+        request: Value,
+        oracle_range: &[&str],
+        dirty: bool,
+    ) {
+        let mut raw_summary = None;
+        let mut raw_key = None;
+        for ignore in [false, true, false] {
+            let mut request = request.clone();
+            request["diffId"] = json!(uuid::Uuid::new_v4().to_string());
+            request["ignoreWhitespace"] = json!(ignore);
+            let scope = if request["type"] == "sessionChanges.request" {
+                "sessionChanges"
+            } else {
+                "compareDiff"
+            };
+            let summary =
+                whitespace_json_response(state, request.clone(), &format!("{scope}.summary")).await;
+            let summary = &summary["state"];
+            for path in [
+                Some("space.txt"),
+                Some("mixed.txt"),
+                Some("blank.txt"),
+                None,
+            ] {
+                let mut args = vec![
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-color",
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    "--unified=3",
+                    "--find-renames=50%",
+                    "--diff-algorithm=myers",
+                    "--no-indent-heuristic",
+                    "--submodule=short",
+                ];
+                args.extend_from_slice(oracle_range);
+                if ignore {
+                    args.push("--ignore-all-space");
+                }
+                args.push("--");
+                if let Some(path) = path {
+                    args.push(path);
+                }
+                let oracle = StdCommand::new("git")
+                    .arg("--no-optional-locks")
+                    .current_dir(repo)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(oracle.status.success());
+                let oracle = String::from_utf8(oracle.stdout).unwrap();
+                let content = whitespace_json_response(
+                    state,
+                    json!({
+                        "type": "diff.content.request",
+                        "clientId": "whitespace-client",
+                        "diffId": request["diffId"],
+                        "scope": scope,
+                        "sessionId": request["sessionId"],
+                        "comparisonKey": summary["comparison"]["comparisonKey"],
+                        "selectedFile": path.map(|path| json!({"oldPath": path, "newPath": path})),
+                        "contextLines": 3,
+                        "ignoreWhitespace": ignore,
+                    }),
+                    "diff.content",
+                )
+                .await;
+                let content = &content["content"];
+                // Patch equality deliberately precedes new-field assertions: baseline RED
+                // must demonstrate missing native -w behavior, not merely a missing echo.
+                assert_eq!(
+                    content["patch"].as_str().unwrap(),
+                    oracle,
+                    "{scope}, {path:?}, -w={ignore}"
+                );
+                if ignore && path == Some("space.txt") {
+                    assert!(oracle.is_empty(), "whitespace-only file must have no hunks");
+                    assert_eq!(
+                        content["rows"],
+                        json!([]),
+                        "empty patch has no source or metadata rows"
+                    );
+                }
+                if ignore && path == Some("blank.txt") {
+                    assert!(
+                        oracle.contains("\n+\n") || oracle.contains("\n-\n"),
+                        "-w must not remove added/deleted blank lines"
+                    );
+                }
+                if ignore && path == Some("mixed.txt") {
+                    let rows = content["rows"].as_array().unwrap();
+                    assert!(rows.iter().any(|row| row["location"]["newLine"] == 2
+                        && row["location"]["text"] == "+new value"));
+                    assert!(rows.iter().any(|row| row["location"]["oldLine"] == 2
+                        && row["location"]["text"] == "-old value"));
+                }
+                if ignore || raw_summary.is_some() {
+                    assert_eq!(content["ignoreWhitespace"], ignore);
+                }
+            }
+            if ignore || raw_summary.is_some() {
+                assert_eq!(summary["request"]["ignoreWhitespace"], ignore);
+                assert_eq!(summary["comparison"]["ignoreWhitespace"], ignore);
+            }
+            if ignore {
+                let wrong_mode = crate::commands::handle_client_message(
+                    state,
+                    serde_json::from_value(json!({
+                        "type": "diff.content.request", "clientId": "whitespace-client",
+                        "diffId": request["diffId"], "scope": scope,
+                        "comparisonKey": summary["comparison"]["comparisonKey"],
+                        "ignoreWhitespace": false,
+                    }))
+                    .unwrap(),
+                )
+                .await;
+                assert!(
+                    matches!(wrong_mode.as_slice(), [ServerMessage::DiffError { .. }]),
+                    "wrong mode must fail instead of returning another presentation"
+                );
+            }
+            if let Some(raw) = &raw_summary {
+                assert_eq!(&summary["summary"], raw, "statistics must stay unfiltered");
+                assert_eq!(
+                    Some(&summary["comparison"]["comparisonKey"]),
+                    raw_key.as_ref()
+                );
+            } else {
+                raw_summary = Some(summary["summary"].clone());
+                raw_key = Some(summary["comparison"]["comparisonKey"].clone());
+            }
+            assert!(
+                summary["summary"]["files"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|file| file["newPath"] == "space.txt")
+            );
+            if dirty {
+                assert_eq!(summary["workingTreeDirty"], true);
+            }
+        }
+    }
+
+    fn whitespace_repo() -> (TempDir, PathBuf, String) {
+        let (temp, repo, _, _) = test_repo();
+        write_file(&repo, "space.txt", "one two\n\tthree four\nfive\n");
+        write_file(&repo, "mixed.txt", "alpha beta\nold value\nomega\n");
+        write_file(&repo, "blank.txt", "start\n\nmiddle\nend\n");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "whitespace baseline"]);
+        let base = git_output(&repo, &["rev-parse", "HEAD"]);
+        write_file(
+            &repo,
+            "space.txt",
+            "one\t two  \n    three   four\t\nfive \t\n",
+        );
+        write_file(&repo, "mixed.txt", "alpha\t beta  \nnew value\nomega\t\n");
+        write_file(&repo, "blank.txt", "start\nmiddle\nend\n\n");
+        (temp, repo, base)
+    }
+
+    #[tokio::test]
+    async fn ordinary_whitespace_native_current_changes_dispatch() {
+        let (_temp, repo, _) = whitespace_repo();
+        let session_dir = TempDir::new().unwrap();
+        let state = crate::tests::test_state(32, None);
+        state.sessions.write().await.insert(
+            "whitespace".into(),
+            diff_test_record(
+                "whitespace",
+                &repo,
+                &session_dir.path().join("session.jsonl"),
+            ),
+        );
+        for (kind, range) in [("unstaged", vec![]), ("staged", vec!["--cached", "HEAD"])] {
+            if kind == "staged" {
+                git(&repo, &["add", "."]);
+            }
+            let index = fs::read(repo.join(".git/index")).unwrap();
+            let original: Vec<_> = ["space.txt", "mixed.txt", "blank.txt"]
+                .map(|path| (path, fs::read(repo.join(path)).unwrap()))
+                .into();
+            assert_whitespace_dispatch(
+                &state,
+                &repo,
+                json!({
+                    "type": "sessionChanges.request", "clientId": "whitespace-client",
+                    "sessionId": "whitespace", "changeKind": kind, "detailMode": "filePatch",
+                }),
+                &range,
+                true,
+            )
+            .await;
+            assert_eq!(fs::read(repo.join(".git/index")).unwrap(), index);
+            for (path, bytes) in original {
+                assert_eq!(fs::read(repo.join(path)).unwrap(), bytes);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_whitespace_empty_aggregate_keeps_current_group_dirty() {
+        let (_temp, repo, _, _) = test_repo();
+        write_file(&repo, "space.txt", "one two\n");
+        write_file(&repo, "eof.txt", "final newline");
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "whitespace-only baseline"]);
+        write_file(&repo, "space.txt", "one\t two  \n");
+        write_file(&repo, "eof.txt", "final newline\n");
+        let session_dir = TempDir::new().unwrap();
+        let state = crate::tests::test_state(32, None);
+        state.sessions.write().await.insert(
+            "whitespace".into(),
+            diff_test_record(
+                "whitespace",
+                &repo,
+                &session_dir.path().join("session.jsonl"),
+            ),
+        );
+        for kind in ["unstaged", "staged"] {
+            if kind == "staged" {
+                git(&repo, &["add", "."]);
+            }
+            let before = repository_bytes(&repo);
+            let mut raw_summary = None;
+            let mut raw_key = None;
+            for ignore in [false, true] {
+                let diff_id = Uuid::new_v4().to_string();
+                let response = whitespace_json_response(
+                    &state,
+                    json!({
+                        "type": "sessionChanges.request", "clientId": "whitespace-client",
+                        "diffId": diff_id, "sessionId": "whitespace", "changeKind": kind,
+                        "detailMode": "filePatch", "ignoreWhitespace": ignore,
+                    }),
+                    "sessionChanges.summary",
+                )
+                .await;
+                let summary = &response["state"];
+                let response = whitespace_json_response(
+                    &state,
+                    json!({
+                        "type": "diff.content.request", "clientId": "whitespace-client",
+                        "diffId": diff_id, "scope": "sessionChanges", "sessionId": "whitespace",
+                        "comparisonKey": summary["comparison"]["comparisonKey"],
+                        "ignoreWhitespace": ignore,
+                    }),
+                    "diff.content",
+                )
+                .await;
+                let patch = response["content"]["patch"].as_str().unwrap();
+                assert_eq!(
+                    patch.is_empty(),
+                    ignore,
+                    "native -w empties the whole group"
+                );
+                if ignore {
+                    assert_eq!(response["content"]["rows"], json!([]));
+                }
+                assert_eq!(summary["workingTreeDirty"], true);
+                assert_eq!(summary["summary"]["files"].as_array().unwrap().len(), 2);
+                assert!(
+                    summary["summary"]["stat"]
+                        .as_str()
+                        .unwrap()
+                        .contains("space.txt")
+                );
+                assert!(
+                    summary["summary"]["stat"]
+                        .as_str()
+                        .unwrap()
+                        .contains("eof.txt")
+                );
+                if let Some(raw) = &raw_summary {
+                    assert_eq!(&summary["summary"], raw);
+                    assert_eq!(
+                        Some(&summary["comparison"]["comparisonKey"]),
+                        raw_key.as_ref()
+                    );
+                } else {
+                    raw_summary = Some(summary["summary"].clone());
+                    raw_key = Some(summary["comparison"]["comparisonKey"].clone());
+                }
+            }
+            assert_eq!(before, repository_bytes(&repo));
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_whitespace_native_pinned_history_and_compare_dispatch() {
+        let (_temp, repo, base) = whitespace_repo();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "whitespace and semantic changes"]);
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["tag", "whitespace-review"]);
+        // Today's checkout must not leak into either immutable review.
+        write_file(&repo, "mixed.txt", "unrelated working tree\n");
+        let original = fs::read(repo.join("mixed.txt")).unwrap();
+        let index = fs::read(repo.join(".git/index")).unwrap();
+        let session_dir = TempDir::new().unwrap();
+        let state = crate::tests::test_state(32, None);
+        state.sessions.write().await.insert(
+            "whitespace".into(),
+            diff_test_record(
+                "whitespace",
+                &repo,
+                &session_dir.path().join("session.jsonl"),
+            ),
+        );
+        for request in [
+            json!({"type": "sessionChanges.request", "clientId": "whitespace-client",
+                "sessionId": "whitespace", "detailMode": "filePatch", "currentCommitOid": head}),
+            json!({"type": "compareDiff.request", "clientId": "whitespace-client",
+                "repoRoot": repo, "detailMode": "filePatch", "mergeBase": false,
+                "base": {"kind": "gitRef", "value": base},
+                "head": {"kind": "gitRef", "value": "whitespace-review"}}),
+        ] {
+            assert_whitespace_dispatch(&state, &repo, request, &[&base, &head], false).await;
+        }
+        let original_revision = read_git_file(repo.to_str().unwrap(), &head, "space.txt")
+            .await
+            .unwrap();
+        assert_eq!(
+            original_revision.text, "one\t two  \n    three   four\t\nfive \t\n",
+            "Copy file must retain original revision whitespace"
+        );
+        assert_eq!(fs::read(repo.join("mixed.txt")).unwrap(), original);
+        assert_eq!(fs::read(repo.join(".git/index")).unwrap(), index);
+        assert_eq!(git_output(&repo, &["rev-parse", "HEAD"]), head);
+    }
+
+    #[tokio::test]
+    async fn ordinary_whitespace_restored_worktree_uses_native_semantics() {
+        let (_temp, repo, base) = whitespace_repo();
+        let mut oracles = Vec::new();
+        for ignore in [false, true] {
+            for path in ["space.txt", "mixed.txt", "blank.txt"] {
+                let mut args = vec![
+                    "--no-optional-locks",
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--no-color",
+                    "--no-indent-heuristic",
+                    "--diff-algorithm=myers",
+                    "--unified=3",
+                    &base,
+                ];
+                if ignore {
+                    args.push("--ignore-all-space");
+                }
+                args.extend(["--", path]);
+                let output = StdCommand::new("git")
+                    .current_dir(&repo)
+                    .args(args)
+                    .output()
+                    .unwrap();
+                assert!(output.status.success());
+                oracles.push((ignore, path, String::from_utf8(output.stdout).unwrap()));
+            }
+        }
+        git(
+            &repo,
+            &["rm", "--cached", "space.txt", "mixed.txt", "blank.txt"],
+        );
+        let before = repository_bytes(&repo);
+        let right = mutable_identity(&repo, &base, "worktree").await.unwrap();
+        let summary = build_summary_payload(&repo, &base, &right).await.unwrap();
+        assert!(
+            summary
+                .files
+                .iter()
+                .any(|file| file.new_path == "space.txt" && file.added > 0)
+        );
+        for (ignore, path, oracle) in oracles {
+            let (patch, truncated) = generate_file_patch(
+                &repo,
+                &base,
+                &right,
+                &DiffFileSelector {
+                    old_path: Some(path.into()),
+                    new_path: path.into(),
+                },
+                3,
+                ignore,
+            )
+            .await
+            .unwrap();
+            assert!(!truncated);
+            assert_eq!(patch, oracle, "restored WORKTREE {path}, -w={ignore}");
+        }
+        assert_eq!(before, repository_bytes(&repo));
+    }
+
+    #[tokio::test]
+    async fn ordinary_whitespace_native_file_edges_and_untracked_additions() {
+        let (_temp, repo, _, _) = test_repo();
+        write_file(&repo, "deleted.txt", "delete me\n");
+        write_file(&repo, "renamed.txt", "keep rename metadata\n");
+        write_file(&repo, "no-newline.txt", "before");
+        fs::write(repo.join("binary.bin"), b"before\0binary").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "edge baseline"]);
+        let base = git_output(&repo, &["rev-parse", "HEAD"]);
+        git(&repo, &["mv", "renamed.txt", "renamed-new.txt"]);
+        git(&repo, &["rm", "deleted.txt"]);
+        write_file(&repo, "no-newline.txt", "after \t");
+        write_file(&repo, "added.txt", " \t\n\n");
+        fs::write(repo.join("binary.bin"), b"after\0binary").unwrap();
+        git(&repo, &["add", "."]);
+        git(&repo, &["commit", "-m", "edge changes"]);
+        let head = git_output(&repo, &["rev-parse", "HEAD"]);
+        let before = repository_bytes(&repo);
+        for ignore in [false, true] {
+            let mut args = vec![
+                "--no-optional-locks",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                "--find-renames=50%",
+                "--diff-algorithm=myers",
+                "--no-indent-heuristic",
+                "--unified=3",
+                &base,
+                &head,
+            ];
+            if ignore {
+                args.push("--ignore-all-space");
+            }
+            let output = StdCommand::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            let oracle = String::from_utf8(output.stdout).unwrap();
+            let (patch, truncated) = generate_aggregate_patch(&repo, &base, &head, 3, ignore)
+                .await
+                .unwrap();
+            assert_eq!(patch, oracle);
+            assert!(!truncated);
+            assert!(patch.contains("rename from renamed.txt"));
+            assert!(patch.contains("deleted file mode") && patch.contains("new file mode"));
+            assert!(
+                patch.contains("Binary files") && patch.contains("\\ No newline at end of file")
+            );
+            let (_, truncated) = generate_patch(&repo, &base, &head, None, 3, 64, ignore)
+                .await
+                .unwrap();
+            assert!(truncated, "filtered patches retain output bounds");
+        }
+        assert_eq!(before, repository_bytes(&repo));
+        write_file(&repo, "untracked.txt", " \t\n\n");
+        let (left, right, _, _) = git_change_range(&repo, GitChangeKind::Untracked)
+            .await
+            .unwrap();
+        let file = DiffFileSelector {
+            old_path: None,
+            new_path: "untracked.txt".into(),
+        };
+        let raw = generate_file_patch(&repo, &left, &right, &file, 3, false)
+            .await
+            .unwrap();
+        let ignored = generate_file_patch(&repo, &left, &right, &file, 3, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            ignored, raw,
+            "-w preserves wholly new lines, including whitespace"
+        );
+        assert!(ignored.0.contains("+ \t\n+\n"));
+    }
+
     #[tokio::test]
     async fn resolves_refs_and_generates_full_and_stat_diff() {
         let (_temp, repo, base, head) = test_repo();
@@ -3674,6 +4220,7 @@ mod tests {
         let (_temp, repo, base, head) = test_repo();
         let app_state = crate::tests::test_state(8, None);
         let file_patch_request = DiffRequestIdentity::CompareDiff {
+            ignore_whitespace: false,
             client_id: "client-1".into(),
             diff_id: test_diff_id(),
             repo_root: repo.display().to_string(),
@@ -3692,6 +4239,7 @@ mod tests {
         let (message, prepared) = build_compare_summary(
             &app_state,
             DiffCompareRequest {
+                ignore_whitespace: false,
                 client_id: "client-1".into(),
                 diff_id: test_diff_id(),
                 repo_root: repo.display().to_string(),
@@ -3726,6 +4274,7 @@ mod tests {
             &prepared.left_tree_or_commit,
             &prepared.right_tree_or_commit,
             prepared.comparison.context_lines,
+            false,
         )
         .await
         .unwrap();
@@ -3740,6 +4289,7 @@ mod tests {
         );
 
         let stat_request = DiffRequestIdentity::CompareDiff {
+            ignore_whitespace: false,
             client_id: "client-1".into(),
             diff_id: test_diff_id(),
             repo_root: repo.display().to_string(),
@@ -3758,6 +4308,7 @@ mod tests {
         let (message, _prepared) = build_compare_summary(
             &app_state,
             DiffCompareRequest {
+                ignore_whitespace: false,
                 client_id: "client-1".into(),
                 diff_id: test_diff_id(),
                 repo_root: repo.display().to_string(),
@@ -4009,6 +4560,7 @@ mod tests {
                 value: third.clone(),
             },
             DiffViewOptions {
+                ignore_whitespace: false,
                 detail_mode: DiffDetailMode::FilePatch,
                 current_commit_oid: Some(third.clone()),
                 selected_file: Some(selector.clone()),
@@ -4038,6 +4590,7 @@ mod tests {
             &prepared.right_tree_or_commit,
             &selector,
             3,
+            false,
         )
         .await
         .unwrap();
@@ -4060,6 +4613,7 @@ mod tests {
                 value: head.clone(),
             },
             DiffViewOptions {
+                ignore_whitespace: false,
                 detail_mode: DiffDetailMode::FilePatch,
                 current_commit_oid: Some(stale_commit),
                 selected_file: None,
@@ -4122,6 +4676,7 @@ mod tests {
                 new_path: summary.new_path.clone(),
             },
             3,
+            false,
         )
         .await
         .unwrap();
@@ -4231,10 +4786,10 @@ mod tests {
             old_path: None,
             new_path: "src/lib.rs".into(),
         };
-        let (staged, _) = generate_file_patch(&repo, &staged_left, &staged_right, &file, 3)
+        let (staged, _) = generate_file_patch(&repo, &staged_left, &staged_right, &file, 3, false)
             .await
             .unwrap();
-        let (unstaged, _) = generate_file_patch(&repo, &left, &right, &file, 3)
+        let (unstaged, _) = generate_file_patch(&repo, &left, &right, &file, 3, false)
             .await
             .unwrap();
         assert!(staged.contains("+staged content") && !staged.contains("working content"));
@@ -4244,12 +4799,12 @@ mod tests {
         assert_eq!(summary.files[0].new_path, "src/lib.rs");
         write_file(&repo, "src/lib.rs", "another content\n");
         assert!(
-            generate_file_patch(&repo, &left, &right, &file, 3)
+            generate_file_patch(&repo, &left, &right, &file, 3, false)
                 .await
                 .is_err()
         );
         assert!(
-            generate_aggregate_patch(&repo, &left, &right, 3)
+            generate_aggregate_patch(&repo, &left, &right, 3, false)
                 .await
                 .is_err()
         );
@@ -4259,7 +4814,7 @@ mod tests {
         assert_ne!(right, changed);
         // An unrelated disk edit does not invalidate a HEAD-to-index patch.
         assert!(
-            generate_file_patch(&repo, &staged_left, &staged_right, &file, 3)
+            generate_file_patch(&repo, &staged_left, &staged_right, &file, 3, false)
                 .await
                 .unwrap()
                 .0
@@ -4267,7 +4822,7 @@ mod tests {
         );
         git(&repo, &["add", "src/lib.rs"]);
         assert!(
-            generate_file_patch(&repo, &staged_left, &staged_right, &file, 3)
+            generate_file_patch(&repo, &staged_left, &staged_right, &file, 3, false)
                 .await
                 .is_err()
         );
@@ -4297,12 +4852,12 @@ mod tests {
             old_path: None,
             new_path: name.into(),
         };
-        let (patch, _) = generate_file_patch(&repo, &left, &right, &selector, 3)
+        let (patch, _) = generate_file_patch(&repo, &left, &right, &selector, 3, false)
             .await
             .unwrap();
         assert!(patch.contains("+new content"));
         assert!(parse_diff_rows(&patch).iter().any(|row| matches!(row, DiffRow::Line { location, .. } if location.new_path == name && location.new_line == Some(1))));
-        let (patch, _) = generate_aggregate_patch(&repo, &left, &right, 3)
+        let (patch, _) = generate_aggregate_patch(&repo, &left, &right, 3, false)
             .await
             .unwrap();
         assert!(patch.contains("empty.txt") && !patch.contains("secret ignored content"));
@@ -4318,7 +4873,7 @@ mod tests {
         let (left, right, _, _) = git_change_range(&repo, GitChangeKind::Untracked)
             .await
             .unwrap();
-        let (patch, _) = generate_aggregate_patch(&repo, &left, &right, 3)
+        let (patch, _) = generate_aggregate_patch(&repo, &left, &right, 3, false)
             .await
             .unwrap();
         assert!(patch.contains("new file mode 120000"));
@@ -4344,7 +4899,7 @@ mod tests {
             (DiffEndpoint::EmptyTree, DiffEndpoint::Index)
         ));
         assert!(
-            generate_aggregate_patch(repo, &left, &right, 3)
+            generate_aggregate_patch(repo, &left, &right, 3, false)
                 .await
                 .unwrap()
                 .0
@@ -4353,7 +4908,7 @@ mod tests {
         let (left, right, _, _) = git_change_range(repo, GitChangeKind::Unstaged)
             .await
             .unwrap();
-        let (patch, _) = generate_aggregate_patch(repo, &left, &right, 3)
+        let (patch, _) = generate_aggregate_patch(repo, &left, &right, 3, false)
             .await
             .unwrap();
         assert!(patch.contains("-index") && patch.contains("+disk"));
@@ -4400,7 +4955,7 @@ mod tests {
             new_path: "src/renamed.rs".into(),
         };
         assert!(
-            generate_file_patch(&repo, &left, &right, &selector, 3)
+            generate_file_patch(&repo, &left, &right, &selector, 3, false)
                 .await
                 .unwrap()
                 .0
@@ -4414,7 +4969,7 @@ mod tests {
         let (left, right, _, _) = git_change_range(&repo, GitChangeKind::Untracked)
             .await
             .unwrap();
-        let (patch, limited) = generate_aggregate_patch(&repo, &left, &right, 3)
+        let (patch, limited) = generate_aggregate_patch(&repo, &left, &right, 3, false)
             .await
             .unwrap();
         assert!(limited && patch.contains("size limit"));
@@ -4431,6 +4986,7 @@ mod tests {
                 new_path: "huge".into(),
             },
             3,
+            false,
         )
         .await
         .unwrap();
@@ -4464,7 +5020,7 @@ mod tests {
                 .any(|file| file.new_path == "src/lib.rs"
                     && file.status == DiffFileStatus::Conflicted)
         );
-        let (patch, _) = generate_aggregate_patch(&repo, &left, &right, 3)
+        let (patch, _) = generate_aggregate_patch(&repo, &left, &right, 3, false)
             .await
             .unwrap();
         assert!(patch.contains("<<<<<<<") && patch.contains(">>>>>>>"));
@@ -4611,7 +5167,7 @@ mod tests {
         ] {
             let (left, right, _, _) = git_change_range(&repo, kind).await.unwrap();
             let summary = build_summary_payload(&repo, &left, &right).await.unwrap();
-            generate_aggregate_patch(&repo, &left, &right, 3)
+            generate_aggregate_patch(&repo, &left, &right, 3, false)
                 .await
                 .unwrap();
             for file in summary.files {
@@ -4624,13 +5180,14 @@ mod tests {
                         new_path: file.new_path,
                     },
                     3,
+                    false,
                 )
                 .await
                 .unwrap();
             }
         }
         let right = mutable_identity(&repo, &base, "worktree").await.unwrap();
-        let (patch, _) = generate_aggregate_patch(&repo, &base, &right, 3)
+        let (patch, _) = generate_aggregate_patch(&repo, &base, &right, 3, false)
             .await
             .unwrap();
         assert!(patch.contains("+disk") && patch.contains("+new"));
@@ -4642,7 +5199,7 @@ mod tests {
         );
         write_file(&repo, "new.txt", "changed\n");
         assert!(
-            generate_aggregate_patch(&repo, &base, &right, 3)
+            generate_aggregate_patch(&repo, &base, &right, 3, false)
                 .await
                 .is_err()
         );
@@ -4667,6 +5224,7 @@ mod tests {
             },
             (base_ref, head_ref),
             DiffViewOptions {
+                ignore_whitespace: false,
                 detail_mode: DiffDetailMode::FilePatch,
                 current_commit_oid: None,
                 selected_file: None,
@@ -4681,6 +5239,7 @@ mod tests {
             &prepared.left_tree_or_commit,
             &prepared.right_tree_or_commit,
             3,
+            false,
         )
         .await
         .unwrap();
@@ -4697,13 +5256,13 @@ mod tests {
         let (left, right, _, _) = git_change_range(&repo, GitChangeKind::Unstaged)
             .await
             .unwrap();
-        let (patch, _) = generate_aggregate_patch(&repo, &left, &right, 3)
+        let (patch, _) = generate_aggregate_patch(&repo, &left, &right, 3, false)
             .await
             .unwrap();
         assert!(patch.contains("+safe native diff"));
         write_file(&repo, ".git/info/attributes", "src/lib.rs -diff\n");
         assert!(
-            generate_aggregate_patch(&repo, &left, &right, 3)
+            generate_aggregate_patch(&repo, &left, &right, 3, false)
                 .await
                 .is_err()
         );
@@ -4711,7 +5270,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            generate_aggregate_patch(&repo, &left, &right, 3)
+            generate_aggregate_patch(&repo, &left, &right, 3, false)
                 .await
                 .unwrap()
                 .0
@@ -4748,14 +5307,14 @@ mod tests {
             old_path: None,
             new_path: "sub".into(),
         };
-        let before = generate_file_patch(&repo, &left, &right, &file, 3)
+        let before = generate_file_patch(&repo, &left, &right, &file, 3, false)
             .await
             .unwrap()
             .0;
         assert!(before.contains(&format!("+Subproject commit {second}")));
         git(&repo.join("sub"), &["checkout", "--detach", &third]);
         assert!(
-            generate_file_patch(&repo, &left, &right, &file, 3)
+            generate_file_patch(&repo, &left, &right, &file, 3, false)
                 .await
                 .is_err()
         );
@@ -4764,7 +5323,7 @@ mod tests {
             .unwrap();
         write_file(&repo.join("sub"), "src/lib.rs", "dirty\n");
         assert!(
-            generate_file_patch(&repo, &left, &right, &file, 3)
+            generate_file_patch(&repo, &left, &right, &file, 3, false)
                 .await
                 .is_err()
         );
@@ -4772,7 +5331,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            generate_file_patch(&repo, &left, &right, &file, 3)
+            generate_file_patch(&repo, &left, &right, &file, 3, false)
                 .await
                 .unwrap()
                 .0
@@ -4796,7 +5355,7 @@ mod tests {
         let before = repository_bytes(&repo);
         let right = mutable_identity(&repo, &base, "worktree").await.unwrap();
         assert!(
-            generate_aggregate_patch(&repo, &base, &right, 3)
+            generate_aggregate_patch(&repo, &base, &right, 3, false)
                 .await
                 .unwrap()
                 .0
@@ -4831,6 +5390,7 @@ mod tests {
                     new_path: path.to_string(),
                 },
                 3,
+                false,
             )
             .await
             .unwrap()
@@ -4884,7 +5444,7 @@ mod tests {
                 .status,
             DiffFileStatus::Binary
         );
-        let patch = generate_aggregate_patch(&repo, &base, &right, 3)
+        let patch = generate_aggregate_patch(&repo, &base, &right, 3, false)
             .await
             .unwrap()
             .0;
@@ -4923,6 +5483,7 @@ mod tests {
             DiffDetailMode::FilePatch,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -4947,6 +5508,7 @@ mod tests {
                 new_path: "src/lib.rs".into(),
             },
             3,
+            false,
         )
         .await
         .unwrap()
@@ -4959,6 +5521,7 @@ mod tests {
             DiffDetailMode::FilePatch,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5570,7 +6133,8 @@ mod tests {
                     oid,
                     DiffDetailMode::FilePatch,
                     None,
-                    None
+                    None,
+                    false
                 )
                 .await
                 .is_err()
@@ -5651,7 +6215,8 @@ mod tests {
                     old_path: None,
                     new_path: "src/lib.rs".into(),
                 },
-                3
+                3,
+                false
             )
             .await
             .is_err()
@@ -5720,6 +6285,7 @@ mod tests {
                     new_path: "src/lib.rs".into(),
                 },
                 3,
+                false,
             )
             .await
             .unwrap()
@@ -5819,6 +6385,7 @@ mod tests {
             DiffDetailMode::FilePatch,
             None,
             None,
+            false,
         )
         .await
         .unwrap();
@@ -5827,6 +6394,7 @@ mod tests {
             &prepared.left_tree_or_commit,
             &prepared.right_tree_or_commit,
             3,
+            false,
         )
         .await
         .unwrap();
@@ -5959,6 +6527,7 @@ mod tests {
                 new_path: "src/lib.rs".into(),
             },
             3,
+            false,
         )
         .await
         .unwrap()
@@ -6002,6 +6571,7 @@ mod tests {
                 new_path: "d".into(),
             },
             3,
+            false,
         )
         .await
         .unwrap()
@@ -6031,6 +6601,7 @@ mod tests {
                 new_path: "src/lib.rs".into(),
             },
             3,
+            false,
         )
         .await
         .unwrap()
@@ -6060,6 +6631,7 @@ mod tests {
                 new_path: "x b/y".to_owned(),
             },
             3,
+            false,
         )
         .await
         .unwrap()

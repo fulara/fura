@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   formatDuration,
   isCompactReadCard,
@@ -13,6 +13,8 @@ import {
 } from "./toolCards";
 import type { TodoPhase, ToolCard, TranscriptEntry } from "./protocol";
 import { DIFF_HIGHLIGHT_LIMITS } from "./diffHighlight";
+
+afterEach(() => vi.restoreAllMocks());
 
 function tool(overrides: Partial<ToolCard> = {}): ToolCard {
   return {
@@ -354,6 +356,7 @@ describe("edit tool cards", () => {
   });
 
   it("tracks replacement positions after old-only deletions", () => {
+    vi.spyOn(performance, "now").mockReturnValue(0);
     const lines = ["-1|let deleted = 0;", " 2|/*", "-3|let x = 1;", "+2|let x = 2;", " 4|*/"];
     const node = renderToolCard(tool({ toolName: "edit", result: { details: { path: "lib.rs", diff: lines.join("\n") } } }));
     expect([...node.querySelectorAll(".diff-line")].map(line => line.textContent)).toEqual(lines);

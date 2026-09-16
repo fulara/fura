@@ -208,6 +208,7 @@ function comparisonLines(state: DiffReviewableState): string[] {
     `Base version: ${state.comparison.leftTreeOrCommit === "EMPTY" ? "empty tree (initial commit)" : state.comparison.leftTreeOrCommit}`,
     `Head version: ${state.comparison.rightTreeOrCommit}`,
     "The shown file versions belong to these exact endpoints; the current checkout may differ.",
+    `Patch whitespace: ${state.comparison.ignoreWhitespace ? "ignored using Git --ignore-all-space (-w); file/stat totals remain unfiltered" : "included"}.`,
     reviewModeLine(state),
     `Comparison key: ${comparisonKey(state)}`,
   ];
