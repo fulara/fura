@@ -391,6 +391,61 @@ class OwnedProcessLifecycle(unittest.TestCase):
                 runner.send_signal(signal.SIGINT)
                 runner.wait(timeout=10)
 
+    def test_repeated_recency_interrupt_finishes_cleanup_and_reports_stop(self):
+        command, ready = self.workload()
+        binary = self.directory / "recency-server"
+        binary.write_text(f"#!{sys.executable}\n" + command[2])
+        binary.chmod(0o700)
+        fixtures = self.directory / "fixtures.json"
+        fixtures.write_text("[]")
+        cleaning = self.directory / "cleaning"
+        # Delay cleanup at its entry to deliver the second signal deterministically.
+        # Emergency cleanup in the disposable runner makes RED safe as well.
+        source = (
+            "import pathlib, runpy, signal, sys, time\n"
+            f"sys.path.insert(0, {str(ROOT / 'scripts')!r})\n"
+            "from smoke_process import OwnedProcess\n"
+            "original = OwnedProcess.cleanup\n"
+            "captured = []\n"
+            "def delayed(self, *args, **kwargs):\n"
+            " captured.append(self)\n"
+            f" pathlib.Path({str(cleaning)!r}).touch()\n"
+            " time.sleep(.3)\n"
+            " return original(self, *args, **kwargs)\n"
+            "OwnedProcess.cleanup = delayed\n"
+            "sys.argv.pop(0)\n"
+            "try:\n"
+            " runpy.run_path(sys.argv[0], run_name='__main__')\n"
+            "finally:\n"
+            " for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP): signal.signal(sig, signal.SIG_IGN)\n"
+            " for owned in captured: original(owned)\n"
+        )
+        runner = subprocess.Popen(
+            [sys.executable, "-c", source, str(ROOT / "scripts/session_recency_smoke.py"),
+             "--binary", str(binary), "--static-dir", str(self.directory),
+             "--fixtures", str(fixtures), "--output-parent", str(self.directory / "recency")],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+        )
+        try:
+            pids = self.await_ready(ready)
+            runner.send_signal(signal.SIGTERM)
+            deadline = time.monotonic() + 5
+            while not cleaning.exists():
+                if time.monotonic() >= deadline:
+                    self.fail("recency runner did not start cleanup")
+                time.sleep(.01)
+            runner.send_signal(signal.SIGINT)
+            stdout, stderr = runner.communicate(timeout=10)
+            self.assertEqual(runner.returncode, 143, stderr)
+            events = [json.loads(line) for line in stdout.splitlines()]
+            self.assertTrue(any(event.get("event") == "stopped" and event["ownedProcessesCleaned"]
+                                for event in events), stdout)
+            self.assert_gone(pids)
+        finally:
+            if runner.poll() is None:
+                runner.send_signal(signal.SIGTERM)
+                runner.communicate(timeout=10)
+
 
 if __name__ == "__main__":
     unittest.main()

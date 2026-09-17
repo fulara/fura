@@ -179,10 +179,14 @@ def main():
             else:
                 raise ValueError("unsupported recency fixture operation")
             emit({"event": "complete", "op": operation, "generation": generation})
+    except KeyboardInterrupt as error:
+        return 128 + (error.args[0] if error.args else signal.SIGINT)
     finally:
+        for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(signum, signal.SIG_IGN)
         stop()
         emit({"event": "stopped", "ownedProcessesCleaned": True, "root": str(root)})
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

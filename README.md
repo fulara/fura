@@ -198,7 +198,7 @@ without restarting does not deploy the new runtime: newly loaded workers may
 refuse an older addon. Build a matching addon and restart only during an explicit
 deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.2.1. Desktop Fura exposes one-shot BTW through
+The current fork tracks OMP 18.2.3. Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
 captured at start; results remain only in browser memory. Upstream TUI BTW history
@@ -229,6 +229,16 @@ RPC plan approval suppresses compact's automatic continuation because approval
 dispatches its own execution turn. Prompt correlation and upstream user/agent
 attribution are preserved together. The fork also retains P2 skill ancestry
 validation and user-invoked skill attachment resolution.
+
+OMP 18.2.3 resolves configured authentication headers asynchronously at request
+time; Fura still consumes model metadata, not credentials. Secret login prompts
+remain terminal-only. Exact `^provider/model` mentions are interpreted by OMP
+and keep Fura's `clientMessageId` through expansion and persistence; this refresh
+does not add model-mention autocomplete or chips to Fura. The branch-local mention
+registry stays synchronized on resume, failed-switch rollback and fork alongside
+Fura's BTW transition barrier. Upstream's complete macOS PID enumeration and
+cancelled-job retention complement, rather than replace, the fork's pinned
+process ownership and kernel cleanup.
 
 Environment overrides for `run-local-omp.sh`:
 
@@ -293,9 +303,10 @@ absence of an unobserved fast double-fork/`setsid` escape. In particular, real O
 eval kernels and launched daemons can create separate sessions. Use a disposable
 container/VM for arbitrary detaching workloads rather than treating group cleanup
 as proof that every descendant is gone.
-The BTW browser gate also handles TERM/INT/HUP and protects both ownership
-handoffs; termination must clean up its private server and worker without
-touching existing processes. Its regression uses disposable sentinels only.
+The BTW and session-recency browser gates handle TERM/INT/HUP and protect their
+ownership handoffs. Final cleanup ignores further interrupts, so repeated
+signals cannot skip cleanup or its completion evidence. Their regressions use
+disposable servers, workers and protected sentinels only.
 If startup fails after spawning but before ownership is established, the
 launcher also retains the temporary directory and reports its path. Inspect
 these resources manually; a PID record alone never authorizes termination.
