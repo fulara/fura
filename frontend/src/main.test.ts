@@ -1885,6 +1885,37 @@ describe("desktop cog options", () => {
       return connection;
     }
 
+    it("keeps an opened server patch isolated from background Git replies and returns to Git on close", async () => {
+      const connection = await openDiffs();
+      clickGitButton("↻");
+      const pending = latestGitRequest(connection);
+      clickGitButton("Open diff…");
+      const listing = connection.sent.at(-1);
+      if (listing?.type !== "diffFile.list") throw new Error("Directory request missing");
+      connection.emit({ type: "diffFile.listed", requestId: listing.requestId, path: "/patches",
+        parentPath: "/", entries: [], truncated: false });
+      const input = document.querySelector<HTMLInputElement>('.diff-file-picker input[placeholder="Absolute server path to a diff or patch"]')!;
+      input.value = "/patches/review.patch";
+      input.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      const opened = connection.sent.at(-1);
+      if (opened?.type !== "diffFile.open") throw new Error("File request missing");
+      const patch = "diff --git a/imported.ts b/imported.ts\n@@ -1 +1 @@\n-old\n+IMPORTED_ONLY";
+      connection.emit({ type: "diffFile.opened", requestId: opened.requestId, path: opened.path, rows: simpleDiffRows(patch) });
+      answerDiff(connection, pending, "background");
+      answerContent(connection, pending, "background", "BACKGROUND_GIT_ONLY");
+      const fileView = () => document.querySelector("#testDiffPanel .diff-file-view");
+      expect(fileView()?.textContent).toContain("IMPORTED_ONLY");
+      expect(fileView()?.textContent).not.toContain("BACKGROUND_GIT_ONLY");
+      expect(fileView()?.querySelector(".diff-comment-btn, .diff-question-btn, .diff-context-more")).toBeNull();
+      const layout = fileView()!.querySelector<HTMLSelectElement>(".diff-layout-select")!;
+      layout.value = "split";
+      layout.dispatchEvent(new Event("change"));
+      expect(fileView()?.querySelector(".diff-split-row")).not.toBeNull();
+      clickGitButton("Close file");
+      expect(fileView()).toBeNull();
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("BACKGROUND_GIT_ONLY");
+    });
+
     it.each(["Current changes", "History"] as const)("paints accepted %s summary and patch before Diffs is reactivated", async mode => {
       const connection = await openDiffs(mode);
       document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Refresh"]')!.click();

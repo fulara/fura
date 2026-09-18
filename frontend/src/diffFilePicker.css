@@ -1,0 +1,61 @@
+.diff-file-picker {
+  width: min(48rem, 92vw);
+  max-height: 90vh;
+  box-sizing: border-box;
+  overflow: auto;
+  color: #e2e8f4;
+  background: #141921;
+  border: 1px solid #526079;
+  border-radius: 0.7rem;
+  padding: 1rem;
+}
+
+.diff-file-picker::backdrop { background: #000a; }
+.diff-file-picker header { display: flex; align-items: center; gap: 0.5rem; }
+.diff-file-picker header strong { flex: 1; }
+.diff-file-picker p { color: #b5bed1; font-size: 0.85rem; overflow-wrap: anywhere; }
+.diff-file-picker button { cursor: pointer; }
+.diff-file-picker button:disabled { cursor: default; opacity: 0.5; }
+.diff-file-picker button,
+.diff-file-picker input {
+  color: inherit;
+  background: #202938;
+  border: 1px solid #526079;
+  border-radius: 0.3rem;
+  font: inherit;
+  padding: 0.4rem 0.65rem;
+}
+.diff-file-picker button:focus-visible,
+.diff-file-picker input:focus-visible { outline: 2px solid #8fb8ff; outline-offset: 2px; }
+.diff-file-picker button:hover:not(:disabled) { background: #2e3c51; }
+
+.diff-file-picker-path { display: flex; align-items: flex-end; gap: 0.5rem; }
+.diff-file-picker-path label { display: grid; gap: 0.35rem; flex: 1; min-width: 0; font-size: 0.85rem; }
+.diff-file-picker-path input { width: 100%; min-width: 0; box-sizing: border-box; background: #0c1017; }
+.diff-file-picker-location { margin-bottom: 0.4rem; font-family: monospace; }
+.diff-file-picker-entries {
+  min-height: 8rem;
+  max-height: 38vh;
+  overflow: auto;
+  margin: 0;
+  padding: 0.3rem;
+  list-style: none;
+  background: #0c1017;
+  border: 1px solid #364155;
+  border-radius: 0.3rem;
+}
+.diff-file-picker .diff-file-picker-entry {
+  display: block;
+  width: 100%;
+  text-align: left;
+  overflow-wrap: anywhere;
+  border: 1px solid transparent;
+  border-radius: 0.2rem;
+  background: transparent;
+  font-size: 0.85rem;
+}
+.diff-file-picker .diff-file-picker-entry.is-selected { background: #2a3d59; border-color: #7ca2d9; }
+.diff-file-picker-listing-status { margin-top: 0.4rem; }
+.diff-file-picker-status { min-height: 1.3em; }
+.diff-file-picker-status.is-error { color: #ffb4b4; }
+.diff-file-picker footer { display: flex; justify-content: flex-end; }

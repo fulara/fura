@@ -336,6 +336,13 @@ pub(crate) async fn handle_client_message_for_connection(
             provider,
             model_id,
         } => handle_model_set_command(state, session_id, &provider, &model_id).await,
+        ClientMessage::DiffFileList { request_id, path } => {
+            let default_directory = state.default_cwd.read().await.clone();
+            vec![crate::diff_files::list(request_id, path, default_directory).await]
+        }
+        ClientMessage::DiffFileOpen { request_id, path } => {
+            vec![crate::diff_files::open(request_id, path).await]
+        }
         ClientMessage::SessionChangesRequest {
             client_id,
             diff_id,

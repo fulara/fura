@@ -2289,23 +2289,84 @@ pub(crate) fn parse_diff_rows(diff_text: &str) -> Vec<DiffRow> {
     let mut rows = Vec::new();
     let mut old_path: Option<String> = None;
     let mut new_path = String::new();
+    let mut file_row = None;
+    let mut git_headers_pending = false;
     let mut hunk: Option<String> = None;
     let mut old_line = 0_u32;
     let mut new_line = 0_u32;
+    let mut old_remaining = 0_u32;
+    let mut new_remaining = 0_u32;
     let mut combined = false;
+    let mut lines = diff_text.trim_start_matches('\u{feff}').lines().peekable();
 
-    for text in diff_text.split_terminator('\n') {
+    while let Some(text) = lines.next() {
+        // Consume hunk bodies before interpreting headers: "---" and "+++"
+        // are also valid removed/added source lines.
+        if old_remaining > 0 || new_remaining > 0 {
+            let kind = match text.as_bytes().first() {
+                Some(b'+') if new_remaining > 0 => Some(DiffLineKind::Add),
+                Some(b'-') if old_remaining > 0 => Some(DiffLineKind::Remove),
+                Some(b' ') if old_remaining > 0 && new_remaining > 0 => Some(DiffLineKind::Context),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                let has_old = kind != DiffLineKind::Add;
+                let has_new = kind != DiffLineKind::Remove;
+                rows.push(DiffRow::Line {
+                    prefix: text[..1].to_string(),
+                    location: DiffLineLocation {
+                        old_path: old_path.clone(),
+                        new_path: new_path.clone(),
+                        hunk: hunk.clone(),
+                        side: if has_new {
+                            DiffSide::Right
+                        } else {
+                            DiffSide::Left
+                        },
+                        kind,
+                        old_line: has_old.then_some(old_line),
+                        new_line: has_new.then_some(new_line),
+                        text: text.to_string(),
+                    },
+                });
+                // Header ranges were checked; saturation can only occur after
+                // consuming the final valid line at u32::MAX.
+                if has_old {
+                    old_remaining -= 1;
+                    old_line = old_line.saturating_add(1);
+                }
+                if has_new {
+                    new_remaining -= 1;
+                    new_line = new_line.saturating_add(1);
+                }
+                continue;
+            }
+            if text == "\\ No newline at end of file" {
+                rows.push(DiffRow::Meta {
+                    text: text.to_string(),
+                });
+                continue;
+            }
+        }
+        old_remaining = 0;
+        new_remaining = 0;
+        hunk = None;
+
         if let Some(path) = text
             .strip_prefix("diff --cc ")
             .or_else(|| text.strip_prefix("diff --combined "))
         {
             let path = decode_diff_path(path).unwrap_or_else(|| path.to_string());
+            old_path = Some(path.clone());
+            new_path = path.clone();
+            file_row = Some(rows.len());
             rows.push(DiffRow::File {
                 text: text.to_string(),
-                old_path: Some(path.clone()),
+                old_path: old_path.clone(),
                 new_path: path.clone(),
                 file_path: path,
             });
+            git_headers_pending = false;
             combined = true;
             continue;
         }
@@ -2313,7 +2374,8 @@ pub(crate) fn parse_diff_rows(diff_text: &str) -> Vec<DiffRow> {
             combined = false;
             old_path = Some(old);
             new_path = new;
-            hunk = None;
+            file_row = Some(rows.len());
+            git_headers_pending = true;
             rows.push(DiffRow::File {
                 text: text.to_string(),
                 old_path: old_path.clone(),
@@ -2329,68 +2391,66 @@ pub(crate) fn parse_diff_rows(diff_text: &str) -> Vec<DiffRow> {
             continue;
         }
 
-        if let Some(rename_from) = text.strip_prefix("rename from ") {
-            old_path =
-                Some(decode_diff_path(rename_from).unwrap_or_else(|| rename_from.to_string()));
-            if let Some(DiffRow::File {
-                old_path: row_old_path,
-                ..
-            }) = rows.last_mut()
+        if let Some(old) = text.strip_prefix("--- ")
+            && let Some(new) = lines.peek().and_then(|line| line.strip_prefix("+++ "))
+        {
+            old_path = parse_diff_header_path(old, if git_headers_pending { "a/" } else { "" });
+            new_path = parse_diff_header_path(new, if git_headers_pending { "b/" } else { "" })
+                .or_else(|| old_path.clone())
+                .unwrap_or_default();
+            if !new_path.is_empty() {
+                let new_header = lines.next().expect("peeked new file header");
+                if git_headers_pending {
+                    update_diff_file_paths(&mut rows, file_row, &old_path, &new_path);
+                    rows.push(DiffRow::Meta {
+                        text: text.to_string(),
+                    });
+                } else {
+                    file_row = Some(rows.len());
+                    rows.push(DiffRow::File {
+                        text: text.to_string(),
+                        old_path: old_path.clone(),
+                        new_path: new_path.clone(),
+                        file_path: new_path.clone(),
+                    });
+                }
+                rows.push(DiffRow::Meta {
+                    text: new_header.to_string(),
+                });
+                git_headers_pending = false;
+                continue;
+            }
+        }
+
+        if git_headers_pending {
+            if let Some(path) = text
+                .strip_prefix("rename from ")
+                .or_else(|| text.strip_prefix("copy from "))
             {
-                *row_old_path = old_path.clone();
-            }
-            rows.push(DiffRow::Meta {
-                text: text.to_string(),
-            });
-            continue;
-        }
-
-        if let Some(rename_to) = text.strip_prefix("rename to ") {
-            new_path = decode_diff_path(rename_to).unwrap_or_else(|| rename_to.to_string());
-            if let Some(DiffRow::File {
-                new_path: row_new_path,
-                file_path,
-                ..
-            }) = rows.last_mut()
+                old_path = decode_diff_path(path);
+            } else if let Some(path) = text
+                .strip_prefix("rename to ")
+                .or_else(|| text.strip_prefix("copy to "))
             {
-                *row_new_path = new_path.clone();
-                *file_path = new_path.clone();
+                if let Some(path) = decode_diff_path(path) {
+                    new_path = path;
+                }
+            } else if text.starts_with("new file mode ") {
+                old_path = None;
             }
-            rows.push(DiffRow::Meta {
-                text: text.to_string(),
-            });
-            continue;
+            update_diff_file_paths(&mut rows, file_row, &old_path, &new_path);
         }
 
-        if text.starts_with("Binary files ") {
-            rows.push(DiffRow::Meta {
-                text: text.to_string(),
-            });
-            continue;
-        }
-
-        if let Some(path) = text.strip_prefix("--- ") {
-            old_path = parse_diff_header_path(path, "a/");
-            rows.push(DiffRow::Meta {
-                text: text.to_string(),
-            });
-            continue;
-        }
-
-        if let Some(path) = text.strip_prefix("+++ ") {
-            if let Some(path) = parse_diff_header_path(path, "b/") {
-                new_path = path;
-            }
-            rows.push(DiffRow::Meta {
-                text: text.to_string(),
-            });
-            continue;
-        }
-
-        if let Some((old_start, new_start)) = parse_hunk_header(text) {
+        if file_row.is_some()
+            && !new_path.is_empty()
+            && let Some((old_start, old_count, new_start, new_count)) = parse_hunk_header(text)
+        {
             old_line = old_start;
             new_line = new_start;
+            old_remaining = old_count;
+            new_remaining = new_count;
             hunk = Some(text.to_string());
+            git_headers_pending = false;
             rows.push(DiffRow::Hunk {
                 text: text.to_string(),
                 old_path: old_path.clone(),
@@ -2401,67 +2461,31 @@ pub(crate) fn parse_diff_rows(diff_text: &str) -> Vec<DiffRow> {
             continue;
         }
 
-        if text.starts_with('+') && !text.starts_with("+++") {
-            rows.push(DiffRow::Line {
-                prefix: "+".to_string(),
-                location: DiffLineLocation {
-                    old_path: old_path.clone(),
-                    new_path: new_path.clone(),
-                    hunk: hunk.clone(),
-                    side: DiffSide::Right,
-                    kind: DiffLineKind::Add,
-                    old_line: None,
-                    new_line: Some(new_line),
-                    text: text.to_string(),
-                },
-            });
-            new_line = new_line.saturating_add(1);
-            continue;
-        }
-
-        if text.starts_with('-') && !text.starts_with("---") {
-            rows.push(DiffRow::Line {
-                prefix: "-".to_string(),
-                location: DiffLineLocation {
-                    old_path: old_path.clone(),
-                    new_path: new_path.clone(),
-                    hunk: hunk.clone(),
-                    side: DiffSide::Left,
-                    kind: DiffLineKind::Remove,
-                    old_line: Some(old_line),
-                    new_line: None,
-                    text: text.to_string(),
-                },
-            });
-            old_line = old_line.saturating_add(1);
-            continue;
-        }
-
-        if text.starts_with(' ') {
-            rows.push(DiffRow::Line {
-                prefix: " ".to_string(),
-                location: DiffLineLocation {
-                    old_path: old_path.clone(),
-                    new_path: new_path.clone(),
-                    hunk: hunk.clone(),
-                    side: DiffSide::Right,
-                    kind: DiffLineKind::Context,
-                    old_line: Some(old_line),
-                    new_line: Some(new_line),
-                    text: text.to_string(),
-                },
-            });
-            old_line = old_line.saturating_add(1);
-            new_line = new_line.saturating_add(1);
-            continue;
-        }
-
         rows.push(DiffRow::Meta {
             text: text.to_string(),
         });
     }
 
     rows
+}
+
+fn update_diff_file_paths(
+    rows: &mut [DiffRow],
+    file_row: Option<usize>,
+    old_path: &Option<String>,
+    new_path: &str,
+) {
+    if let Some(DiffRow::File {
+        old_path: row_old,
+        new_path: row_new,
+        file_path,
+        ..
+    }) = file_row.and_then(|index| rows.get_mut(index))
+    {
+        row_old.clone_from(old_path);
+        new_path.clone_into(row_new);
+        new_path.clone_into(file_path);
+    }
 }
 
 fn parse_diff_git_line(text: &str) -> Option<(String, String)> {
@@ -2535,17 +2559,34 @@ fn decode_diff_path(text: &str) -> Option<String> {
 }
 
 fn parse_diff_header_path(text: &str, prefix: &str) -> Option<String> {
-    let path = decode_diff_path(text.trim_end_matches('\t'))?;
-    path.strip_prefix(prefix).map(str::to_string)
+    // Unified headers separate the path and optional timestamp with a tab.
+    // Git quotes tabs inside filenames, so split before decoding quoted paths.
+    let path = decode_diff_path(text.split('\t').next()?)?;
+    if path.is_empty() || path == "/dev/null" {
+        return None;
+    }
+    Some(path.strip_prefix(prefix).unwrap_or(&path).to_string())
 }
 
-fn parse_hunk_header(text: &str) -> Option<(u32, u32)> {
+fn parse_hunk_header(text: &str) -> Option<(u32, u32, u32, u32)> {
+    fn range(text: &str) -> Option<(u32, u32)> {
+        let (start, count) = text.split_once(',').unwrap_or((text, "1"));
+        let start: u32 = start.parse().ok()?;
+        let count: u32 = count.parse().ok()?;
+        if count > 0 {
+            if start == 0 {
+                return None;
+            }
+            start.checked_add(count - 1)?;
+        }
+        Some((start, count))
+    }
     let rest = text.strip_prefix("@@ -")?;
     let (old_part, rest) = rest.split_once(" +")?;
     let (new_part, _) = rest.split_once(" @@")?;
-    let old_start = old_part.split(',').next()?.parse().ok()?;
-    let new_start = new_part.split(',').next()?.parse().ok()?;
-    Some((old_start, new_start))
+    let (old_start, old_count) = range(old_part)?;
+    let (new_start, new_count) = range(new_part)?;
+    Some((old_start, old_count, new_start, new_count))
 }
 
 async fn current_review_worktree(state: &AppState, repo_root: &Path) -> Option<DiffReviewWorktree> {
@@ -3527,6 +3568,99 @@ mod tests {
     use serde_json::{Value, json};
     use std::{collections::HashSet, fs, process::Command as StdCommand};
     use tempfile::TempDir;
+
+    #[test]
+    fn unified_rows_keep_timestamped_paths_and_header_like_source_lines() {
+        let rows = parse_diff_rows(concat!(
+            "mail preamble\n+not a hunk\n",
+            "--- old name.txt\t2026-01-01 12:00:00 +0000\n",
+            "+++ new name.txt\t2026-01-02 12:00:00 +0000\n",
+            "@@ -8,2 +9,2 @@ section\n",
+            "--- old source\n+++ new source\n context\n",
+            "+outside the declared hunk\n",
+            "--- /dev/null\n+++ added.txt\n@@ -0,0 +1 @@\n+added\n",
+            "--- removed.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-removed\n",
+        ));
+        let locations: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                DiffRow::Line { location, .. } => Some(location),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            locations
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "--- old source",
+                "+++ new source",
+                " context",
+                "+added",
+                "-removed"
+            ]
+        );
+        assert_eq!(locations[0].old_path.as_deref(), Some("old name.txt"));
+        assert_eq!(locations[0].old_line, Some(8));
+        assert_eq!(locations[1].new_path, "new name.txt");
+        assert_eq!(locations[1].new_line, Some(9));
+        assert_eq!(
+            (locations[2].old_line, locations[2].new_line),
+            (Some(9), Some(10))
+        );
+        assert_eq!(locations[3].old_path, None);
+        assert_eq!(locations[3].new_path, "added.txt");
+        assert_eq!(locations[4].new_path, "removed.txt");
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, DiffRow::File { .. }))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn overflowing_or_exhausted_hunks_never_fabricate_line_numbers() {
+        let rows = parse_diff_rows(concat!(
+            "--- a\n+++ b\n",
+            "@@ -4294967295,2 +1,2 @@\n-overflow\n+invalid\n",
+            "@@ -4294967295 +4294967295 @@\n-last old\n+last new\n+excess\n",
+            "@@ -0 +1 @@\n-invalid zero\n+not a line\n",
+        ));
+        let locations: Vec<_> = rows
+            .iter()
+            .filter_map(|row| match row {
+                DiffRow::Line { location, .. } => Some(location),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(locations.len(), 2);
+        assert_eq!(locations[0].old_line, Some(u32::MAX));
+        assert_eq!(locations[1].new_line, Some(u32::MAX));
+        assert_eq!(locations[1].text, "+last new");
+    }
+
+    #[test]
+    fn git_metadata_updates_file_identity_without_fabricating_hunks() {
+        let rows = parse_diff_rows(concat!(
+            "diff --git a/old b/new\nsimilarity index 100%\n",
+            "rename from old\nrename to new\n",
+            "diff --git a/added b/added\nnew file mode 100644\n",
+            "--- /dev/null\n+++ b/added\n@@ -0,0 +1 @@\n+value\n",
+            "\\ No newline at end of file\n",
+        ));
+        assert!(matches!(&rows[0], DiffRow::File { old_path, new_path, .. }
+            if old_path.as_deref() == Some("old") && new_path == "new"));
+        assert!(matches!(&rows[4], DiffRow::File { old_path, new_path, .. }
+            if old_path.is_none() && new_path == "added"));
+        assert_eq!(
+            rows.iter()
+                .filter(|row| matches!(row, DiffRow::Line { .. }))
+                .count(),
+            1
+        );
+    }
 
     fn git(repo: &Path, args: &[&str]) {
         let output = StdCommand::new("git")

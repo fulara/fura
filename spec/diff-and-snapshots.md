@@ -120,7 +120,7 @@ leave a pinned History review waiting for a working-tree response.
 
 Desktop chrome is compact: repository selector, branch/HEAD and view navigation share
 one header (two rows in narrow panels). **Review options** is a native disclosure for
-Add/Hide selected/Set default and Advanced Compare. The menu survives background
+Add/Hide selected/Set default, Open diff… and Advanced Compare. The menu survives background
 summary/history rerenders while open and closes after an action or Escape.
 History and changed files use dense rows with independent scrolling. Long subjects
 and paths truncate visually; tooltips retain their full values.
@@ -134,6 +134,43 @@ Pop out lives in the Dockview tab header, not in a separate content toolbar.
 **Show more context** adds ten context lines to the visible patch, up to 200.
 In All files view it reloads the aggregate patch; with one file selected it reloads
 that file. Expanding context never silently changes the file selection.
+
+## Opening a server diff file
+
+**Review options → Open diff…** opens a native HTML dialog browsing the **Fura
+server's filesystem**, not a browser-local upload or an OS dialog on the server.
+It is also available without a selected session and in dedicated review sessions.
+Directory path/Go, Up, directory entries and a file-path/Open form allow navigation.
+The listing shows directories and `.diff`/`.patch` files (case-insensitive); a typed
+file path may have any extension. Paths returned by the server are canonical.
+
+Successful directory visits and file opens remember their containing directory in
+origin-scoped browser `localStorage` (`fura.diff.lastDirectory`), across dialog close
+and page reload. The initial fallback is session cwd, then server default cwd.
+Failed paths never overwrite this preference. Request IDs reject late/superseded
+replies; changing input invalidates a pending read. Cancel, disconnect and session
+switch close the picker. Errors leave the previous listing available.
+
+The selected UTF-8 patch replaces only the displayed diff surface. It reuses the
+shared parser, syntax highlighting and Unified/Side by side preference, with no
+comments, agent questions, checkout, wider-context reads or apply action. Background
+Git replies cannot replace it. Close file returns to the existing Git review;
+session switches and reloads discard the opened file, not the remembered folder.
+Git patches and plain unified headers (including timestamps) are supported.
+Header-like source lines within hunks remain source lines; unsupported binary or
+combined patch content stays read-only metadata. All content is rendered as text.
+
+Authenticated `diffFile.list` / `diffFile.open` requests carry `requestId` and `path`.
+Only the requesting connection receives `diffFile.listed`, `diffFile.opened` or
+`diffFile.error`. These reads do not call Git or OMP and never write filesystem data.
+Explicit server browsing is not repository-contained; access uses the server user's
+filesystem permissions. File opens require regular files, reject NUL/non-UTF-8 and
+empty/non-diff content, and are bounded to 2 MiB, 20,000 lines and a conservative
+32 MiB estimated expanded-row size before parsing. No partial patch is returned.
+Listings stop after 1,000 matching entries or 10,000 inspected entries and visibly
+report truncation; a typed path remains usable. Filesystem work runs off the async
+runtime, and supported Unix targets use nonblocking opens plus descriptor type checks.
+Event summaries never include imported patch content.
 
 ## Diff layout
 
@@ -401,6 +438,7 @@ snapshot afterward. It still acts on the session cwd repository, without fetchin
 
 - `src/diff.rs`: direct Git groups/comparisons, version validation, lazy patches, jobs,
   review worktrees and rebase mechanics.
+- `src/diff_files.rs` / `frontend/src/diffFilePicker.ts`: bounded server filesystem picker and read-only patch imports.
 - `src/session_repos.rs`: repository discovery and durable manual corrections.
 - `src/range_diff.rs` / `frontend/src/rangeDiff.ts`: bounded native range-diff execution and safe ANSI rendering.
 - `src/protocol.rs` / `frontend/src/protocol.ts`: manually mirrored DTOs.

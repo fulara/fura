@@ -544,6 +544,8 @@ export type DiffRow =
   | { type: "hunk"; text: string; oldPath?: string | null; newPath: string; filePath: string; hunk: string }
   | { type: "line"; prefix: string; location: DiffLineLocation };
 
+export type DiffFileEntry = { name: string; path: string; isDirectory: boolean };
+
 export type DiffReviewAnnotation = {
   id: string;
   kind: "comment" | "question";
@@ -754,6 +756,9 @@ export type ServerMessage =
   | { type: "git.rangeDiff"; targetClientId: string; requestId: string; result: GitRangeDiffResult | null; error: string | null }
   | { type: "sessionChanges.summary"; state: SessionChangesSummaryState }
   | { type: "compareDiff.summary"; state: CompareDiffSummaryState }
+  | { type: "diffFile.listed"; requestId: string; path: string; parentPath: string | null; entries: DiffFileEntry[]; truncated: boolean }
+  | { type: "diffFile.opened"; requestId: string; path: string; rows: DiffRow[] }
+  | { type: "diffFile.error"; requestId: string; message: string }
   | { type: "diff.content"; content: DiffContentState }
   | { type: "diff.complete"; targetClientId: string; diffId: string; scope: DiffScope }
   | { type: "diff.cancelled"; targetClientId: string; diffId: string; scope: DiffScope; reason?: string | null }
@@ -824,6 +829,8 @@ export type ClientMessage =
   | { type: "git.rangeDiff.cancel"; requestId: string }
   | { type: "sessionRepos.update"; sessionId: string; action: SessionRepoAction; path: string }
   | { type: "compareDiff.request"; clientId: string; diffId: string; repoRoot: string; base: DiffRefInput; head: DiffRefInput; detailMode: DiffDetailMode; mergeBase?: boolean; currentCommitOid?: string | null; selectedFile?: DiffFileSelector | null; contextLines?: number | null; ignoreWhitespace?: boolean }
+  | { type: "diffFile.list"; requestId: string; path: string }
+  | { type: "diffFile.open"; requestId: string; path: string }
   | { type: "diff.content.request"; clientId: string; diffId: string; scope: DiffScope; sessionId?: string | null; comparisonKey: string; selectedFile?: DiffFileSelector | null; contextLines?: number | null; ignoreWhitespace?: boolean }
   | { type: "diff.cancel"; clientId: string; diffId: string; scope: DiffScope; reason?: "replaced" | "closed" | "sessionChanged" | "repoChanged" | "refsChanged" | "payloadChanged" | "refreshed" }
   | { type: "diff.reviewWorktree.ensure"; sourceRepoRoot: string; target?: DiffCheckoutTarget | null }

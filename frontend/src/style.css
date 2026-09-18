@@ -1511,6 +1511,11 @@ h2 {
   gap: 0;
 }
 
+.diff-file-view { grid-template-columns: minmax(0, 1fr); }
+.diff-file-view .diffs-toolbar { padding: 0.5rem; border-bottom: 1px solid #252a35; }
+.diff-file-title { flex: 1 1 100%; overflow-wrap: anywhere; }
+.diff-file-view .diff-line-hunk { grid-template-columns: auto minmax(0, 1fr); }
+
 .git-review-view {
   grid-template-columns: clamp(12rem, 23%, 18rem) minmax(0, 1fr);
   grid-template-rows: auto minmax(14rem, 1fr);

@@ -276,6 +276,8 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::GitRangeDiffCancel { .. } => "git.rangeDiff.cancel",
         ClientMessage::SessionReposUpdate { .. } => "sessionRepos.update",
         ClientMessage::CompareDiffRequest { .. } => "compareDiff.request",
+        ClientMessage::DiffFileList { .. } => "diffFile.list",
+        ClientMessage::DiffFileOpen { .. } => "diffFile.open",
         ClientMessage::DiffCancel { .. } => "diff.cancel",
         ClientMessage::DiffContentRequest { .. } => "diff.content.request",
         ClientMessage::DiffReviewWorktreeEnsure { .. } => "diff.reviewWorktree.ensure",
@@ -327,6 +329,14 @@ fn client_message_debug_fields(
     );
     let message_type = client_message_type(message);
     match message {
+        ClientMessage::DiffFileList { request_id, path }
+        | ClientMessage::DiffFileOpen { request_id, path } => {
+            fields.insert("requestId".to_string(), Value::String(request_id.clone()));
+            fields.insert(
+                "pathPreview".to_string(),
+                Value::String(text_preview(path, 240)),
+            );
+        }
         ClientMessage::SessionAttach { session_id }
         | ClientMessage::SessionDetach { session_id }
         | ClientMessage::SessionStop { session_id }
@@ -1269,6 +1279,9 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::GitFile { .. } => "git.file",
         ServerMessage::GitRangeDiff { .. } => "git.rangeDiff",
         ServerMessage::CompareDiffSummary { .. } => "compareDiff.summary",
+        ServerMessage::DiffFileListed { .. } => "diffFile.listed",
+        ServerMessage::DiffFileOpened { .. } => "diffFile.opened",
+        ServerMessage::DiffFileError { .. } => "diffFile.error",
         ServerMessage::DiffContent { .. } => "diff.content",
         ServerMessage::DiffComplete { .. } => "diff.complete",
         ServerMessage::DiffCancelled { .. } => "diff.cancelled",
@@ -1501,6 +1514,40 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "plan.review",
             session_id = %session_id,
             bytes = content.len()
+        ),
+        ServerMessage::DiffFileListed {
+            request_id,
+            path,
+            entries,
+            truncated,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "diffFile.listed",
+            request_id = %request_id,
+            path_preview = %text_preview(path, 240),
+            entry_count = entries.len(),
+            truncated
+        ),
+        ServerMessage::DiffFileOpened {
+            request_id,
+            path,
+            rows,
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = "diffFile.opened",
+            request_id = %request_id,
+            path_preview = %text_preview(path, 240),
+            row_count = rows.len()
+        ),
+        ServerMessage::DiffFileError {
+            request_id,
+            message,
+        } => warn!(
+            direction = "bridge_to_client",
+            message_type = "diffFile.error",
+            request_id = %request_id,
+            bytes = message.len()
         ),
         ServerMessage::GitHistory {
             session_id,

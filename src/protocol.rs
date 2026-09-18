@@ -198,6 +198,14 @@ pub(crate) enum DiffRow {
     },
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DiffFileEntry {
+    pub(crate) name: String,
+    pub(crate) path: String,
+    pub(crate) is_directory: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum DiffRefKind {
@@ -987,6 +995,10 @@ pub(crate) enum ClientMessage {
         #[serde(default)]
         ignore_whitespace: bool,
     },
+    #[serde(rename = "diffFile.list")]
+    DiffFileList { request_id: String, path: String },
+    #[serde(rename = "diffFile.open")]
+    DiffFileOpen { request_id: String, path: String },
     #[serde(rename = "diff.cancel")]
     DiffCancel {
         client_id: String,
@@ -1332,6 +1344,22 @@ pub(crate) enum ServerMessage {
     SessionChangesSummary { state: SessionChangesSummaryState },
     #[serde(rename = "compareDiff.summary")]
     CompareDiffSummary { state: Box<CompareDiffSummaryState> },
+    #[serde(rename = "diffFile.listed")]
+    DiffFileListed {
+        request_id: String,
+        path: String,
+        parent_path: Option<String>,
+        entries: Vec<DiffFileEntry>,
+        truncated: bool,
+    },
+    #[serde(rename = "diffFile.opened")]
+    DiffFileOpened {
+        request_id: String,
+        path: String,
+        rows: Vec<DiffRow>,
+    },
+    #[serde(rename = "diffFile.error")]
+    DiffFileError { request_id: String, message: String },
     #[serde(rename = "diff.content")]
     DiffContent { content: DiffContentState },
     #[serde(rename = "diff.complete")]

@@ -24,6 +24,7 @@ mod commands;
 mod config;
 mod control;
 mod diff;
+mod diff_files;
 mod event_debug;
 mod omp_rpc;
 mod presets;

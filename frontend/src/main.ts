@@ -72,6 +72,7 @@ import {
 } from "./diffState";
 import { acceptGitHistoryResult, beginGitHistoryRequest, createGitHistoryState, gitHeadLabel, preserveHistoryBranchPicker, renderGitHistoryBrowser, selectGitHistoryRef, type GitHistoryState, type GitReviewView } from "./gitHistory";
 import { openCommittedFileView } from "./gitFileView";
+import { openDiffFilePicker, type DiffFilePicker } from "./diffFilePicker";
 import {
   annotationsForDiffLocation,
   checkoutTargetForDiffFile,
@@ -909,6 +910,8 @@ let activeReviewCommentComposer: ActiveReviewCommentComposer | null = null;
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
+let diffFilePicker: DiffFilePicker | null = null;
+let openedDiffFile: Extract<ServerMessage, { type: "diffFile.opened" }> | null = null;
 let diffLayout: "unified" | "split" = sessionStorage.getItem("fura.diff.layout") === "split" ? "split" : "unified";
 let diffIgnoreWhitespace = sessionStorage.getItem("fura.diff.ignoreWhitespace") === "true";
 type CachedDiffPatch = { patch: string; truncated: boolean; rows: DiffRow[]; contextLines: number };
@@ -1881,6 +1884,7 @@ function connect(token: string): void {
     onClose: () => {
       if (epoch !== connectionEpoch) return;
       sessionSkillsView.close(false);
+      diffFilePicker?.close();
       transcriptBtw.interrupt();
       btwDrafts.clear();
       markTranscriptViewDirty();
@@ -2011,6 +2015,8 @@ function activateSession(sessionId: string): void {
   const sessionChanged = activeSessionId !== sessionId || workspaceMode !== "session";
   if (sessionChanged) {
     clearPendingGitHistory();
+    diffFilePicker?.close();
+    openedDiffFile = null;
     pendingGitFile?.view.close();
     clearCodeRevision();
     switchComposerDraft(sessionId);
@@ -2050,6 +2056,11 @@ function handleServerMessage(message: ServerMessage): void {
   // Working-tree replies belong to the suspended workspace, never to a revision.
   if (codeRevision && message.type.startsWith("code.")) return;
   switch (message.type) {
+    case "diffFile.listed":
+    case "diffFile.opened":
+    case "diffFile.error":
+      diffFilePicker?.handleMessage(message);
+      break;
     case "session.skills.result":
     case "session.skills.error": {
       const state = sessionSkillsView.receive(message);
@@ -7118,8 +7129,76 @@ function retainReadableDiff(container: HTMLElement, annotationKey: string, targe
   return true;
 }
 
+function openServerDiffFile(owner: Document): void {
+  diffFilePicker?.close();
+  const initialDirectory = (activeSessionId ? projections.get(activeSessionId)?.summary.cwd : null)
+    || serverConfig?.defaultCwd || "";
+  diffFilePicker = openDiffFilePicker(owner, initialDirectory, send, file => {
+    openedDiffFile = file;
+    renderDiffsViewIfVisible(activeSessionId ?? "");
+  }, () => { diffFilePicker = null; });
+}
+
+function openDiffFileButton(): HTMLButtonElement {
+  const button = mkEl("button");
+  button.type = "button";
+  button.textContent = "Open diff…";
+  button.title = "Open a .diff or .patch file on the Fura server";
+  button.addEventListener("click", () => openServerDiffFile(button.ownerDocument));
+  return button;
+}
+
+function renderOpenedDiffFile(container: HTMLElement, file: NonNullable<typeof openedDiffFile>): void {
+  const previousRoot = container.querySelector<HTMLElement>(".diff-file-view");
+  if (previousRoot?.dataset.requestId === file.requestId && previousRoot.dataset.layout === diffLayout) return;
+  const previousBody = previousRoot?.dataset.requestId === file.requestId
+    ? previousRoot.querySelector<HTMLElement>(".diffs-main-body") : null;
+  const scrollTop = previousBody?.scrollTop ?? 0;
+  const scrollLeft = previousBody?.scrollLeft ?? 0;
+  const layoutFocused = container.ownerDocument.activeElement?.classList.contains("diff-layout-select");
+  const root = mkEl("section");
+  root.className = "diffs-view diff-file-view";
+  root.dataset.requestId = file.requestId;
+  root.dataset.layout = diffLayout;
+  root.setAttribute("aria-label", "Opened diff file");
+  const main = mkEl("section");
+  main.className = "diffs-main";
+  const toolbar = mkEl("header");
+  toolbar.className = "diffs-toolbar";
+  const title = mkEl("code");
+  title.className = "diff-file-title";
+  title.textContent = file.path;
+  title.title = file.path;
+  const note = mkEl("span");
+  note.textContent = "Server file · read-only";
+  const close = mkEl("button");
+  close.type = "button";
+  close.textContent = "Close file";
+  close.addEventListener("click", () => {
+    openedDiffFile = null;
+    renderDiffsViewIfVisible(activeSessionId ?? "");
+  });
+  toolbar.append(title, note, diffLayoutSelector(), openDiffFileButton(), close);
+  const body = mkEl("div");
+  body.className = "diffs-main-body";
+  renderDiffRows(body, "", null, file.rows, [], [], "", false, "sessionChanges");
+  main.append(toolbar, body);
+  root.append(main);
+  container.replaceChildren(root);
+  body.scrollTop = scrollTop;
+  body.scrollLeft = scrollLeft;
+  if (layoutFocused) toolbar.querySelector<HTMLSelectElement>(".diff-layout-select")?.focus({ preventScroll: true });
+}
+
 function renderDiffsView(container: HTMLElement, projection: SessionProjection | undefined): void {
   setRenderDocument(container.ownerDocument);
+  if (openedDiffFile) {
+    lastDiffsRenderedSessionId = activeSessionId;
+    lastDiffsRenderedProjectionPresent = Boolean(projection);
+    diffPanelDirty = false;
+    renderOpenedDiffFile(container, openedDiffFile);
+    return;
+  }
   const target = activeSessionId && projection ? diffReviewTarget(activeSessionId) : "";
   if (activeSessionId && projection && retainReadableDiff(container, activeSessionId, target)) {
     diffPanelDirty = false;
@@ -7176,6 +7255,7 @@ function renderDiffsView(container: HTMLElement, projection: SessionProjection |
   container.append(root);
 
   if (!activeSessionId || !projection) {
+    sidebarTop.append(openDiffFileButton());
     renderDiffMessage(main, "No session selected.", false);
     return;
   }
@@ -7291,7 +7371,7 @@ function renderSessionChangesView(sessionId: string, sidebarTop: HTMLElement, si
     renderDiffsViewIfVisible(sessionId);
   });
   navigation.append(refresh, expand);
-  optionsMenu.append(compare);
+  optionsMenu.append(openDiffFileButton(), compare);
   header.append(repository, navigation, options);
   root.prepend(header);
   if (choosingEntry) {
@@ -7384,7 +7464,7 @@ function renderDiffReviewSessionView(
   header.className = "diffs-toolbar";
   const title = mkEl("strong");
   title.textContent = "Diff";
-  header.append(title);
+  header.append(title, openDiffFileButton());
   main.append(header);
   const request = diffReviewRequestForSummary(summary);
   if (!request) {
@@ -7794,7 +7874,7 @@ function diffLayoutSelector(): HTMLSelectElement {
     // Presentation only: leave requests, repository/ref selection and anchors intact.
     markDiffsViewDirty();
     markComparePanelDirty();
-    if (activeSessionId) renderDiffsViewIfVisible(activeSessionId);
+    renderDiffsViewIfVisible(activeSessionId ?? "");
     renderComparePanelIfVisible();
   });
   return select;
@@ -8490,7 +8570,7 @@ function renderReviewCommentsSection(
 }
 
 
-function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState, rows: DiffRow[], annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff"): void {
+function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState | null, rows: DiffRow[], annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff"): void {
   const diff = mkEl("div");
   diff.className = `diff-lines${diffLayout === "split" ? " diff-lines-split" : ""}`;
   const fragment = diff.ownerDocument.createDocumentFragment();
@@ -8550,7 +8630,7 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
   container.append(diff);
 }
 
-function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annotationKey: string, state: DiffReviewableState, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff", highlighter: DiffHighlighter, index: number, displaySide?: "left" | "right"): void {
+function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annotationKey: string, state: DiffReviewableState | null, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff", highlighter: DiffHighlighter, index: number, displaySide?: "left" | "right"): void {
   if (row.type === "line") {
     // Context has one canonical review anchor (right). Its old-side copy is read-only.
     const displayOnly = displaySide === "left" && row.location.kind === "context";
@@ -8560,7 +8640,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
     lineWrap.className = "diff-line-wrap";
     const line = mkEl("div");
     line.className = `diff-line diff-line-${row.location.kind}`;
-    if (!displayOnly) {
+    if (!displayOnly && state) {
       const commentBtn = mkEl("button");
       commentBtn.type = "button";
       commentBtn.className = `diff-comment-btn ${lineComments.length > 0 ? "has-comments" : ""}`;
@@ -8574,7 +8654,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
       spacer.className = "diff-comment-spacer";
       spacer.setAttribute("aria-hidden", "true");
       line.append(spacer);
-      line.title = "Shared context; use the new-side controls to comment or ask a question.";
+      if (state) line.title = "Shared context; use the new-side controls to comment or ask a question.";
     }
     const gutter = mkEl("span");
     gutter.className = "diff-gutter";
@@ -8585,7 +8665,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
     highlighter.renderLine(index, text, displaySide);
     content.append(text);
     line.append(gutter, content);
-    if (!displayOnly) {
+    if (!displayOnly && state) {
       const questionBtn = mkEl("button");
       questionBtn.type = "button";
       questionBtn.className = `diff-question-btn ${lineQuestions.length > 0 ? "has-questions" : ""}`;
@@ -8601,13 +8681,13 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
       line.append(spacer);
     }
     lineWrap.append(line);
-    const showComposer = !displayOnly && isReviewCommentCreateComposer(annotationKey, key, row.location);
+    const showComposer = state && !displayOnly && isReviewCommentCreateComposer(annotationKey, key, row.location);
     if (lineComments.length > 0 || lineQuestions.length > 0 || showComposer) {
       const thread = mkEl("div");
       thread.className = "diff-inline-comments";
       for (const comment of lineComments) thread.append(renderReviewCommentItem(comment, false));
       for (const annotation of lineQuestions) thread.append(renderDiffAnnotationItem(annotationKey, annotation));
-      if (showComposer && activeReviewCommentComposer?.mode === "create") {
+      if (state && showComposer && activeReviewCommentComposer?.mode === "create") {
         thread.append(renderReviewCommentComposer({
           mode: "create",
           initialBody: activeReviewCommentComposer.body,
@@ -8634,7 +8714,7 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
   spacer.className = "diff-comment-spacer";
   const text = mkEl("code");
   text.textContent = row.text;
-  if (row.type === "hunk") {
+  if (row.type === "hunk" && state) {
     const more = mkEl("button");
     more.type = "button";
     more.className = "diff-context-more";

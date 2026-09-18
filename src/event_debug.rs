@@ -328,6 +328,18 @@ pub(crate) fn summarize_rpc_event(session_id: &str, raw_line: &str) -> Map<Strin
 
 pub(crate) fn summarize_client_event(message: &ClientMessage) -> Map<String, Value> {
     match message {
+        ClientMessage::DiffFileList { request_id, path }
+        | ClientMessage::DiffFileOpen { request_id, path } => {
+            let event_type = if matches!(message, ClientMessage::DiffFileList { .. }) {
+                "diffFile.list"
+            } else {
+                "diffFile.open"
+            };
+            let mut record = event_record("client_to_bridge", event_type);
+            record.insert("requestId".to_string(), json!(request_id));
+            insert_text_summary(&mut record, "path", path);
+            record
+        }
         ClientMessage::PlanApprove {
             session_id,
             plan_file_path,
@@ -411,6 +423,40 @@ pub(crate) fn summarize_client_event(message: &ClientMessage) -> Map<String, Val
 
 pub(crate) fn summarize_server_event(message: &ServerMessage) -> Map<String, Value> {
     match message {
+        ServerMessage::DiffFileListed {
+            request_id,
+            path,
+            entries,
+            truncated,
+            ..
+        } => {
+            let mut record = event_record("bridge_to_client", "diffFile.listed");
+            record.insert("requestId".to_string(), json!(request_id));
+            insert_text_summary(&mut record, "path", path);
+            record.insert("entryCount".to_string(), json!(entries.len()));
+            record.insert("truncated".to_string(), json!(truncated));
+            record
+        }
+        ServerMessage::DiffFileOpened {
+            request_id,
+            path,
+            rows,
+        } => {
+            let mut record = event_record("bridge_to_client", "diffFile.opened");
+            record.insert("requestId".to_string(), json!(request_id));
+            insert_text_summary(&mut record, "path", path);
+            record.insert("rowCount".to_string(), json!(rows.len()));
+            record
+        }
+        ServerMessage::DiffFileError {
+            request_id,
+            message,
+        } => {
+            let mut record = event_record("bridge_to_client", "diffFile.error");
+            record.insert("requestId".to_string(), json!(request_id));
+            record.insert("messageBytes".to_string(), json!(message.len()));
+            record
+        }
         ServerMessage::PlanReview {
             session_id,
             plan_file_path,

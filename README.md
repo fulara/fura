@@ -16,7 +16,7 @@ Browser  ←→  Fura (Rust/Axum)  ←→  omp --mode rpc (child process, stdio 
 The desktop uses a compact session list, shared tab-header actions and a resizable
 prompt composer. Git review keeps repository context and navigation above the patch;
 full commit metadata expands on demand. The **⋯ / Review options** menu contains
-repository management and **Advanced Compare**. Touch/pointer-coarse controls retain
+repository management, **Open diff…**, and **Advanced Compare**. Touch/pointer-coarse controls retain
 larger targets; the separate mobile layout is unchanged.
 
 Manual `/compact` uses OMP's builtin parser, including its compaction modes.
@@ -71,6 +71,13 @@ Both views retain file filtering, lazy patches, statistics and wider context wit
 staging files or creating Git objects/refs. Historical files open directly from immutable
 blobs, without checkout. **Advanced Compare** remains separate and inherits the selected
 repository. See [the diff contract](spec/diff-and-snapshots.md) for read limits and Git-helper policy.
+
+**⋯ / Review options → Open diff…** browses files on the **Fura server**, not the
+browser computer. The dialog remembers the last successful directory in this
+browser across reloads. Choose a `.diff`/`.patch` file or type a server file path;
+UTF-8 Git and unified patches open read-only in Unified or Side by side layout.
+Nothing is applied. **Close file** returns to Git review. Files are limited to
+2 MiB and 20,000 lines, with an additional expanded-rendering safety limit.
 
 In a historical file's context menu, **View committed file** keeps the existing modal;
 **View this revision in Code** opens the full revision in Fura's read-only Code panel.
