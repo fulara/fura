@@ -56,6 +56,12 @@ readiness. Fura's pre-switch BTW reconciliation brackets the transition without
 replacing either upstream barrier. Fork and branch invalidate admitted prompt
 setup only at the commit boundary; a cancelled hook leaves the source prompt valid.
 
+OMP 18.2.5 delivers session events before extension hooks finish and persists
+completed messages on a separate ordered queue. Receiving an event is not proof
+that hooks have settled; the pre-switch reconciler must still drain side work.
+The upstream token-rate reset/reseed remains inside the corresponding committed
+new-session/resume paths without changing Fura's existing RPC rate semantics.
+
 ## Verification boundaries
 
 `frontend/src/main.test.ts` exercises the actual desktop DOM with the existing connection/Dockview harness: internal entry and tab structure, composer targeting, keyboard navigation, ACK/draft races, terminal replacement, main stream continuity, source/controller swaps, background badges, close/cleanup ordering, reconnect/stale ownership, snippets, image decoding, source stop, and adopted-document clipboard/focus. Main runs validation and isolated browser smoke; no provider or live-session verification is implied by these tests.

@@ -198,7 +198,7 @@ without restarting does not deploy the new runtime: newly loaded workers may
 refuse an older addon. Build a matching addon and restart only during an explicit
 deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.2.3. Desktop Fura exposes one-shot BTW through
+The current fork tracks OMP 18.2.5. Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
 captured at start; results remain only in browser memory. Upstream TUI BTW history
@@ -239,6 +239,20 @@ registry stays synchronized on resume, failed-switch rollback and fork alongside
 Fura's BTW transition barrier. Upstream's complete macOS PID enumeration and
 cancelled-job retention complement, rather than replace, the fork's pinned
 process ownership and kernel cleanup.
+
+OMP 18.2.5 moves shared terminal and domain types into `@oh-my-pi/pi-tui`.
+The fork imports those canonical types directly while preserving Fura's RPC
+payloads, client prompt identity, session skills and BTW transition barriers.
+Session events now reach subscribers independently of extension-hook completion;
+Fura still waits for authoritative terminal state rather than inferring completion
+from individual messages. The new per-session token-rate meter is preserved across
+fork transitions, but RPC's existing `tokensPerSecond` calculation is unchanged.
+
+Terminal livestreaming (`omp stream`) and the smoothed live token-rate display
+are not enabled in Fura. Upstream's automatic web-search order now prefers
+keyless Parallel over Perplexity; existing explicit search settings still apply.
+Typed judgments may fall back to configured online models. This refresh does not
+change model/provider settings, credentials, or enable a new sharing endpoint.
 
 Environment overrides for `run-local-omp.sh`:
 
