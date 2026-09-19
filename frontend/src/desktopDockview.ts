@@ -3,9 +3,14 @@ import { DockviewComponent, themeDark } from "dockview-core";
 import type { DockviewGroupPanel, IDockviewPanel, SerializedDockview } from "dockview-core";
 import { captureDiffViewScroll, restoreDiffViewScroll } from "./diffViewDom";
 
-export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare";
+export type PinnedDiffPanelId = `pinnedDiff:${string}`;
+export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare" | PinnedDiffPanelId;
 
-export type DesktopDockviewLayoutMode = "normal" | "diffReview";
+export type DesktopDockviewLayoutMode = "normal" | "diffReview" | "pinned";
+
+export function isPinnedDiffPanelId(id: string): id is PinnedDiffPanelId {
+  return id.startsWith("pinnedDiff:") && id.length > "pinnedDiff:".length;
+}
 
 export type DesktopDockview = {
   panelMounted(id: DesktopDockviewPanelId): boolean;
@@ -19,7 +24,9 @@ export type DesktopDockview = {
   ensureSessionChangesPanel(): boolean;
   ensureDiffsPanel(): boolean;
   ensureComparePanel(): boolean;
-  closePanel(id: "sessionChanges" | "diffs" | "compare"): boolean;
+  addPinnedPanel(id: PinnedDiffPanelId, title: string): boolean;
+  setPanelTitle(id: DesktopDockviewPanelId, title: string): boolean;
+  closePanel(id: "sessionChanges" | "diffs" | "compare" | PinnedDiffPanelId): boolean;
 };
 
 type DesktopDockviewOptions = {
@@ -68,7 +75,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     // content or reopen anything while the owning application is shutting down.
     const data: PersistedDockviewLayout = {
       version: 1,
-      layout: dockedLayout(api.toJSON(), id => returnLocations.get(api.getGroupPanel(id)!)),
+      layout: persistentLayout(dockedLayout(api.toJSON(), id => returnLocations.get(api.getGroupPanel(id)!))),
     };
     storage(win).setItem(options.storageKey, JSON.stringify(data));
   }, { capture: true });
@@ -109,7 +116,12 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   }
 
   function closePanelFromUser(panel: IDockviewPanel): void {
-    if (shuttingDown || panel.api.location.type !== "popout") return;
+    if (shuttingDown) return;
+    if (isPinnedDiffPanelId(panel.id)) {
+      api.removePanel(panel);
+      return;
+    }
+    if (panel.api.location.type !== "popout") return;
     if (panel.group.size === 1) {
       panel.api.getWindow().close();
     } else {
@@ -142,7 +154,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   }
 
   function workspaceVisible(): boolean {
-    return !options.host.classList.contains("workspace-panel-host")
+    return options.layoutMode === "pinned" || !options.host.classList.contains("workspace-panel-host")
       || options.host.classList.contains("workspace-panel-host-active");
   }
 
@@ -258,6 +270,21 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       return {
         element,
         init(params) {
+          if (isPinnedDiffPanelId(params.api.id)) {
+            const close = owner.createElement("button");
+            close.type = "button";
+            close.className = "dv-default-tab-action panel-close-btn";
+            close.title = "Close pinned panel";
+            close.setAttribute("aria-label", "Close pinned panel");
+            close.textContent = "×";
+            close.addEventListener("pointerdown", event => { event.stopPropagation(); });
+            close.addEventListener("click", event => {
+              event.preventDefault();
+              event.stopPropagation();
+              params.api.close();
+            });
+            element.append(close);
+          }
           title.textContent = params.title;
           listener = params.api.onDidTitleChange(event => { title.textContent = event.title; });
         },
@@ -313,7 +340,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       return {
         element: shell.element,
         init(params) {
-          if (panelId === "diffs" || panelId === "sessionChanges" || panelId === "compare") {
+          if (panelId === "diffs" || panelId === "sessionChanges" || panelId === "compare" || isPinnedDiffPanelId(panelId)) {
             params.api.group.api.setConstraints({ minimumWidth: 560 });
           }
           panelActivators[panelId] = () => {
@@ -345,6 +372,13 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     delete panelActivators[panelId];
     visiblePanels.delete(panelId);
     pendingScrollRestores.get(panelId)?.();
+    if (options.layoutMode === "pinned") {
+      queueMicrotask(() => {
+        if (shuttingDown || api.isDisposed || api.panels.length !== 0) return;
+        // Closing a popup's last tab can leave its empty native return group.
+        for (const group of api.groups) if (group.size === 0) api.removeGroup(group);
+      });
+    }
     options.onPanelClosed?.(panelId);
   });
 
@@ -364,7 +398,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     win.clearTimeout(layoutSaveTimer);
     layoutSaveTimer = win.setTimeout(() => {
       if (shuttingDown || api.isDisposed) return;
-      const data: PersistedDockviewLayout = { version: 1, layout: api.toJSON() };
+      const data: PersistedDockviewLayout = { version: 1, layout: persistentLayout(api.toJSON()) };
       storage(win).setItem(options.storageKey, JSON.stringify(data));
     }, 300);
   });
@@ -413,14 +447,33 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       return true;
     },
     ensureSessionChangesPanel() {
-      return ensureSessionChangesPanel(api);
+      return options.layoutMode !== "pinned" && ensureSessionChangesPanel(api);
     },
     ensureDiffsPanel() {
+      if (options.layoutMode === "pinned") return false;
       ensureDiffsPanel(api);
       return true;
     },
     ensureComparePanel() {
-      return ensureComparePanel(api);
+      return options.layoutMode !== "pinned" && ensureComparePanel(api);
+    },
+    addPinnedPanel(id, title) {
+      if (options.layoutMode !== "pinned" || !isPinnedDiffPanelId(id) || api.getGroupPanel(id)) return false;
+      const reference = api.panels.find(panel => panel.api.location.type === "grid");
+      api.addPanel({
+        id,
+        component: id,
+        title,
+        position: reference ? { referencePanel: reference.id, direction: "within" } : undefined,
+        renderer: "always",
+      });
+      return true;
+    },
+    setPanelTitle(id, title) {
+      const panel = api.getGroupPanel(id);
+      if (!panel) return false;
+      panel.api.setTitle(title);
+      return true;
     },
     closePanel(id) {
       const panel = api.getGroupPanel(id);
@@ -436,7 +489,9 @@ function createDesktopPanelShell(
   panelId: DesktopDockviewPanelId,
 ): DesktopPanelShell {
   const element = owner.createElement("div");
-  element.className = `panel-content panel-content-${panelId}`;
+  element.className = isPinnedDiffPanelId(panelId)
+    ? "panel-content panel-content-diffs panel-content-pinned-diff"
+    : `panel-content panel-content-${panelId}`;
 
   const scroll = owner.createElement("div");
   scroll.className = "panel-scroll";
@@ -456,6 +511,53 @@ function createPanelToolbar(owner: Document, onPopout: () => void): HTMLElement 
   popoutBtn.addEventListener("click", onPopout);
   toolbar.append(popoutBtn);
   return toolbar;
+}
+
+// Pin descriptors and their content live only in RAM. Filter before Dockview
+// deserializes anything, including stale pins mixed into an older workspace.
+function persistentLayout(layout: SerializedDockview): SerializedDockview {
+  for (const [id, panel] of Object.entries(layout.panels)) {
+    if (!desktopPanelId(id) || isPinnedDiffPanelId(id) || panel.id !== id || panel.contentComponent !== id) {
+      delete layout.panels[id];
+    }
+  }
+  type Node = SerializedDockview["grid"]["root"];
+  type Group = Exclude<Node["data"], Node[]>;
+  const groups = new Set<string>();
+  const panels = new Set<string>();
+  // Native popouts need their empty main-group placeholders until redocked.
+  // A transient/unknown-only popup must not retain one.
+  const returnGroups = new Set((layout.popoutGroups ?? [])
+    .filter(group => group.data.views.some(id => Object.hasOwn(layout.panels, id)))
+    .map(group => group.gridReferenceGroup));
+  function keepGroup(group: Group): boolean {
+    group.views = group.views.filter(id => {
+      if (!Object.hasOwn(layout.panels, id) || panels.has(id)) return false;
+      panels.add(id);
+      return true;
+    });
+    if (group.views.length === 0 && !returnGroups.has(group.id)) return false;
+    if (!group.activeView || !group.views.includes(group.activeView)) group.activeView = group.views[0];
+    groups.add(group.id);
+    return true;
+  }
+  function keepNode(node: Node): boolean {
+    if (!Array.isArray(node.data)) return keepGroup(node.data);
+    node.data = node.data.filter(keepNode);
+    // Retain single-child branches: depth determines split orientation.
+    return node.data.length > 0;
+  }
+  if (!keepNode(layout.grid.root)) layout.grid.root = { type: "branch", data: [] };
+  layout.floatingGroups = layout.floatingGroups?.filter(group => keepGroup(group.data));
+  layout.popoutGroups = layout.popoutGroups?.filter(group => keepGroup(group.data));
+  for (const group of layout.popoutGroups ?? []) {
+    if (group.gridReferenceGroup && !groups.has(group.gridReferenceGroup)) delete group.gridReferenceGroup;
+  }
+  if (layout.activeGroup && !groups.has(layout.activeGroup)) delete layout.activeGroup;
+  for (const id of Object.keys(layout.panels)) {
+    if (!panels.has(id)) delete layout.panels[id];
+  }
+  return layout;
 }
 
 function dockedLayout(
@@ -529,6 +631,10 @@ function restoreOrCreateLayout(
   storageKey: string,
   layoutMode: DesktopDockviewLayoutMode,
 ): void {
+  if (layoutMode === "pinned") {
+    store.removeItem(storageKey);
+    return;
+  }
   const stored = store.getItem(storageKey);
   let layoutRestored = false;
 
@@ -536,7 +642,7 @@ function restoreOrCreateLayout(
     try {
       const data = JSON.parse(stored) as PersistedDockviewLayout;
       if (data.version === 1 && data.layout) {
-        api.fromJSON(dockedLayout(data.layout));
+        api.fromJSON(persistentLayout(dockedLayout(data.layout)));
         layoutRestored = true;
       }
     } catch {
@@ -548,6 +654,7 @@ function restoreOrCreateLayout(
 }
 
 function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLayoutMode): void {
+  if (layoutMode === "pinned") return;
   if (layoutMode === "diffReview") {
     api.addPanel({
       id: "sessionChanges",
@@ -619,6 +726,7 @@ function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLa
 }
 
 function ensureRequiredPanels(api: DockviewComponent, layoutMode: DesktopDockviewLayoutMode): void {
+  if (layoutMode === "pinned") return;
   ensureTranscriptPanel(api);
   if (layoutMode === "normal") ensureGoalPanel(api);
   ensureCodePanel(api);
@@ -727,7 +835,7 @@ function ensureComparePanel(api: DockviewComponent): boolean {
 
 
 function desktopPanelId(name: string): DesktopDockviewPanelId | null {
-  return name === "sessionChanges" || name === "transcript" || name === "goal" || name === "code" || name === "tools" || name === "diffs" || name === "compare" ? name : null;
+  return name === "sessionChanges" || name === "transcript" || name === "goal" || name === "code" || name === "tools" || name === "diffs" || name === "compare" || isPinnedDiffPanelId(name) ? name : null;
 }
 
 function copyStylesToPopout(owner: Document, popWin: Window): void {

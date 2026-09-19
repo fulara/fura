@@ -29,8 +29,9 @@ existing explicit navigation behavior.
 Moving focus to another visible panel or window is not a new entry. Popout,
 redock and internal Dockview transfer retain the repository, viewed ref, pinned
 OID, file/stat selection, disclosures and independent scroll positions.
-Top-level docked panels cannot be user-closed; native popup close and **Return to
-main** redock existing content rather than invoking panel teardown (see
+Permanent top-level docked panels cannot be user-closed; additional pinned diff
+tabs can. Native popup close and **Return to main** redock existing content rather
+than invoking panel teardown (see
 [workspace panel lifetime](ui-preferences.md#desktop-workspace-panel-lifetime)).
 
 The independent inline tool-card diffs still render OMP `result.details.diff`.
@@ -171,6 +172,65 @@ Listings stop after 1,000 matching entries or 10,000 inspected entries and visib
 report truncation; a typed path remains usable. Filesystem work runs off the async
 runtime, and supported Unix targets use nonblocking opens plus descriptor type checks.
 Event summaries never include imported patch content.
+
+## Independent pinned panels
+
+**Pin as new panel** in Current changes, History and ordinary ref Compare adds
+an independent review tab without replacing ordinary Diffs. Several pins may
+coexist. They use the same file/patch renderer, parser, highlighting, split layout
+and comment anchors, with separate controllers and mutable UI state. Native
+Range-diff explicitly disables Pin because it compares patches, not file versions.
+
+A pin captures the selected canonical worktree, Git group or resolved comparison
+endpoints, selected immutable History OID, file, layout/whitespace settings,
+available patch cache, scroll and local review draft. It reviews that comparison,
+not a moving branch-tip/history browser. Branch movement cannot replace its OID.
+Two sessions sharing one worktree share its Git changes; pinning is not attribution
+or isolation of one agent's edits.
+
+Switching conversations, ordinary repositories, normal/diffReview workspace,
+focus or visibility does not retarget or refresh pins. **Refresh**, an uncached
+file read, or a whitespace/detail/context change reads only the captured source.
+Current changes can consequently show newer contents of the same worktree; it is
+not an archival snapshot. Layout and cached file selection remain local and do
+not request another comparison. The header identifies the source and explains
+manual refresh. During refresh/failure, retained content is explicitly old and
+cannot submit stale review actions. Disconnect leaves a readable error; reconnect
+requires explicit Refresh rather than silently resuming reads.
+
+Each pin has a unique client ID and fresh diff generation on the existing socket,
+isolating the backend's client/scope slots from ordinary Diffs and other pins.
+Summary/content acceptance includes generation, repository, whitespace, comparison,
+selected file and context. Closing a tab cancels its generation and releases its
+cache; late replies cannot revive it. Cache limits apply independently per pin.
+
+Session-backed comments and review prompts keep the original recipient, visibly
+labelled **Send to …** in the pin and preview. They never use the newly active
+conversation. Sending notes/questions to a busy recipient queues them as follow-up;
+it does not switch sessions. Compare opened without an agent remains read-only.
+Stopped/unavailable recipients cannot be resumed by pin actions. Deleting a source
+session blocks fresh sessionChanges/History reads and leaves the last result with
+an unavailable-source diagnostic. Repo-scoped Compare reads do not require that
+session, but its agent actions still do. Missing repositories never fall back to
+another source.
+
+Code/file actions use the displayed comparison's canonical root, committed OID
+and old/new path. Immutable previews and their Copy action never read today's
+file; live Code explicitly reads that worktree and keeps the pin's note recipient. A pinned Code
+revision survives conversation changes rather than restoring another worktree
+under its recipient. Returning to active-workspace Code is explicit.
+
+Pins live in one dedicated Dockview group host independent of the two agent
+workspaces. Wide desktops place it beside the ordinary workspace; narrower
+desktops stack the hosts to keep controls accessible. Each pin can pop out.
+Popup close/Return to main redocks the same instance; only **Close pinned panel**
+deletes it. Unrelated session events do not recreate its draft or text selection.
+
+Lifetime is **the current application document only**. Reload discards pins,
+patches and drafts; layout serialization excludes their descriptors and empty
+groups, so reload never restores broken tabs or retargets them to an active agent.
+There is no persisted patch archive, new OMP session, checkout, worktree creation,
+filesystem watcher, polling loop or backend protocol change.
 
 ## Diff layout
 

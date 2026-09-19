@@ -115,10 +115,17 @@ and group user-close entry points, without blocking dragging, selection, transfe
 explicit internal `closePanel`, removal or disposal. Dockview 5.2 has no cancellable
 close event; dependency upgrades must recheck these entry points.
 
+Additional **pinned diff panels** are the explicit exception: their tab close
+button deletes only that review instance, including in a popup. They belong to a
+third, session-independent host; changing normal/diffReview never hides their
+windows. Native popup/group close and Return to main still redock rather than
+delete pins. Their descriptors are excluded from layout saves and restoration:
+reload starts without pins, preserving the existing permanent workspace layouts.
+
 Detached groups show **Return to main** instead of another Pop out action. This
 button, group close and native popup-window close return the group through
-Dockview's native redock. An individual popup panel-close request returns only
-that panel. Existing content instances survive; original main groups and tab
+Dockview's native redock. For permanent panels, an individual popup panel-close
+request returns only that panel. Existing content instances survive; original main groups and tab
 positions are preferred, with a deterministic main-workspace fallback when the
 target is gone. Tabs collected from different origins return to their own
 surviving groups. Normal and diff-review workspaces retain separate ownership.
@@ -132,6 +139,14 @@ return positions synchronously, without moving content, reopening windows or
 showing a confirmation dialog. Reload restores detached panels into the owning
 main workspace; legacy saved popup layouts are normalized too, including optional
 Compare panels. This does not add draft/content persistence across reload.
+
+Dockview 5.2 leaves its resize-end debounce timer alive after disposing a popup.
+`frontend/dockviewResizeCleanup.ts` adds timer cancellation to that disposer in the
+consumed ESM source during Vite dev/build and Vitest execution; it does not modify
+installed dependencies. The transform fails explicitly if the upstream function
+shape changes. Dependency upgrades must recheck/remove this compatibility fix.
+The real-library regression resizes and immediately closes a popup, without
+waiting for its debounce timer, then verifies the same review redocks.
 
 Real-library lifecycle regressions cover close versus teardown and saved layout
 round trips. Default browser smoke runs the black-box cases in `panel-close.spec.ts`;

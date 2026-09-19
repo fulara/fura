@@ -16,6 +16,7 @@ vi.mock("dockview-core", async importOriginal => {
   };
 });
 import { initDesktopDockview } from "./desktopDockview";
+import type { DesktopDockviewLayoutMode, PinnedDiffPanelId } from "./desktopDockview";
 
 beforeEach(() => {
   localStorage.clear();
@@ -32,7 +33,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function setup(layoutMode: "normal" | "diffReview" = "normal") {
+function setup(layoutMode: DesktopDockviewLayoutMode = "normal") {
   const host = document.createElement("div");
   host.className = "workspace-panel-host workspace-panel-host-active";
   document.body.append(host);
@@ -182,6 +183,187 @@ describe("desktop Dockview close lifecycle", () => {
     expect(api.getGroupPanel("diffs")).toBeUndefined();
     expect(desktop.panelMounted("diffs")).toBe(false);
     expect(closed).toHaveBeenCalledExactlyOnceWith("diffs");
+  });
+
+  it("closes individual pinned tabs while retaining other pins and static workspaces", () => {
+    const normal = setup();
+    const { api, desktop, closed, ready, host } = setup("pinned");
+    expect(api.panels).toEqual([]);
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A · Current");
+    desktop.addPinnedPanel("pinnedDiff:b", "Repo B · History");
+    const first = api.getGroupPanel("pinnedDiff:a")!;
+    const second = api.getGroupPanel("pinnedDiff:b")!;
+    expect(first.group).toBe(second.group);
+    second.api.moveTo({ group: api.addGroup() });
+    second.api.moveTo({ group: first.group });
+    expect(closed).not.toHaveBeenCalled();
+    expect(desktop.addPinnedPanel("pinnedDiff:a", "Duplicate")).toBe(false);
+    expect(ready).toHaveBeenCalledTimes(2);
+    desktop.setPanelTitle("pinnedDiff:a", "Repo A · abc1234");
+    const tab = [...host.querySelectorAll<HTMLElement>(".dv-default-tab")]
+      .find(element => element.textContent?.includes("Repo A · abc1234"))!;
+    tab.querySelector<HTMLButtonElement>(".panel-close-btn")!.click();
+    expect(api.getGroupPanel("pinnedDiff:a")).toBeUndefined();
+    expect(api.getGroupPanel("pinnedDiff:b")).toBe(second);
+    expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+    second.api.close();
+    expect(api.panels).toEqual([]);
+    expect(closed.mock.calls).toEqual([["pinnedDiff:a"], ["pinnedDiff:b"]]);
+    expect(host.querySelector(".panel-close-btn")).toBeNull();
+    expect(normal.desktop.panelMounted("diffs")).toBe(true);
+    expect(normal.closed).not.toHaveBeenCalled();
+  });
+
+  it.each(["window", "group", "toolbar"] as const)("redocks pinned %s returns after workspace switches without remounting or losing local state", async action => {
+    const normal = setup();
+    const review = setup("diffReview");
+    const { api, desktop, closed, ready } = setup("pinned");
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A · Current");
+    desktop.addPinnedPanel("pinnedDiff:b", "Repo B · History");
+    const first = api.getGroupPanel("pinnedDiff:a")!;
+    const original = first.group;
+    const order = original.panels.map(panel => panel.id);
+    let content: HTMLElement | undefined;
+    let draft: HTMLTextAreaElement | undefined;
+    desktop.withPanel("pinnedDiff:a", element => {
+      content = element;
+      draft = element.ownerDocument.createElement("textarea");
+      draft.value = "Send only to A";
+      element.append(draft);
+      element.scrollTop = 143;
+      element.scrollLeft = 29;
+    });
+    const popup = await popout(api, original);
+    for (let index = 0; index < 3; index++) {
+      normal.host.classList.toggle("workspace-panel-host-active", index % 2 === 0);
+      review.host.classList.toggle("workspace-panel-host-active", index % 2 !== 0);
+      popup.dispatchEvent(new Event("focus"));
+      await Promise.resolve();
+    }
+    desktop.withPanel("pinnedDiff:a", element => {
+      expect(element).toBe(content);
+      expect(element.ownerDocument).toBe(popup.document);
+      expect(element.style.visibility).toBe("");
+    });
+    if (action === "window") popup.close();
+    else if (action === "group") first.group.api.close();
+    else popup.document.querySelector<HTMLButtonElement>(".panel-return-btn")!.click();
+    await Promise.resolve();
+    expect(first.group).toBe(original);
+    expect(original.panels.map(panel => panel.id)).toEqual(order);
+    desktop.withPanel("pinnedDiff:a", element => {
+      expect(element).toBe(content);
+      expect(element.ownerDocument).toBe(document);
+      expect(element.querySelector("textarea")).toBe(draft);
+      expect(draft!.value).toBe("Send only to A");
+      expect(element.scrollTop).toBe(143);
+      expect(element.scrollLeft).toBe(29);
+    });
+    expect(ready).toHaveBeenCalledTimes(2);
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it("cancels pending popup resize work when the native window closes", async () => {
+    vi.useFakeTimers();
+    const { api, desktop, closed } = setup("pinned");
+    desktop.addPinnedPanel("pinnedDiff:resize", "Resize review");
+    const panel = api.getGroupPanel("pinnedDiff:resize")!;
+    desktop.withPanel("pinnedDiff:resize", element => { element.textContent = "Retained review"; });
+    const popup = await popout(api, panel);
+    popup.dispatchEvent(new Event("resize"));
+    popup.close();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(api.getGroupPanel("pinnedDiff:resize")).toBe(panel);
+    expect(panel.api.getWindow()).toBe(window);
+    desktop.withPanel("pinnedDiff:resize", element => { expect(element.textContent).toBe("Retained review"); });
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it("deletes only the explicitly closed popup tab, then returns its surviving pin", async () => {
+    const { api, desktop, closed, ready } = setup("pinned");
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    desktop.addPinnedPanel("pinnedDiff:b", "Repo B");
+    const first = api.getGroupPanel("pinnedDiff:a")!;
+    const second = api.getGroupPanel("pinnedDiff:b")!;
+    const popup = await popout(api, first.group);
+    const firstTab = [...popup.document.querySelectorAll<HTMLElement>(".dv-default-tab")]
+      .find(element => element.textContent?.includes("Repo A"))!;
+    firstTab.querySelector<HTMLButtonElement>(".panel-close-btn")!.click();
+    await Promise.resolve();
+    expect(api.getGroupPanel("pinnedDiff:a")).toBeUndefined();
+    expect(second.api.getWindow()).toBe(popup);
+    expect(popup.close).not.toHaveBeenCalled();
+    expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+    popup.close();
+    await Promise.resolve();
+    expect(api.getGroupPanel("pinnedDiff:b")).toBe(second);
+    expect(second.api.getWindow()).toBe(window);
+    expect(ready).toHaveBeenCalledTimes(2);
+    expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+  });
+
+  it("does not resurrect the last pin when closing its popup tab also closes the window", async () => {
+    const { api, desktop, closed } = setup("pinned");
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    const popup = await popout(api, api.getGroupPanel("pinnedDiff:a")!);
+    popup.document.querySelector<HTMLButtonElement>(".panel-close-btn")!.click();
+    await Promise.resolve();
+    expect(api.panels).toEqual([]);
+    expect(api.groups).toEqual([]);
+    expect(desktop.panelMounted("pinnedDiff:a")).toBe(false);
+    expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+  });
+
+  it("saves no pin descriptors and starts empty on reload even with an old saved layout", async () => {
+    vi.useFakeTimers();
+    const { api, desktop } = setup("pinned");
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    desktop.addPinnedPanel("pinnedDiff:b", "Repo B");
+    const raw = api.toJSON();
+    await vi.advanceTimersByTimeAsync(500);
+    const saved = JSON.parse(localStorage.getItem("lifecycle.pinned")!);
+    expect(saved.layout.panels).toEqual({});
+    expect(saved.layout.grid.root.data).toEqual([]);
+    expect(saved.layout.activeGroup).toBeUndefined();
+    localStorage.setItem("lifecycle.pinned", JSON.stringify({ version: 1, layout: raw }));
+    const restored = setup("pinned");
+    expect(restored.api.panels).toEqual([]);
+    expect(restored.api.groups).toEqual([]);
+    expect(restored.ready).not.toHaveBeenCalled();
+    expect(restored.desktop.addPinnedPanel("pinnedDiff:a", "New review")).toBe(true);
+    expect(restored.api.panels.map(panel => panel.title)).toEqual(["New review"]);
+  });
+
+  it.each(["normal", "diffReview"] as const)("prunes transient and unknown saved tabs, empty groups and active references in %s", async layoutMode => {
+    const { api } = setup(layoutMode);
+    const docked: PinnedDiffPanelId = "pinnedDiff:docked";
+    const floating: PinnedDiffPanelId = "pinnedDiff:floating";
+    const detached: PinnedDiffPanelId = "pinnedDiff:popup";
+    api.addPanel({ id: docked, component: docked, position: { referencePanel: "transcript", direction: "within" } });
+    api.addPanel({ id: floating, component: floating, floating: true });
+    api.addPanel({ id: "unknown", component: "missing" });
+    api.addPanel({ id: detached, component: detached });
+    await popout(api, api.getGroupPanel(detached)!);
+    const raw = api.toJSON();
+    raw.panels.code.contentComponent = "missing";
+    raw.panels.code.title = "Broken saved component";
+    window.dispatchEvent(new Event("beforeunload"));
+    const saved = JSON.parse(localStorage.getItem(`lifecycle.${layoutMode}`)!);
+    expect(Object.keys(saved.layout.panels).sort()).toEqual(layoutMode === "normal"
+      ? ["code", "diffs", "goal", "tools", "transcript"]
+      : ["code", "sessionChanges", "tools", "transcript"]);
+    expect(saved.layout.floatingGroups ?? []).toEqual([]);
+    expect(saved.layout.popoutGroups).toBeUndefined();
+    localStorage.setItem(`lifecycle.${layoutMode}`, JSON.stringify({ version: 1, layout: raw }));
+    const open = vi.spyOn(window, "open");
+    open.mockClear();
+    const restored = setup(layoutMode);
+    expect(restored.api.panels.map(panel => panel.id).sort()).toEqual(Object.keys(saved.layout.panels).sort());
+    expect(restored.api.getGroupPanel("code")!.title).toBe("Code");
+    expect(restored.api.groups.every(group => group.size > 0)).toBe(true);
+    expect(restored.api.groups.every(group => group.panels.includes(group.activePanel!))).toBe(true);
+    expect(restored.ready.mock.calls.some(([id]) => id === "unknown" || id.startsWith("pinnedDiff:"))).toBe(false);
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("restores saved popup panels in their owning workspace without reopening windows", async () => {

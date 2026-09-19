@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import type { ServerMessage } from "../src/protocol";
 
-const bridgeToken = "dev";
+const bridgeToken = process.env.FURA_SMOKE_TOKEN ?? "dev";
 const tinyPngBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=";
 

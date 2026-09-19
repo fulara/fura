@@ -163,7 +163,7 @@ function simpleDiffRows(patch: string): DiffRow[] {
 
 let connections: FakeConnection[] = [];
 let fakeConnectionAutoOpen = true;
-type MockWorkspace = "normal" | "diffReview";
+type MockWorkspace = "normal" | "diffReview" | "pinned";
 type MockDockviewOptions = {
   host: HTMLElement;
   layoutMode: MockWorkspace;
@@ -173,9 +173,9 @@ type MockDockviewOptions = {
   onPanelVisibilityChanged?: (id: string, visible: boolean) => void;
   onWindowFocus?: (document: Document) => void;
 };
-let desktopMockActivePanelId: Record<MockWorkspace, string | null> = { normal: "diffs", diffReview: "sessionChanges" };
+let desktopMockActivePanelId: Record<MockWorkspace, string | null> = { normal: "diffs", diffReview: "sessionChanges", pinned: null };
 let desktopMockVisiblePanelIds: Record<MockWorkspace, Set<string>> = {
-  normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]),
+  normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]), pinned: new Set(),
 };
 const desktopMockOptions = new Map<MockWorkspace, MockDockviewOptions>();
 const desktopMockActivatePanel = vi.fn((_id: string) => true);
@@ -216,12 +216,13 @@ function installMocks(): void {
     },
   }));
   vi.doMock("./desktopDockview", () => ({
+    isPinnedDiffPanelId: (id: string) => id.startsWith("pinnedDiff:"),
     initDesktopDockview: (options: MockDockviewOptions) => {
       const normal = options.layoutMode === "normal";
       desktopMockOptions.set(options.layoutMode, options);
       if (normal) desktopMockPanelClosed = options.onPanelClosed ?? null;
       const panels: Record<string, HTMLElement> = {};
-      const ids = normal ? ["diffs", "transcript", "goal"] : ["sessionChanges", "transcript"];
+      const ids = normal ? ["diffs", "transcript", "goal"] : options.layoutMode === "pinned" ? [] : ["sessionChanges", "transcript"];
       if (desktopMockMountCodePanel) ids.push("code");
       const mount = (id: string) => {
         if (panels[id]) return false;
@@ -252,6 +253,11 @@ function installMocks(): void {
           return true;
         },
         ensureSessionChangesPanel: () => !normal && mount("sessionChanges"),
+        addPinnedPanel: (id: string) => {
+          if (options.layoutMode !== "pinned" || !mount(id)) return false;
+          activatePanel(id, "pinned");
+          return true;
+        },
         ensureDiffsPanel: () => normal && mount("diffs"),
         ensureComparePanel: () => normal && mount("compare"),
         closePanel: (id: string) => {
@@ -295,8 +301,8 @@ async function createHarness(options: { preserveLocalStorage?: boolean; mountCod
     this.dispatchEvent(new Event("close"));
   };
   connections = [];
-  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges" };
-  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]) };
+  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges", pinned: null };
+  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]), pinned: new Set() };
   desktopMockOptions.clear();
   desktopMockPanelClosed = null;
   desktopMockActivatePanel.mockReset().mockReturnValue(true);
@@ -321,8 +327,8 @@ async function createPendingHarness() {
   vi.resetModules();
   vi.restoreAllMocks();
   connections = [];
-  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges" };
-  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]) };
+  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges", pinned: null };
+  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]), pinned: new Set() };
   desktopMockOptions.clear();
   desktopMockPanelClosed = null;
   desktopMockActivatePanel.mockReset().mockReturnValue(true);
@@ -1865,8 +1871,8 @@ describe("desktop cog options", () => {
         scope, comparisonKey: key, file: null, patch, rows: simpleDiffRows(patch), truncated: false, contextLines: 3, generatedAt: "now" } });
     }
 
-    async function openDiffs(mode: "Current changes" | "History" = "Current changes") {
-      const { connection } = await createHarness();
+    async function openDiffs(mode: "Current changes" | "History" = "Current changes", mountCodePanel = false) {
+      const { connection } = await createHarness({ mountCodePanel });
       connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other")] });
       document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
       connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
@@ -1884,6 +1890,157 @@ describe("desktop cog options", () => {
       expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("readable-before-refresh");
       return connection;
     }
+
+    it("pins a separate review without replacing ordinary Diffs", async () => {
+      await openDiffs();
+      const pin = document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]');
+      expect(pin).not.toBeNull();
+      pin!.click();
+      expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("readable-before-refresh");
+      const pinned = document.querySelector(".pinned-diff-view");
+      expect(pinned?.textContent).toContain("readable-before-refresh");
+      expect(pinned?.textContent).toContain("/repo");
+    });
+
+    it("keeps two pinned views local across session and workspace changes", async () => {
+      const connection = await openDiffs();
+      const original = document.querySelector<HTMLElement>("#testDiffPanel .diffs-main-body")!;
+      original.scrollTop = 123;
+      const layout = document.querySelector<HTMLSelectElement>("#testDiffPanel .diff-layout-select")!;
+      layout.value = "split";
+      layout.dispatchEvent(new Event("change"));
+      const pinButton = () => document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!;
+      pinButton().click();
+      pinButton().click();
+      await Promise.resolve();
+      const roots = () => [...document.querySelectorAll<HTMLElement>(".pinned-diff-view")];
+      expect(roots()).toHaveLength(2);
+      expect(roots()[0].querySelector<HTMLElement>(".diffs-main-body")!.scrollTop).toBe(123);
+      const ids = roots().map(root => root.dataset.panelId);
+      expect(new Set(ids).size).toBe(2);
+      const firstLayout = roots()[0].querySelector<HTMLSelectElement>(".diff-layout-select")!;
+      firstLayout.value = "unified";
+      firstLayout.dispatchEvent(new Event("change"));
+      expect(roots()[0].querySelector(".diff-lines-split")).toBeNull();
+      expect(roots()[1].querySelector(".diff-lines-split")).not.toBeNull();
+      const firstFilter = roots()[0].querySelector<HTMLInputElement>(".diff-filter-input")!;
+      firstFilter.value = "missing";
+      firstFilter.dispatchEvent(new Event("input"));
+      expect(roots()[0].querySelector(".diffs-filter-empty")?.textContent).toContain("No files match");
+      expect(roots()[1].querySelector("[data-diff-file-path='same.ts']")).not.toBeNull();
+      connection.sent.length = 0;
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other", { sessionMode: "diffReview", cwd: "/other", title: "HEAD...topic" })] });
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(button => button.textContent?.includes("HEAD...topic"))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other", { summary: summary("other", { sessionMode: "diffReview", cwd: "/other", title: "HEAD...topic" }) }) });
+      focusWorkspace("pinned");
+      await Promise.resolve();
+      expect(roots().map(root => root.dataset.panelId)).toEqual(ids);
+      expect(roots().every(root => root.textContent?.includes("readable-before-refresh"))).toBe(true);
+      expect(document.querySelector("#pinnedWorkspacePanelHost")?.classList.contains("workspace-panel-host-active")).toBe(true);
+      expect(connection.sent.some(message => "clientId" in message && ids.includes(`pinnedDiff:${message.clientId}`))).toBe(false);
+    });
+
+    it("routes pinned review to its captured recipient and blocks a preview after refresh or source removal", async () => {
+      const connection = await openDiffs();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!.click();
+      await Promise.resolve();
+      const root = () => document.querySelector<HTMLElement>(".pinned-diff-view")!;
+      const review = () => [...root().querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Request agent review")!;
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(button => button.textContent?.includes("Session other"))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+      await Promise.resolve();
+      review().click();
+      expect(document.querySelector("#diffPreviewSubtitle")?.textContent).toContain("Session live");
+      document.querySelector<HTMLButtonElement>("#diffPreviewSend")!.click();
+      const sent = connection.sent.filter(message => message.type === "review.agentReview.start");
+      expect(sent.at(-1)).toMatchObject({ sessionId: "live" });
+      review().click();
+      root().querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!.click();
+      document.querySelector<HTMLButtonElement>("#diffPreviewSend")!.click();
+      expect(connection.sent.filter(message => message.type === "review.agentReview.start")).toHaveLength(sent.length);
+      expect(document.querySelector("#diffPreviewStatus")?.textContent).toContain("Refreshing");
+      const opensBeforeRemoval = connection.sent.filter(message => message.type === "session.open").length;
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("other")] });
+      await Promise.resolve();
+      expect(root().textContent).toContain("unavailable");
+      expect(root().textContent).toContain("readable-before-refresh");
+      expect(connection.sent.filter(message => message.type === "session.open")).toHaveLength(opensBeforeRemoval);
+    });
+
+    it("keeps comment composers separate and creates comments for the source session after switching agents", async () => {
+      const connection = await openDiffs();
+      const button = document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!;
+      button.click();
+      button.click();
+      await Promise.resolve();
+      const roots = () => [...document.querySelectorAll<HTMLElement>(".pinned-diff-view")];
+      roots()[0].querySelector<HTMLButtonElement>(".diff-comment-btn")!.click();
+      const draft = roots()[0].querySelector<HTMLTextAreaElement>(".review-comment-composer-input")!;
+      draft.value = "Only pin one owns this draft";
+      draft.dispatchEvent(new Event("input", { bubbles: true }));
+      roots()[1].querySelector<HTMLButtonElement>(".diff-comment-btn")!.click();
+      expect(roots()[1].querySelector<HTMLTextAreaElement>(".review-comment-composer-input")!.value).toBe("");
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(candidate => candidate.textContent?.includes("Session other"))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+      await Promise.resolve();
+      expect(roots()[0].querySelector<HTMLTextAreaElement>(".review-comment-composer-input")!.value).toBe("Only pin one owns this draft");
+      roots()[0].querySelector<HTMLFormElement>(".review-comment-composer")!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      expect(connection.sent.filter(message => message.type === "review.comment.create").at(-1)).toMatchObject({
+        sessionId: "live", repoRoot: "/repo", comparisonKey: "initial", body: "Only pin one owns this draft",
+      });
+      expect(roots()[1].querySelector(".review-comment-composer")).not.toBeNull();
+    });
+
+    it("review regression: preserves draft caret during unrelated session updates", async () => {
+      const connection = await openDiffs();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!.click();
+      await Promise.resolve();
+      document.querySelector<HTMLButtonElement>(".pinned-diff-view .diff-comment-btn")!.click();
+      const input = document.querySelector<HTMLTextAreaElement>(".pinned-diff-view textarea")!;
+      input.value = "keep editing the middle";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.focus();
+      input.setSelectionRange(2, 7);
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other", { isBusy: true }) });
+      await Promise.resolve();
+      const current = document.querySelector<HTMLTextAreaElement>(".pinned-diff-view textarea")!;
+      expect(current.selectionStart).toBe(2);
+      expect(current.selectionEnd).toBe(7);
+      expect(document.activeElement).toBe(current);
+    });
+
+    it("review regression: does not route Find from a pin into ordinary Code", async () => {
+      await openDiffs("Current changes", true);
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!.click();
+      await Promise.resolve();
+      activatePanel("code");
+      const pin = document.querySelector<HTMLElement>(".pinned-diff-view")!;
+      pin.focus();
+      const event = new KeyboardEvent("keydown", { key: "f", ctrlKey: true, bubbles: true, cancelable: true });
+      pin.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(false);
+    });
+
+    it("review regression: retains pinned revision rather than assigning its owner to suspended Code", async () => {
+      const connection = await openDiffs("History", true);
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!.click();
+      await Promise.resolve();
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")].find(button => button.textContent?.includes("Session other"))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });
+      activatePanel("code");
+      connection.emit({ type: "code.workspace.ready", workspace: { workspaceId: "suspended-B", sessionId: "other", root: "/other", source: "session", status: "filesOnly" } });
+      connection.emit({ type: "code.file", workspaceId: "suspended-B", file: { path: "b.ts", language: "", text: "WORKING_B", size: 9, version: 1 } });
+      expect(document.querySelector("#testCodePanel")?.textContent).toContain("WORKING_B");
+      const pin = document.querySelector<HTMLElement>(".pinned-diff-view")!;
+      pin.querySelector<HTMLButtonElement>('.diffs-file-jump[data-diff-file-path="same.ts"]')!.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      [...document.querySelectorAll<HTMLButtonElement>(".pinned-diff-view .diffs-file-menu button")].find(button => button.textContent === "View this revision in Code")!.click();
+      const request = connection.sent.filter(message => message.type === "git.file.request").at(-1)!;
+      connection.emit(gitFileReply(request, "IMMUTABLE_A"));
+      expect(revisionText()).toBe("IMMUTABLE_A");
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")].find(button => button.textContent?.includes("Session live"))!.click();
+      expect(revisionText()).toBe("IMMUTABLE_A");
+      expect(document.querySelector("#testCodePanel")?.textContent).not.toContain("WORKING_B");
+    });
 
     it("keeps an opened server patch isolated from background Git replies and returns to Git on close", async () => {
       const connection = await openDiffs();

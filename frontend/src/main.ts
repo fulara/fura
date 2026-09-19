@@ -135,7 +135,8 @@ import {
   renderAskCard,
   type PendingAsk,
 } from "./askCard";
-import { initDesktopDockview, type DesktopDockview } from "./desktopDockview";
+import { initDesktopDockview, isPinnedDiffPanelId, type DesktopDockview } from "./desktopDockview";
+import { PinnedDiff, pinnedPatchKey } from "./pinnedDiff";
 import { captureDiffFilterFocus, captureDiffViewScroll, restoreDiffFilterFocus, restoreDiffViewScroll } from "./diffViewDom";
 import { messagePromptText, renderMarkdown, renderMessage as renderTranscriptMessage, transcriptMessageRenderCacheKey, updateRenderedMessage } from "./transcriptView";
 import { setTextileRedmineRootUrl } from "./textileRendering";
@@ -291,6 +292,7 @@ app.innerHTML = `
       <div id="workspacePanelHost" class="workspace-panel-stack">
         <div id="normalWorkspacePanelHost" class="workspace-panel-host workspace-panel-host-active"></div>
         <div id="diffReviewWorkspacePanelHost" class="workspace-panel-host"></div>
+        <div id="pinnedWorkspacePanelHost" class="workspace-panel-host pinned-workspace-panel-host"></div>
       </div>
 
       <div id="statusBar" class="status-bar" aria-label="Session status"></div>
@@ -907,6 +909,14 @@ type ActiveReviewCommentComposer =
       body: string;
     };
 let activeReviewCommentComposer: ActiveReviewCommentComposer | null = null;
+const pinnedCommentComposers = new Map<string, ActiveReviewCommentComposer>();
+const pinnedDiffs = new Map<string, PinnedDiff>();
+const pinnedActionStates = new WeakMap<PinnedDiff, string | null>();
+let pinnedPreviewGuard: { id: string; generation: number; comparisonKey: string } | null = null;
+let pinnedCodeOwner: { id: string; sessionId: string | null } | null = null;
+window.addEventListener("beforeunload", () => {
+  for (const pin of pinnedDiffs.values()) pin.cancel("closed");
+});
 const diffErrors = new Map<string, string>();
 const diffLoadingSessions = new Set<string>();
 let diffPanelDirty = true;
@@ -1060,6 +1070,8 @@ function clearPendingDiffFilePatch(panelKey: string, diffId?: string): void {
 }
 
 function selectedDiffFilePatchError(panelKey: string, filePath: string | null): string | null {
+  const pin = pinnedDiffs.get(panelKey);
+  if (pin) return pin.error ?? pin.unavailable;
   const error = diffFilePatchErrors.get(panelKey);
   return error?.filePath === filePath ? error.message : null;
 }
@@ -1119,6 +1131,13 @@ function clearCurrentCompareDiff(reason: "replaced" | "closed" | "sessionChanged
 }
 
 function selectedDiffFilePath(key: string, state: DiffReviewableState, filePaths: string[]): string | null {
+  const pin = pinnedDiffs.get(key);
+  if (pin) {
+    if (pin.selectedFile && !filePaths.includes(pin.selectedFile)) pin.selectedFile = null;
+    if (pin.selectedFile) sessionChangesSelectedFiles.set(key, pin.selectedFile);
+    else sessionChangesSelectedFiles.delete(key);
+    return pin.selectedFile;
+  }
   const requestedPath = state.comparison.selectedFile?.newPath ?? null;
   const rememberedPath = sessionChangesSelectedFiles.get(key) ?? null;
   const nextPath = [requestedPath, rememberedPath].find(
@@ -1206,7 +1225,7 @@ function pruneStaleSessionCaches(liveSessionIds: ReadonlySet<string>): void {
   }
 
   for (const sessionId of candidates) {
-    if (liveSessionIds.has(sessionId)) continue;
+    if (liveSessionIds.has(sessionId) || isPinnedDiffPanelId(sessionId)) continue;
 
     const changesState = sessionChangesStates.get(sessionId);
     if (changesState?.status === "ready") {
@@ -1307,6 +1326,7 @@ type CodeOpenRequest = { source: "sessionWorktree"; sessionId: string; repoRoot:
 let desktopDockview: DesktopDockview | null = null;
 let normalDesktopDockview: DesktopDockview | null = null;
 let diffReviewDesktopDockview: DesktopDockview | null = null;
+let pinnedDesktopDockview: DesktopDockview | null = null;
 let activeDesktopDockviewMode: "normal" | "diffReview" | null = null;
 
 let codePanelDirty = true;
@@ -1479,7 +1499,8 @@ voiceButton.addEventListener("pointercancel", () => { void stopVoiceRecording();
 voiceButton.addEventListener("lostpointercapture", () => { void stopVoiceRecording(); });
 voiceButton.addEventListener("contextmenu", event => event.preventDefault());
 window.addEventListener("keydown", event => {
-  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && desktopDockview?.isPanelActive("code") && !codeRevision) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && desktopDockview?.isPanelActive("code") && !codeRevision
+    && !document.activeElement?.closest("#pinnedWorkspacePanelHost")) {
     event.preventDefault();
     openCodeSearch();
     return;
@@ -1868,6 +1889,7 @@ function connect(token: string): void {
     onOpen: () => {
       if (epoch !== connectionEpoch) return;
       sessionSkillsView.close(false);
+      for (const pin of pinnedDiffs.values()) pin.disconnect();
       transcriptBtw.interrupt();
       btwDrafts.clear();
       markTranscriptViewDirty();
@@ -1883,6 +1905,7 @@ function connect(token: string): void {
     },
     onClose: () => {
       if (epoch !== connectionEpoch) return;
+      for (const pin of pinnedDiffs.values()) pin.disconnect();
       sessionSkillsView.close(false);
       diffFilePicker?.close();
       transcriptBtw.interrupt();
@@ -1992,7 +2015,7 @@ function activateControllerWorkspace(): void {
   invalidateRollbackChat();
   if (workspaceMode !== "controller") {
     pendingGitFile?.view.close();
-    clearCodeRevision();
+    if (!pinnedCodeOwner) clearCodeRevision();
     switchComposerDraft(CONTROLLER_DRAFT);
     workspaceMode = "controller";
     resetPromptHistoryNavigation();
@@ -2018,7 +2041,7 @@ function activateSession(sessionId: string): void {
     diffFilePicker?.close();
     openedDiffFile = null;
     pendingGitFile?.view.close();
-    clearCodeRevision();
+    if (!pinnedCodeOwner) clearCodeRevision();
     switchComposerDraft(sessionId);
     if (previousSessionId && previousSessionId !== sessionId && currentSessionChangesRequest?.sessionId === previousSessionId) {
       clearCurrentSessionChangesRequest("sessionChanged");
@@ -2053,6 +2076,34 @@ function shouldActivateSnapshot(sessionId: string): boolean {
 }
 
 function handleServerMessage(message: ServerMessage): void {
+  for (const pin of pinnedDiffs.values()) if (pin.handle(message)) return;
+  if (["sessions.snapshot", "session.snapshot", "session.delta", "session.exited"].includes(message.type)) {
+    queueMicrotask(() => {
+      for (const pin of pinnedDiffs.values()) {
+        if (message.type !== "sessions.snapshot" && "sessionId" in message && message.sessionId !== pin.ownerSessionId) continue;
+        if (pin.target.scope === "sessionChanges" && pin.ownerSessionId && !currentSessionSummary(pin.ownerSessionId)) {
+          pin.cancel("closed");
+          pin.generation++;
+          pin.loading = false;
+          pin.pendingState = null;
+          pin.unavailable = `Source session ${pin.ownerLabel} is unavailable. Showing the captured result.`;
+        } else if (pin.unavailable) {
+          pin.unavailable = null;
+        }
+        if (pinnedActionStates.get(pin) !== pinnedActionError(pin)) renderPinnedDiff(pin.id);
+      }
+      if (pinnedCodeOwner) renderCodePanelIfNeeded(true);
+    });
+  }
+  if (message.type === "review.comments.snapshot" || message.type === "review.comment.upserted" || message.type === "review.comment.deleted") {
+    const owner = message.type === "review.comment.upserted" ? message.comment.sessionId : message.sessionId;
+    queueMicrotask(() => {
+      for (const pin of pinnedDiffs.values()) if (pin.ownerSessionId === owner) {
+        reviewComments.set(pin.id, [...(reviewComments.get(owner) ?? [])]);
+        renderPinnedDiff(pin.id);
+      }
+    });
+  }
   // Working-tree replies belong to the suspended workspace, never to a revision.
   if (codeRevision && message.type.startsWith("code.")) return;
   switch (message.type) {
@@ -4719,6 +4770,7 @@ function markCodeViewDirty(): void {
 
 
 function resetCodeViewForSession(sessionId: string | null): void {
+  pinnedCodeOwner = null;
   clearCodeRevision();
   codeSessionId = sessionId;
   codeWorkspace = null;
@@ -4749,12 +4801,13 @@ function resetCodeViewForSession(sessionId: string | null): void {
 }
 
 function activeCodeViewState(): CodeViewerState {
+  const owner = pinnedCodeOwner ? pinnedCodeOwner.sessionId : workspaceMode === "session" ? activeSessionId : null;
   const activeCodeComments =
-    workspaceMode === "session" && activeSessionId && codeWorkspace && codeFile
-      ? selectedCodeComments(sessionCodeComments(activeSessionId).get(codeCommentFileKey(codeWorkspace.root, codeFile.path)) ?? [], codeWorkspace.root, codeFile)
+    owner && codeWorkspace && codeFile
+      ? selectedCodeComments(sessionCodeComments(owner).get(codeCommentFileKey(codeWorkspace.root, codeFile.path)) ?? [], codeWorkspace.root, codeFile)
       : [];
   return {
-    activeSessionId: workspaceMode === "session" ? activeSessionId : null,
+    activeSessionId: pinnedCodeOwner ? pinnedCodeOwner.sessionId ?? pinnedCodeOwner.id : workspaceMode === "session" ? activeSessionId : null,
     workspace: codeWorkspace,
     treePath: codeTreePath,
     entries: codeTreeEntries,
@@ -4814,6 +4867,7 @@ function requestCodeWorkspaceForSession(sessionId: string): void {
 }
 
 function ensureActiveCodeWorkspace(): void {
+  if (pinnedCodeOwner) return;
   if (codeRevision) return;
   if (pendingCodeOpenRequest) return;
   if (!desktopDockview?.isPanelActive("code")) return;
@@ -5186,6 +5240,9 @@ function sendCodeComments(sessionId: string, root: string, file: CodeFileContent
 }
 
 function previewCodeComments(sessionId: string, root: string, file: CodeFileContent): void {
+  const pin = pinnedCodeOwner ? pinnedDiffs.get(pinnedCodeOwner.id) : undefined;
+  if (pinnedCodeOwner && (!pin || pinnedActionError(pin))) return;
+  pinnedPreviewGuard = pin ? { id: pin.id, generation: pin.generation, comparisonKey: comparisonKey(pin.state) } : null;
   const comments = selectedCodeComments(sessionCodeComments(sessionId).get(codeCommentFileKey(root, file.path)) ?? [], root, file);
   if (comments.length === 0) return;
   codePreviewDraft = { sessionId, root, file, comments };
@@ -5193,8 +5250,8 @@ function previewCodeComments(sessionId: string, root: string, file: CodeFileCont
   transcriptPreviewDraft = null;
   agentReviewDraft = null;
   diffPreviewTitle.textContent = "Preview code comments";
-  diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
-  diffPreviewSend.textContent = "Send comments";
+  diffPreviewSubtitle.textContent = pin ? `Send to ${pin.ownerLabel} · ${root}` : "Review the prompt that will be sent to OMP.";
+  diffPreviewSend.textContent = pin ? `Send to ${pin.ownerLabel}` : "Send comments";
   diffPreviewSend.disabled = false;
   diffPreviewText.readOnly = false;
   diffPreviewText.value = buildCodeCommentPrompt(root, file, comments);
@@ -5213,11 +5270,12 @@ function openSearchResultInCode(path: string): void {
 }
 
 
-function openCodeRequest(request: CodeOpenRequest): void {
+function openCodeRequest(request: CodeOpenRequest, pin?: PinnedDiff): void {
   clearCodeRevision();
   codeError = null;
   markCodeViewDirty();
   if (codeSessionId !== request.sessionId || codeWorkspace?.root !== request.repoRoot) resetCodeViewForSession(request.sessionId);
+  pinnedCodeOwner = pin ? { id: pin.id, sessionId: pin.ownerSessionId } : null;
   pendingCodeOpenRequest = request;
   if (codeWorkspace && codeSessionId === request.sessionId && codeWorkspace.root === request.repoRoot) {
     pendingCodeOpenRequest = null;
@@ -5274,6 +5332,10 @@ function dispatchGitFileRead(): void {
 function openDiffRevisionInCode(state: DiffReviewableState, filePath: string, originKey: string): void {
   const committed = committedFileTarget(state, filePath);
   if (!committed) return;
+  const pin = pinnedDiffs.get(originKey);
+  if (pin) {
+    pinnedCodeOwner = { id: pin.id, sessionId: pin.ownerSessionId };
+  } else pinnedCodeOwner = null;
   closeCodeContextMenu();
   clearPendingCodeSearchRequest();
   codeDefinitionRequestId = codeReferencesRequestId = null;
@@ -5286,11 +5348,11 @@ function openDiffRevisionInCode(state: DiffReviewableState, filePath: string, or
   pendingCodeRefresh = null;
   codeLoadingWorkspace = codeLoadingTree = codeLoadingFile = false;
   codeRevision = {
-    requestId: randomUuid(), sessionId: workspaceMode === "session" ? activeSessionId : null,
+    requestId: randomUuid(), sessionId: pin ? pin.ownerSessionId : workspaceMode === "session" ? activeSessionId : null,
     repoRoot: state.comparison.repoRoot, ...committed,
     side: state.summary.files.find(file => file.newPath === filePath)?.status === "deleted" ? "base" : "head",
     file: null, loading: true, error: null, sent: false,
-    originKey: diffRequestModeForAnnotationKey(originKey) === "compareDiff" ? "compareDiff" : originKey,
+    originKey: pin ? originKey : diffRequestModeForAnnotationKey(originKey) === "compareDiff" ? "compareDiff" : originKey,
     originComparison: revisionComparisonIdentity(state),
   };
   markCodeViewDirty();
@@ -5330,7 +5392,7 @@ function committedFileTarget(state: DiffReviewableState, filePath: string): { co
     : null;
 }
 
-function openDiffFileInCode(state: DiffReviewableState, filePath: string, owner: Document = document): void {
+function openDiffFileInCode(state: DiffReviewableState, filePath: string, owner: Document = document, annotationKey = activeSessionId ?? ""): void {
   const committed = committedFileTarget(state, filePath);
   if (committed) {
     pendingGitFile?.view.close();
@@ -5348,8 +5410,9 @@ function openDiffFileInCode(state: DiffReviewableState, filePath: string, owner:
   }
   const target = checkoutTargetForDiffFile(state);
   if (target?.kind !== "workingTree" || state.summary.files.find(file => file.newPath === filePath)?.status === "deleted") return;
-  const sessionId = activeSessionId;
-  if (sessionId) openCodeRequest({ source: "sessionWorktree", sessionId, repoRoot: state.comparison.repoRoot, path: filePath });
+  const pin = pinnedDiffs.get(annotationKey);
+  const sessionId = pin ? pin.ownerSessionId ?? pin.id : activeSessionId;
+  if (sessionId) openCodeRequest({ source: "sessionWorktree", sessionId, repoRoot: state.comparison.repoRoot, path: filePath }, pin);
 }
 
 
@@ -5410,12 +5473,13 @@ function renderToolsPanelIfNeeded(projection: SessionProjection | undefined, for
 function renderCodePanelIfNeeded(force = false): void {
   if (!desktopDockview?.panelMounted("code")) return;
   const sessionId = workspaceMode === "session" ? activeSessionId : null;
-  if (codeRevision && codeRevision.sessionId !== sessionId) clearCodeRevision();
+  if (codeRevision && !pinnedCodeOwner && codeRevision.sessionId !== sessionId) clearCodeRevision();
   if (codeRevision) {
     if (!force && !codePanelDirty) return;
     const revision = codeRevision;
     if (desktopDockview.withPanel("code", container => renderRevisionCodeViewer(container, revision, () => {
       clearCodeRevision();
+      if (pinnedCodeOwner) resetCodeViewForSession(sessionId);
       ensureActiveCodeWorkspace();
       renderCodePanelIfNeeded(true);
       focusCodePanel(".code-workspace-header button:not(:disabled)");
@@ -5427,10 +5491,12 @@ function renderCodePanelIfNeeded(force = false): void {
   // review "Open in Code" would wipe the workspace mid-open.
   const viewingReviewWorktree =
     codeWorkspace?.source === "reviewWorktree";
-  const sessionChanged = !viewingReviewWorktree && codeSessionId !== sessionId;
+  const sessionChanged = !pinnedCodeOwner && !viewingReviewWorktree && codeSessionId !== sessionId;
   if (sessionChanged) resetCodeViewForSession(sessionId);
   if (!force && !codePanelDirty && !sessionChanged) return;
   const rendered = desktopDockview.withPanel("code", container => {
+    const pin = pinnedCodeOwner ? pinnedDiffs.get(pinnedCodeOwner.id) : undefined;
+    const commentOwner = pinnedCodeOwner ? pin && !pinnedActionError(pin) ? pin.ownerSessionId : null : workspaceMode === "session" ? activeSessionId : null;
     renderCodeViewer(container, activeCodeViewState(), {
       openWorkspace: refreshCodeWorkspace,
       listTree: requestCodeTree,
@@ -5451,24 +5517,29 @@ function renderCodePanelIfNeeded(force = false): void {
       searchFiles: submitCodeSearch,
       openSearchResult: openSearchResultInCode,
       addComment: (lineNumber, lineText) => {
-        if (workspaceMode === "session" && activeSessionId && codeWorkspace && codeFile) {
-          addCodeComment(activeSessionId, codeWorkspace.root, codeFile, lineNumber, lineText);
+        if (pin && pinnedActionError(pin)) return;
+        if (commentOwner && codeWorkspace && codeFile) {
+          addCodeComment(commentOwner, codeWorkspace.root, codeFile, lineNumber, lineText);
         }
       },
       editComment: comment => {
-        if (workspaceMode === "session" && activeSessionId) editCodeComment(activeSessionId, comment);
+        if (pin && pinnedActionError(pin)) return;
+        if (commentOwner) editCodeComment(commentOwner, comment);
       },
       deleteComment: comment => {
-        if (workspaceMode === "session" && activeSessionId) deleteCodeComment(activeSessionId, comment);
+        if (pin && pinnedActionError(pin)) return;
+        if (commentOwner) deleteCodeComment(commentOwner, comment);
       },
       previewComments: () => {
-        if (workspaceMode === "session" && activeSessionId && codeWorkspace && codeFile) {
-          previewCodeComments(activeSessionId, codeWorkspace.root, codeFile);
+        if (pin && pinnedActionError(pin)) return;
+        if (commentOwner && codeWorkspace && codeFile) {
+          previewCodeComments(commentOwner, codeWorkspace.root, codeFile);
         }
       },
       flushComments: () => {
-        if (workspaceMode === "session" && activeSessionId && codeWorkspace && codeFile) {
-          flushCodeComments(activeSessionId, codeWorkspace.root, codeFile);
+        if (pin && pinnedActionError(pin)) return;
+        if (commentOwner && codeWorkspace && codeFile) {
+          flushCodeComments(commentOwner, codeWorkspace.root, codeFile);
         }
       },
       openContextMenu: openCodeContextMenu,
@@ -5481,6 +5552,22 @@ function renderCodePanelIfNeeded(force = false): void {
         renderCodePanelIfNeeded(true);
       },
     });
+    if (pinnedCodeOwner) {
+      const banner = mkEl("div");
+      banner.className = "pinned-code-source";
+      const label = mkEl("span");
+      label.textContent = `Pinned source · ${codeWorkspace?.root ?? pin?.target.repoRoot ?? ""} · ${pin?.ownerSessionId ? `Send to ${pin.ownerLabel}` : "No agent recipient"}`;
+      const back = mkEl("button");
+      back.textContent = "Return to active workspace";
+      back.addEventListener("click", () => {
+        resetCodeViewForSession(activeSessionId);
+        ensureActiveCodeWorkspace();
+        renderCodePanelIfNeeded(true);
+      });
+      banner.append(label, back);
+      container.prepend(banner);
+      if (!commentOwner) for (const button of container.querySelectorAll<HTMLButtonElement>(".code-comment-btn, .code-file-actions button:not(:last-child), .review-comment-actions button")) button.disabled = true;
+    }
   });
   if (!rendered) return;
   codePanelDirty = false;
@@ -6173,6 +6260,7 @@ function requestDiffReviewState(
 }
 
 function renderDiffsViewIfVisible(sessionId: string): void {
+  if (pinnedDiffs.has(sessionId)) { renderPinnedDiff(sessionId); return; }
   if (sessionId !== (activeSessionId ?? "")) return;
   markDiffsViewDirty();
   if (desktopDockview?.isPanelVisible("diffs")) {
@@ -6365,6 +6453,7 @@ function restoreScrollTopAcrossDiffRender(element: HTMLElement | null, scrollTop
 }
 
 function rerenderDiffsViewPreservingScroll(sessionId: string): void {
+  if (pinnedDiffs.has(sessionId)) { renderPinnedDiff(sessionId); return; }
   if (sessionId === "compareDiff") {
     markComparePanelDirty();
     rerenderComparePanelPreservingScroll();
@@ -6478,8 +6567,11 @@ function deleteTranscriptReviewComment(sessionId: string, comment: TranscriptRev
 }
 
 function flushTranscriptReviewComments(sessionId: string, message: TranscriptMessage): void {
+  pinnedPreviewGuard = null;
   const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
   if (comments.length === 0) return;
+  agentReviewDraft = null;
+  codePreviewDraft = null;
   transcriptPreviewDraft = { sessionId, message, comments };
   diffPreviewDraft = null;
   diffPreviewTitle.textContent = "Preview transcript comments";
@@ -6532,9 +6624,11 @@ function transcriptReviewOptions(sessionId: string, message: TranscriptMessage) 
 }
 
 function flushPlanReviewComments(sessionId: string, review: PendingPlanReview): void {
+  pinnedPreviewGuard = null;
   const message = planReviewTranscriptMessage(review);
   const comments = transcriptReviewCommentsForMessage(sessionId, message.id);
   if (comments.length === 0) return;
+  agentReviewDraft = null;
   const promptText = buildPlanReviewPrompt(review, comments);
   transcriptPreviewDraft = { sessionId, message, comments, promptText };
   diffPreviewDraft = null;
@@ -6645,10 +6739,11 @@ function reviewCommentAuthorLabel(author: ReviewComment["author"]): string {
 }
 
 function isReviewCommentCreateComposer(sessionId: string, key: string, location: DiffLineLocation): boolean {
-  return activeReviewCommentComposer?.mode === "create"
-    && activeReviewCommentComposer.sessionId === sessionId
-    && activeReviewCommentComposer.comparisonKey === key
-    && isSameDiffLineLocation(activeReviewCommentComposer.anchor, location);
+  const composer = pinnedDiffs.has(sessionId) ? pinnedCommentComposers.get(sessionId) : activeReviewCommentComposer;
+  return composer?.mode === "create"
+    && composer.sessionId === sessionId
+    && composer.comparisonKey === key
+    && isSameDiffLineLocation(composer.anchor, location);
 }
 
 function renderReviewCommentComposer(options: {
@@ -6701,9 +6796,11 @@ function renderReviewCommentComposer(options: {
   textarea.ownerDocument.defaultView?.requestAnimationFrame(() => {
     const owner = textarea.ownerDocument;
     const root = form.closest<HTMLElement>(".diffs-view, .compare-view");
-    const id = root?.classList.contains("compare-view") ? "compare"
+    const pinnedId = root?.dataset.pinnedId;
+    const id = pinnedId && isPinnedDiffPanelId(pinnedId) ? pinnedId : root?.classList.contains("compare-view") ? "compare"
       : activeDesktopDockviewMode === "diffReview" ? "sessionChanges" : "diffs";
-    if (!form.isConnected || !root || !owner.hasFocus() || !desktopDockview?.isPanelActive(id)
+    const dockview = pinnedId ? pinnedDesktopDockview : desktopDockview;
+    if (!form.isConnected || !root || !owner.hasFocus() || !dockview?.isPanelActive(id)
       || (owner.activeElement !== owner.body && owner.activeElement !== root)) return;
     textarea.focus({ preventScroll: true });
     textarea.setSelectionRange(textarea.value.length, textarea.value.length);
@@ -6712,30 +6809,37 @@ function renderReviewCommentComposer(options: {
 }
 
 function closeReviewCommentComposer(sessionId: string): void {
-  activeReviewCommentComposer = null;
+  if (isPinnedDiffPanelId(sessionId)) pinnedCommentComposers.delete(sessionId);
+  else activeReviewCommentComposer = null;
   markDiffsViewDirty();
   rerenderDiffsViewPreservingScroll(sessionId);
 }
 
-function startReviewCommentEdit(comment: ReviewComment): void {
-  activeReviewCommentComposer = {
+function startReviewCommentEdit(comment: ReviewComment, annotationKey = comment.sessionId): void {
+  const pin = pinnedDiffs.get(annotationKey);
+  if (pin && pinnedActionError(pin)) return;
+  const composer: ActiveReviewCommentComposer = {
     mode: "edit",
     sessionId: comment.sessionId,
     commentId: comment.id,
     body: comment.body,
   };
+  if (pin) pinnedCommentComposers.set(annotationKey, composer);
+  else activeReviewCommentComposer = composer;
   markDiffsViewDirty();
-  rerenderDiffsViewPreservingScroll(comment.sessionId);
+  rerenderDiffsViewPreservingScroll(annotationKey);
 }
 
-function submitReviewCommentEdit(comment: ReviewComment, body: string): void {
+function submitReviewCommentEdit(comment: ReviewComment, body: string, annotationKey = comment.sessionId): void {
+  const pin = pinnedDiffs.get(annotationKey);
+  if (pin && pinnedActionError(pin)) return;
   if (body === comment.body) {
-    closeReviewCommentComposer(comment.sessionId);
+    closeReviewCommentComposer(annotationKey);
     return;
   }
   markReviewCommentsDirty(comment.sessionId);
   if (send({ type: "review.comment.update", id: comment.id, body })) {
-    activeReviewCommentComposer = null;
+    closeReviewCommentComposer(annotationKey);
     markDiffsViewDirty();
     rerenderDiffsViewPreservingScroll(comment.sessionId);
   }
@@ -6746,7 +6850,10 @@ function deleteReviewComment(comment: ReviewComment): void {
   send({ type: "review.comment.delete", id: comment.id });
 }
 
-function renderReviewCommentItem(comment: ReviewComment, stale: boolean, options: { locationLabel?: string; summary?: boolean } = {}): HTMLElement {
+function renderReviewCommentItem(comment: ReviewComment, stale: boolean, options: { locationLabel?: string; summary?: boolean; annotationKey?: string } = {}): HTMLElement {
+  const annotationKey = options.annotationKey ?? comment.sessionId;
+  const pin = pinnedDiffs.get(annotationKey);
+  const composer = pin ? pinnedCommentComposers.get(annotationKey) : activeReviewCommentComposer;
   const item = mkEl("article");
   item.className = [
     "review-comment-card",
@@ -6790,27 +6897,27 @@ function renderReviewCommentItem(comment: ReviewComment, stale: boolean, options
   const edit = mkEl("button");
   edit.type = "button";
   edit.textContent = "Edit";
-  edit.addEventListener("click", () => startReviewCommentEdit(comment));
+  edit.disabled = Boolean(pin && pinnedActionError(pin));
+  edit.addEventListener("click", () => startReviewCommentEdit(comment, annotationKey));
   const remove = mkEl("button");
   remove.type = "button";
   remove.textContent = "Remove";
-  remove.addEventListener("click", () => deleteReviewComment(comment));
+  remove.disabled = Boolean(pin && pinnedActionError(pin));
+  remove.addEventListener("click", () => { if (!pin || !pinnedActionError(pin)) deleteReviewComment(comment); });
   controls.append(edit, remove);
   header.append(identity, meta, controls);
   item.append(header);
-  if (activeReviewCommentComposer?.mode === "edit" && activeReviewCommentComposer.commentId === comment.id) {
+  if (composer?.mode === "edit" && composer.commentId === comment.id) {
     item.append(renderReviewCommentComposer({
       mode: "edit",
-      initialBody: activeReviewCommentComposer.body,
+      initialBody: composer.body,
       title: "Edit review comment",
       submitLabel: "Save",
       onInput: body => {
-        if (activeReviewCommentComposer?.mode === "edit" && activeReviewCommentComposer.commentId === comment.id) {
-          activeReviewCommentComposer.body = body;
-        }
+        composer.body = body;
       },
-      onSubmit: body => submitReviewCommentEdit(comment, body),
-      onCancel: () => closeReviewCommentComposer(comment.sessionId),
+      onSubmit: body => submitReviewCommentEdit(comment, body, annotationKey),
+      onCancel: () => closeReviewCommentComposer(annotationKey),
     }));
   } else {
     const body = mkEl("p");
@@ -6826,14 +6933,18 @@ function startDiffCommentComposer(
   state: DiffReviewableState,
   location: DiffLineLocation,
 ): void {
+  const pin = pinnedDiffs.get(sessionId);
+  if (pin && (pinnedActionError(pin) || comparisonKey(pin.state) !== comparisonKey(state))) return;
   const key = comparisonKey(state);
-  activeReviewCommentComposer = {
+  const composer: ActiveReviewCommentComposer = {
     mode: "create",
     sessionId,
     comparisonKey: key,
     anchor: location,
     body: "",
   };
+  if (pin) pinnedCommentComposers.set(sessionId, composer);
+  else activeReviewCommentComposer = composer;
   markDiffsViewDirty();
   rerenderDiffsViewPreservingScroll(sessionId);
 }
@@ -6844,9 +6955,12 @@ function submitDiffComment(
   location: DiffLineLocation,
   body: string,
 ): void {
-  markReviewCommentsDirty(sessionId);
-  if (send(createReviewCommentCreateMessage(sessionId, state, location, body))) {
-    activeReviewCommentComposer = null;
+  const pin = pinnedDiffs.get(sessionId);
+  if (pin && (pinnedActionError(pin) || comparisonKey(pin.state) !== comparisonKey(state))) return;
+  const owner = pin?.ownerSessionId ?? sessionId;
+  markReviewCommentsDirty(owner);
+  if (send(createReviewCommentCreateMessage(owner, state, location, body))) {
+    closeReviewCommentComposer(sessionId);
     markDiffsViewDirty();
     rerenderDiffsViewPreservingScroll(sessionId);
   }
@@ -6857,6 +6971,8 @@ function askDiffQuestion(
   state: DiffReviewableState,
   location: DiffLineLocation,
 ): void {
+  const pin = pinnedDiffs.get(sessionId);
+  if (pin && (pinnedActionError(pin) || comparisonKey(pin.state) !== comparisonKey(state))) return;
   const question = window.prompt("Ask the agent about this diff line");
   if (!question?.trim()) return;
   const annotations = diffAnnotations.get(sessionId) ?? [];
@@ -6874,11 +6990,9 @@ function askDiffQuestion(
   rerenderDiffsViewPreservingScroll(sessionId);
 }
 
-function cachedDiffRowsForAnnotation(state: DiffReviewableState, annotation: DiffReviewAnnotation): DiffRow[] | null {
-  const key = comparisonKey(state);
-  return diffPatchCache.get(diffPatchCacheKey(key, annotation.anchor.newPath))?.rows
-    ?? diffPatchCache.get(diffPatchCacheKey(key, null))?.rows
-    ?? null;
+function cachedDiffRowsForAnnotation(state: DiffReviewableState, annotation: DiffReviewAnnotation, annotationKey = ""): DiffRow[] | null {
+  return diffPatchForView(annotationKey, state, annotation.anchor.newPath)?.rows
+    ?? diffPatchForView(annotationKey, state, null)?.rows ?? null;
 }
 
 function diffAnnotationFlushEditorText(annotations: DiffReviewAnnotation[]): string {
@@ -6898,6 +7012,8 @@ function sendDiffAnnotations(
   annotationsToFlush: DiffReviewAnnotation[],
   promptText: string,
 ): void {
+  const pin = pinnedDiffs.get(sessionId);
+  if (pin && pinnedActionError(pin)) return;
   if (annotationsToFlush.length === 0) return;
   const flushedIds = new Set(annotationsToFlush.map(annotation => annotation.id));
   const flushedPersistedComments = annotationsToFlush
@@ -6923,6 +7039,10 @@ function sendDiffAnnotations(
     rerenderDiffsViewPreservingScroll(sessionId);
   };
   closeDiffPreview();
+  if (pin) {
+    if (sendPromptMessage(pin.ownerSessionId!, promptText, [], currentSessionSummary(pin.ownerSessionId!)?.status === "busy" ? "followUp" : undefined)) clearFlushedAnnotations();
+    return;
+  }
   sendPromptWithBusyHandling({
     sessionId,
     text: promptText,
@@ -6938,16 +7058,21 @@ function previewDiffAnnotationList(
   annotationsToFlush: DiffReviewAnnotation[],
   promptMode: DiffAnnotationPromptMode,
 ): void {
+  const pin = pinnedDiffs.get(sessionId);
+  if (pin && pinnedActionError(pin)) return;
+  pinnedPreviewGuard = pin ? { id: pin.id, generation: pin.generation, comparisonKey: comparisonKey(pin.state) } : null;
   const key = comparisonKey(state);
   if (annotationsToFlush.length === 0) return;
-  const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffRowsForAnnotation(state, annotation), promptMode);
+  agentReviewDraft = null;
+  codePreviewDraft = null;
+  const prompt = prepareDiffAnnotationPrompt(state, annotationsToFlush, annotation => cachedDiffRowsForAnnotation(state, annotation, sessionId), promptMode);
   const isQuestionPreview = annotationsToFlush.every(annotation => annotation.kind === "question");
   if (prompt.ok) {
     diffPreviewDraft = { sessionId, state, comparisonKey: key, annotations: annotationsToFlush };
     transcriptPreviewDraft = null;
     diffPreviewTitle.textContent = isQuestionPreview ? "Preview diff questions" : "Preview diff notes";
-    diffPreviewSubtitle.textContent = "Review the prompt that will be sent to OMP.";
-    diffPreviewSend.textContent = isQuestionPreview ? "Send questions" : "Send notes";
+    diffPreviewSubtitle.textContent = pin ? `Send to ${pin.ownerLabel} · ${pin.target.repoRoot}` : "Review the prompt that will be sent to OMP.";
+    diffPreviewSend.textContent = pin ? `Send to ${pin.ownerLabel}` : isQuestionPreview ? "Send questions" : "Send notes";
     diffPreviewSend.disabled = false;
     diffPreviewText.readOnly = false;
     diffPreviewText.value = prompt.prompt;
@@ -6981,22 +7106,26 @@ function previewDiffAnnotations(
 }
 
 function previewAgentDiffReview(sessionId: string, state: DiffReviewableState): void {
+  const pin = pinnedDiffs.get(sessionId);
+  if (pin && pinnedActionError(pin)) return;
+  pinnedPreviewGuard = pin ? { id: pin.id, generation: pin.generation, comparisonKey: comparisonKey(pin.state) } : null;
   agentReviewDraft = { sessionId, state };
   diffPreviewDraft = null;
   transcriptPreviewDraft = null;
   codePreviewDraft = null;
   diffPreviewTitle.textContent = "Request agent review";
-  diffPreviewSubtitle.textContent = "Tell the agent how to review. Agent comments will persist after bridge broadcast.";
+  diffPreviewSubtitle.textContent = pin ? `Send to ${pin.ownerLabel} · ${pin.target.repoRoot}` : "Tell the agent how to review. Agent comments will persist after bridge broadcast.";
   diffPreviewText.value = "Review the full change for correctness, reliability, maintainability, and edge cases.";
   diffPreviewText.readOnly = false;
   diffPreviewStatus.textContent = "Agent review comments will appear after the bridge stores and broadcasts them.";
-  diffPreviewSend.textContent = "Start review";
+  diffPreviewSend.textContent = pin ? `Send to ${pin.ownerLabel}` : "Start review";
   diffPreviewSend.disabled = false;
   diffPreviewOverlay.hidden = false;
   focusPromptPreviewStart();
 }
 
 function closeDiffPreview(): void {
+  pinnedPreviewGuard = null;
   diffPreviewOverlay.hidden = true;
   diffPreviewText.value = "";
   diffPreviewStatus.textContent = "";
@@ -7016,12 +7145,19 @@ function sendPromptPreviewDraft(): void {
   const transcriptDraft = transcriptPreviewDraft;
   const codeDraft = codePreviewDraft;
   const agentDraft = agentReviewDraft;
+  const guard = pinnedPreviewGuard;
+  const pin = guard ? pinnedDiffs.get(guard.id) : undefined;
+  if (guard && (!pin || pin.generation !== guard.generation || comparisonKey(pin.state) !== guard.comparisonKey || pinnedActionError(pin))) {
+    diffPreviewSend.disabled = true;
+    diffPreviewStatus.textContent = pin ? pinnedActionError(pin) ?? "This preview is stale. Reopen it from the pinned panel." : "This pinned panel was closed.";
+    return;
+  }
   const target = agentDraft?.sessionId ?? codeDraft?.sessionId ?? diffDraft?.sessionId ?? transcriptDraft?.sessionId;
   if (target && transcriptBtw.rejectMainSend(target)) return;
   if (agentDraft) {
     const instructions = diffPreviewText.value.trim();
     closeDiffPreview();
-    send({ type: "review.agentReview.start", sessionId: agentDraft.sessionId, state: agentDraft.state, instructions });
+    send({ type: "review.agentReview.start", sessionId: pin?.ownerSessionId ?? agentDraft.sessionId, state: agentDraft.state, instructions });
     return;
   }
   if (codeDraft) {
@@ -7056,6 +7192,8 @@ function flushDiffAnnotations(
 
 
 function diffReviewTarget(annotationKey: string): string {
+  const pin = pinnedDiffs.get(annotationKey);
+  if (pin) return JSON.stringify([pin.id, pin.target, pin.selectedFile]);
   const file = sessionChangesSelectedFiles.get(annotationKey) ?? null;
   if (annotationKey === "compareDiff") {
     return JSON.stringify(compareMode === "rangeDiff" ? ["rangeDiff", rangeDiffInputs]
@@ -7078,6 +7216,8 @@ function diffPatchReady(annotationKey: string, state: DiffReviewableState | null
 }
 
 function diffPanelHasFocus(annotationKey: string, container: HTMLElement): boolean {
+  const pin = pinnedDiffs.get(annotationKey);
+  if (pin) return Boolean(pinnedDesktopDockview?.isPanelActive(pin.id) && container.ownerDocument.hasFocus() && container.contains(container.ownerDocument.activeElement));
   const id = annotationKey === "compareDiff" ? "compare"
     : activeDesktopDockviewMode === "diffReview" ? "sessionChanges" : "diffs";
   return Boolean(desktopDockview?.isPanelActive(id) && container.ownerDocument.hasFocus()
@@ -7632,6 +7772,13 @@ function renderRangeDiffCompare(container: HTMLElement): void {
   layoutNote.className = "diff-layout-note";
   layoutNote.textContent = "Range-diff is a diff of patches; Unified only. Side by side applies to File diff.";
   form.append(layoutNote);
+  const pin = mkEl("button");
+  pin.type = "button";
+  pin.textContent = "Pin as new panel";
+  pin.setAttribute("aria-label", "Pin as new panel");
+  pin.disabled = true;
+  pin.title = "Native range-diff compares patches, not file versions. Pin a File diff comparison instead.";
+  form.append(pin);
   const fields = {} as Record<"repoRoot" | "base" | "old" | "new", HTMLInputElement>;
   for (const [key, title] of [["repoRoot", "Repository"], ["base", "Base"], ["old", "Old"], ["new", "New"]] as const) {
     const label = mkEl("label");
@@ -7794,7 +7941,169 @@ function renderDiffMessage(main: HTMLElement, message: string, error: boolean): 
   main.append(body);
 }
 
+function diffPatchForView(annotationKey: string, state: DiffReviewableState, file: string | null): CachedDiffPatch | undefined {
+  const pin = pinnedDiffs.get(annotationKey);
+  return pin ? pin.cache.get(pinnedPatchKey(state, file)) : diffPatchCache.get(diffPatchCacheKey(comparisonKey(state), file));
+}
+
+function pinnedActionError(pin: PinnedDiff): string | null {
+  if (pin.closed || !pinnedDiffs.has(pin.id)) return "This pinned panel is closed.";
+  if (!connection?.isOpen()) return "Not connected to the Fura bridge.";
+  if (pin.unavailable || pin.error) return pin.unavailable ?? pin.error;
+  if (pin.loading) return "Refreshing this pin. The displayed patch is the previous result.";
+  if (!pin.ownerSessionId) return "This comparison has no agent recipient.";
+  const source = currentSessionSummary(pin.ownerSessionId);
+  if (!source || source.kind !== "managed" || !["idle", "busy"].includes(source.status)) {
+    return `Recipient ${pin.ownerLabel} is unavailable or stopped. This panel will not resume it.`;
+  }
+  return null;
+}
+
+function pinDiffView(annotationKey: string, state: DiffReviewableState, sourceRoot: HTMLElement | null): void {
+  if (!pinnedDesktopDockview || isPinnedDiffPanelId(annotationKey)) return;
+  const owner = annotationKey === "compareDiff" ? null : annotationKey;
+  const pin = new PinnedDiff(randomUuid(), owner, owner ? currentSessionSummary(owner)?.title || owner : "No agent",
+    state, { selectedFile: sessionChangesSelectedFiles.get(annotationKey) ?? null, layout: diffLayout, ignoreWhitespace: diffIgnoreWhitespace,
+      changeKind: diffRequestModeForAnnotationKey(annotationKey) === "sessionChanges" ? sessionChangesKinds.get(annotationKey) ?? "unstaged" : undefined },
+    send, randomUuid, () => queueMicrotask(() => renderPinnedDiff(pin.id)));
+  for (const [key, patch] of diffPatchCache) {
+    if (patchCacheComparisonKey(key) === comparisonKey(state)) pin.remember(key, patch);
+  }
+  const selectedPatch = pin.cache.get(pinnedPatchKey(state, pin.selectedFile));
+  if (selectedPatch) pin.contextLines = selectedPatch.contextLines;
+  pinnedDiffs.set(pin.id, pin);
+  diffAnnotations.set(pin.id, (diffAnnotations.get(annotationKey) ?? []).map(annotation => ({ ...annotation })));
+  reviewComments.set(pin.id, [...(reviewComments.get(annotationKey) ?? [])]);
+  if (activeReviewCommentComposer?.sessionId === annotationKey) {
+    pinnedCommentComposers.set(pin.id, { ...activeReviewCommentComposer, sessionId: pin.id });
+  }
+  const filter = diffFileFilters.get(annotationKey);
+  if (filter) diffFileFilters.set(pin.id, filter);
+  const mode = pin.target.scope === "sessionChanges" && !pin.target.currentCommitOid
+    ? `Current ${pin.target.changeKind}` : `Fixed ${state.comparison.rightTreeOrCommit.slice(0, 12)}`;
+  const title = `${shortPath(pin.target.repoRoot)} · ${mode}`;
+  requireElement("workspacePanelHost").classList.add("has-pinned-diffs");
+  requireElement("pinnedWorkspacePanelHost").classList.add("workspace-panel-host-active");
+  if (!pinnedDesktopDockview.addPinnedPanel(pin.id, title)) { closePinnedDiff(pin.id); return; }
+  renderPinnedDiff(pin.id);
+  pinnedDesktopDockview.activatePanel(pin.id);
+  if (sourceRoot) pinnedDesktopDockview.withPanel(pin.id, container => {
+    for (const selector of [".diffs-main-body", ".diffs-sidebar-scroll"]) {
+      const source = sourceRoot.querySelector<HTMLElement>(selector);
+      const target = container.querySelector<HTMLElement>(selector);
+      if (source && target) { target.scrollTop = source.scrollTop; target.scrollLeft = source.scrollLeft; }
+    }
+  });
+}
+
+function closePinnedDiff(id: string): void {
+  const pin = pinnedDiffs.get(id);
+  if (!pin) return;
+  pin.close();
+  pinnedDiffs.delete(id);
+  for (const map of [sessionChangesSelectedFiles, diffFileFilters, diffAnnotations, reviewComments, pinnedCommentComposers]) map.delete(id);
+  if (openDiffFileMenu?.annotationKey === id) openDiffFileMenu = null;
+  if (pinnedPreviewGuard?.id === id) {
+    diffPreviewSend.disabled = true;
+    diffPreviewStatus.textContent = "This pinned panel was closed.";
+  }
+  if (!pinnedDiffs.size) {
+    requireElement("workspacePanelHost").classList.remove("has-pinned-diffs");
+    requireElement("pinnedWorkspacePanelHost").classList.remove("workspace-panel-host-active");
+  }
+}
+
+function renderPinnedDiff(id: string): void {
+  const pin = pinnedDiffs.get(id);
+  if (!pin || pin.closed) return;
+  pinnedDesktopDockview?.withPanel(pin.id, container => {
+    setRenderDocument(container.ownerDocument);
+    const scroll = captureDiffViewScroll(container);
+    const filterFocus = captureDiffFilterFocus(container);
+    const composer = container.querySelector<HTMLTextAreaElement>(".review-comment-composer-input");
+    const composerSelection = composer && container.ownerDocument.activeElement === composer
+      ? { start: composer.selectionStart, end: composer.selectionEnd, direction: composer.selectionDirection, top: composer.scrollTop } : null;
+    const expandedCommit = container.querySelector<HTMLDetailsElement>(".diff-commit-message[open]")?.dataset.comparisonKey;
+    pinnedActionStates.set(pin, pinnedActionError(pin));
+    const focusedClass = container.contains(container.ownerDocument.activeElement)
+      ? container.ownerDocument.activeElement?.className : "";
+    container.replaceChildren();
+    const root = mkEl("div");
+    root.className = "diffs-view pinned-diff-view";
+    root.dataset.pinnedId = id;
+    root.dataset.panelId = id;
+    root.dataset.reviewTarget = diffReviewTarget(id);
+    root.dataset.comparisonKey = comparisonKey(pin.state);
+    root.dataset.ignoreWhitespace = String(pin.state.comparison.ignoreWhitespace ?? false);
+    root.tabIndex = 0;
+    root.setAttribute("aria-label", "Pinned Git review");
+    const sidebar = mkEl("aside");
+    sidebar.className = "diffs-sidebar";
+    const top = mkEl("div");
+    top.className = "diffs-sidebar-top";
+    const files = mkEl("div");
+    files.className = "diffs-sidebar-scroll";
+    const header = mkEl("header");
+    header.className = "pinned-diff-header";
+    const heading = mkEl("strong");
+    heading.textContent = `Pinned · ${pin.target.scope === "sessionChanges"
+      ? pin.target.currentCommitOid ? `History ${pin.target.currentCommitOid.slice(0, 12)}` : `Current changes (${pin.target.changeKind})`
+      : "Fixed comparison"}`;
+    const repo = mkEl("code");
+    repo.textContent = pin.target.repoRoot;
+    const recipient = mkEl("p");
+    recipient.className = "pinned-diff-recipient";
+    recipient.textContent = pin.ownerSessionId ? `Send to ${pin.ownerLabel}` : "Read-only comparison · no agent recipient";
+    const refresh = mkEl("button");
+    refresh.type = "button";
+    refresh.textContent = "Refresh";
+    refresh.setAttribute("aria-label", "Refresh");
+    refresh.title = "Refresh this captured target only. Session changes and focus never refresh a pin.";
+    refresh.disabled = pin.loading || Boolean(pin.unavailable) || !connection?.isOpen();
+    refresh.addEventListener("click", () => pin.refresh());
+    header.append(heading, repo, recipient, refresh);
+    const freshness = mkEl("p");
+    freshness.className = "pinned-diff-recipient";
+    freshness.textContent = "Captured result · Refresh manually to read this source again.";
+    header.append(freshness);
+    const reason = pin.unavailable ?? pin.error ?? (pin.loading ? "Refreshing… Showing previous result." : pinnedActionError(pin));
+    if (reason) {
+      const status = mkEl("p");
+      status.className = "diff-refresh-status";
+      status.setAttribute("role", "status");
+      status.textContent = reason;
+      header.append(status);
+    }
+    top.append(header);
+    sidebar.append(top, files);
+    const main = mkEl("section");
+    main.className = "diffs-main";
+    root.append(sidebar, main);
+    container.append(root);
+    renderReviewableDiff(id, pin.state, top, files, main, Boolean(pin.ownerSessionId), pin.scope);
+    if (pin.stale) {
+      root.dataset.refreshRetained = "true";
+      root.setAttribute("aria-busy", String(pin.loading));
+      for (const control of main.querySelectorAll<HTMLButtonElement | HTMLSelectElement>(".diffs-actions button, .diffs-actions select, .diffs-main-body button")) control.disabled = true;
+    }
+    restoreDiffViewScroll(container, scroll);
+    restoreDiffFilterFocus(container, filterFocus);
+    const commit = root.querySelector<HTMLDetailsElement>(".diff-commit-message");
+    if (commit && expandedCommit === commit.dataset.comparisonKey) commit.open = true;
+    if (composerSelection) {
+      const replacement = root.querySelector<HTMLTextAreaElement>(".review-comment-composer-input");
+      replacement?.focus({ preventScroll: true });
+      replacement?.setSelectionRange(composerSelection.start, composerSelection.end, composerSelection.direction);
+      if (replacement) replacement.scrollTop = composerSelection.top;
+    }
+    if (focusedClass === "diff-layout-select") root.querySelector<HTMLSelectElement>(".diff-layout-select")?.focus({ preventScroll: true });
+    if (focusedClass === "diff-ignore-whitespace") root.querySelector<HTMLInputElement>(".diff-ignore-whitespace")?.focus({ preventScroll: true });
+  });
+}
+
 function requestDiffContent(annotationKey: string, state: DiffReviewableState, filePath: string | null, requestMode: "sessionChanges" | "compareDiff", contextLines?: number): void {
+  const pin = pinnedDiffs.get(annotationKey);
+  if (pin) { pin.requestContent(filePath, contextLines); return; }
   if ((state.comparison.ignoreWhitespace ?? false) !== diffIgnoreWhitespace) return;
   const file = filePath ? state.summary.files.find(candidate => candidate.newPath === filePath) : null;
   if (filePath && !file) return;
@@ -7849,15 +8158,15 @@ function requestDiffContent(annotationKey: string, state: DiffReviewableState, f
 }
 
 function requestWiderDiffContext(annotationKey: string, state: DiffReviewableState, filePath: string, requestMode: "sessionChanges" | "compareDiff"): void {
-  const key = comparisonKey(state);
   const scope = sessionChangesSelectedFiles.get(annotationKey) ? filePath : null;
-  const cached = diffPatchCache.get(diffPatchCacheKey(key, scope));
+  const cached = diffPatchForView(annotationKey, state, scope);
   const currentContext = cached?.contextLines ?? state.comparison.contextLines ?? 3;
   requestDiffContent(annotationKey, state, scope, requestMode, Math.min(currentContext + 10, 200));
 }
 
 
-function diffLayoutSelector(): HTMLSelectElement {
+function diffLayoutSelector(annotationKey?: string): HTMLSelectElement {
+  const pin = annotationKey ? pinnedDiffs.get(annotationKey) : undefined;
   const select = mkEl("select");
   select.className = "diff-layout-select";
   select.setAttribute("aria-label", "Diff layout");
@@ -7867,8 +8176,9 @@ function diffLayoutSelector(): HTMLSelectElement {
     option.textContent = label;
     select.append(option);
   }
-  select.value = diffLayout;
+  select.value = pin?.layout ?? diffLayout;
   select.addEventListener("change", () => {
+    if (pin) { pin.layout = select.value === "split" ? "split" : "unified"; renderPinnedDiff(pin.id); return; }
     diffLayout = select.value === "split" ? "split" : "unified";
     sessionStorage.setItem("fura.diff.layout", diffLayout);
     // Presentation only: leave requests, repository/ref selection and anchors intact.
@@ -7880,15 +8190,17 @@ function diffLayoutSelector(): HTMLSelectElement {
   return select;
 }
 
-function diffWhitespaceToggle(): HTMLLabelElement {
+function diffWhitespaceToggle(annotationKey?: string): HTMLLabelElement {
+  const pin = annotationKey ? pinnedDiffs.get(annotationKey) : undefined;
   const label = mkEl("label");
   label.className = "checkbox-row diff-whitespace-control";
   label.title = "Git -w (--ignore-all-space): ignores whitespace when comparing lines, not added/deleted blank lines. File list and statistics remain unfiltered.";
   const input = mkEl("input");
   input.type = "checkbox";
   input.className = "diff-ignore-whitespace";
-  input.checked = diffIgnoreWhitespace;
+  input.checked = pin?.ignoreWhitespace ?? diffIgnoreWhitespace;
   input.addEventListener("change", () => {
+    if (pin) { pin.ignoreWhitespace = input.checked; pin.refresh(); return; }
     diffIgnoreWhitespace = input.checked;
     sessionStorage.setItem("fura.diff.ignoreWhitespace", String(diffIgnoreWhitespace));
     markDiffsViewDirty();
@@ -7922,7 +8234,9 @@ function renderReviewableDiff(
   requestMode: "sessionChanges" | "compareDiff",
 ): void {
   const key = comparisonKey(state);
-  if (annotationKey !== "compareDiff") ensureReviewCommentsLoaded(annotationKey);
+  const pin = pinnedDiffs.get(annotationKey);
+  const owner = pin?.ownerSessionId ?? annotationKey;
+  if (owner !== "compareDiff" && !isPinnedDiffPanelId(owner) && !pin?.unavailable) ensureReviewCommentsLoaded(owner);
   const annotations = diffAnnotations.get(annotationKey) ?? [];
   const comments = reviewCommentsForComparison(reviewComments.get(annotationKey) ?? [], key);
   const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
@@ -7940,6 +8254,9 @@ function renderReviewableDiffMainContent(
   requestMode: "sessionChanges" | "compareDiff",
 ): void {
   const key = comparisonKey(state);
+  const pin = pinnedDiffs.get(annotationKey);
+  const ignoreWhitespace = pin ? pin.state.comparison.ignoreWhitespace ?? false : diffIgnoreWhitespace;
+  if (pin) allowPromptActions = Boolean(pin.ownerSessionId && !pinnedActionError(pin));
   if ("workingTreeStatusError" in state && state.workingTreeStatusError) {
     const warning = mkEl("p");
     warning.className = "diffs-error";
@@ -7951,8 +8268,8 @@ function renderReviewableDiffMainContent(
   const comments = reviewCommentsForComparison(reviewComments.get(annotationKey) ?? [], key);
   const fileSummaries = summarizeWireDiffFiles(state.summary.files, [...annotations, ...comments.map(reviewCommentAsAnnotation)], key);
   const selectedFilePath = selectedDiffFilePath(annotationKey, state, fileSummaries.map(file => file.filePath));
-  const cachedPatch = selectedFilePath ? diffPatchCache.get(diffPatchCacheKey(key, selectedFilePath)) : undefined;
-  const aggregatePatch = selectedFilePath ? undefined : diffPatchCache.get(diffPatchCacheKey(key, null));
+  const cachedPatch = selectedFilePath ? diffPatchForView(annotationKey, state, selectedFilePath) : undefined;
+  const aggregatePatch = selectedFilePath ? undefined : diffPatchForView(annotationKey, state, null);
   const detailToolbar = mkEl("div");
   detailToolbar.className = "git-detail-toolbar";
   const navigation = main.querySelector<HTMLElement>(".diffs-toolbar, .git-commit-navigation");
@@ -8029,6 +8346,7 @@ function renderReviewableDiffMainContent(
   payloadToggle.textContent = state.comparison.detailMode === "filePatch" ? "Show stat" : "Show file patch";
   payloadToggle.addEventListener("click", () => {
     const nextPayload: DiffDetailMode = state.comparison.detailMode === "filePatch" ? "statOnly" : "filePatch";
+    if (pin) { pin.detailMode = nextPayload; pin.refresh(); return; }
     if (requestMode === "compareDiff") {
       if (annotationKey === "compareDiff") requestCompareDiff({ payloadKind: nextPayload, currentCommitOid: state.review.currentCommitOid ?? null });
       else {
@@ -8040,8 +8358,17 @@ function renderReviewableDiffMainContent(
     }
   });
   toolbar.append(payloadToggle);
-  toolbar.append(diffLayoutSelector(), diffWhitespaceToggle());
-  if (requestMode === "compareDiff") {
+  toolbar.append(diffLayoutSelector(annotationKey), diffWhitespaceToggle(annotationKey));
+  if (!pin) {
+    const pinButton = mkEl("button");
+    pinButton.type = "button";
+    pinButton.className = "diff-pin-button";
+    pinButton.textContent = "Pin as new panel";
+    pinButton.setAttribute("aria-label", "Pin as new panel");
+    pinButton.addEventListener("click", () => pinDiffView(annotationKey, state, main.closest<HTMLElement>(".diffs-view, .compare-view")));
+    toolbar.append(pinButton);
+  }
+  if (requestMode === "compareDiff" && !pin) {
   const firstCommit = state.review.commits[0]?.oid ?? null;
   const stepBtn = mkEl("button");
   stepBtn.type = "button";
@@ -8125,10 +8452,10 @@ function renderReviewableDiffMainContent(
     code.textContent = committed ? "View committed file" : "Code";
     code.disabled = !committed && (checkoutTargetForDiffFile(state)?.kind !== "workingTree" || state.summary.files.find(file => file.newPath === selectedFilePath)?.status === "deleted");
     code.title = committed ? `Read ${committed.path} at ${committed.commitOid.slice(0, 12)} without a checkout` : code.disabled ? "This version exists only in the diff, not as a working-tree file." : `Open ${selectedFilePath} in Code`;
-    code.addEventListener("click", () => openDiffFileInCode(state, selectedFilePath, code.ownerDocument));
+    code.addEventListener("click", () => openDiffFileInCode(state, selectedFilePath, code.ownerDocument, annotationKey));
     toolbar.append(code);
   }
-  if (allowPromptActions) {
+  if (allowPromptActions || pin?.ownerSessionId) {
     const promptMode: DiffAnnotationPromptMode = state.review.currentCommitOid ? "comparisonReview" : requestMode === "sessionChanges" || annotationKey !== "compareDiff" ? "sessionChanges" : "comparisonReview";
     const queuedDraftComments = selectedDiffAnnotations(annotations, key, "comment");
     const queuedPersistedComments = flushableReviewCommentAnnotations(comments, key);
@@ -8138,20 +8465,22 @@ function renderReviewableDiffMainContent(
       const flushComments = mkEl("button");
       flushComments.type = "button";
       flushComments.textContent = `Preview comments (${queuedComments.length})`;
+      flushComments.disabled = !allowPromptActions;
       flushComments.addEventListener("click", () => previewDiffAnnotationList(annotationKey, state, queuedComments, promptMode));
       toolbar.append(flushComments);
     }
     const flushQuestions = mkEl("button");
     flushQuestions.type = "button";
     flushQuestions.textContent = `Preview questions (${queuedQuestions.length})`;
-    flushQuestions.disabled = queuedQuestions.length === 0;
+    flushQuestions.disabled = !allowPromptActions || queuedQuestions.length === 0;
     flushQuestions.addEventListener("click", () => flushDiffAnnotations(annotationKey, state, "question", promptMode));
     toolbar.append(flushQuestions);
     const review = mkEl("button");
     review.type = "button";
     review.textContent = "Request agent review";
-    review.disabled = state.summary.files.length === 0;
-    review.title = state.summary.files.length > 0 ? "Ask the agent to review the full diff" : "No changed files to review";
+    review.disabled = !allowPromptActions || state.summary.files.length === 0;
+    review.title = pin && !allowPromptActions ? pinnedActionError(pin) ?? "Recipient unavailable"
+      : state.summary.files.length > 0 ? "Ask the agent to review the full diff" : "No changed files to review";
     review.addEventListener("click", () => {
       if (state.summary.files.length === 0) return;
       previewAgentDiffReview(annotationKey, { ...state, patch: null });
@@ -8163,7 +8492,7 @@ function renderReviewableDiffMainContent(
 
   const body = mkEl("div");
   body.className = "diffs-main-body";
-  if (diffIgnoreWhitespace) {
+  if (ignoreWhitespace) {
     const note = mkEl("p");
     note.className = "diff-whitespace-note";
     note.textContent = "Ignoring whitespace (Git -w). File list and statistics still show all changes.";
@@ -8206,7 +8535,7 @@ function renderReviewableDiffMainContent(
       if (renderedRows.length === 0) {
         const empty = mkEl("p");
         empty.className = "empty diffs-empty";
-        empty.textContent = diffIgnoreWhitespace
+        empty.textContent = ignoreWhitespace
           ? "No patch changes remain with Ignore whitespace enabled."
           : "No changes for this comparison.";
         body.append(empty);
@@ -8228,7 +8557,7 @@ function renderReviewableDiffMainContent(
     if (renderedRows.length === 0) {
       const empty = mkEl("p");
       empty.className = "empty diffs-empty";
-      empty.textContent = diffIgnoreWhitespace
+      empty.textContent = ignoreWhitespace
         ? "No patch changes remain with Ignore whitespace enabled."
         : "No patch changes for this file.";
       body.append(empty);
@@ -8243,11 +8572,14 @@ function renderReviewableDiffMainContent(
     key,
     selectedFilePath,
     new Set(state.summary.files.map(file => file.newPath)),
+    annotationKey,
   );
   main.append(body);
 }
 
 function stateForDiffFileFilter(annotationKey: string): DiffReviewableState | null {
+  const pin = pinnedDiffs.get(annotationKey);
+  if (pin) return pin.state;
   if (annotationKey === "compareDiff") return compareDiffState?.diffId === compareDiffId
     && (compareDiffState.comparison.ignoreWhitespace ?? false) === diffIgnoreWhitespace ? compareDiffState : null;
   const projection = projections.get(annotationKey);
@@ -8269,6 +8601,8 @@ function stateForDiffFileFilter(annotationKey: string): DiffReviewableState | nu
 }
 
 function diffRequestModeForAnnotationKey(annotationKey: string): "sessionChanges" | "compareDiff" {
+  const pin = pinnedDiffs.get(annotationKey);
+  if (pin) return pin.scope;
   if (annotationKey === "compareDiff") return "compareDiff";
   return projections.get(annotationKey)?.summary.sessionMode === "diffReview" ? "compareDiff" : "sessionChanges";
 }
@@ -8281,6 +8615,7 @@ function updateDesktopModifiedFileSelection(root: HTMLElement, selectedFilePath:
 }
 
 function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElement | null): boolean {
+  if (pinnedDiffs.has(annotationKey)) { renderPinnedDiff(annotationKey); return true; }
   const state = stateForDiffFileFilter(annotationKey);
   const main = root?.querySelector<HTMLElement>(".diffs-main") ?? null;
   if (!root || !main || !state) return false;
@@ -8325,6 +8660,7 @@ function rerenderSelectedDiffFileContent(annotationKey: string, root: HTMLElemen
 }
 
 function rerenderSelectedDiffFileContentIfVisible(annotationKey: string): boolean {
+  if (pinnedDiffs.has(annotationKey)) { renderPinnedDiff(annotationKey); return true; }
   let rendered = false;
   if (annotationKey === "compareDiff") {
     if (!desktopDockview?.isPanelVisible("compare")) return false;
@@ -8415,6 +8751,8 @@ function renderDesktopModifiedFiles(
   allFiles.addEventListener("click", () => {
     openDiffFileMenu = null;
     sessionChangesSelectedFiles.delete(annotationKey);
+    const pin = pinnedDiffs.get(annotationKey);
+    if (pin) pin.selectFile(null);
     const root = allFiles.closest<HTMLElement>(".diffs-view, .compare-view");
     if (!rerenderSelectedDiffFileContent(annotationKey, root)) {
       markDiffsViewDirty();
@@ -8455,6 +8793,8 @@ function renderDesktopModifiedFiles(
     jump.addEventListener("click", () => {
       openDiffFileMenu = null;
       sessionChangesSelectedFiles.set(annotationKey, file.filePath);
+      const pin = pinnedDiffs.get(annotationKey);
+      if (pin) pin.selectFile(file.filePath);
       const root = jump.closest<HTMLElement>(".diffs-view, .compare-view");
       if (!rerenderSelectedDiffFileContent(annotationKey, root)) {
         markDiffsViewDirty();
@@ -8466,6 +8806,8 @@ function renderDesktopModifiedFiles(
     jump.addEventListener("contextmenu", event => {
       event.preventDefault();
       sessionChangesSelectedFiles.set(annotationKey, file.filePath);
+      const pin = pinnedDiffs.get(annotationKey);
+      if (pin) pin.selectFile(file.filePath);
       openDiffFileMenu = { annotationKey, filePath: file.filePath };
       markDiffsViewDirty();
       markComparePanelDirty();
@@ -8492,7 +8834,7 @@ function renderDesktopModifiedFiles(
       openInCode.addEventListener("click", event => {
         event.stopPropagation();
         openDiffFileMenu = null;
-        openDiffFileInCode(state, file.filePath, openInCode.ownerDocument);
+        openDiffFileInCode(state, file.filePath, openInCode.ownerDocument, annotationKey);
       });
       menu.append(openInCode);
       if (committed) {
@@ -8532,6 +8874,7 @@ function renderReviewCommentsSection(
   key: string,
   selectedFilePath: string | null,
   currentFilePaths: Set<string>,
+  annotationKey: string,
 ): void {
   const section = mkEl("section");
   section.className = "diff-review-comments-section";
@@ -8563,6 +8906,7 @@ function renderReviewCommentsSection(
     list.append(renderReviewCommentItem(comment, stale, {
       locationLabel: formatReviewCommentLocation(comment),
       summary: true,
+      annotationKey,
     }));
   }
   section.append(list);
@@ -8571,11 +8915,12 @@ function renderReviewCommentsSection(
 
 
 function renderDiffRows(container: HTMLElement, annotationKey: string, state: DiffReviewableState | null, rows: DiffRow[], annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff"): void {
+  const layoutMode = pinnedDiffs.get(annotationKey)?.layout ?? diffLayout;
   const diff = mkEl("div");
-  diff.className = `diff-lines${diffLayout === "split" ? " diff-lines-split" : ""}`;
+  diff.className = `diff-lines${layoutMode === "split" ? " diff-lines-split" : ""}`;
   const fragment = diff.ownerDocument.createDocumentFragment();
   const highlighter = createGitDiffHighlighter(rows, diff.ownerDocument);
-  if (diffLayout === "unified") {
+  if (layoutMode === "unified") {
     for (let index = 0; index < rows.length; index++) {
       appendDiffRow(fragment, rows[index], annotationKey, state, annotations, comments, key, allowPromptActions, requestMode, highlighter, index);
     }
@@ -8631,6 +8976,7 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
 }
 
 function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annotationKey: string, state: DiffReviewableState | null, annotations: DiffReviewAnnotation[], comments: ReviewComment[], key: string, allowPromptActions: boolean, requestMode: "sessionChanges" | "compareDiff", highlighter: DiffHighlighter, index: number, displaySide?: "left" | "right"): void {
+  const composer = pinnedDiffs.has(annotationKey) ? pinnedCommentComposers.get(annotationKey) : activeReviewCommentComposer;
   if (row.type === "line") {
     // Context has one canonical review anchor (right). Its old-side copy is read-only.
     const displayOnly = displaySide === "left" && row.location.kind === "context";
@@ -8685,18 +9031,16 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
     if (lineComments.length > 0 || lineQuestions.length > 0 || showComposer) {
       const thread = mkEl("div");
       thread.className = "diff-inline-comments";
-      for (const comment of lineComments) thread.append(renderReviewCommentItem(comment, false));
+      for (const comment of lineComments) thread.append(renderReviewCommentItem(comment, false, { annotationKey }));
       for (const annotation of lineQuestions) thread.append(renderDiffAnnotationItem(annotationKey, annotation));
-      if (state && showComposer && activeReviewCommentComposer?.mode === "create") {
+      if (state && showComposer && composer?.mode === "create") {
         thread.append(renderReviewCommentComposer({
           mode: "create",
-          initialBody: activeReviewCommentComposer.body,
+          initialBody: composer.body,
           title: "Add review comment",
           submitLabel: "Comment",
           onInput: body => {
-            if (isReviewCommentCreateComposer(annotationKey, key, row.location) && activeReviewCommentComposer?.mode === "create") {
-              activeReviewCommentComposer.body = body;
-            }
+            if (isReviewCommentCreateComposer(annotationKey, key, row.location)) composer.body = body;
           },
           onSubmit: body => submitDiffComment(annotationKey, state, row.location, body),
           onCancel: () => closeReviewCommentComposer(annotationKey),
@@ -8847,6 +9191,17 @@ function initDesktopWorkspace(): void {
     layoutMode: "diffReview",
     storageKey: "fura.dockview.diffReview.layout",
     ...createDockviewCallbacks("diffReview"),
+  });
+  pinnedDesktopDockview = initDesktopDockview({
+    host: requireElement<HTMLDivElement>("pinnedWorkspacePanelHost"),
+    layoutMode: "pinned",
+    storageKey: "fura.dockview.pinned.layout",
+    onPanelReady: id => queueMicrotask(() => renderPinnedDiff(id)),
+    onPanelActivated: id => renderPinnedDiff(id),
+    onPanelVisibilityChanged: (id, visible) => { if (visible) renderPinnedDiff(id); },
+    onPanelClosed: closePinnedDiff,
+    onWindowFocus: () => {},
+    onPopoutBlocked: () => window.alert("Popup window was blocked. Allow popups for this site."),
   });
   syncSessionModePanels();
   renderActiveDockviewPanel(activeSessionId ? projections.get(activeSessionId) : undefined);

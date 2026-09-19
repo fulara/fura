@@ -1,8 +1,11 @@
 import { defineConfig } from "vite";
 import { VitePWA } from "vite-plugin-pwa";
+import { dockviewResizeCleanup } from "./dockviewResizeCleanup";
 
 export default defineConfig({
+  optimizeDeps: { exclude: ["dockview-core"] },
   plugins: [
+    dockviewResizeCleanup(),
     VitePWA({
       registerType: "autoUpdate",
       injectRegister: "script",

@@ -4,7 +4,7 @@ type MockPanel = {
   id: string;
   group: MockGroup;
   title: string;
-  api: { setTitle(title: string): void; setActive(): void; getWindow(): { focus(): void }; readonly isVisible: boolean; onDidVisibilityChange(listener: (event: { isVisible: boolean }) => void): { dispose(): void } };
+  api: { setTitle(title: string): void; setActive(): void; getWindow(): { focus(): void }; readonly isVisible: boolean; readonly location: { type: "grid" }; onDidVisibilityChange(listener: (event: { isVisible: boolean }) => void): { dispose(): void } };
   setActiveCalls: number;
   windowFocusCalls: number;
   setActive(): void;
@@ -80,6 +80,7 @@ const dockviewMock = vi.hoisted(() => {
           setActive: () => panel.setActive(),
           getWindow: () => panel.getWindow(),
           get isVisible() { return panel.isVisible; },
+          get location() { return panel.group.api.location; },
           onDidVisibilityChange,
         },
         group,
@@ -250,6 +251,35 @@ describe("initDesktopDockview", () => {
     expect(ids).not.toContain("goal");
     expect(ids).not.toContain("diffs");
     expect(ids).not.toContain("compare");
+  });
+
+  it("keeps dynamic pins in their own empty layout and closes only the requested instance", () => {
+    const closed = vi.fn();
+    const ready = vi.fn();
+    const normal = initTestDockview();
+    const pinned = initTestDockview({ layoutMode: "pinned", storageKey: "test.pins", onPanelClosed: closed, onPanelReady: ready });
+    expect(pinned.ensureSessionChangesPanel()).toBe(false);
+    expect(pinned.ensureDiffsPanel()).toBe(false);
+    expect(pinned.ensureComparePanel()).toBe(false);
+    expect(dockviewMock.instances[1].panels).toEqual([]);
+    expect(normal.addPinnedPanel("pinnedDiff:a", "Repo A")).toBe(false);
+    expect(pinned.addPinnedPanel("pinnedDiff:a", "Repo A")).toBe(true);
+    expect(pinned.addPinnedPanel("pinnedDiff:b", "Repo B")).toBe(true);
+    const [first, second] = dockviewMock.instances[1].panels;
+    expect(first.group).toBe(second.group);
+    let content: HTMLElement | undefined;
+    pinned.withPanel("pinnedDiff:a", element => { content = element; element.textContent = "local review"; });
+    expect(pinned.addPinnedPanel("pinnedDiff:a", "Duplicate")).toBe(false);
+    expect(ready).toHaveBeenCalledTimes(2);
+    expect(pinned.setPanelTitle("pinnedDiff:a", "Repo A · Current")).toBe(true);
+    expect(first.title).toBe("Repo A · Current");
+    pinned.withPanel("pinnedDiff:a", element => { expect(element).toBe(content); expect(element.textContent).toBe("local review"); });
+    expect(pinned.closePanel("pinnedDiff:a")).toBe(true);
+    expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+    expect(pinned.panelMounted("pinnedDiff:b")).toBe(true);
+    expect(pinned.setPanelTitle("pinnedDiff:a", "Gone")).toBe(false);
+    expect(pinned.closePanel("pinnedDiff:a")).toBe(false);
+    expect(normal.panelMounted("diffs")).toBe(true);
   });
 
   it("opens and closes the lazy compare panel", () => {

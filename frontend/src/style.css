@@ -851,6 +851,64 @@ h2 {
   z-index: 1;
 }
 
+.workspace-panel-stack.has-pinned-diffs > .workspace-panel-host:not(.pinned-workspace-panel-host) {
+  right: 50%;
+}
+
+.pinned-workspace-panel-host {
+  left: 50%;
+  border-left: 1px solid #252a35;
+}
+
+@media (max-width: 1600px) {
+  .workspace-panel-stack.has-pinned-diffs > .workspace-panel-host:not(.pinned-workspace-panel-host) {
+    right: 0;
+    bottom: 50%;
+  }
+
+  .pinned-workspace-panel-host {
+    left: 0;
+    top: 50%;
+    border-left: 0;
+    border-top: 1px solid #252a35;
+  }
+}
+
+.pinned-diff-header {
+  display: grid;
+  gap: 0.45rem;
+  min-width: 0;
+}
+
+.pinned-diff-header code {
+  overflow-wrap: anywhere;
+  font-size: 0.75rem;
+}
+
+.pinned-diff-recipient {
+  margin: 0;
+  color: #aeb8ca;
+  font-size: 0.75rem;
+}
+
+.diffs-view.pinned-diff-view {
+  grid-template-columns: clamp(9rem, 28%, 12rem) minmax(0, 1fr);
+}
+
+.pinned-diff-view .diff-refresh-status {
+  margin: 0;
+}
+
+.pinned-code-source {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.4rem;
+  background: #151922;
+  font-size: 0.75rem;
+}
+
 /* Panel content fills the area below Dockview's tab and action header. */
 .panel-content {
   display: flex;
