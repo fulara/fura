@@ -205,7 +205,7 @@ without restarting does not deploy the new runtime: newly loaded workers may
 refuse an older addon. Build a matching addon and restart only during an explicit
 deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.2.5. Desktop Fura exposes one-shot BTW through
+The current fork tracks OMP 18.2.6. Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
 captured at start; results remain only in browser memory. Upstream TUI BTW history
@@ -260,6 +260,15 @@ are not enabled in Fura. Upstream's automatic web-search order now prefers
 keyless Parallel over Perplexity; existing explicit search settings still apply.
 Typed judgments may fall back to configured online models. This refresh does not
 change model/provider settings, credentials, or enable a new sharing endpoint.
+
+OMP 18.2.6 stabilizes Anthropic's prompt-cache head across memory-recall refreshes
+and removes the redundant current-time stamp from recall blocks. These changes
+apply inside OMP without changing Fura's RPC contract or model/provider settings.
+Concurrent clipboard image/text reads fix terminal paste stalls; Fura keeps its
+browser-native clipboard path. All local RPC, session-skill, BTW and process
+ownership patches remain necessary; this update does not enable new UI features.
+The 18.2.6 native-addon version sentinel requires a matching isolated native build
+for verification and a matching production build at the next explicit deployment.
 
 Environment overrides for `run-local-omp.sh`:
 
