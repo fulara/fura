@@ -44,6 +44,14 @@ check_omp_native() (
     if (typeof natives.Process?.prototype?.identity !== "function") {
       throw new Error("OMP native addon does not expose Process.identity; build the Fura fork addon");
     }
+    // A release-version sentinel alone cannot detect native changes within a release.
+    const probePath = "fura-native-preflight.txt";
+    const inspection = natives.editInspect("sloppy", JSON.stringify({
+      input: `*** SM:EDIT ${probePath}\n*** SM:FIND\nold\n*** SM:PUT\nnew\n`,
+    }));
+    if (inspection.paths.length !== 1 || inspection.paths[0] !== probePath) {
+      throw new Error("OMP native addon does not support the current Sloppy Edit payload; rebuild it");
+    }
   ' || exit $?
   PATH="$(dirname -- "${BUN_BIN}"):${PATH}" "${BUN_BIN}" src/cli.ts --version >/dev/null
 )

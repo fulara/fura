@@ -11,6 +11,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class NativePreflight(unittest.TestCase):
     def test_missing_process_identity_never_reaches_bridge_build(self):
+        self.check_rejected_addon("export class Process {}\n")
+
+    def test_same_version_stale_edit_parser_never_reaches_bridge_build(self):
+        self.check_rejected_addon(
+            "export class Process { identity() {} }\n"
+            "export function editInspect() { return { paths: [], entries: [], fileOps: [] }; }\n",
+        )
+
+    def check_rejected_addon(self, module):
         bun = os.environ.get("BUN_BIN") or shutil.which("bun")
         if bun is None:
             self.skipTest("bun is required for the real addon-import preflight")
@@ -28,11 +37,13 @@ class NativePreflight(unittest.TestCase):
                 (omp / "package.json").write_text('{"packageManager":"bun@1.4.0"}')
                 (omp / "packages/natives/native").mkdir(parents=True)
                 (omp / "packages/natives/package.json").write_text('{"version":"1.0.0"}')
-                # The glob and version checks pass; only lifecycle identity is absent.
+                # Glob and version checks pass; exercise the incompatible native behavior.
                 platform = subprocess.check_output([bun, "-e", "process.stdout.write(`${process.platform}-${process.arch}`)"], text=True)
                 (omp / f"packages/natives/native/pi_natives.{platform}.node").touch()
                 (native / "package.json").write_text('{"type":"module","main":"index.js"}')
-                (native / "index.js").write_text("export function __piNativesV1_0_0() {}\nexport function editDescription() {}\nexport class Process {}\n")
+                (native / "index.js").write_text(
+                    "export function __piNativesV1_0_0() {}\nexport function editDescription() {}\n" + module
+                )
                 (agent / "src/cli.ts").write_text("process.stdout.write('1.0.0');\n")
                 marker = directory / "bridge-build-started"
                 cargo = directory / "cargo"
@@ -58,7 +69,6 @@ class NativePreflight(unittest.TestCase):
                                         capture_output=True, text=True, timeout=15)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse(marker.exists(), "unsafe addon must be rejected before bridge build")
-                self.assertIn("Process.identity", result.stderr)
 
 
 if __name__ == "__main__":

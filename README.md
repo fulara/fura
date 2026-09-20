@@ -205,7 +205,8 @@ without restarting does not deploy the new runtime: newly loaded workers may
 refuse an older addon. Build a matching addon and restart only during an explicit
 deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.2.6. Desktop Fura exposes one-shot BTW through
+The current fork tracks OMP 18.2.6 plus upstream through `10b867cb2e`.
+Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
 captured at start; results remain only in browser memory. Upstream TUI BTW history
@@ -269,6 +270,20 @@ browser-native clipboard path. All local RPC, session-skill, BTW and process
 ownership patches remain necessary; this update does not enable new UI features.
 The 18.2.6 native-addon version sentinel requires a matching isolated native build
 for verification and a matching production build at the next explicit deployment.
+
+The post-18.2.6 update replaces Sloppy Edit's XML payload with `*** SM:EDIT`,
+`*** SM:FIND` and `*** SM:PUT` headers, without changing the package version.
+Both local launchers therefore inspect a synthetic header payload before building
+Fura; a stale same-version addon fails closed. This probe never reads or writes
+the named file. A version sentinel alone is not proof of parser compatibility.
+Existing processes retain their already-loaded addon until explicit deployment.
+
+Upstream also removes the Bash tool's separate `env` parameter; extensions must
+use the current tool contract rather than replaying that field. Empty-session
+filtering affects OMP's picker and automatic continue, not explicit file resume
+or Fura's independent session catalog. No session files are deleted by that
+filter. Browser relay target discovery and model-discovery routing improvements
+stay inside OMP; this update adds no sharing endpoint, provider setting or UI.
 
 Environment overrides for `run-local-omp.sh`:
 
