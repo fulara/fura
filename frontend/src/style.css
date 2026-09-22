@@ -954,6 +954,7 @@ h2 {
   overflow-x: hidden;
   overflow-y: auto;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: var(--gap-transcript);
   padding: var(--pad-transcript);
@@ -1024,6 +1025,8 @@ h2 {
   min-height: 0;
   overflow: auto;
   display: grid;
+  /* Content must fit the panel, not set the conversation's implicit minimum. */
+  grid-template-columns: minmax(0, 1fr);
   align-content: start;
   gap: var(--gap-transcript);
   padding: var(--pad-transcript);
@@ -4815,6 +4818,7 @@ h2 {
 
 .task-progress {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 0.25rem;
   padding: 0.65rem 0.85rem 0.75rem;
 }

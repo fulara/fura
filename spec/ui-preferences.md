@@ -106,6 +106,15 @@ delete action remain separate. Unread reserves space beside the delete action.
 Keyed rows retain DOM identity, focus and scroll position when activity reorders
 the list, including documents belonging to popout windows.
 
+### Transcript width
+
+Panel, conversation/BTW and task-progress grids use a single `minmax(0, 1fr)`
+column. Their width comes from the available panel space, not the intrinsic
+minimum width of nested content. Keep the constraint on both outer and nested
+grids: a long, non-wrapping task description must ellipsize inside its row,
+not widen every message. Long code lines keep their existing wrapping behavior;
+conversation content is not clipped to conceal layout overflow.
+
 ### Desktop workspace panel lifetime
 
 Top-level Dockview panels (Transcript, Goal, Code, Tools, Git changes/Diff and
