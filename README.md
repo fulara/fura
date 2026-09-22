@@ -205,7 +205,7 @@ without restarting does not deploy the new runtime: newly loaded workers may
 refuse an older addon. Build a matching addon and restart only during an explicit
 deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.2.6 plus upstream through `10b867cb2e`.
+The current fork tracks OMP 18.2.8 plus upstream through `df624f56b0`.
 Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
@@ -284,6 +284,25 @@ filtering affects OMP's picker and automatic continue, not explicit file resume
 or Fura's independent session catalog. No session files are deleted by that
 filter. Browser relay target discovery and model-discovery routing improvements
 stay inside OMP; this update adds no sharing endpoint, provider setting or UI.
+
+The 18.2.7–18.2.8 refresh keeps Fura's RPC contract and all local lifecycle,
+prompt-correlation, session-skill and BTW patches. Semantic `find` is a new tool,
+not the old `glob` alias; it remains disabled by default and can send source
+excerpts to the configured judge when enabled. No search, model-role or provider
+settings are changed by this refresh. The chat model selector still receives
+OMP's chat-only catalog, not image, speech, judge or video models.
+
+Agent-side integrations should use `await judge(...)` for direct answers or
+`judge_batch(...)` / `judgeBatch(...)` for batches; `JudgmentHandle` is removed.
+`agent://` slash segments now select JSON paths; nested agents use dotted names
+and the former `?q=` selector is no longer supported. These changes do not alter
+Fura's WebSocket DTOs. Background completions now wake interruptible waits.
+
+OMP also adds system-prompt templates, browser diagnostics and specialist model
+roles. Fura does not replace session skills with templates, expose gateway
+endpoints, or enable new UI controls. Its browser Mermaid/SVG renderer remains
+independent of OMP's new native terminal renderer. A matching native addon is
+required at the next explicit deployment; verification builds stay private.
 
 Environment overrides for `run-local-omp.sh`:
 
