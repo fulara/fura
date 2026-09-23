@@ -48,6 +48,7 @@ describe("Git diff highlighting adapter", () => {
   });
 
   it("does not merge distinct hunk identities when a peer omits hunk header rows", () => {
+    vi.spyOn(performance, "now").mockReturnValue(0);
     const nodes = render([line(" /* first hunk", "context", "@@ -1 +1 @@"), line(" pub fn after_gap() {}", "context", "@@ -99 +99 @@")]);
     expect(nodes[0].querySelector(".hljs-comment")).not.toBeNull();
     expect(nodes[1].querySelector(".hljs-keyword")?.textContent).toBe("pub");

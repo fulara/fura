@@ -205,7 +205,7 @@ without restarting does not deploy the new runtime: newly loaded workers may
 refuse an older addon. Build a matching addon and restart only during an explicit
 deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.2.8 plus upstream through `df624f56b0`.
+The current fork tracks OMP 18.2.10 plus upstream through `8761110a78`.
 Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot
@@ -303,6 +303,29 @@ roles. Fura does not replace session skills with templates, expose gateway
 endpoints, or enable new UI controls. Its browser Mermaid/SVG renderer remains
 independent of OMP's new native terminal renderer. A matching native addon is
 required at the next explicit deployment; verification builds stay private.
+
+The 18.2.9–18.2.10 refresh preserves Fura's local RPC, BTW, session-skill,
+prompt-correlation and process-ownership extensions. Upstream's new `get_entries`,
+`get_tree` and `get_available_thinking_levels` commands are additive; Fura keeps
+its existing active-branch projection. Frozen skill hints and cancellable prompt
+setup remain separate from Fura's persistent session-skill selection.
+
+Upstream now defaults `find.enabled` to `auto`: an explicitly configured boolean
+is migrated to `on`/`off`, while an unset value can enable semantic search when
+the judge role resolves to a native System One/TypeSafe API. Here “native” does
+not mean local or offline. Using that tool can send source excerpts to the judge.
+New `ttsr.judge=auto` can likewise evaluate matching `question` rules remotely.
+The refresh does not edit model/provider settings, credentials, or rules; unchanged
+configuration is not a guarantee of unchanged upstream defaults. Provider defaults,
+fallbacks and the SingularityAPI provider-ID migration need review at deployment.
+
+Eval gains explicit `%load` and `%bun add` commands; managed JavaScript installs
+disable lifecycle scripts and do not run merely because OMP starts. Skillshare
+management and terminal `/record`/`omp clip` remain upstream capabilities, not
+new Fura controls. Recording is local; `omp clip` explicitly publishes a public
+clip, so neither command is an automatic Fura export or sharing workflow.
+Verification uses private builds and copied credentials; publishing this refresh
+does not restart Fura or replace its active binary, frontend, or native addon.
 
 Environment overrides for `run-local-omp.sh`:
 
