@@ -6,7 +6,15 @@ import { captureDiffViewScroll, restoreDiffViewScroll } from "./diffViewDom";
 export type PinnedDiffPanelId = `pinnedDiff:${string}`;
 export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare" | PinnedDiffPanelId;
 
-export type DesktopDockviewLayoutMode = "normal" | "diffReview" | "pinned";
+export type DesktopDockviewLayoutMode = "normal" | "diffReview";
+
+export type PinnedPanelPresentation = {
+  id: PinnedDiffPanelId;
+  title: string;
+  content: HTMLElement;
+  active: boolean;
+  restore: () => void;
+};
 
 export function isPinnedDiffPanelId(id: string): id is PinnedDiffPanelId {
   return id.startsWith("pinnedDiff:") && id.length > "pinnedDiff:".length;
@@ -24,7 +32,10 @@ export type DesktopDockview = {
   ensureSessionChangesPanel(): boolean;
   ensureDiffsPanel(): boolean;
   ensureComparePanel(): boolean;
-  addPinnedPanel(id: PinnedDiffPanelId, title: string): boolean;
+  addPinnedPanel(id: PinnedDiffPanelId, title: string, presentation?: PinnedPanelPresentation): boolean;
+  detachPinnedPanel(id: PinnedDiffPanelId): PinnedPanelPresentation | null;
+  isPanelPoppedOut(id: PinnedDiffPanelId): boolean;
+  forgetPinnedPanel(id: PinnedDiffPanelId): void;
   setPanelTitle(id: DesktopDockviewPanelId, title: string): boolean;
   closePanel(id: "sessionChanges" | "diffs" | "compare" | PinnedDiffPanelId): boolean;
 };
@@ -36,6 +47,7 @@ type DesktopDockviewOptions = {
   onPanelReady(id: DesktopDockviewPanelId, container: HTMLElement): void;
   onPanelActivated(id: DesktopDockviewPanelId): void;
   onPanelClosed?(id: DesktopDockviewPanelId): void;
+  onPinnedPanelReturned?(id: PinnedDiffPanelId): void;
   onPanelVisibilityChanged?(id: DesktopDockviewPanelId, visible: boolean): void;
   onWindowFocus?(owner: Document): void;
   onPopoutBlocked(): void;
@@ -48,10 +60,11 @@ type PersistedDockviewLayout = {
 
 type DesktopPanelShell = {
   element: HTMLDivElement;
-  scroll: HTMLDivElement;
+  scroll: HTMLElement;
 };
 
 type PanelReturnLocation = { group: DockviewGroupPanel; order: string[] };
+const pendingScrollRestores = new WeakMap<HTMLElement, { restore(): void; stop(): void }>();
 
 
 export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDockview {
@@ -61,21 +74,25 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   const win = owner.defaultView ?? window;
   const visiblePanels = new Set<DesktopDockviewPanelId>();
   const watchedDocuments = new WeakSet<Document>();
-  const pendingScrollRestores = new Map<DesktopDockviewPanelId, () => void>();
   let visibilityQueued = false;
   let shuttingDown = false;
   let layoutSaveTimer: number | undefined;
-  const returnLocations = new WeakMap<IDockviewPanel, PanelReturnLocation>();
+  const returnLocations = new Map<string, PanelReturnLocation>();
+  const openingPins = new Map<PinnedDiffPanelId, { window?: Window; timer?: number }>();
+  let mountingPresentation: PinnedPanelPresentation | undefined;
+  let detachingPanel: PinnedDiffPanelId | undefined;
+  let transferSelections: Map<string, boolean> | undefined;
   const guardedGroups = new WeakSet<DockviewGroupPanel>();
   win.addEventListener("beforeunload", () => {
     if (api.isDisposed || shuttingDown) return;
     shuttingDown = true;
+    for (const opening of openingPins.values()) win.clearInterval(opening.timer);
     win.clearTimeout(layoutSaveTimer);
     // Save return positions before Dockview closes its windows. Do not move
     // content or reopen anything while the owning application is shutting down.
     const data: PersistedDockviewLayout = {
       version: 1,
-      layout: persistentLayout(dockedLayout(api.toJSON(), id => returnLocations.get(api.getGroupPanel(id)!))),
+      layout: persistentLayout(dockedLayout(api.toJSON(), id => returnLocations.get(id))),
     };
     storage(win).setItem(options.storageKey, JSON.stringify(data));
   }, { capture: true });
@@ -84,26 +101,78 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     return api.groups.includes(group) && group.api.location.type !== "popout";
   }
 
+  function pinFallbackGroup(): DockviewGroupPanel {
+    const diffs = api.getGroupPanel(options.layoutMode === "normal" ? "diffs" : "sessionChanges");
+    return diffs?.api.location.type === "grid" ? diffs.group
+      : api.groups.find(group => group.api.location.type === "grid") ?? api.addGroup();
+  }
+
+  function returnIndex(id: string, target: DockviewGroupPanel, order: string[]): number {
+    const originalIndex = order.indexOf(id);
+    if (originalIndex < 0) return target.panels.length;
+    const remaining = target.panels.filter(panel => panel.id !== id);
+    const next = order.slice(originalIndex + 1).find(candidate => remaining.some(panel => panel.id === candidate));
+    const previous = order.slice(0, originalIndex).reverse().find(candidate => remaining.some(panel => panel.id === candidate));
+    return next ? remaining.findIndex(panel => panel.id === next)
+      : previous ? remaining.findIndex(panel => panel.id === previous) + 1
+      : Math.min(originalIndex, remaining.length);
+  }
+
+  function rememberLocation(panel: IDockviewPanel, group: DockviewGroupPanel, order: string[]): void {
+    const fullOrder = [...order];
+    for (const [id, origin] of returnLocations) {
+      if (origin.group !== group || fullOrder.includes(id)) continue;
+      const current = api.getGroupPanel(id);
+      if (current && current.api.location.type !== "popout") continue;
+      const index = origin.order.indexOf(id);
+      const next = origin.order.slice(index + 1).find(candidate => fullOrder.includes(candidate));
+      const previous = origin.order.slice(0, index).reverse().find(candidate => fullOrder.includes(candidate));
+      fullOrder.splice(next ? fullOrder.indexOf(next) : previous ? fullOrder.indexOf(previous) + 1 : 0, 0, id);
+    }
+    returnLocations.set(panel.id, { group, order: fullOrder });
+  }
+
+  function forgetLocation(id: string): void {
+    const origin = returnLocations.get(id);
+    returnLocations.delete(id);
+    if (!origin) return;
+    queueMicrotask(() => {
+      if (shuttingDown || api.isDisposed || !mainGroup(origin.group) || origin.group.size !== 0) return;
+      const retained = [...returnLocations].some(([panelId, location]) => {
+        const panel = api.getGroupPanel(panelId);
+        return location.group === origin.group
+          && (panel?.api.location.type === "popout" || (!panel && isPinnedDiffPanelId(panelId)));
+      });
+      if (!retained) api.removeGroup(origin.group);
+    });
+  }
+
+  function removePinnedPanel(panel: IDockviewPanel): void {
+    const group = panel.group;
+    const retained = group.api.location.type === "grid" && [...returnLocations].some(([id, origin]) => {
+      const current = api.getGroupPanel(id);
+      return id !== panel.id && origin.group === group
+        && (current?.api.location.type === "popout" || (!current && isPinnedDiffPanelId(id)));
+    });
+    api.removePanel(panel, { removeEmptyGroup: !retained });
+    if (retained && group.size === 0) group.api.setVisible(false);
+  }
+
   function returnPanels(panels: IDockviewPanel[]): void {
     if (shuttingDown || api.isDisposed) return;
-    const locations = panels.map(panel => ({ panel, origin: returnLocations.get(panel) }));
+    const locations = panels.map(panel => ({ panel, origin: returnLocations.get(panel.id) }));
     const selected = panels.filter(panel => panel.api.isVisible);
     for (const { panel, origin } of locations) {
       if (api.getGroupPanel(panel.id) !== panel) continue;
       const target = origin && mainGroup(origin.group) ? origin.group
+        : isPinnedDiffPanelId(panel.id) ? pinFallbackGroup()
         : mainGroup(panel.group) ? panel.group
         : api.groups.find(group => group.api.location.type === "grid") ?? api.addGroup();
       // A popup can collect tabs detached at different times. Use the fullest
       // original ordering so later departures do not erase earlier tab slots.
       const order = locations.filter(entry => entry.origin?.group === origin?.group)
         .reduce((best, entry) => (entry.origin?.order.length ?? 0) > best.length ? entry.origin!.order : best, origin?.order ?? []);
-      const originalIndex = order.indexOf(panel.id);
-      const next = order.slice(originalIndex + 1).find(id => target.panels.some(candidate => candidate.id === id));
-      const previous = order.slice(0, originalIndex).reverse().find(id => target.panels.some(candidate => candidate.id === id));
-      const remaining = target.panels.filter(candidate => candidate !== panel);
-      const index = next ? remaining.findIndex(candidate => candidate.id === next)
-        : previous ? remaining.findIndex(candidate => candidate.id === previous) + 1
-        : Math.min(Math.max(originalIndex, 0), remaining.length);
+      const index = returnIndex(panel.id, target, order);
       if (panel.group !== target || target.panels.indexOf(panel) !== index) {
         panel.api.moveTo({ group: target, index, skipSetActive: true });
       }
@@ -118,7 +187,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   function closePanelFromUser(panel: IDockviewPanel): void {
     if (shuttingDown) return;
     if (isPinnedDiffPanelId(panel.id)) {
-      api.removePanel(panel);
+      removePinnedPanel(panel);
       return;
     }
     if (panel.api.location.type !== "popout") return;
@@ -147,19 +216,21 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     group.addDisposables(
       group.model.onDidAddPanel(() => { order = group.panels.map(panel => panel.id); }),
       group.model.onDidRemovePanel(({ panel }) => {
-        if (group.api.location.type !== "popout") returnLocations.set(panel, { group, order });
+        if (group.api.location.type !== "popout") rememberLocation(panel, group, order);
         order = group.panels.map(candidate => candidate.id);
       }),
     );
   }
 
   function workspaceVisible(): boolean {
-    return options.layoutMode === "pinned" || !options.host.classList.contains("workspace-panel-host")
+    return !options.host.classList.contains("workspace-panel-host")
       || options.host.classList.contains("workspace-panel-host-active");
   }
 
   function panelSelected(id: DesktopDockviewPanelId): boolean {
-    return workspaceVisible() && Boolean(api.getGroupPanel(id)?.api.isVisible);
+    const panel = api.getGroupPanel(id);
+    return Boolean(panel?.api.isVisible
+      && (workspaceVisible() || (isPinnedDiffPanelId(id) && panel.api.location.type === "popout")));
   }
 
   function notifyVisibility(): void {
@@ -171,7 +242,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       // group selection, not those intermediate transfer states or OS focus.
       for (const id of Object.keys(panelEls) as DesktopDockviewPanelId[]) {
         const element = panelEls[id];
-        if (element) element.style.visibility = element.ownerDocument !== owner && !workspaceVisible() ? "hidden" : "";
+        if (element) element.style.visibility = !isPinnedDiffPanelId(id) && element.ownerDocument !== owner && !workspaceVisible() ? "hidden" : "";
         const visible = panelSelected(id);
         if (visiblePanels.has(id) === visible) continue;
         if (visible) visiblePanels.add(id);
@@ -210,51 +281,18 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
         if (shuttingDown || api.isDisposed) return;
         returnPanels(panels);
         for (const restore of restores) restore();
+        for (const panel of panels) {
+          if (isPinnedDiffPanelId(panel.id) && api.getGroupPanel(panel.id) === panel && panel.api.location.type !== "popout") {
+            options.onPinnedPanelReturned?.(panel.id);
+          }
+        }
       });
     }, { capture: true });
   }
 
   function preserveTransferScroll(id: DesktopDockviewPanelId): () => void {
     const container = panelEls[id];
-    const snapshot = container && captureDiffViewScroll(container);
-    const focused = container?.ownerDocument.activeElement;
-    const scroll = container ? [container, ...container.querySelectorAll<HTMLElement>("*")]
-      .filter(element => element.scrollTop !== 0 || element.scrollLeft !== 0)
-      .map(element => ({ element, top: element.scrollTop, left: element.scrollLeft })) : [];
-    return () => {
-      if (shuttingDown || !container || panelEls[id] !== container) return;
-      for (const { element, top, left } of scroll) {
-        element.scrollTop = top;
-        element.scrollLeft = left;
-      }
-      if (workspaceVisible() && focused && container.contains(focused)) {
-        (focused as HTMLElement).focus({ preventScroll: true });
-      }
-      if (!container || !snapshot) return;
-      pendingScrollRestores.get(id)?.();
-      const view = container.ownerDocument.defaultView;
-      if (!view) return;
-      const observer = new view.ResizeObserver(restore);
-      const stop = () => {
-        observer.disconnect();
-        view.cancelAnimationFrame(frame);
-        pendingScrollRestores.delete(id);
-      };
-      function restore(): void {
-        const root = container!.querySelector<HTMLElement>(".diffs-view, .compare-view");
-        if (panelEls[id] !== container || !root || root.dataset.reviewTarget !== snapshot!.target) {
-          stop();
-          return;
-        }
-        const rect = root.getBoundingClientRect();
-        if (!root.isConnected || rect.width <= 0 || rect.height <= 0) return;
-        restoreDiffViewScroll(container!, snapshot!);
-        stop();
-      }
-      const frame = view.requestAnimationFrame(restore);
-      pendingScrollRestores.set(id, stop);
-      observer.observe(container);
-    };
+    return container ? capturePanelScroll(container) : () => {};
   }
 
   const api = new DockviewComponent(options.host, {
@@ -301,10 +339,33 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
         const panel = group.activePanel && api.getGroupPanel(group.activePanel.id);
         const panelId = panel && desktopPanelId(panel.id);
         if (!panel || !panelId) return;
+        const pinId = isPinnedDiffPanelId(panelId) ? panelId : undefined;
+        const opening: { window?: Window; timer?: number } | undefined = pinId ? {} : undefined;
+        if (pinId && opening) {
+          if (openingPins.has(pinId)) return;
+          openingPins.set(pinId, opening);
+        }
         let restoreScroll = preserveTransferScroll(panelId);
+        const finish = (opened: boolean) => {
+          if (pinId && openingPins.get(pinId) !== opening) return;
+          if (opening) win.clearInterval(opening.timer);
+          if (pinId) openingPins.delete(pinId);
+          if (opened) restoreScroll();
+          else if (pinId && opening) {
+            opening.window?.close();
+            if (!shuttingDown && !api.isDisposed && api.getGroupPanel(pinId) === panel) options.onPinnedPanelReturned?.(pinId);
+          }
+          notifyVisibility();
+        };
         void api.api.addPopoutGroup(panel, {
           popoutUrl: "/popout.html",
           onDidOpen: ({ window: popWin }) => {
+            if (opening) {
+              opening.window = popWin;
+              // Dockview's opening promise is load-only; a pre-load close may
+              // emit no usable document event. Check only during this handshake.
+              opening.timer = win.setInterval(() => { if (popWin.closed) finish(false); }, 100);
+            }
             copyStylesToPopout(owner, popWin);
             watchPopout(popWin);
             popWin.addEventListener("load", () => {
@@ -312,21 +373,19 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
               watchPopout(popWin);
             }, { once: true });
           },
-        }).then(opened => {
-          if (opened) restoreScroll();
-          notifyVisibility();
-        });
+        }).then(finish, () => finish(false));
       });
       const button = element.querySelector<HTMLButtonElement>("button")!;
       const update = () => {
         const returning = group.api.location.type === "popout";
         button.className = returning ? "panel-return-btn" : "panel-popout-btn";
-        button.textContent = returning ? "Return to main" : "Pop out";
-        button.title = returning ? "Return to main" : "Open panel in a separate window";
+        const pin = group.activePanel && isPinnedDiffPanelId(group.activePanel.id);
+        button.textContent = returning ? "Return to main" : pin ? "Open in new window" : "Pop out";
+        button.title = returning ? "Return to main" : pin ? "Open in new window" : "Open panel in a separate window";
       };
-      const listener = group.api.onDidLocationChange(update);
+      const listeners = [group.api.onDidLocationChange(update), group.api.onDidActivePanelChange(update)];
       update();
-      return { element, init() {}, dispose() { listener.dispose(); } };
+      return { element, init() {}, dispose() { for (const listener of listeners) listener.dispose(); } };
     },
     createComponent(componentOptions) {
       const panelId = desktopPanelId(componentOptions.name);
@@ -335,12 +394,12 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
         return { element, init() {} };
       }
 
-      const shell = createDesktopPanelShell(owner, panelId);
+      const shell = createDesktopPanelShell(owner, panelId, mountingPresentation?.id === panelId ? mountingPresentation.content : undefined);
 
       return {
         element: shell.element,
         init(params) {
-          if (panelId === "diffs" || panelId === "sessionChanges" || panelId === "compare" || isPinnedDiffPanelId(panelId)) {
+          if (panelId === "diffs" || panelId === "sessionChanges" || panelId === "compare") {
             params.api.group.api.setConstraints({ minimumWidth: 560 });
           }
           panelActivators[panelId] = () => {
@@ -348,7 +407,15 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
             params.api.getWindow().focus();
           };
           panelEls[panelId] = shell.scroll;
-          params.api.onDidVisibilityChange(notifyVisibility);
+          params.api.onDidVisibilityChange(({ isVisible }) => {
+            if (isPinnedDiffPanelId(panelId) && panelEls[panelId] === shell.scroll) {
+              // Registered before Dockview's overlay listener sets display:none:
+              // hidden scrollers report zero, so retain the last visible state.
+              if (!isVisible && !mountingPresentation) preserveTransferScroll(panelId)();
+              else if (isVisible) pendingScrollRestores.get(shell.scroll)?.restore();
+            }
+            notifyVisibility();
+          });
           params.api.onDidLocationChange(() => {
             watchPopout(params.api.getWindow());
             notifyVisibility();
@@ -368,17 +435,19 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   api.onDidRemovePanel(panel => {
     const panelId = desktopPanelId(panel.id);
     if (!panelId) return;
+    const content = panelEls[panelId];
     delete panelEls[panelId];
     delete panelActivators[panelId];
     visiblePanels.delete(panelId);
-    pendingScrollRestores.get(panelId)?.();
-    if (options.layoutMode === "pinned") {
-      queueMicrotask(() => {
-        if (shuttingDown || api.isDisposed || api.panels.length !== 0) return;
-        // Closing a popup's last tab can leave its empty native return group.
-        for (const group of api.groups) if (group.size === 0) api.removeGroup(group);
-      });
+    if (content) pendingScrollRestores.get(content)?.stop();
+    if (detachingPanel === panelId) return;
+    if (isPinnedDiffPanelId(panelId)) {
+      const opening = openingPins.get(panelId);
+      openingPins.delete(panelId);
+      if (opening) win.clearInterval(opening.timer);
+      opening?.window?.close();
     }
+    queueMicrotask(() => { if (!api.getGroupPanel(panelId)) forgetLocation(panelId); });
     options.onPanelClosed?.(panelId);
   });
 
@@ -447,27 +516,68 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       return true;
     },
     ensureSessionChangesPanel() {
-      return options.layoutMode !== "pinned" && ensureSessionChangesPanel(api);
+      return ensureSessionChangesPanel(api);
     },
     ensureDiffsPanel() {
-      if (options.layoutMode === "pinned") return false;
       ensureDiffsPanel(api);
       return true;
     },
     ensureComparePanel() {
-      return options.layoutMode !== "pinned" && ensureComparePanel(api);
+      return ensureComparePanel(api);
     },
-    addPinnedPanel(id, title) {
-      if (options.layoutMode !== "pinned" || !isPinnedDiffPanelId(id) || api.getGroupPanel(id)) return false;
-      const reference = api.panels.find(panel => panel.api.location.type === "grid");
-      api.addPanel({
-        id,
-        component: id,
-        title,
-        position: reference ? { referencePanel: reference.id, direction: "within" } : undefined,
-        renderer: "always",
-      });
+    addPinnedPanel(id, title, presentation) {
+      if (!isPinnedDiffPanelId(id) || api.getGroupPanel(id) || (presentation && presentation.id !== id)) return false;
+      const origin = presentation && returnLocations.get(id);
+      const group = origin && mainGroup(origin.group) ? origin.group : pinFallbackGroup();
+      mountingPresentation = presentation;
+      try {
+        const panel = api.addPanel({
+          id,
+          component: id,
+          title,
+          position: { referenceGroup: group, direction: "within", index: origin?.group === group ? returnIndex(id, group, origin.order) : undefined },
+          inactive: presentation ? !presentation.active : false,
+          renderer: "always",
+        });
+        if (!group.activePanel) group.model.openPanel(panel, { skipSetGroupActive: true });
+      } finally {
+        mountingPresentation = undefined;
+      }
+      if (!group.api.isVisible) group.api.setVisible(true);
+      presentation?.restore();
       return true;
+    },
+    detachPinnedPanel(id) {
+      const panel = api.getGroupPanel(id);
+      const content = panelEls[id];
+      if (!panel || !content || !isPinnedDiffPanelId(id) || openingPins.has(id) || panel.api.location.type === "popout") return null;
+      if (!transferSelections) {
+        transferSelections = new Map(api.panels.filter(candidate => isPinnedDiffPanelId(candidate.id))
+          .map(candidate => [candidate.id, candidate.group.activePanel === candidate]));
+        queueMicrotask(() => { transferSelections = undefined; });
+      }
+      const presentation: PinnedPanelPresentation = {
+        id, title: panel.title ?? id, content,
+        active: transferSelections.get(id) ?? false,
+        restore: preserveTransferScroll(id),
+      };
+      const group = panel.group;
+      rememberLocation(panel, group, group.panels.map(candidate => candidate.id));
+      detachingPanel = id;
+      try {
+        content.remove();
+        api.removePanel(panel, { removeEmptyGroup: group.api.location.type !== "grid", skipSetActiveGroup: true });
+      } finally {
+        detachingPanel = undefined;
+      }
+      if (group.api.location.type === "grid" && group.size === 0) group.api.setVisible(false);
+      return presentation;
+    },
+    isPanelPoppedOut(id) {
+      return openingPins.has(id) || api.getGroupPanel(id)?.api.location.type === "popout";
+    },
+    forgetPinnedPanel(id) {
+      if (!api.getGroupPanel(id)) forgetLocation(id);
     },
     setPanelTitle(id, title) {
       const panel = api.getGroupPanel(id);
@@ -478,7 +588,8 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     closePanel(id) {
       const panel = api.getGroupPanel(id);
       if (!panel) return false;
-      api.removePanel(panel);
+      if (isPinnedDiffPanelId(id)) removePinnedPanel(panel);
+      else api.removePanel(panel);
       return true;
     },
   };
@@ -487,16 +598,73 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
 function createDesktopPanelShell(
   owner: Document,
   panelId: DesktopDockviewPanelId,
+  content?: HTMLElement,
 ): DesktopPanelShell {
   const element = owner.createElement("div");
   element.className = isPinnedDiffPanelId(panelId)
     ? "panel-content panel-content-diffs panel-content-pinned-diff"
     : `panel-content panel-content-${panelId}`;
 
-  const scroll = owner.createElement("div");
-  scroll.className = "panel-scroll";
+  const scroll = content ?? owner.createElement("div");
+  if (!content) scroll.className = "panel-scroll";
   element.append(scroll);
   return { element, scroll };
+}
+
+function capturePanelScroll(container: HTMLElement): () => void {
+  const pending = pendingScrollRestores.get(container);
+  if (pending) return pending.restore;
+  const snapshot = captureDiffViewScroll(container);
+  const focused = container.ownerDocument.activeElement;
+  const scroll = [container, ...container.querySelectorAll<HTMLElement>("*")]
+    .filter(element => element.scrollTop !== 0 || element.scrollLeft !== 0)
+    .map(element => ({ element, top: element.scrollTop, left: element.scrollLeft }));
+  function apply(): void {
+    for (const { element, top, left } of scroll) {
+      element.scrollTop = top;
+      element.scrollLeft = left;
+    }
+    restoreDiffViewScroll(container, snapshot);
+    const active = container.ownerDocument.activeElement;
+    // A popup can close while the user is already typing in the main composer.
+    // Its stale activeElement must not replace focus in the destination.
+    if (container.isConnected && focused && container.contains(focused)
+      && (!active || active === container.ownerDocument.body || container.contains(active))
+      && !container.closest(".workspace-panel-host:not(.workspace-panel-host-active)")) {
+      (focused as HTMLElement).focus({ preventScroll: true });
+    }
+  }
+  return function restore(): void {
+    pendingScrollRestores.get(container)?.stop();
+    apply();
+    const view = container.ownerDocument.defaultView;
+    if (!view || (scroll.length === 0 && !snapshot)) return;
+    let frame = 0;
+    const schedule = () => {
+      view.cancelAnimationFrame(frame);
+      frame = view.requestAnimationFrame(settle);
+    };
+    const observer = new view.ResizeObserver(schedule);
+    const stop = () => {
+      observer.disconnect();
+      view.cancelAnimationFrame(frame);
+      if (pendingScrollRestores.get(container)?.stop === stop) pendingScrollRestores.delete(container);
+    };
+    function settle(): void {
+      const root = container.querySelector<HTMLElement>(".diffs-view, .compare-view") ?? container;
+      if (!container.isConnected || (snapshot && root.dataset.reviewTarget !== snapshot.target)) {
+        stop();
+        return;
+      }
+      const rect = root.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      apply();
+      stop();
+    }
+    pendingScrollRestores.set(container, { restore, stop });
+    observer.observe(container);
+    schedule();
+  };
 }
 
 function createPanelToolbar(owner: Document, onPopout: () => void): HTMLElement {
@@ -631,10 +799,6 @@ function restoreOrCreateLayout(
   storageKey: string,
   layoutMode: DesktopDockviewLayoutMode,
 ): void {
-  if (layoutMode === "pinned") {
-    store.removeItem(storageKey);
-    return;
-  }
   const stored = store.getItem(storageKey);
   let layoutRestored = false;
 
@@ -654,7 +818,6 @@ function restoreOrCreateLayout(
 }
 
 function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLayoutMode): void {
-  if (layoutMode === "pinned") return;
   if (layoutMode === "diffReview") {
     api.addPanel({
       id: "sessionChanges",
@@ -726,7 +889,6 @@ function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLa
 }
 
 function ensureRequiredPanels(api: DockviewComponent, layoutMode: DesktopDockviewLayoutMode): void {
-  if (layoutMode === "pinned") return;
   ensureTranscriptPanel(api);
   if (layoutMode === "normal") ensureGoalPanel(api);
   ensureCodePanel(api);

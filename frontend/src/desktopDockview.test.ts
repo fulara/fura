@@ -20,14 +20,16 @@ type MockGroup = {
   size: number;
   activePanel?: MockPanel;
   headerActions?: HTMLElement;
-  api: { location: { type: "grid" }; close(): void; onDidLocationChange(listener: () => void): { dispose(): void }; setConstraints(value: { minimumWidth: number }): void };
+  api: { location: { type: "grid" }; isVisible: boolean; close(): void; setVisible(visible: boolean): void; onDidLocationChange(listener: () => void): { dispose(): void }; onDidActivePanelChange(listener: () => void): { dispose(): void }; setConstraints(value: { minimumWidth: number }): void };
   model: { closePanel(panel: MockPanel): void; closeAllPanels(): void; onDidAddPanel(listener: () => void): { dispose(): void }; onDidRemovePanel(listener: (event: { panel: MockPanel }) => void): { dispose(): void } };
   addDisposables(...disposables: Array<{ dispose(): void }>): void;
+  emitActivePanelChange(): void;
 };
 
 type MockDockviewInstance = {
   panels: MockPanel[];
   activePanel: MockPanel | undefined;
+  readonly groups: MockGroup[];
   popoutCalls: Array<{ item: MockPanel | MockGroup; options: unknown }>;
   removePanel(panel: MockPanel): void;
 };
@@ -39,6 +41,7 @@ const dockviewMock = vi.hoisted(() => {
     readonly panels: MockPanel[] = [];
     activePanel: MockPanel | undefined;
     get api(): MockDockviewComponent { return this; }
+    get groups(): MockGroup[] { return [...new Set(this.panels.map(panel => panel.group))]; }
     private readonly removeListeners: Array<(panel: MockPanel) => void> = [];
     private readonly activeListeners: Array<(panel: MockPanel) => void> = [];
     readonly popoutCalls: Array<{ item: MockPanel | MockGroup; options: unknown }> = [];
@@ -57,15 +60,26 @@ const dockviewMock = vi.hoisted(() => {
       instances.push(this);
     }
 
-    addPanel(options: { id: string; component: string; title?: string; position?: { referencePanel: string; direction: string; index?: number } }): MockPanel {
+    addPanel(options: { id: string; component: string; title?: string; inactive?: boolean; position?: { referencePanel?: string; referenceGroup?: MockGroup; direction: string; index?: number } }): MockPanel {
       const reference = options.position?.referencePanel ? this.getGroupPanel(options.position.referencePanel) : undefined;
+      const activePanelListeners = new Set<() => void>();
       const group: MockGroup = options.position?.direction === "within" && reference
         ? reference.group
-        : {
+        : options.position?.referenceGroup ?? {
           id: `${options.id}-group`, panels: [], size: 0,
-          api: { location: { type: "grid" }, close() {}, onDidLocationChange: () => ({ dispose() {} }), setConstraints: vi.fn() },
+          api: {
+            location: { type: "grid" }, isVisible: true, close() {},
+            setVisible(visible) { this.isVisible = visible; },
+            onDidLocationChange: () => ({ dispose() {} }),
+            onDidActivePanelChange: listener => {
+              activePanelListeners.add(listener);
+              return { dispose: () => { activePanelListeners.delete(listener); } };
+            },
+            setConstraints: vi.fn(),
+          },
           model: { closePanel() {}, closeAllPanels() {}, onDidAddPanel: () => ({ dispose() {} }), onDidRemovePanel: () => ({ dispose() {} }) },
           addDisposables() {},
+          emitActivePanelChange() { for (const listener of activePanelListeners) listener(); },
         };
       const visibilityListeners = new Set<(event: { isVisible: boolean }) => void>();
       const onDidVisibilityChange = (listener: (event: { isVisible: boolean }) => void) => {
@@ -105,6 +119,7 @@ const dockviewMock = vi.hoisted(() => {
       this.host.append(component.element);
       component.init({ api: panel, containerApi: this });
       this.activePanel ??= panel;
+      if (options.inactive === false) this.setActivePanel(panel);
       return panel;
     }
 
@@ -120,6 +135,7 @@ const dockviewMock = vi.hoisted(() => {
       const previous = panel.group.activePanel;
       this.activePanel = panel;
       panel.group.activePanel = panel;
+      panel.group.emitActivePanelChange();
       if (previous !== panel) {
         previous?.emitVisibility();
         panel.emitVisibility();
@@ -253,33 +269,37 @@ describe("initDesktopDockview", () => {
     expect(ids).not.toContain("compare");
   });
 
-  it("keeps dynamic pins in their own empty layout and closes only the requested instance", () => {
+  it.each(["normal", "diffReview"] as const)("adds independent tabs beside Diffs without changing group constraints in %s", layoutMode => {
     const closed = vi.fn();
     const ready = vi.fn();
-    const normal = initTestDockview();
-    const pinned = initTestDockview({ layoutMode: "pinned", storageKey: "test.pins", onPanelClosed: closed, onPanelReady: ready });
-    expect(pinned.ensureSessionChangesPanel()).toBe(false);
-    expect(pinned.ensureDiffsPanel()).toBe(false);
-    expect(pinned.ensureComparePanel()).toBe(false);
-    expect(dockviewMock.instances[1].panels).toEqual([]);
-    expect(normal.addPinnedPanel("pinnedDiff:a", "Repo A")).toBe(false);
-    expect(pinned.addPinnedPanel("pinnedDiff:a", "Repo A")).toBe(true);
-    expect(pinned.addPinnedPanel("pinnedDiff:b", "Repo B")).toBe(true);
-    const [first, second] = dockviewMock.instances[1].panels;
-    expect(first.group).toBe(second.group);
+    const desktop = initTestDockview({ layoutMode, onPanelClosed: closed, onPanelReady: ready });
+    const dockview = dockviewMock.instances[0];
+    const diffs = dockview.panels.find(panel => panel.id === (layoutMode === "normal" ? "diffs" : "sessionChanges"))!;
+    const groups = [...dockview.groups];
+    const constraints = vi.mocked(diffs.group.api.setConstraints).mock.calls.length;
+    ready.mockClear();
+    expect(desktop.addPinnedPanel("pinnedDiff:a", "Repo A")).toBe(true);
+    expect(desktop.addPinnedPanel("pinnedDiff:b", "Repo B")).toBe(true);
+    const first = dockview.panels.find(panel => panel.id === "pinnedDiff:a")!;
+    const second = dockview.panels.find(panel => panel.id === "pinnedDiff:b")!;
+    expect(first.group).toBe(diffs.group);
+    expect(second.group).toBe(diffs.group);
+    expect(dockview.groups).toEqual(groups);
+    expect(diffs.group.api.setConstraints).toHaveBeenCalledTimes(constraints);
+    expect(dockview.activePanel).toBe(second);
     let content: HTMLElement | undefined;
-    pinned.withPanel("pinnedDiff:a", element => { content = element; element.textContent = "local review"; });
-    expect(pinned.addPinnedPanel("pinnedDiff:a", "Duplicate")).toBe(false);
+    desktop.withPanel("pinnedDiff:a", element => { content = element; element.textContent = "local review"; });
+    expect(desktop.addPinnedPanel("pinnedDiff:a", "Duplicate")).toBe(false);
     expect(ready).toHaveBeenCalledTimes(2);
-    expect(pinned.setPanelTitle("pinnedDiff:a", "Repo A · Current")).toBe(true);
+    expect(desktop.setPanelTitle("pinnedDiff:a", "Repo A · Current")).toBe(true);
     expect(first.title).toBe("Repo A · Current");
-    pinned.withPanel("pinnedDiff:a", element => { expect(element).toBe(content); expect(element.textContent).toBe("local review"); });
-    expect(pinned.closePanel("pinnedDiff:a")).toBe(true);
+    desktop.withPanel("pinnedDiff:a", element => { expect(element).toBe(content); expect(element.textContent).toBe("local review"); });
+    expect(desktop.closePanel("pinnedDiff:a")).toBe(true);
     expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
-    expect(pinned.panelMounted("pinnedDiff:b")).toBe(true);
-    expect(pinned.setPanelTitle("pinnedDiff:a", "Gone")).toBe(false);
-    expect(pinned.closePanel("pinnedDiff:a")).toBe(false);
-    expect(normal.panelMounted("diffs")).toBe(true);
+    expect(desktop.panelMounted("pinnedDiff:b")).toBe(true);
+    expect(desktop.setPanelTitle("pinnedDiff:a", "Gone")).toBe(false);
+    expect(desktop.closePanel("pinnedDiff:a")).toBe(false);
+    expect(desktop.panelMounted(diffs.id as "diffs" | "sessionChanges")).toBe(true);
   });
 
   it("opens and closes the lazy compare panel", () => {
@@ -293,18 +313,16 @@ describe("initDesktopDockview", () => {
 
   it("distinguishes a visible inactive split from a mounted hidden tab", () => {
     const desktop = initTestDockview();
-    // Optional access lets the regression compile before the adapter contract lands.
-    const visible = desktop as typeof desktop & { isPanelVisible?: (id: "diffs" | "code") => boolean };
     desktop.activatePanel("diffs");
     desktop.activatePanel("transcript");
     expect(desktop.panelMounted("diffs")).toBe(true);
     expect(desktop.isPanelActive("diffs")).toBe(false);
-    expect(visible.isPanelVisible?.("diffs")).toBe(true);
+    expect(desktop.isPanelVisible("diffs")).toBe(true);
     expect(desktop.panelMounted("code")).toBe(true);
-    expect(visible.isPanelVisible?.("code")).toBe(false);
+    expect(desktop.isPanelVisible("code")).toBe(false);
     desktop.activatePanel("code");
-    expect(visible.isPanelVisible?.("diffs")).toBe(true);
-    expect(visible.isPanelVisible?.("code")).toBe(true);
+    expect(desktop.isPanelVisible("diffs")).toBe(true);
+    expect(desktop.isPanelVisible("code")).toBe(true);
     expect(desktop.isPanelActive("code")).toBe(true);
   });
 

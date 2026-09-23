@@ -851,28 +851,6 @@ h2 {
   z-index: 1;
 }
 
-.workspace-panel-stack.has-pinned-diffs > .workspace-panel-host:not(.pinned-workspace-panel-host) {
-  right: 50%;
-}
-
-.pinned-workspace-panel-host {
-  left: 50%;
-  border-left: 1px solid #252a35;
-}
-
-@media (max-width: 1600px) {
-  .workspace-panel-stack.has-pinned-diffs > .workspace-panel-host:not(.pinned-workspace-panel-host) {
-    right: 0;
-    bottom: 50%;
-  }
-
-  .pinned-workspace-panel-host {
-    left: 0;
-    top: 50%;
-    border-left: 0;
-    border-top: 1px solid #252a35;
-  }
-}
 
 .pinned-diff-header {
   display: grid;

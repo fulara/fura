@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DockviewComponent } from "dockview-core";
+import type { DockviewComponent, SerializedDockview } from "dockview-core";
 import type * as DockviewCore from "dockview-core";
 
 const captured = vi.hoisted(() => ({ instances: [] as DockviewComponent[] }));
@@ -39,34 +39,53 @@ function setup(layoutMode: DesktopDockviewLayoutMode = "normal") {
   document.body.append(host);
   const closed = vi.fn();
   const ready = vi.fn();
+  const returned = vi.fn();
+  const blocked = vi.fn();
   const desktop = initDesktopDockview({
     host, layoutMode, storageKey: `lifecycle.${layoutMode}`,
-    onPanelReady: ready, onPanelClosed: closed,
-    onPanelActivated() {}, onPopoutBlocked() {},
+    onPanelReady: ready, onPanelClosed: closed, onPinnedPanelReturned: returned,
+    onPanelActivated() {}, onPopoutBlocked: blocked,
   });
   const api = captured.instances.at(-1)!;
   api.layout(1200, 800);
-  return { host, api, desktop, closed, ready };
+  return { host, api, desktop, closed, ready, returned, blocked };
 }
 
 // Only the browser-window boundary is emulated. Dockview performs the actual
 // popout transfer, beforeunload return, group disposal and panel rendering.
-async function popout(api: DockviewComponent, item: Parameters<DockviewComponent["api"]["addPopoutGroup"]>[0]) {
+function popupWindow() {
   const frame = document.createElement("iframe");
   document.body.append(frame);
   const popup = frame.contentWindow!;
+  Object.defineProperty(popup, "ResizeObserver", { value: window.ResizeObserver, configurable: true });
   vi.spyOn(popup, "focus").mockImplementation(() => {});
   let closing = false;
+  Object.defineProperty(popup, "closed", { configurable: true, get: () => closing });
+  // Unlike an iframe, a closed browser window cannot deliver a queued load.
+  popup.addEventListener("load", event => { if (closing) event.stopImmediatePropagation(); }, { capture: true });
   vi.spyOn(popup, "close").mockImplementation(() => {
     if (closing) return;
     closing = true;
     popup.dispatchEvent(new Event("beforeunload"));
   });
   vi.spyOn(window, "open").mockReturnValue(popup);
+  return popup;
+}
+
+async function popout(api: DockviewComponent, item: Parameters<DockviewComponent["api"]["addPopoutGroup"]>[0]) {
+  const popup = popupWindow();
   const opened = api.api.addPopoutGroup(item);
   popup.dispatchEvent(new Event("load"));
   expect(await opened).toBe(true);
   return popup;
+}
+
+function gridGroup(api: DockviewComponent, id: string) {
+  type Node = SerializedDockview["grid"]["root"];
+  function visit(node: Node): Node | undefined {
+    return Array.isArray(node.data) ? node.data.map(visit).find(Boolean) : node.data.id === id ? node : undefined;
+  }
+  return visit(api.toJSON().grid.root);
 }
 
 describe("desktop Dockview close lifecycle", () => {
@@ -185,14 +204,15 @@ describe("desktop Dockview close lifecycle", () => {
     expect(closed).toHaveBeenCalledExactlyOnceWith("diffs");
   });
 
-  it("closes individual pinned tabs while retaining other pins and static workspaces", () => {
-    const normal = setup();
-    const { api, desktop, closed, ready, host } = setup("pinned");
-    expect(api.panels).toEqual([]);
+  it("closes individual pinned tabs while retaining other pins and permanent panels", () => {
+    const { api, desktop, closed, ready, host } = setup();
+    const permanent = [...api.panels];
+    ready.mockClear();
     desktop.addPinnedPanel("pinnedDiff:a", "Repo A · Current");
     desktop.addPinnedPanel("pinnedDiff:b", "Repo B · History");
     const first = api.getGroupPanel("pinnedDiff:a")!;
     const second = api.getGroupPanel("pinnedDiff:b")!;
+    expect(first.group).toBe(api.getGroupPanel("diffs")!.group);
     expect(first.group).toBe(second.group);
     second.api.moveTo({ group: api.addGroup() });
     second.api.moveTo({ group: first.group });
@@ -207,51 +227,207 @@ describe("desktop Dockview close lifecycle", () => {
     expect(api.getGroupPanel("pinnedDiff:b")).toBe(second);
     expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
     second.api.close();
-    expect(api.panels).toEqual([]);
+    expect(api.panels).toEqual(permanent);
     expect(closed.mock.calls).toEqual([["pinnedDiff:a"], ["pinnedDiff:b"]]);
     expect(host.querySelector(".panel-close-btn")).toBeNull();
-    expect(normal.desktop.panelMounted("diffs")).toBe(true);
-    expect(normal.closed).not.toHaveBeenCalled();
   });
 
-  it.each(["window", "group", "toolbar"] as const)("redocks pinned %s returns after workspace switches without remounting or losing local state", async action => {
+  it("transfers one content DOM and selected-tab intent without closing drafts or reordering returning pins", async () => {
     const normal = setup();
     const review = setup("diffReview");
-    const { api, desktop, closed, ready } = setup("pinned");
-    desktop.addPinnedPanel("pinnedDiff:a", "Repo A · Current");
-    desktop.addPinnedPanel("pinnedDiff:b", "Repo B · History");
-    const first = api.getGroupPanel("pinnedDiff:a")!;
+    const ids = ["pinnedDiff:a", "pinnedDiff:b", "pinnedDiff:c"] as const;
+    for (const id of ids) normal.desktop.addPinnedPanel(id, id);
+    normal.desktop.activatePanel(ids[0]);
+    const original = normal.api.getGroupPanel(ids[0])!.group;
+    const order = original.panels.map(panel => panel.id);
+    const content = new Map<PinnedDiffPanelId, HTMLElement>();
+    for (const id of ids) normal.desktop.withPanel(id, element => {
+      content.set(id, element);
+      const draft = document.createElement("textarea");
+      draft.value = `Unsent ${id}`;
+      element.append(draft);
+      element.scrollTop = 143;
+    });
+    for (const [from, to] of [[normal, review], [review, normal]]) {
+      for (const id of ids) {
+        const presentation = from.desktop.detachPinnedPanel(id)!;
+        expect(presentation.content).toBe(content.get(id));
+        expect(from.desktop.panelMounted(id)).toBe(false);
+        expect(from.api.getGroupPanel(id)).toBeUndefined();
+        expect(to.desktop.addPinnedPanel(id, presentation.title, presentation)).toBe(true);
+      }
+      await Promise.resolve();
+      expect(to.api.getGroupPanel(ids[0])!.group.activePanel?.id).toBe(ids[0]);
+      for (const id of ids) to.desktop.withPanel(id, element => {
+        expect(element).toBe(content.get(id));
+        expect(element.querySelector("textarea")!.value).toBe(`Unsent ${id}`);
+        expect(element.scrollTop).toBe(143);
+        expect(element.isConnected).toBe(true);
+      });
+      expect(from.closed).not.toHaveBeenCalled();
+      expect(to.closed).not.toHaveBeenCalled();
+    }
+    expect(normal.api.getGroupPanel(ids[0])!.group).toBe(original);
+    expect(original.panels.map(panel => panel.id)).toEqual(order);
+  });
+
+  it("retains pre-hide scroll through inactive transfers whose hidden scrollers report zero", async () => {
+    vi.useFakeTimers();
+    const normal = setup();
+    const review = setup("diffReview");
+    const id = "pinnedDiff:scroll" as const;
+    normal.desktop.addPinnedPanel(id, "Repo A");
+    const root = document.createElement("div");
+    root.className = "diffs-view";
+    root.dataset.reviewTarget = "immutable:A";
+    const body = document.createElement("div");
+    body.className = "diffs-main-body";
+    root.append(body);
+    normal.desktop.withPanel(id, element => { element.append(root); });
+    const displayed = () => root.isConnected
+      && root.closest<HTMLElement>(".dv-render-overlay")?.style.display !== "none";
+    // JSDOM has no layout: emulate browser reads/clamping under display:none,
+    // while real Dockview drives visibility, wrapper disposal and activation.
+    let top = 0;
+    Object.defineProperty(body, "scrollTop", {
+      configurable: true,
+      get: () => displayed() ? top : 0,
+      set: (value: number) => { top = displayed() ? value : 0; },
+    });
+    vi.spyOn(root, "getBoundingClientRect").mockImplementation(() => displayed()
+      ? new DOMRect(0, 0, 560, 400) : new DOMRect());
+    await vi.advanceTimersByTimeAsync(50);
+    body.scrollTop = 247;
+    normal.desktop.activatePanel("diffs");
+    expect(body.scrollTop).toBe(0);
+    for (const [from, to] of [[normal, review], [review, normal], [normal, review], [review, normal]]) {
+      const presentation = from.desktop.detachPinnedPanel(id)!;
+      to.desktop.addPinnedPanel(id, presentation.title, presentation);
+      await vi.advanceTimersByTimeAsync(50);
+      expect(body.scrollTop).toBe(0);
+      to.desktop.withPanel(id, element => { expect(element.querySelector(".diffs-view")).toBe(root); });
+    }
+    normal.desktop.activatePanel(id);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(body.scrollTop).toBe(247);
+    // A fresh visible scroll after the next paint wins over the retained snapshot.
+    body.scrollTop = 0;
+    normal.desktop.activatePanel("diffs");
+    normal.desktop.activatePanel(id);
+    await vi.advanceTimersByTimeAsync(16);
+    body.scrollTop = 330;
+    await vi.advanceTimersByTimeAsync(50);
+    expect(body.scrollTop).toBe(330);
+    body.scrollTop = 0;
+    normal.desktop.activatePanel("diffs");
+    const presentation = normal.desktop.detachPinnedPanel(id)!;
+    review.desktop.addPinnedPanel(id, presentation.title, presentation);
+    review.desktop.activatePanel(id);
+    await vi.advanceTimersByTimeAsync(50);
+    expect(body.scrollTop).toBe(0);
+    expect(normal.closed).not.toHaveBeenCalled();
+    expect(review.closed).not.toHaveBeenCalled();
+  });
+
+  it("selects an inactive returning pin locally in its empty manual group without stealing workspace focus", () => {
+    const normal = setup();
+    const review = setup("diffReview");
+    normal.desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    const group = normal.api.addGroup({ referencePanel: "diffs", direction: "right" });
+    normal.api.getGroupPanel("pinnedDiff:a")!.api.moveTo({ group });
+    const outgoing = normal.desktop.detachPinnedPanel("pinnedDiff:a")!;
+    review.desktop.addPinnedPanel(outgoing.id, outgoing.title, outgoing);
+    review.desktop.activatePanel("sessionChanges");
+    const returning = review.desktop.detachPinnedPanel(outgoing.id)!;
+    expect(returning.active).toBe(false);
+    normal.desktop.activatePanel("transcript");
+    normal.desktop.addPinnedPanel(returning.id, returning.title, returning);
+    expect(normal.api.getGroupPanel(returning.id)!.group).toBe(group);
+    expect(group.activePanel?.id).toBe(returning.id);
+    expect(normal.desktop.isPanelVisible(returning.id)).toBe(true);
+    expect(normal.api.activePanel?.id).toBe("transcript");
+  });
+
+  it("evacuates a manual pin-only split at zero space and restores its cached size", async () => {
+    const normal = setup();
+    const review = setup("diffReview");
+    normal.api.layout(1920, 1080);
+    normal.desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    const panel = normal.api.getGroupPanel("pinnedDiff:a")!;
+    const group = normal.api.addGroup({ referencePanel: "diffs", direction: "right" });
+    panel.api.moveTo({ group });
+    group.api.setSize({ width: 340 });
+    const before = gridGroup(normal.api, group.id)!;
+    const diffs = normal.api.getGroupPanel("diffs")!.group;
+    const width = diffs.width;
+    const outgoing = normal.desktop.detachPinnedPanel("pinnedDiff:a")!;
+    review.desktop.addPinnedPanel(outgoing.id, outgoing.title, outgoing);
+    expect(group.size).toBe(0);
+    expect(group.api.isVisible).toBe(false);
+    expect(gridGroup(normal.api, group.id)).toMatchObject({ visible: false, size: before.size });
+    expect(diffs.width).toBeGreaterThan(width);
+    const returning = review.desktop.detachPinnedPanel("pinnedDiff:a")!;
+    normal.desktop.addPinnedPanel(returning.id, returning.title, returning);
+    expect(normal.api.getGroupPanel(returning.id)!.group).toBe(group);
+    expect(group.api.isVisible).toBe(true);
+    expect(gridGroup(normal.api, group.id)!.size).toBe(before.size);
+    const closingAway = normal.desktop.detachPinnedPanel(returning.id)!;
+    review.desktop.addPinnedPanel(closingAway.id, closingAway.title, closingAway);
+    review.closed.mockImplementation((id: PinnedDiffPanelId) => {
+      normal.desktop.forgetPinnedPanel(id);
+      review.desktop.forgetPinnedPanel(id);
+    });
+    review.desktop.closePanel(closingAway.id);
+    await Promise.resolve();
+    expect(normal.api.groups).not.toContain(group);
+    expect(normal.closed).not.toHaveBeenCalled();
+    expect(review.closed).toHaveBeenCalledExactlyOnceWith(returning.id);
+  });
+
+  it.each(["window", "group", "toolbar"] as const)("keeps an inactive workspace popup visible and transfers its %s return only after native correction", async action => {
+    const normal = setup();
+    const review = setup("diffReview");
+    normal.desktop.addPinnedPanel("pinnedDiff:a", "Repo A · Current");
+    const first = normal.api.getGroupPanel("pinnedDiff:a")!;
     const original = first.group;
     const order = original.panels.map(panel => panel.id);
     let content: HTMLElement | undefined;
     let draft: HTMLTextAreaElement | undefined;
-    desktop.withPanel("pinnedDiff:a", element => {
+    normal.desktop.withPanel("pinnedDiff:a", element => {
       content = element;
-      draft = element.ownerDocument.createElement("textarea");
+      draft = document.createElement("textarea");
       draft.value = "Send only to A";
       element.append(draft);
       element.scrollTop = 143;
       element.scrollLeft = 29;
     });
-    const popup = await popout(api, original);
-    for (let index = 0; index < 3; index++) {
-      normal.host.classList.toggle("workspace-panel-host-active", index % 2 === 0);
-      review.host.classList.toggle("workspace-panel-host-active", index % 2 !== 0);
-      popup.dispatchEvent(new Event("focus"));
-      await Promise.resolve();
-    }
-    desktop.withPanel("pinnedDiff:a", element => {
+    const popup = await popout(normal.api, first);
+    expect(normal.desktop.detachPinnedPanel("pinnedDiff:a")).toBeNull();
+    normal.host.classList.remove("workspace-panel-host-active");
+    popup.dispatchEvent(new Event("focus"));
+    await Promise.resolve();
+    normal.desktop.withPanel("pinnedDiff:a", element => {
       expect(element).toBe(content);
       expect(element.ownerDocument).toBe(popup.document);
       expect(element.style.visibility).toBe("");
+    });
+    expect(normal.desktop.isPanelPoppedOut("pinnedDiff:a")).toBe(true);
+    expect(normal.desktop.isPanelVisible("pinnedDiff:a")).toBe(true);
+    normal.returned.mockImplementation((id: PinnedDiffPanelId) => {
+      expect(first.group).toBe(original);
+      expect(original.panels.map(panel => panel.id)).toEqual(order);
+      expect(normal.desktop.isPanelPoppedOut(id)).toBe(false);
+      const presentation = normal.desktop.detachPinnedPanel(id)!;
+      review.desktop.addPinnedPanel(id, presentation.title, presentation);
     });
     if (action === "window") popup.close();
     else if (action === "group") first.group.api.close();
     else popup.document.querySelector<HTMLButtonElement>(".panel-return-btn")!.click();
     await Promise.resolve();
-    expect(first.group).toBe(original);
-    expect(original.panels.map(panel => panel.id)).toEqual(order);
-    desktop.withPanel("pinnedDiff:a", element => {
+    expect(normal.returned).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+    expect(normal.desktop.panelMounted("pinnedDiff:a")).toBe(false);
+    expect(review.api.getGroupPanel("pinnedDiff:a")!.group).toBe(review.api.getGroupPanel("sessionChanges")!.group);
+    review.desktop.withPanel("pinnedDiff:a", element => {
       expect(element).toBe(content);
       expect(element.ownerDocument).toBe(document);
       expect(element.querySelector("textarea")).toBe(draft);
@@ -259,13 +435,226 @@ describe("desktop Dockview close lifecycle", () => {
       expect(element.scrollTop).toBe(143);
       expect(element.scrollLeft).toBe(29);
     });
-    expect(ready).toHaveBeenCalledTimes(2);
+    expect(normal.closed).not.toHaveBeenCalled();
+    expect(review.closed).not.toHaveBeenCalled();
+  });
+
+  it("keeps a pin-only popup return group hidden when its last docked sibling closes, then removes it on final close", async () => {
+    const { api, desktop, closed } = setup();
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    desktop.addPinnedPanel("pinnedDiff:b", "Repo B");
+    const group = api.addGroup({ referencePanel: "diffs", direction: "right" });
+    const first = api.getGroupPanel("pinnedDiff:a")!;
+    const second = api.getGroupPanel("pinnedDiff:b")!;
+    first.api.moveTo({ group });
+    second.api.moveTo({ group });
+    const popup = await popout(api, first);
+    second.api.close();
+    await Promise.resolve();
+    expect(group.size).toBe(0);
+    expect(group.api.isVisible).toBe(false);
+    expect(gridGroup(api, group.id)?.visible).toBe(false);
+    expect(first.api.getWindow()).toBe(popup);
+    popup.document.querySelector<HTMLButtonElement>(".panel-close-btn")!.click();
+    await Promise.resolve();
+    expect(api.groups).not.toContain(group);
+    expect(closed.mock.calls).toEqual([["pinnedDiff:b"], ["pinnedDiff:a"]]);
+    expect(desktop.panelMounted("diffs")).toBe(true);
+  });
+
+  it("returns multiple separately opened pins in their remembered order", async () => {
+    const { api, desktop, closed } = setup();
+    const ids = ["pinnedDiff:a", "pinnedDiff:b", "pinnedDiff:c"] as const;
+    for (const id of ids) desktop.addPinnedPanel(id, id);
+    const group = api.getGroupPanel(ids[0])!.group;
+    const order = group.panels.map(panel => panel.id);
+    const first = await popout(api, api.getGroupPanel(ids[0])!);
+    const second = await popout(api, api.getGroupPanel(ids[1])!);
+    second.close();
+    await Promise.resolve();
+    first.close();
+    await Promise.resolve();
+    expect(group.panels.map(panel => panel.id)).toEqual(order);
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it("falls back to docked Diffs when a pin's saved group has disappeared", async () => {
+    const { api, desktop, returned, closed } = setup();
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    const panel = api.getGroupPanel("pinnedDiff:a")!;
+    const original = api.addGroup({ referencePanel: "diffs", direction: "right" });
+    panel.api.moveTo({ group: original });
+    const popup = await popout(api, panel);
+    api.removeGroup(original);
+    popup.close();
+    await Promise.resolve();
+    expect(api.getGroupPanel(panel.id)).toBe(panel);
+    expect(panel.group).toBe(api.getGroupPanel("diffs")!.group);
+    expect(returned).toHaveBeenCalledExactlyOnceWith(panel.id);
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the main grid when both the remembered group and Diffs are unavailable", async () => {
+    const normal = setup();
+    const review = setup("diffReview");
+    normal.desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    const original = normal.api.addGroup({ referencePanel: "diffs", direction: "right" });
+    normal.api.getGroupPanel("pinnedDiff:a")!.api.moveTo({ group: original });
+    const presentation = normal.desktop.detachPinnedPanel("pinnedDiff:a")!;
+    review.desktop.addPinnedPanel(presentation.id, presentation.title, presentation);
+    normal.api.removeGroup(original);
+    await popout(normal.api, normal.api.getGroupPanel("diffs")!);
+    const returning = review.desktop.detachPinnedPanel(presentation.id)!;
+    normal.desktop.addPinnedPanel(returning.id, returning.title, returning);
+    expect(normal.api.getGroupPanel(returning.id)!.api.location.type).toBe("grid");
+    expect(normal.api.getGroupPanel(returning.id)!.group).toBe(normal.api.getGroupPanel("transcript")!.group);
+  });
+
+  it("retains pin ownership and content while its popup loads across a workspace switch", async () => {
+    const normal = setup();
+    const review = setup("diffReview");
+    normal.desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    const panel = normal.api.getGroupPanel("pinnedDiff:a")!;
+    let content: HTMLElement | undefined;
+    normal.desktop.withPanel("pinnedDiff:a", element => { content = element; element.textContent = "Unsent A review"; });
+    const popup = popupWindow();
+    const opening = vi.spyOn(normal.api.api, "addPopoutGroup");
+    const button = panel.group.element.querySelector<HTMLButtonElement>(".panel-popout-btn")!;
+    button.click();
+    button.click();
+    expect(window.open).toHaveBeenCalledOnce();
+    normal.host.classList.remove("workspace-panel-host-active");
+    expect(normal.desktop.isPanelPoppedOut("pinnedDiff:a")).toBe(true);
+    expect(normal.desktop.detachPinnedPanel("pinnedDiff:a")).toBeNull();
+    expect(normal.api.getGroupPanel("pinnedDiff:a")).toBe(panel);
+    expect(review.desktop.panelMounted("pinnedDiff:a")).toBe(false);
+    popup.dispatchEvent(new Event("load"));
+    expect(await opening.mock.results[0].value).toBe(true);
+    normal.desktop.withPanel("pinnedDiff:a", element => {
+      expect(element).toBe(content);
+      expect(element.ownerDocument).toBe(popup.document);
+      expect(element.textContent).toBe("Unsent A review");
+      expect(element.style.visibility).toBe("");
+    });
+    expect(panel.api.location.type).toBe("popout");
+    expect(normal.desktop.isPanelVisible("pinnedDiff:a")).toBe(true);
+    expect(normal.closed).not.toHaveBeenCalled();
+    expect(normal.returned).not.toHaveBeenCalled();
+  });
+
+  it("returns a pin after pre-load native window close without mistaking initial navigation for closure", async () => {
+    vi.useFakeTimers();
+    const normal = setup();
+    const review = setup("diffReview");
+    normal.desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    let content: HTMLElement | undefined;
+    normal.desktop.withPanel("pinnedDiff:a", element => { content = element; element.textContent = "Unsent A review"; });
+    normal.returned.mockImplementation((id: PinnedDiffPanelId) => {
+      const presentation = normal.desktop.detachPinnedPanel(id)!;
+      review.desktop.addPinnedPanel(id, presentation.title, presentation);
+    });
+    const popup = popupWindow();
+    // Hold the window boundary at its initial document, like a delayed HTTP response.
+    popup.addEventListener("load", event => { event.stopImmediatePropagation(); }, { capture: true });
+    normal.api.getGroupPanel("pinnedDiff:a")!.group.element.querySelector<HTMLButtonElement>(".panel-popout-btn")!.click();
+    normal.host.classList.remove("workspace-panel-host-active");
+    popup.dispatchEvent(new Event("beforeunload"));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(normal.returned).not.toHaveBeenCalled();
+    expect(normal.desktop.isPanelPoppedOut("pinnedDiff:a")).toBe(true);
+    expect(normal.desktop.detachPinnedPanel("pinnedDiff:a")).toBeNull();
+    popup.close();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(normal.returned).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+    expect(normal.desktop.isPanelPoppedOut("pinnedDiff:a")).toBe(false);
+    expect(normal.desktop.panelMounted("pinnedDiff:a")).toBe(false);
+    expect(review.desktop.panelMounted("pinnedDiff:a")).toBe(true);
+    review.desktop.withPanel("pinnedDiff:a", element => {
+      expect(element).toBe(content);
+      expect(element.textContent).toBe("Unsent A review");
+    });
+    expect(normal.closed).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(normal.returned).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("returns a blocked pending pin to the newly active workspace", async () => {
+    const normal = setup();
+    const review = setup("diffReview");
+    normal.desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    let content: HTMLElement | undefined;
+    normal.desktop.withPanel("pinnedDiff:a", element => { content = element; });
+    normal.returned.mockImplementation((id: PinnedDiffPanelId) => {
+      const presentation = normal.desktop.detachPinnedPanel(id)!;
+      review.desktop.addPinnedPanel(id, presentation.title, presentation);
+    });
+    vi.spyOn(window, "open").mockReturnValue(null);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const opening = vi.spyOn(normal.api.api, "addPopoutGroup");
+    normal.api.getGroupPanel("pinnedDiff:a")!.group.element.querySelector<HTMLButtonElement>(".panel-popout-btn")!.click();
+    normal.host.classList.remove("workspace-panel-host-active");
+    expect(normal.desktop.detachPinnedPanel("pinnedDiff:a")).toBeNull();
+    expect(await opening.mock.results[0].value).toBe(false);
+    expect(normal.returned).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+    expect(normal.desktop.panelMounted("pinnedDiff:a")).toBe(false);
+    review.desktop.withPanel("pinnedDiff:a", element => { expect(element).toBe(content); });
+    expect(review.api.getGroupPanel("pinnedDiff:a")!.group).toBe(review.api.getGroupPanel("sessionChanges")!.group);
+    expect(normal.closed).not.toHaveBeenCalled();
+  });
+
+  it.each(["loading", "loaded"] as const)("closes a pending %s popup window when its pin is explicitly deleted", async phase => {
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error");
+    const { api, desktop, closed, returned } = setup();
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    const panel = api.getGroupPanel("pinnedDiff:a")!;
+    const popup = popupWindow();
+    const opening = vi.spyOn(api.api, "addPopoutGroup");
+    panel.group.element.querySelector<HTMLButtonElement>(".panel-popout-btn")!.click();
+    if (phase === "loaded") popup.dispatchEvent(new Event("load"));
+    desktop.closePanel("pinnedDiff:a");
+    if (phase === "loaded") expect(await opening.mock.results[0].value).toBe(false);
+    if (phase === "loading") {
+      popup.dispatchEvent(new Event("load"));
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(popup.close).toHaveBeenCalled();
+    expect(api.getGroupPanel("pinnedDiff:a")).toBeUndefined();
+    expect(desktop.isPanelPoppedOut("pinnedDiff:a")).toBe(false);
+    expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
+    expect(returned).not.toHaveBeenCalled();
+    expect(errors).not.toHaveBeenCalled();
+  });
+
+  it("leaves the same usable pin in place when the browser blocks its popup", async () => {
+    const { api, desktop, host, blocked, returned, closed } = setup();
+    desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
+    const panel = api.getGroupPanel("pinnedDiff:a")!;
+    const group = panel.group;
+    const layout = api.toJSON().grid;
+    let content: HTMLElement | undefined;
+    desktop.withPanel("pinnedDiff:a", element => { content = element; element.textContent = "Local review"; });
+    vi.spyOn(window, "open").mockReturnValue(null);
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const opening = vi.spyOn(api.api, "addPopoutGroup");
+    const button = group.element.querySelector<HTMLButtonElement>(".panel-popout-btn")!;
+    expect(host.contains(button)).toBe(true);
+    button.click();
+    await opening.mock.results[0].value;
+    expect(blocked).toHaveBeenCalledOnce();
+    expect(api.getGroupPanel(panel.id)).toBe(panel);
+    expect(panel.group).toBe(group);
+    expect(api.toJSON().grid).toEqual(layout);
+    expect(desktop.isPanelPoppedOut("pinnedDiff:a")).toBe(false);
+    desktop.withPanel("pinnedDiff:a", element => { expect(element).toBe(content); expect(element.textContent).toBe("Local review"); });
+    expect(returned).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
     expect(closed).not.toHaveBeenCalled();
   });
 
   it("cancels pending popup resize work when the native window closes", async () => {
     vi.useFakeTimers();
-    const { api, desktop, closed } = setup("pinned");
+    const { api, desktop, closed } = setup();
     desktop.addPinnedPanel("pinnedDiff:resize", "Resize review");
     const panel = api.getGroupPanel("pinnedDiff:resize")!;
     desktop.withPanel("pinnedDiff:resize", element => { element.textContent = "Retained review"; });
@@ -279,13 +668,17 @@ describe("desktop Dockview close lifecycle", () => {
     expect(closed).not.toHaveBeenCalled();
   });
 
-  it("deletes only the explicitly closed popup tab, then returns its surviving pin", async () => {
-    const { api, desktop, closed, ready } = setup("pinned");
+  it("deletes only an explicitly closed popup tab and returns its surviving pin without remounting", async () => {
+    const { api, desktop, closed, ready } = setup();
     desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
     desktop.addPinnedPanel("pinnedDiff:b", "Repo B");
     const first = api.getGroupPanel("pinnedDiff:a")!;
     const second = api.getGroupPanel("pinnedDiff:b")!;
-    const popup = await popout(api, first.group);
+    const group = api.addGroup({ referencePanel: "diffs", direction: "right" });
+    first.api.moveTo({ group });
+    second.api.moveTo({ group });
+    const mounts = ready.mock.calls.length;
+    const popup = await popout(api, group);
     const firstTab = [...popup.document.querySelectorAll<HTMLElement>(".dv-default-tab")]
       .find(element => element.textContent?.includes("Repo A"))!;
     firstTab.querySelector<HTMLButtonElement>(".panel-close-btn")!.click();
@@ -298,40 +691,22 @@ describe("desktop Dockview close lifecycle", () => {
     await Promise.resolve();
     expect(api.getGroupPanel("pinnedDiff:b")).toBe(second);
     expect(second.api.getWindow()).toBe(window);
-    expect(ready).toHaveBeenCalledTimes(2);
+    expect(ready).toHaveBeenCalledTimes(mounts);
     expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
   });
 
-  it("does not resurrect the last pin when closing its popup tab also closes the window", async () => {
-    const { api, desktop, closed } = setup("pinned");
+  it("does not resurrect the last popup pin when closing its tab also closes the window", async () => {
+    const { api, desktop, closed, returned } = setup();
+    const permanent = [...api.panels];
     desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
     const popup = await popout(api, api.getGroupPanel("pinnedDiff:a")!);
     popup.document.querySelector<HTMLButtonElement>(".panel-close-btn")!.click();
     await Promise.resolve();
-    expect(api.panels).toEqual([]);
-    expect(api.groups).toEqual([]);
+    expect(api.panels).toEqual(permanent);
+    expect(api.groups.every(group => group.size > 0)).toBe(true);
     expect(desktop.panelMounted("pinnedDiff:a")).toBe(false);
     expect(closed).toHaveBeenCalledExactlyOnceWith("pinnedDiff:a");
-  });
-
-  it("saves no pin descriptors and starts empty on reload even with an old saved layout", async () => {
-    vi.useFakeTimers();
-    const { api, desktop } = setup("pinned");
-    desktop.addPinnedPanel("pinnedDiff:a", "Repo A");
-    desktop.addPinnedPanel("pinnedDiff:b", "Repo B");
-    const raw = api.toJSON();
-    await vi.advanceTimersByTimeAsync(500);
-    const saved = JSON.parse(localStorage.getItem("lifecycle.pinned")!);
-    expect(saved.layout.panels).toEqual({});
-    expect(saved.layout.grid.root.data).toEqual([]);
-    expect(saved.layout.activeGroup).toBeUndefined();
-    localStorage.setItem("lifecycle.pinned", JSON.stringify({ version: 1, layout: raw }));
-    const restored = setup("pinned");
-    expect(restored.api.panels).toEqual([]);
-    expect(restored.api.groups).toEqual([]);
-    expect(restored.ready).not.toHaveBeenCalled();
-    expect(restored.desktop.addPinnedPanel("pinnedDiff:a", "New review")).toBe(true);
-    expect(restored.api.panels.map(panel => panel.title)).toEqual(["New review"]);
+    expect(returned).not.toHaveBeenCalled();
   });
 
   it.each(["normal", "diffReview"] as const)("prunes transient and unknown saved tabs, empty groups and active references in %s", async layoutMode => {

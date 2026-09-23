@@ -125,11 +125,16 @@ explicit internal `closePanel`, removal or disposal. Dockview 5.2 has no cancell
 close event; dependency upgrades must recheck these entry points.
 
 Additional **pinned diff panels** are the explicit exception: their tab close
-button deletes only that review instance, including in a popup. They belong to a
-third, session-independent host; changing normal/diffReview never hides their
-windows. Native popup/group close and Return to main still redock rather than
-delete pins. Their descriptors are excluded from layout saves and restoration:
-reload starts without pins, preserving the existing permanent workspace layouts.
+button deletes only that review instance, including in a popup. **Pin as new tab**
+selects a tab alongside Diffs without a new split. Pins retain one controller
+and content DOM while docked presentation moves between normal/diffReview;
+their separate user layouts remain intact. **Open in new window** detaches the
+selected pin, and changing workspace never hides its opening or open popup.
+Native popup/group close and Return to main redock rather than delete pins,
+into the active workspace's remembered group/order, falling back to docked
+Diffs and then a main group. Empty pin-only return groups occupy no space.
+Their descriptors are excluded from layout saves and restoration: reload
+starts without pins, preserving the existing permanent workspace layouts.
 
 Detached groups show **Return to main** instead of another Pop out action. This
 button, group close and native popup-window close return the group through
@@ -142,6 +147,8 @@ surviving groups. Normal and diff-review workspaces retain separate ownership.
 Transfer preserves content, draft, review identity, comments, preferences and
 scroll; it does not cancel pending diff/Compare responses or restart History
 smart-entry. BTW conversation subtabs remain independently closeable.
+Restoring a popup's content focus never overrides a control already focused in
+the destination window, such as the main composer.
 
 Ordinary layout saves retain native popup geometry. Main-page shutdown saves
 return positions synchronously, without moving content, reopening windows or

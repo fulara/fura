@@ -292,7 +292,6 @@ app.innerHTML = `
       <div id="workspacePanelHost" class="workspace-panel-stack">
         <div id="normalWorkspacePanelHost" class="workspace-panel-host workspace-panel-host-active"></div>
         <div id="diffReviewWorkspacePanelHost" class="workspace-panel-host"></div>
-        <div id="pinnedWorkspacePanelHost" class="workspace-panel-host pinned-workspace-panel-host"></div>
       </div>
 
       <div id="statusBar" class="status-bar" aria-label="Session status"></div>
@@ -1326,7 +1325,7 @@ type CodeOpenRequest = { source: "sessionWorktree"; sessionId: string; repoRoot:
 let desktopDockview: DesktopDockview | null = null;
 let normalDesktopDockview: DesktopDockview | null = null;
 let diffReviewDesktopDockview: DesktopDockview | null = null;
-let pinnedDesktopDockview: DesktopDockview | null = null;
+const pinnedPanelOwners = new Map<string, DesktopDockview>();
 let activeDesktopDockviewMode: "normal" | "diffReview" | null = null;
 
 let codePanelDirty = true;
@@ -1500,7 +1499,7 @@ voiceButton.addEventListener("lostpointercapture", () => { void stopVoiceRecordi
 voiceButton.addEventListener("contextmenu", event => event.preventDefault());
 window.addEventListener("keydown", event => {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "f" && desktopDockview?.isPanelActive("code") && !codeRevision
-    && !document.activeElement?.closest("#pinnedWorkspacePanelHost")) {
+    && !document.activeElement?.closest(".pinned-diff-view")) {
     event.preventDefault();
     openCodeSearch();
     return;
@@ -6414,6 +6413,7 @@ function setActiveDesktopDockviewMode(mode: "normal" | "diffReview"): boolean {
       normalCompareNeedsRefresh = Boolean(saved && compareMode === "files");
     }
     activeDesktopDockviewMode = mode;
+    for (const pin of pinnedDiffs.values()) transferPinnedPanel(pin.id, nextDockview);
     lastTranscriptRenderedSessionId = null;
     lastToolsRenderedSessionId = null;
     transcriptPanelDirty = true;
@@ -6799,7 +6799,7 @@ function renderReviewCommentComposer(options: {
     const pinnedId = root?.dataset.pinnedId;
     const id = pinnedId && isPinnedDiffPanelId(pinnedId) ? pinnedId : root?.classList.contains("compare-view") ? "compare"
       : activeDesktopDockviewMode === "diffReview" ? "sessionChanges" : "diffs";
-    const dockview = pinnedId ? pinnedDesktopDockview : desktopDockview;
+    const dockview = pinnedId ? pinnedPanelOwners.get(pinnedId) : desktopDockview;
     if (!form.isConnected || !root || !owner.hasFocus() || !dockview?.isPanelActive(id)
       || (owner.activeElement !== owner.body && owner.activeElement !== root)) return;
     textarea.focus({ preventScroll: true });
@@ -7217,7 +7217,7 @@ function diffPatchReady(annotationKey: string, state: DiffReviewableState | null
 
 function diffPanelHasFocus(annotationKey: string, container: HTMLElement): boolean {
   const pin = pinnedDiffs.get(annotationKey);
-  if (pin) return Boolean(pinnedDesktopDockview?.isPanelActive(pin.id) && container.ownerDocument.hasFocus() && container.contains(container.ownerDocument.activeElement));
+  if (pin) return Boolean(pinnedPanelOwners.get(pin.id)?.isPanelActive(pin.id) && container.ownerDocument.hasFocus() && container.contains(container.ownerDocument.activeElement));
   const id = annotationKey === "compareDiff" ? "compare"
     : activeDesktopDockviewMode === "diffReview" ? "sessionChanges" : "diffs";
   return Boolean(desktopDockview?.isPanelActive(id) && container.ownerDocument.hasFocus()
@@ -7774,8 +7774,8 @@ function renderRangeDiffCompare(container: HTMLElement): void {
   form.append(layoutNote);
   const pin = mkEl("button");
   pin.type = "button";
-  pin.textContent = "Pin as new panel";
-  pin.setAttribute("aria-label", "Pin as new panel");
+  pin.textContent = "Pin as new tab";
+  pin.setAttribute("aria-label", "Pin as new tab");
   pin.disabled = true;
   pin.title = "Native range-diff compares patches, not file versions. Pin a File diff comparison instead.";
   form.append(pin);
@@ -7959,8 +7959,25 @@ function pinnedActionError(pin: PinnedDiff): string | null {
   return null;
 }
 
+function transferPinnedPanel(id: PinnedDiff["id"], target: DesktopDockview): void {
+  const previous = pinnedPanelOwners.get(id);
+  if (!previous || previous === target || previous.isPanelPoppedOut(id)) return;
+  const presentation = previous.detachPinnedPanel(id);
+  if (!presentation) return;
+  pinnedPanelOwners.set(id, target);
+  if (!target.addPinnedPanel(id, presentation.title, presentation)) {
+    pinnedPanelOwners.set(id, previous);
+    previous.addPinnedPanel(id, presentation.title, presentation);
+  }
+}
+
 function pinDiffView(annotationKey: string, state: DiffReviewableState, sourceRoot: HTMLElement | null): void {
-  if (!pinnedDesktopDockview || isPinnedDiffPanelId(annotationKey)) return;
+  const dockview = desktopDockview;
+  if (!dockview || isPinnedDiffPanelId(annotationKey)) return;
+  const sourceScroll = [".diffs-main-body", ".diffs-sidebar-scroll"].map(selector => {
+    const element = sourceRoot?.querySelector<HTMLElement>(selector);
+    return { selector, top: element?.scrollTop ?? 0, left: element?.scrollLeft ?? 0 };
+  });
   const owner = annotationKey === "compareDiff" ? null : annotationKey;
   const pin = new PinnedDiff(randomUuid(), owner, owner ? currentSessionSummary(owner)?.title || owner : "No agent",
     state, { selectedFile: sessionChangesSelectedFiles.get(annotationKey) ?? null, layout: diffLayout, ignoreWhitespace: diffIgnoreWhitespace,
@@ -7982,17 +7999,20 @@ function pinDiffView(annotationKey: string, state: DiffReviewableState, sourceRo
   const mode = pin.target.scope === "sessionChanges" && !pin.target.currentCommitOid
     ? `Current ${pin.target.changeKind}` : `Fixed ${state.comparison.rightTreeOrCommit.slice(0, 12)}`;
   const title = `${shortPath(pin.target.repoRoot)} · ${mode}`;
-  requireElement("workspacePanelHost").classList.add("has-pinned-diffs");
-  requireElement("pinnedWorkspacePanelHost").classList.add("workspace-panel-host-active");
-  if (!pinnedDesktopDockview.addPinnedPanel(pin.id, title)) { closePinnedDiff(pin.id); return; }
+  pinnedPanelOwners.set(pin.id, dockview);
+  if (!dockview.addPinnedPanel(pin.id, title)) { closePinnedDiff(pin.id); return; }
   renderPinnedDiff(pin.id);
-  pinnedDesktopDockview.activatePanel(pin.id);
-  if (sourceRoot) pinnedDesktopDockview.withPanel(pin.id, container => {
-    for (const selector of [".diffs-main-body", ".diffs-sidebar-scroll"]) {
-      const source = sourceRoot.querySelector<HTMLElement>(selector);
-      const target = container.querySelector<HTMLElement>(selector);
-      if (source && target) { target.scrollTop = source.scrollTop; target.scrollLeft = source.scrollLeft; }
-    }
+  dockview.activatePanel(pin.id);
+  dockview.withPanel(pin.id, container => {
+    const restore = () => {
+      if (pin.closed) return;
+      for (const { selector, top, left } of sourceScroll) {
+        const target = container.querySelector<HTMLElement>(selector);
+        if (target) { target.scrollTop = top; target.scrollLeft = left; }
+      }
+    };
+    restore();
+    container.ownerDocument.defaultView?.requestAnimationFrame(restore);
   });
 }
 
@@ -8007,16 +8027,17 @@ function closePinnedDiff(id: string): void {
     diffPreviewSend.disabled = true;
     diffPreviewStatus.textContent = "This pinned panel was closed.";
   }
-  if (!pinnedDiffs.size) {
-    requireElement("workspacePanelHost").classList.remove("has-pinned-diffs");
-    requireElement("pinnedWorkspacePanelHost").classList.remove("workspace-panel-host-active");
+  pinnedPanelOwners.delete(id);
+  if (isPinnedDiffPanelId(id)) {
+    normalDesktopDockview?.forgetPinnedPanel(id);
+    diffReviewDesktopDockview?.forgetPinnedPanel(id);
   }
 }
 
 function renderPinnedDiff(id: string): void {
   const pin = pinnedDiffs.get(id);
   if (!pin || pin.closed) return;
-  pinnedDesktopDockview?.withPanel(pin.id, container => {
+  pinnedPanelOwners.get(id)?.withPanel(pin.id, container => {
     setRenderDocument(container.ownerDocument);
     const scroll = captureDiffViewScroll(container);
     const filterFocus = captureDiffFilterFocus(container);
@@ -8363,8 +8384,8 @@ function renderReviewableDiffMainContent(
     const pinButton = mkEl("button");
     pinButton.type = "button";
     pinButton.className = "diff-pin-button";
-    pinButton.textContent = "Pin as new panel";
-    pinButton.setAttribute("aria-label", "Pin as new panel");
+    pinButton.textContent = "Pin as new tab";
+    pinButton.setAttribute("aria-label", "Pin as new tab");
     pinButton.addEventListener("click", () => pinDiffView(annotationKey, state, main.closest<HTMLElement>(".diffs-view, .compare-view")));
     toolbar.append(pinButton);
   }
@@ -9078,6 +9099,14 @@ function appendDiffRow(diff: HTMLElement | DocumentFragment, row: DiffRow, annot
 function initDesktopWorkspace(): void {
   const createDockviewCallbacks = (mode: "normal" | "diffReview") => ({
     onPanelReady: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
+      if (isPinnedDiffPanelId(id)) {
+        queueMicrotask(() => {
+          pinnedPanelOwners.get(id)?.withPanel(id, container => {
+            if (!container.querySelector(".pinned-diff-view")) renderPinnedDiff(id);
+          });
+        });
+        return;
+      }
       if (id === "transcript") markTranscriptViewDirty();
       if (id === "goal") return;
       if (id === "tools") markToolsViewDirty();
@@ -9087,6 +9116,7 @@ function initDesktopWorkspace(): void {
       if (id === "code") markCodeViewDirty();
     },
     onPanelVisibilityChanged: (id: Parameters<DesktopDockview["withPanel"]>[0], visible: boolean) => {
+      if (isPinnedDiffPanelId(id)) return;
       if (mode !== activeDesktopDockviewMode) return;
       if (id === "transcript") {
         transcriptBtw.setVisibleSource(workspaceMode === "session" ? activeSessionId : null, visible);
@@ -9108,6 +9138,7 @@ function initDesktopWorkspace(): void {
       if (mode === activeDesktopDockviewMode) refreshVisibleReviews(owner);
     },
     onPanelActivated: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
+      if (isPinnedDiffPanelId(id)) return;
       if (mode !== activeDesktopDockviewMode) return;
       const isDiffs = id === "diffs" || id === "sessionChanges";
       const entering = isDiffs && !diffsVisible;
@@ -9142,6 +9173,7 @@ function initDesktopWorkspace(): void {
       }
     },
     onPanelClosed: (id: Parameters<DesktopDockview["withPanel"]>[0]) => {
+      if (isPinnedDiffPanelId(id)) { closePinnedDiff(id); return; }
       if (mode !== activeDesktopDockviewMode) return;
       if (id === "diffs" || id === "sessionChanges") {
         diffsVisible = false;
@@ -9169,6 +9201,9 @@ function initDesktopWorkspace(): void {
       markComparePanelDirty();
       renderComparePanelIfVisible();
     },
+    onPinnedPanelReturned: (id: PinnedDiff["id"]) => {
+      if (desktopDockview) transferPinnedPanel(id, desktopDockview);
+    },
     onPopoutBlocked: () => {
       const sid = activeSessionId;
       if (!sid) return;
@@ -9191,17 +9226,6 @@ function initDesktopWorkspace(): void {
     layoutMode: "diffReview",
     storageKey: "fura.dockview.diffReview.layout",
     ...createDockviewCallbacks("diffReview"),
-  });
-  pinnedDesktopDockview = initDesktopDockview({
-    host: requireElement<HTMLDivElement>("pinnedWorkspacePanelHost"),
-    layoutMode: "pinned",
-    storageKey: "fura.dockview.pinned.layout",
-    onPanelReady: id => queueMicrotask(() => renderPinnedDiff(id)),
-    onPanelActivated: id => renderPinnedDiff(id),
-    onPanelVisibilityChanged: (id, visible) => { if (visible) renderPinnedDiff(id); },
-    onPanelClosed: closePinnedDiff,
-    onWindowFocus: () => {},
-    onPopoutBlocked: () => window.alert("Popup window was blocked. Allow popups for this site."),
   });
   syncSessionModePanels();
   renderActiveDockviewPanel(activeSessionId ? projections.get(activeSessionId) : undefined);

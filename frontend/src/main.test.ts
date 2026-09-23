@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { FURA_TOKEN_STORAGE_KEY } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection } from "./connection";
+import type { PinnedPanelPresentation } from "./desktopDockview";
 import type { ClientMessage, CodeLocation, DiffFileSummary, DiffRow, GitFileContent, PendingAskProjection, ReviewComment, ServerConfig, ServerMessage, SessionChangesSummaryState, SessionProjection, SessionSummary } from "./protocol";
 
 class FakeConnection implements FuraConnection {
@@ -163,21 +164,24 @@ function simpleDiffRows(patch: string): DiffRow[] {
 
 let connections: FakeConnection[] = [];
 let fakeConnectionAutoOpen = true;
-type MockWorkspace = "normal" | "diffReview" | "pinned";
+type MockWorkspace = "normal" | "diffReview";
 type MockDockviewOptions = {
   host: HTMLElement;
   layoutMode: MockWorkspace;
   onPanelReady(id: string, container: HTMLElement): void;
   onPanelActivated(id: string): void;
   onPanelClosed?: (id: string) => void;
+  onPinnedPanelReturned?: (id: `pinnedDiff:${string}`) => void;
   onPanelVisibilityChanged?: (id: string, visible: boolean) => void;
   onWindowFocus?: (document: Document) => void;
 };
-let desktopMockActivePanelId: Record<MockWorkspace, string | null> = { normal: "diffs", diffReview: "sessionChanges", pinned: null };
+let desktopMockActivePanelId: Record<MockWorkspace, string | null> = { normal: "diffs", diffReview: "sessionChanges" };
 let desktopMockVisiblePanelIds: Record<MockWorkspace, Set<string>> = {
-  normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]), pinned: new Set(),
+  normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]),
 };
 const desktopMockOptions = new Map<MockWorkspace, MockDockviewOptions>();
+const desktopMockPanels = new Map<MockWorkspace, Record<string, HTMLElement>>();
+const desktopMockPoppedOut = new Set<string>();
 const desktopMockActivatePanel = vi.fn((_id: string) => true);
 // Code is opt-in so unrelated protocol tests do not open a code workspace.
 let desktopMockMountCodePanel = false;
@@ -197,6 +201,13 @@ function activatePanel(id: string, workspace: MockWorkspace = "normal"): void {
   if (["transcript", "goal", "code"].includes(id)) {
     for (const sibling of ["transcript", "goal", "code"]) {
       if (sibling !== id) setPanelVisible(sibling, false, workspace);
+    }
+  }
+  if (["diffs", "sessionChanges", "compare"].includes(id) || id.startsWith("pinnedDiff:")) {
+    for (const sibling of desktopMockVisiblePanelIds[workspace]) {
+      if (sibling !== id && (["diffs", "sessionChanges", "compare"].includes(sibling) || sibling.startsWith("pinnedDiff:"))) {
+        setPanelVisible(sibling, false, workspace);
+      }
     }
   }
   setPanelVisible(id, true, workspace);
@@ -222,7 +233,8 @@ function installMocks(): void {
       desktopMockOptions.set(options.layoutMode, options);
       if (normal) desktopMockPanelClosed = options.onPanelClosed ?? null;
       const panels: Record<string, HTMLElement> = {};
-      const ids = normal ? ["diffs", "transcript", "goal"] : options.layoutMode === "pinned" ? [] : ["sessionChanges", "transcript"];
+      desktopMockPanels.set(options.layoutMode, panels);
+      const ids = normal ? ["diffs", "transcript", "goal"] : ["sessionChanges", "transcript"];
       if (desktopMockMountCodePanel) ids.push("code");
       const mount = (id: string) => {
         if (panels[id]) return false;
@@ -240,7 +252,7 @@ function installMocks(): void {
         panelMounted: (id: string) => Boolean(panels[id]),
         panelContains: (id: string, element: Element) => Boolean(panels[id]?.contains(element)),
         isPanelActive: (id: string) => Boolean(panels[id]) && workspaceVisible() && desktopMockActivePanelId[options.layoutMode] === id,
-        isPanelVisible: (id: string) => Boolean(panels[id]) && workspaceVisible() && desktopMockVisiblePanelIds[options.layoutMode].has(id),
+        isPanelVisible: (id: string) => Boolean(panels[id]) && (workspaceVisible() || desktopMockPoppedOut.has(id)) && desktopMockVisiblePanelIds[options.layoutMode].has(id),
         activatePanel: (id: string) => {
           if (!desktopMockActivatePanel(id) || !panels[id]) return false;
           activatePanel(id, options.layoutMode);
@@ -253,11 +265,33 @@ function installMocks(): void {
           return true;
         },
         ensureSessionChangesPanel: () => !normal && mount("sessionChanges"),
-        addPinnedPanel: (id: string) => {
-          if (options.layoutMode !== "pinned" || !mount(id)) return false;
-          activatePanel(id, "pinned");
+        addPinnedPanel: (id: string, _title: string, presentation?: PinnedPanelPresentation) => {
+          if (panels[id]) return false;
+          if (presentation) {
+            panels[id] = presentation.content;
+            options.host.append(presentation.content);
+            if (presentation.active) activatePanel(id, options.layoutMode);
+            presentation.restore();
+          } else {
+            mount(id);
+            activatePanel(id, options.layoutMode);
+          }
           return true;
         },
+        detachPinnedPanel: (id: `pinnedDiff:${string}`): PinnedPanelPresentation | null => {
+          const content = panels[id];
+          if (!content || desktopMockPoppedOut.has(id)) return null;
+          const active = desktopMockVisiblePanelIds[options.layoutMode].has(id);
+          const scroll = [...content.querySelectorAll<HTMLElement>("*")].map(element => [element, element.scrollTop, element.scrollLeft] as const);
+          setPanelVisible(id, false, options.layoutMode);
+          content.remove();
+          delete panels[id];
+          return { id, title: id, content, active, restore: () => {
+            for (const [element, top, left] of scroll) { element.scrollTop = top; element.scrollLeft = left; }
+          } };
+        },
+        isPanelPoppedOut: (id: string) => desktopMockPoppedOut.has(id),
+        forgetPinnedPanel: () => undefined,
         ensureDiffsPanel: () => normal && mount("diffs"),
         ensureComparePanel: () => normal && mount("compare"),
         closePanel: (id: string) => {
@@ -265,6 +299,7 @@ function installMocks(): void {
           setPanelVisible(id, false, options.layoutMode);
           panels[id].remove();
           delete panels[id];
+          desktopMockPoppedOut.delete(id);
           options.onPanelClosed?.(id);
           return true;
         },
@@ -301,8 +336,10 @@ async function createHarness(options: { preserveLocalStorage?: boolean; mountCod
     this.dispatchEvent(new Event("close"));
   };
   connections = [];
-  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges", pinned: null };
-  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]), pinned: new Set() };
+  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges" };
+  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]) };
+  desktopMockPanels.clear();
+  desktopMockPoppedOut.clear();
   desktopMockOptions.clear();
   desktopMockPanelClosed = null;
   desktopMockActivatePanel.mockReset().mockReturnValue(true);
@@ -327,8 +364,10 @@ async function createPendingHarness() {
   vi.resetModules();
   vi.restoreAllMocks();
   connections = [];
-  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges", pinned: null };
-  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]), pinned: new Set() };
+  desktopMockActivePanelId = { normal: "diffs", diffReview: "sessionChanges" };
+  desktopMockVisiblePanelIds = { normal: new Set(["diffs", "transcript"]), diffReview: new Set(["sessionChanges", "transcript"]) };
+  desktopMockPanels.clear();
+  desktopMockPoppedOut.clear();
   desktopMockOptions.clear();
   desktopMockPanelClosed = null;
   desktopMockActivatePanel.mockReset().mockReturnValue(true);
@@ -1893,7 +1932,7 @@ describe("desktop cog options", () => {
 
     it("pins a separate review without replacing ordinary Diffs", async () => {
       await openDiffs();
-      const pin = document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]');
+      const pin = document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]');
       expect(pin).not.toBeNull();
       pin!.click();
       expect(document.querySelector("#testDiffPanel .diffs-main")?.textContent).toContain("readable-before-refresh");
@@ -1909,7 +1948,7 @@ describe("desktop cog options", () => {
       const layout = document.querySelector<HTMLSelectElement>("#testDiffPanel .diff-layout-select")!;
       layout.value = "split";
       layout.dispatchEvent(new Event("change"));
-      const pinButton = () => document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!;
+      const pinButton = () => document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!;
       pinButton().click();
       pinButton().click();
       await Promise.resolve();
@@ -1932,17 +1971,115 @@ describe("desktop cog options", () => {
       connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), summary("other", { sessionMode: "diffReview", cwd: "/other", title: "HEAD...topic" })] });
       [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(button => button.textContent?.includes("HEAD...topic"))!.click();
       connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other", { summary: summary("other", { sessionMode: "diffReview", cwd: "/other", title: "HEAD...topic" }) }) });
-      focusWorkspace("pinned");
+      focusWorkspace("diffReview");
       await Promise.resolve();
       expect(roots().map(root => root.dataset.panelId)).toEqual(ids);
       expect(roots().every(root => root.textContent?.includes("readable-before-refresh"))).toBe(true);
-      expect(document.querySelector("#pinnedWorkspacePanelHost")?.classList.contains("workspace-panel-host-active")).toBe(true);
+      expect(ids.every(id => desktopMockPanels.get("diffReview")?.[id!])).toBe(true);
+      expect(ids.some(id => desktopMockPanels.get("normal")?.[id!])).toBe(false);
       expect(connection.sent.some(message => "clientId" in message && ids.includes(`pinnedDiff:${message.clientId}`))).toBe(false);
+    });
+
+    it.each([true, false])("transfers a pin without replacing its draft, selection or scroll when active=%s", async active => {
+      const connection = await openDiffs();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!.click();
+      await Promise.resolve();
+      document.querySelector<HTMLButtonElement>(".pinned-diff-view .diff-comment-btn")!.click();
+      const root = document.querySelector<HTMLElement>(".pinned-diff-view")!;
+      const id = root.dataset.panelId!;
+      const draft = root.querySelector<HTMLTextAreaElement>(".review-comment-composer-input")!;
+      draft.value = "Draft still belongs to A";
+      draft.dispatchEvent(new Event("input", { bubbles: true }));
+      draft.setSelectionRange(3, 12);
+      const body = root.querySelector<HTMLElement>(".diffs-main-body")!;
+      body.scrollTop = 137;
+      if (!active) activatePanel("diffs");
+      const before = connection.sent.length;
+      const review = summary("other", { sessionMode: "diffReview", cwd: "/other", title: "diff: main..topic" });
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), review] });
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(button => button.textContent?.includes(review.title!))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other", { summary: review }) });
+      await Promise.resolve();
+      expect(desktopMockPanels.get("normal")?.[id]).toBeUndefined();
+      expect(desktopMockPanels.get("diffReview")?.[id].contains(root)).toBe(true);
+      expect(desktopMockVisiblePanelIds.diffReview.has(id)).toBe(active);
+      activatePanel("sessionChanges", "diffReview");
+      focusWorkspace("diffReview");
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(button => button.textContent?.includes("Session live"))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "live", state: projection("live") });
+      await Promise.resolve();
+      expect(desktopMockPanels.get("normal")?.[id].contains(root)).toBe(true);
+      expect(desktopMockPanels.get("diffReview")?.[id]).toBeUndefined();
+      activatePanel(id);
+      expect(document.querySelector(".pinned-diff-view")).toBe(root);
+      expect(root.querySelector(".review-comment-composer-input")).toBe(draft);
+      expect(root.querySelector(".diffs-main-body")).toBe(body);
+      expect(draft.value).toBe("Draft still belongs to A");
+      expect([draft.selectionStart, draft.selectionEnd, body.scrollTop]).toEqual([3, 12, 137]);
+      expect(connection.sent.slice(before).filter(message => "clientId" in message && `pinnedDiff:${message.clientId}` === id)).toEqual([]);
+      draft.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      expect(connection.sent.filter(message => message.type === "review.comment.create").at(-1)).toMatchObject({
+        sessionId: "live", repoRoot: "/repo", body: "Draft still belongs to A",
+      });
+    });
+
+    it("continues a pending pin request while inactive across workspace transfer without closing its controller", async () => {
+      const connection = await openDiffs();
+      // createHarness resets the module registry; use the same controller class as the newly loaded main.
+      const { PinnedDiff } = await import("./pinnedDiff");
+      const close = vi.spyOn(PinnedDiff.prototype, "close");
+      const refresh = vi.spyOn(PinnedDiff.prototype, "refresh");
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!.click();
+      await Promise.resolve();
+      document.querySelector<HTMLButtonElement>('.pinned-diff-view button[aria-label="Refresh"]')!.click();
+      const pending = latestGitRequest(connection);
+      const controller = refresh.mock.contexts[0];
+      activatePanel("diffs");
+      const review = summary("other", { sessionMode: "diffReview", cwd: "/other", title: "diff: main..topic" });
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), review] });
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(button => button.textContent?.includes(review.title!))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other", { summary: review }) });
+      answerDiff(connection, pending, "pin-delayed");
+      expect(connection.sent).toContainEqual(expect.objectContaining({ type: "diff.content.request", clientId: pending.clientId, diffId: pending.diffId, comparisonKey: "pin-delayed" }));
+      answerContent(connection, pending, "pin-delayed", "A accepted while pin inactive");
+      await Promise.resolve();
+      const root = document.querySelector<HTMLElement>(".pinned-diff-view")!;
+      expect(root.textContent).toContain("A accepted while pin inactive");
+      expect(root.textContent).not.toContain("/other");
+      expect(desktopMockVisiblePanelIds.diffReview.has(root.dataset.panelId!)).toBe(false);
+      expect(close).not.toHaveBeenCalled();
+      expect(refresh).toHaveBeenCalledTimes(1);
+      activatePanel(root.dataset.panelId!, "diffReview");
+      root.querySelector<HTMLButtonElement>('button[aria-label="Refresh"]')!.click();
+      expect(refresh.mock.contexts[1]).toBe(controller);
+      expect(latestGitRequest(connection)).toMatchObject({ clientId: pending.clientId, sessionId: "live", repoId: "/repo" });
+    });
+
+    it("keeps a popup with its owner until return then transfers it to the current workspace", async () => {
+      const connection = await openDiffs();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!.click();
+      const root = document.querySelector<HTMLElement>(".pinned-diff-view")!;
+      const id = root.dataset.panelId! as `pinnedDiff:${string}`;
+      desktopMockPoppedOut.add(id);
+      const review = summary("other", { sessionMode: "diffReview", cwd: "/other", title: "diff: main..topic" });
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("live"), review] });
+      [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item button")].find(button => button.textContent?.includes(review.title!))!.click();
+      connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other", { summary: review }) });
+      expect(desktopMockPanels.get("normal")?.[id].contains(root)).toBe(true);
+      expect(desktopMockPanels.get("diffReview")?.[id]).toBeUndefined();
+      desktopMockPoppedOut.delete(id);
+      desktopMockOptions.get("normal")!.onPinnedPanelReturned!(id);
+      await Promise.resolve();
+      expect(desktopMockPanels.get("normal")?.[id]).toBeUndefined();
+      expect(desktopMockPanels.get("diffReview")?.[id].contains(root)).toBe(true);
+      expect(document.querySelector(".pinned-diff-view")).toBe(root);
+      expect(root.textContent).toContain("readable-before-refresh");
+      expect(document.querySelector("#sessionTitle")?.textContent).toContain(review.title);
     });
 
     it("routes pinned review to its captured recipient and blocks a preview after refresh or source removal", async () => {
       const connection = await openDiffs();
-      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!.click();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!.click();
       await Promise.resolve();
       const root = () => document.querySelector<HTMLElement>(".pinned-diff-view")!;
       const review = () => [...root().querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Request agent review")!;
@@ -1969,7 +2106,7 @@ describe("desktop cog options", () => {
 
     it("keeps comment composers separate and creates comments for the source session after switching agents", async () => {
       const connection = await openDiffs();
-      const button = document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!;
+      const button = document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!;
       button.click();
       button.click();
       await Promise.resolve();
@@ -1993,7 +2130,7 @@ describe("desktop cog options", () => {
 
     it("review regression: preserves draft caret during unrelated session updates", async () => {
       const connection = await openDiffs();
-      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!.click();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!.click();
       await Promise.resolve();
       document.querySelector<HTMLButtonElement>(".pinned-diff-view .diff-comment-btn")!.click();
       const input = document.querySelector<HTMLTextAreaElement>(".pinned-diff-view textarea")!;
@@ -2011,7 +2148,7 @@ describe("desktop cog options", () => {
 
     it("review regression: does not route Find from a pin into ordinary Code", async () => {
       await openDiffs("Current changes", true);
-      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!.click();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!.click();
       await Promise.resolve();
       activatePanel("code");
       const pin = document.querySelector<HTMLElement>(".pinned-diff-view")!;
@@ -2023,7 +2160,7 @@ describe("desktop cog options", () => {
 
     it("review regression: retains pinned revision rather than assigning its owner to suspended Code", async () => {
       const connection = await openDiffs("History", true);
-      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new panel"]')!.click();
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!.click();
       await Promise.resolve();
       [...document.querySelectorAll<HTMLButtonElement>("#sessionsList .session-item > button")].find(button => button.textContent?.includes("Session other"))!.click();
       connection.emit({ type: "session.snapshot", sessionId: "other", state: projection("other") });

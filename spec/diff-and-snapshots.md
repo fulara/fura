@@ -175,8 +175,9 @@ Event summaries never include imported patch content.
 
 ## Independent pinned panels
 
-**Pin as new panel** in Current changes, History and ordinary ref Compare adds
-an independent review tab without replacing ordinary Diffs. Several pins may
+**Pin as new tab** in Current changes, History and ordinary ref Compare adds
+an active independent review tab in the existing Diffs group without replacing
+ordinary Diffs, adding a split or changing group proportions. Several pins may
 coexist. They use the same file/patch renderer, parser, highlighting, split layout
 and comment anchors, with separate controllers and mutable UI state. Native
 Range-diff explicitly disables Pin because it compares patches, not file versions.
@@ -220,17 +221,33 @@ file; live Code explicitly reads that worktree and keeps the pin's note recipien
 revision survives conversation changes rather than restoring another worktree
 under its recipient. Returning to active-workspace Code is explicit.
 
-Pins live in one dedicated Dockview group host independent of the two agent
-workspaces. Wide desktops place it beside the ordinary workspace; narrower
-desktops stack the hosts to keep controls accessible. Each pin can pop out.
-Popup close/Return to main redocks the same instance; only **Close pinned panel**
-deletes it. Unrelated session events do not recreate its draft or text selection.
+Pins share the ordinary Dockview tab strip; there is no separate pin host or
+reserved screen area. Normal and diffReview retain separate user arrangements.
+Each pin has one controller, one persistent content DOM and one current host.
+Changing workspace transfers docked content, not its source or lifetime; the
+native Dockview wrapper may change but transfer never closes or refreshes the pin.
+Inactive tabs retain drafts, selection, settings and scroll.
+
+**Open in new window** uses native popout for the selected pin. An opening or
+open popup remains owned by its original workspace and stays visible through
+workspace changes. A blocked popup leaves a functioning tab. Popup close and
+**Return to main** return the same content to the active workspace, preferring
+its remembered group and tab neighbors, then its docked Diffs group, then a
+main grid group. They do not switch conversations. Only **Close pinned panel**
+deletes the review instance. Unrelated session events and focus changes do not
+recreate its draft or text selection.
+
+Splits are explicit user actions. A pin-only group evacuated by popout or
+workspace transfer occupies no space while retaining its return geometry.
+Closing its last docked pin while another is popped out also releases its area;
+closing all associated pins removes the empty return group. Other user splits
+and sizes are preserved rather than resetting either workspace to defaults.
 
 Lifetime is **the current application document only**. Reload discards pins,
 patches and drafts; layout serialization excludes their descriptors and empty
 groups, so reload never restores broken tabs or retargets them to an active agent.
 There is no persisted patch archive, new OMP session, checkout, worktree creation,
-filesystem watcher, polling loop or backend protocol change.
+filesystem watcher, diff-source polling loop or backend protocol change.
 
 ## Diff layout
 
