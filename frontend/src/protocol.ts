@@ -140,26 +140,6 @@ export type SessionWorktreeSummary = {
   path: string;
 };
 
-export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
-
-export type GoalProjection = {
-  id: string;
-  objective: string;
-  status: GoalStatus;
-  tokenBudget?: number | null;
-  tokensUsed: number;
-  timeUsedSeconds: number;
-  createdAt: number;
-  updatedAt: number;
-};
-
-export type GoalModeProjection = {
-  enabled: boolean;
-  mode: "active" | "exiting";
-  reason?: "completed" | null;
-  goal: GoalProjection;
-};
-
 export type SessionSummary = {
   kind: "managed" | "available";
   sessionMode: SessionMode;
@@ -175,7 +155,6 @@ export type SessionSummary = {
   timestamp?: string | null;
   category?: string | null;
   worktree?: SessionWorktreeSummary | null;
-  goalMode?: GoalModeProjection | null;
   awaitingAsk?: boolean;
 };
 
@@ -254,7 +233,6 @@ export type SessionProjection = {
   contextPercent?: number | null;
   planMode?: PlanModeProjection | null;
   pendingPlanReview?: PendingPlanReviewProjection | null;
-  goalMode?: GoalModeProjection | null;
   sessionSkills?: SessionSkillsState;
   todoPhases: TodoPhase[];
   pendingAsk?: PendingAskProjection | null;
@@ -279,7 +257,6 @@ export type SessionProjectionDelta = {
   contextPercent?: number | null;
   planMode?: PlanModeProjection | null;
   pendingPlanReview?: PendingPlanReviewProjection | null;
-  goalMode?: GoalModeProjection | null;
   sessionSkills?: SessionSkillsState;
   todoPhases: TodoPhase[];
   pendingAsk?: PendingAskProjection | null;
@@ -785,7 +762,6 @@ export type WorktreeCreateOptions = {
 
 export type PlanApprovalMode = "execute" | "compact" | "keep";
 
-export type GoalControlAction = "pause" | "resume" | "drop";
 export type ClientMessage =
   | ({ type: "session.skills.get"; requestId: string } & SessionSkillsIdentity)
   | ({ type: "session.skills.apply"; requestId: string } & SessionSkillsApplyRequest)
@@ -816,9 +792,6 @@ export type ClientMessage =
       behavior?: "steer" | "followUp";
     }
   | { type: "prompt.abort"; sessionId: string }
-  | { type: "goal.start"; sessionId: string; objective: string; tokenBudget?: number | null }
-  | { type: "goal.control"; sessionId: string; action: GoalControlAction }
-  | { type: "goal.setBudget"; sessionId: string; tokenBudget?: number | null }
   | { type: "dialog.respond"; sessionId: string; dialogId: string; response: unknown }
   | { type: "model.list"; sessionId: string }
   | { type: "model.set"; sessionId: string; provider: string; modelId: string }

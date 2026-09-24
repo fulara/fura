@@ -644,7 +644,6 @@ pub(crate) mod tests {
             context_window: None,
             context_percent: None,
             plan_mode: None,
-            goal_mode: None,
             session_skills: None,
             pending_plan_review: None,
             pending_ask: None,
@@ -713,100 +712,91 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn maps_goal_mode_projection_from_omp_state() {
-        let value = serde_json::json!({
-            "enabled": true,
-            "mode": "active",
-            "goal": {
-                "id": "goal-1",
-                "objective": "Ship the release",
-                "status": "budget-limited",
-                "tokenBudget": 1000,
-                "tokensUsed": 1200,
-                "timeUsedSeconds": 45,
-                "createdAt": 10,
-                "updatedAt": 20
-            }
-        });
-
-        let projection = map_goal_mode_projection(&value).expect("goal mode should map");
-
-        assert!(projection.enabled);
-        assert_eq!(projection.mode, GoalModeRuntimeMode::Active);
-        assert_eq!(projection.goal.objective, "Ship the release");
-        assert_eq!(projection.goal.status, GoalStatusProjection::BudgetLimited);
-        assert_eq!(projection.goal.token_budget, Some(1000));
-        assert_eq!(projection.goal.tokens_used, 1200);
-    }
-
-    #[test]
-    fn serializes_goal_mode_rpc_commands() {
-        assert_eq!(
-            goal_mode_command(
-                "goal-1".to_string(),
-                "create",
-                Some("Ship controls".to_string()),
-                Some(1000),
-            ),
+    fn legacy_goal_client_commands_are_rejected() {
+        for message in [
             serde_json::json!({
-                "id": "goal-1",
-                "type": "goal_mode",
-                "op": "create",
-                "objective": "Ship controls",
-                "tokenBudget": 1000
-            })
-        );
-
-        assert_eq!(
-            goal_mode_command("goal-2".to_string(), "set_budget", None, None),
+                "type": "goal.start", "sessionId": "s1",
+                "objective": "Standing objective", "tokenBudget": 1000
+            }),
             serde_json::json!({
-                "id": "goal-2",
-                "type": "goal_mode",
-                "op": "set_budget"
-            })
-        );
+                "type": "goal.control", "sessionId": "s1", "action": "pause"
+            }),
+            serde_json::json!({
+                "type": "goal.setBudget", "sessionId": "s1", "tokenBudget": 2000
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<ClientMessage>(message).is_err(),
+                "removed frontend commands must be rejected before dispatch"
+            );
+        }
     }
 
-    #[test]
-    fn rpc_state_update_clears_goal_mode_when_reported_absent() {
-        let mut record = test_record();
-        record.goal_mode = Some(GoalModeProjection {
-            enabled: true,
-            mode: GoalModeRuntimeMode::Active,
-            reason: None,
-            goal: GoalProjection {
-                id: "goal-1".to_string(),
-                objective: "Ship".to_string(),
-                status: GoalStatusProjection::Active,
-                token_budget: None,
-                tokens_used: 0,
-                time_used_seconds: 0,
-                created_at: 1,
-                updated_at: 1,
-            },
-        });
+    #[tokio::test]
+    async fn upstream_goal_events_do_not_mutate_sessions_or_send_commands() {
+        let state = test_state(8, None);
+        let record = test_record();
+        let before = serde_json::to_value(record.projection()).expect("initial projection");
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), record);
+        let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+        let mut events = state.events.subscribe();
 
-        apply_rpc_state_to_record(
-            &mut record,
-            RpcRecordState {
-                is_streaming: false,
-                is_compacting: false,
-                session_name: None,
-                model: None,
-                thinking_level: None,
-                session_file: None,
-                context_tokens: None,
-                context_window: None,
-                context_percent: None,
-                plan_mode: None,
-                goal_mode: Some(None),
-                todo_phases: None,
-                session_skills: None,
-            },
-        );
+        for frame in [
+            read_contract_fixture("event-goal-updated.json"),
+            serde_json::json!({
+                "type": "goal_updated", "state": { "futureShape": true }, "goal": null
+            }),
+            read_contract_fixture("response-goal-mode.json"),
+        ] {
+            apply_rpc_frame(&state, "transport", &frame).await;
+        }
 
-        assert!(record.goal_mode.is_none());
+        let sessions = state.sessions.read().await;
+        let after = serde_json::to_value(sessions["s1"].projection()).expect("final projection");
+        assert_eq!(after, before);
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            commands.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
     }
+
+    #[tokio::test]
+    async fn goal_slash_is_unsupported_without_forwarding_to_omp() {
+        let state = test_state(8, None);
+        state
+            .sessions
+            .write()
+            .await
+            .insert("s1".to_string(), test_record());
+        let mut commands = register_test_transport(&state, "transport", "s1", 8).await;
+        for text in [
+            "/goal",
+            "/goal pause",
+            "/goal drop",
+            "/goal Ship the release",
+        ] {
+            let responses =
+                send_prompt(&state, "s1".to_string(), text.to_string(), None, None).await;
+            assert!(matches!(
+                &responses[..],
+                [ServerMessage::SessionNotice { session_id, level: NoticeLevel::Warning, .. }]
+                    if session_id == "s1"
+            ));
+        }
+        assert!(matches!(
+            commands.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+    }
+
     #[test]
     fn rpc_state_update_keeps_pending_plan_while_plan_mode_active() {
         let mut record = test_record();
@@ -834,7 +824,6 @@ pub(crate) mod tests {
                     plan_file_path: "local://PLAN.md".to_string(),
                     workflow: Some("parallel".to_string()),
                 })),
-                goal_mode: None,
                 todo_phases: None,
                 session_skills: None,
             },
@@ -873,7 +862,6 @@ pub(crate) mod tests {
                     plan_file_path: "local://PLAN.md".to_string(),
                     workflow: Some("parallel".to_string()),
                 })),
-                goal_mode: None,
                 todo_phases: None,
                 session_skills: None,
             },
@@ -899,7 +887,6 @@ pub(crate) mod tests {
             messages: Vec::new(),
             tool_cards: Vec::new(),
             messages_loaded: false,
-            goal_mode: None,
         }
     }
 
@@ -1527,10 +1514,9 @@ pub(crate) mod tests {
                     projection.plan_mode.as_ref().map(|mode| mode.enabled),
                     populated_state.then_some(true)
                 );
-                assert_eq!(
-                    projection.goal_mode.as_ref().map(|mode| mode.enabled),
-                    populated_state.then_some(true)
-                );
+                let wire = serde_json::to_value(&projection).expect("session projection");
+                assert!(wire.get("goalMode").is_none());
+                assert!(wire["summary"].get("goalMode").is_none());
                 if populated_state {
                     assert_eq!(
                         projection.todo_phases[0].tasks[0].content,
@@ -1674,37 +1660,6 @@ pub(crate) mod tests {
         fs::write(path, format!("{header}\n{message}\n")).expect("session file should be written");
     }
 
-    fn write_test_goal_session(path: &Path, mode: &str, status: &str) {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("session dir should be created");
-        }
-        let header = serde_json::json!({
-            "type": "session",
-            "id": "goal-session",
-            "title": "Goal session",
-            "timestamp": "2026-04-29T00:00:00.000Z",
-            "cwd": "/workspace/project",
-        });
-        let goal_mode = serde_json::json!({
-            "type": "mode_change",
-            "mode": mode,
-            "data": {
-                "goal": {
-                    "id": "goal-1",
-                    "objective": "Keep this visible after reconnect",
-                    "status": status,
-                    "tokenBudget": 50000,
-                    "tokensUsed": 1200,
-                    "timeUsedSeconds": 90,
-                    "createdAt": 10,
-                    "updatedAt": 20
-                }
-            }
-        });
-        fs::write(path, format!("{header}\n{goal_mode}\n"))
-            .expect("goal session file should be written");
-    }
-
     fn write_test_subagent_session(path: &Path, id: &str, cwd: &str) {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("subagent session dir should be created");
@@ -1810,18 +1765,6 @@ pub(crate) mod tests {
                 true,
                 false,
             ),
-            "command-goal-mode-create" => goal_mode_command(
-                "cmd-goal-create-1".to_string(),
-                "create",
-                Some("Ship goal-mode projection".to_string()),
-                Some(50000),
-            ),
-            "command-goal-mode-set-budget" => goal_mode_command(
-                "cmd-goal-budget-1".to_string(),
-                "set_budget",
-                None,
-                Some(75000),
-            ),
             "command-set-host-uri-schemes" => return None,
             _ => panic!("unexpected command fixture {name}"),
         })
@@ -1874,6 +1817,13 @@ pub(crate) mod tests {
         for entry in manifest {
             let value = read_contract_fixture(&entry.file);
             if entry.category == "command" {
+                if value.get("type").and_then(Value::as_str) == Some("goal_mode") {
+                    assert!(
+                        serde_json::from_value::<OmpRpcCommand>(value).is_err(),
+                        "Fura must not generate upstream Goal commands"
+                    );
+                    continue;
+                }
                 serde_json::from_value::<OmpRpcCommand>(value.clone()).unwrap_or_else(|error| {
                     panic!(
                         "{} ({}) failed to decode as command: {error}",
@@ -1964,13 +1914,6 @@ pub(crate) mod tests {
                             .expect("get_state fixture must include planMode");
                         assert!(plan.enabled);
                         assert_eq!(plan.workflow.as_deref(), Some("parallel"));
-                        let goal = data
-                            .goal_mode
-                            .as_ref()
-                            .expect("get_state fixture must include goalMode");
-                        assert!(goal.enabled);
-                        assert_eq!(goal.mode, "active");
-                        assert!(goal.goal.is_some());
                         let blocked = data
                             .todo_phases
                             .iter()
@@ -2052,17 +1995,6 @@ pub(crate) mod tests {
                             .expect("approve_plan_mode data should decode");
                         assert_eq!(data.execution_dispatched, Some(true));
                     }
-                    "goal_mode" => {
-                        let data: OmpGoalModeResponse =
-                            response.data_as().expect("goal_mode data should decode");
-                        assert!(
-                            data.goal_mode
-                                .as_ref()
-                                .and_then(|state| state.goal.as_ref())
-                                .is_some(),
-                            "goal mode response fixture must carry a goal"
-                        );
-                    }
                     "set_active_tools" => {
                         let data: OmpSetActiveToolsResponse = response
                             .data_as()
@@ -2121,21 +2053,7 @@ pub(crate) mod tests {
                     assert_eq!(model.get("maxTokens"), Some(&Value::Null));
                     assert_eq!(thinking_level.as_deref(), Some("medium"));
                 }
-                OmpRpcFrame::GoalUpdated { goal, state } => {
-                    assert_eq!(
-                        goal.as_ref()
-                            .and_then(|goal| goal.get("id"))
-                            .and_then(Value::as_str),
-                        Some("goal-1")
-                    );
-                    assert_eq!(
-                        state
-                            .as_ref()
-                            .and_then(|state| state.get("mode"))
-                            .and_then(Value::as_str),
-                        Some("active")
-                    );
-                }
+                OmpRpcFrame::Unknown if entry.name == "event-goal-updated" => {}
                 OmpRpcFrame::BtwUpdate {
                     btw_id,
                     state,
@@ -2306,64 +2224,6 @@ pub(crate) mod tests {
         assert!(!saved_config.session_modes.contains_key("missing-session"));
 
         assert!(!refresh_session_catalog(&state).await);
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn refresh_session_catalog_hydrates_persisted_goal_mode() {
-        let root = env::temp_dir().join(format!(
-            "fura-goal-session-catalog-test-{}",
-            Uuid::new_v4().simple()
-        ));
-        let session_path = root.join("project").join("goal-session.jsonl");
-        write_test_goal_session(&session_path, "goal", "active");
-        let mut state = test_state(8, None);
-        state.session_root = root.clone();
-
-        assert!(refresh_session_catalog(&state).await);
-        let sessions = state.sessions.read().await;
-        let record = sessions
-            .get("goal-session")
-            .expect("goal session should be discovered");
-        let goal_mode = record
-            .goal_mode
-            .as_ref()
-            .expect("persisted goal mode should hydrate");
-        assert!(goal_mode.enabled);
-        assert_eq!(goal_mode.mode, GoalModeRuntimeMode::Active);
-        assert_eq!(goal_mode.goal.status, GoalStatusProjection::Active);
-        assert_eq!(
-            goal_mode.goal.objective,
-            "Keep this visible after reconnect"
-        );
-        assert_eq!(
-            record
-                .summary()
-                .goal_mode
-                .as_ref()
-                .map(|mode| mode.goal.id.as_str()),
-            Some("goal-1")
-        );
-        drop(sessions);
-
-        let _ = fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn read_session_file_goal_mode_uses_latest_mode_change() {
-        let root = env::temp_dir().join(format!(
-            "fura-goal-session-header-test-{}",
-            Uuid::new_v4().simple()
-        ));
-        let session_path = root.join("project").join("goal-session.jsonl");
-        write_test_goal_session(&session_path, "goal_paused", "paused");
-
-        let goal_mode = read_session_header(&session_path)
-            .and_then(|session| session.goal_mode)
-            .expect("persisted paused goal should hydrate");
-        assert!(!goal_mode.enabled);
-        assert_eq!(goal_mode.goal.status, GoalStatusProjection::Paused);
-
         let _ = fs::remove_dir_all(root);
     }
 

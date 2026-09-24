@@ -258,9 +258,6 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::SessionBtwCancel { .. } => "session.btw.cancel",
         ClientMessage::SessionBtwRelease { .. } => "session.btw.release",
         ClientMessage::SessionBtwPromote { .. } => "session.btw.promote",
-        ClientMessage::GoalStart { .. } => "goal.start",
-        ClientMessage::GoalControl { .. } => "goal.control",
-        ClientMessage::GoalSetBudget { .. } => "goal.setBudget",
         ClientMessage::ControlPrompt { .. } => "control.prompt",
         ClientMessage::ControlAbort { .. } => "control.abort",
         ClientMessage::VoiceStart { .. } => "voice.start",
@@ -1890,7 +1887,6 @@ mod tests {
             timestamp: None,
             category: None,
             worktree: None,
-            goal_mode: None,
             awaiting_ask: false,
         }
     }
@@ -1921,7 +1917,6 @@ mod tests {
             context_window: None,
             context_percent: None,
             plan_mode: None,
-            goal_mode: None,
             session_skills: None,
             pending_plan_review: None,
             pending_ask: None,

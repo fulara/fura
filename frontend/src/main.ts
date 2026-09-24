@@ -121,7 +121,6 @@ import {
   validateProposedModels,
 } from "./proposedModels";
 import { deriveSessionDeleteView, sessionDeleteMessage, type SessionDeleteView } from "./sessionDelete";
-import { goalModeBadgeLabel, renderGoalModeCard } from "./goalMode";
 import { createSessionListView, renderSessionCategoryFilter } from "./sessionListView";
 import {
   createCategoryCombobox,
@@ -184,7 +183,6 @@ import type {
   DiffRow,
   FrontendControlAction,
   FrontendUiSnapshot,
-  GoalControlAction,
   ModelSummary,
   PlanApprovalMode,
   ProposedModelConfig,
@@ -3890,16 +3888,6 @@ function renderCategoryFilter(): void {
   );
 }
 
-function goalLabelsForSessions(): ReadonlyMap<string, string> {
-  const labels = new Map<string, string>();
-  for (const session of sessions) {
-    const goalMode = projections.get(session.sessionId)?.goalMode ?? session.goalMode;
-    const label = goalModeBadgeLabel(goalMode);
-    if (label) labels.set(session.sessionId, label);
-  }
-  return labels;
-}
-
 function visibleSessions(): SessionSummary[] {
   return filterVisibleSessions(sessions, selectedCategoryFilter);
 }
@@ -3944,7 +3932,6 @@ function renderSessions(): void {
     visibleSessions: visible,
     selectedCategoryFilter,
     activeSessionId: workspaceMode === "session" ? activeSessionId : null,
-    sessionGoalLabels: goalLabelsForSessions(),
     unreadSessionIds: unreadSessions,
   });
   transcriptBtw.renderSessionBadges(sessionsList, visible.map(session => session.sessionId));
@@ -4716,44 +4703,6 @@ function renderActiveSession(): void {
   if (sessionChanged) requestActiveDiffState();
 }
 
-function sendGoalStart(sessionId: string, objective: string, tokenBudget?: number): void {
-  send({ type: "goal.start", sessionId, objective, tokenBudget });
-}
-
-function sendGoalControl(sessionId: string, action: GoalControlAction): void {
-  if (action === "drop" && !window.confirm("Drop goal? This removes the goal record; accumulated usage stays in the session log.")) return;
-  send({ type: "goal.control", sessionId, action });
-}
-
-function sendGoalBudget(sessionId: string, tokenBudget?: number): void {
-  send({ type: "goal.setBudget", sessionId, tokenBudget });
-}
-
-function renderGoalModePanel(container: HTMLElement, projection: SessionProjection | undefined): void {
-  container.replaceChildren();
-  const sessionId = projection?.summary.sessionId;
-  const card = renderGoalModeCard(
-    container.ownerDocument,
-    projection?.goalMode,
-    "desktop",
-    sessionId
-      ? {
-          onStart: (objective, tokenBudget) => sendGoalStart(sessionId, objective, tokenBudget),
-          onControl: action => sendGoalControl(sessionId, action),
-          onSetBudget: tokenBudget => sendGoalBudget(sessionId, tokenBudget),
-        }
-      : undefined,
-  );
-  if (card) {
-    container.append(card);
-    return;
-  }
-  const empty = mkEl("p");
-  empty.className = "empty";
-  empty.textContent = "Select a session to view or set a goal.";
-  container.append(empty);
-}
-
 function markTranscriptViewDirty(options: { resetCache?: boolean } = {}): void {
   transcriptPanelDirty = true;
   if (options.resetCache) transcriptRenderRevision += 1;
@@ -5419,9 +5368,6 @@ function renderActiveDockviewPanel(projection: SessionProjection | undefined): v
   syncSessionModePanels();
   renderTranscriptPanelIfNeeded(projection);
   renderToolsPanelIfNeeded(projection);
-  if (desktopDockview?.isPanelActive("goal")) {
-    desktopDockview.withPanel("goal", container => renderGoalModePanel(container, projection));
-  }
   if (desktopDockview?.isPanelVisible("diffs") && shouldRenderDiffsView(projection)) {
     desktopDockview.withPanel("diffs", container => renderDiffsView(container, projection));
   }
@@ -9108,7 +9054,6 @@ function initDesktopWorkspace(): void {
         return;
       }
       if (id === "transcript") markTranscriptViewDirty();
-      if (id === "goal") return;
       if (id === "tools") markToolsViewDirty();
       if (id === "diffs") markDiffsViewDirty();
       if (id === "sessionChanges") markDiffsViewDirty();
@@ -9149,10 +9094,6 @@ function initDesktopWorkspace(): void {
       const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
       if (id === "transcript") {
         renderTranscriptPanelIfNeeded(projection, true);
-        return;
-      }
-      if (id === "goal") {
-        desktopDockview?.withPanel("goal", container => renderGoalModePanel(container, projection));
         return;
       }
       if (id === "tools") {
@@ -9270,7 +9211,6 @@ function renderStatusBar(projection?: SessionProjection): void {
   parts.push(statusPart(projection.model ?? "model unknown", "model"));
   parts.push(statusPart(projection.thinkingLevel ?? "thinking inherit", "thinking"));
   if (projection.planMode?.enabled) parts.push(statusPart("Plan", "mode"));
-  if (projection.goalMode?.goal) parts.push(statusPart(goalModeBadgeLabel(projection.goalMode) ?? "Goal", "mode"));
   parts.push(statusPart(`📁 ${shortPath(cwd)}`, "cwd"));
   parts.push(statusPart(formatTokens(projection.tokensTotal), "tokens"));
   parts.push(statusPart(formatCost(projection.costUsd), "cost"));

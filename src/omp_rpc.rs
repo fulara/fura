@@ -91,11 +91,6 @@ pub(crate) enum OmpRpcFrame {
         #[serde(rename = "isError")]
         is_error: Option<bool>,
     },
-    #[serde(rename = "goal_updated")]
-    GoalUpdated {
-        goal: Option<Value>,
-        state: Option<Value>,
-    },
     #[serde(rename = "extension_ui_request")]
     ExtensionUiRequest {
         id: String,
@@ -253,7 +248,6 @@ pub(crate) struct OmpSessionState {
     #[serde(default)]
     pub(crate) queued_message_count: usize,
     pub(crate) plan_mode: Option<OmpPlanModeState>,
-    pub(crate) goal_mode: Option<OmpGoalModeState>,
     pub(crate) session_skills: Option<crate::SessionSkillsState>,
     #[serde(default)]
     pub(crate) todo_phases: Vec<TodoPhaseProjection>,
@@ -278,28 +272,6 @@ pub(crate) struct OmpPlanModeState {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct OmpGoalModeState {
-    pub(crate) enabled: bool,
-    pub(crate) mode: String,
-    pub(crate) reason: Option<String>,
-    pub(crate) goal: Option<OmpGoal>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OmpGoal {
-    pub(crate) id: String,
-    pub(crate) objective: String,
-    pub(crate) status: String,
-    pub(crate) token_budget: Option<u64>,
-    pub(crate) tokens_used: u64,
-    pub(crate) time_used_seconds: u64,
-    pub(crate) created_at: u64,
-    pub(crate) updated_at: u64,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct OmpContextUsage {
     pub(crate) tokens: Option<u64>,
     pub(crate) context_window: Option<u64>,
@@ -320,12 +292,6 @@ pub(crate) struct OmpApprovePlanModeResponse {
     pub(crate) context_preserved: Option<bool>,
     pub(crate) compaction_outcome: Option<String>,
     pub(crate) execution_dispatched: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct OmpGoalModeResponse {
-    pub(crate) goal_mode: Option<OmpGoalModeState>,
 }
 
 #[allow(dead_code)]
@@ -553,15 +519,6 @@ pub(crate) enum OmpRpcCommand {
     },
     #[serde(rename = "set_host_uri_schemes")]
     SetHostUriSchemes { id: String, schemes: Vec<Value> },
-    #[serde(rename = "goal_mode")]
-    GoalMode {
-        id: String,
-        op: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        objective: Option<String>,
-        #[serde(rename = "tokenBudget", skip_serializing_if = "Option::is_none")]
-        token_budget: Option<u64>,
-    },
     #[serde(rename = "get_available_commands")]
     GetAvailableCommands { id: String },
 }
@@ -662,21 +619,6 @@ pub(crate) fn prompt_command(
         images,
         streaming_behavior: behavior
             .map(|behavior| behavior.as_rpc_streaming_behavior().to_string()),
-    }
-    .into_value()
-}
-
-pub(crate) fn goal_mode_command(
-    id: String,
-    op: &'static str,
-    objective: Option<String>,
-    token_budget: Option<u64>,
-) -> Value {
-    OmpRpcCommand::GoalMode {
-        id,
-        op: op.to_string(),
-        objective,
-        token_budget,
     }
     .into_value()
 }

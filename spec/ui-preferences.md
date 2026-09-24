@@ -117,7 +117,7 @@ conversation content is not clipped to conceal layout overflow.
 
 ### Desktop workspace panel lifetime
 
-Top-level Dockview panels (Transcript, Goal, Code, Tools, Git changes/Diff and
+Top-level Dockview panels (Transcript, Code, Tools, Git changes/Diff and
 opened Compare) are not user-closeable anywhere in the main workspace, including
 floating groups. Tabs have no destructive close action. The adapter guards panel
 and group user-close entry points, without blocking dragging, selection, transfers,
@@ -155,6 +155,19 @@ return positions synchronously, without moving content, reopening windows or
 showing a confirmation dialog. Reload restores detached panels into the owning
 main workspace; legacy saved popup layouts are normalized too, including optional
 Compare panels. This does not add draft/content persistence across reload.
+
+Goal is no longer a Fura feature: neither shell exposes its panel, controls,
+session-list badge or status-bar state. Fura does not send Goal mutations to OMP.
+OMP still owns any historical or active Goal state; session journals are not
+rewritten, paused or dropped. Optional upstream Goal fields/events and old
+frontend snapshots/deltas are tolerated without a Goal projection.
+
+Legacy `goal` panels are pruned by the existing saved-layout sanitizer before
+Dockview restoration, in both normal and diffReview layouts. Surviving panel
+parameters, tab order, manual split structure and group identity are retained;
+Goal-only groups and dangling active references are removed. This is not a
+layout reset or a localStorage version bump. Existing popout/redock and transient
+pinned-diff persistence rules above remain unchanged.
 
 Dockview 5.2 leaves its resize-end debounce timer alive after disposing a popup.
 `frontend/dockviewResizeCleanup.ts` adds timer cancellation to that disposer in the

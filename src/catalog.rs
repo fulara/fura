@@ -11,10 +11,10 @@ use tracing::warn;
 
 use crate::session_recency::{JournalFact, JournalRecency, SessionFileStamp, read_json_line};
 use crate::{
-    AppState, GoalModeProjection, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionKind,
-    SessionRecord, SessionStatus, SessionSummary, Timestamp, ToolCard, TranscriptMessage,
-    append_bridge_debug_event, is_controller_session_record, map_goal_mode_projection,
-    project_omp_transcript, save_fura_config,
+    AppState, SESSION_CATALOG_PRELOAD_LIMIT, ServerMessage, SessionKind, SessionRecord,
+    SessionStatus, SessionSummary, Timestamp, ToolCard, TranscriptMessage,
+    append_bridge_debug_event, is_controller_session_record, project_omp_transcript,
+    save_fura_config,
 };
 
 #[derive(Debug, Clone)]
@@ -32,7 +32,6 @@ pub(crate) struct DiscoveredSession {
     pub(crate) messages: Vec<TranscriptMessage>,
     pub(crate) tool_cards: Vec<ToolCard>,
     pub(crate) messages_loaded: bool,
-    pub(crate) goal_mode: Option<GoalModeProjection>,
 }
 
 #[derive(Default)]
@@ -90,13 +89,6 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
         }
         let category = categories.get(&session.id).cloned();
         let session_mode = modes.get(&session.id).copied().unwrap_or_default();
-        let should_load_goal_mode = match sessions.get(&session.id) {
-            Some(record) if record.kind == SessionKind::Available => {
-                record.file_stamp != session.file_stamp
-            }
-            Some(_) => false,
-            None => true,
-        };
         let already_hydrated = sessions.contains_key(&session.id)
             && state
                 .session_catalog_cache
@@ -153,9 +145,6 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                 }
                 record.category = category;
                 record.session_mode = session_mode;
-                if should_load_goal_mode {
-                    record.goal_mode = session.goal_mode;
-                }
                 if should_reload_messages {
                     record.messages = session.messages;
                     record.tool_cards = session.tool_cards;
@@ -174,9 +163,6 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                 }
                 record.category = category;
                 record.session_mode = session_mode;
-                if record.goal_mode.is_none() {
-                    record.goal_mode = session.goal_mode;
-                }
             }
             None => {
                 sessions.insert(
@@ -214,7 +200,6 @@ pub(crate) async fn refresh_session_catalog(state: &AppState) -> bool {
                         context_window: None,
                         context_percent: None,
                         plan_mode: None,
-                        goal_mode: session.goal_mode,
                         session_skills: None,
                         pending_plan_review: None,
                         pending_ask: None,
@@ -354,33 +339,6 @@ fn collect_direct_session_files(
         .collect()
 }
 
-#[derive(serde::Deserialize)]
-struct GoalModeEntry {
-    mode: String,
-    data: Option<GoalModeData>,
-}
-
-#[derive(serde::Deserialize)]
-struct GoalModeData {
-    goal: Option<Value>,
-}
-
-fn extract_goal_mode_change(entry: GoalModeEntry) -> Option<Option<GoalModeProjection>> {
-    match entry.mode.as_str() {
-        "none" => Some(None),
-        "goal" | "goal_paused" => {
-            let goal = entry.data?.goal?;
-            let state = serde_json::json!({
-                "enabled": entry.mode == "goal",
-                "mode": "active",
-                "goal": goal,
-            });
-            map_goal_mode_projection(&state).map(Some)
-        }
-        _ => None,
-    }
-}
-
 fn sanitize_session_title(value: &str) -> Option<String> {
     let first_line = value.lines().next().unwrap_or_default();
     let stripped = first_line
@@ -464,7 +422,6 @@ fn scan_session_metadata(
     let mut recency = JournalRecency::default();
     let mut first_entry_type = None;
     let mut first_user_offsets = Vec::new();
-    let mut mode_offsets = Vec::new();
     let mut after_header = 0;
     loop {
         let entry_offset = offset;
@@ -483,9 +440,6 @@ fn scan_session_metadata(
             if fact.is_user_message() {
                 first_user_offsets.push(entry_offset);
             }
-        }
-        if fact.kind == "mode_change" {
-            mode_offsets.push(entry_offset);
         }
         recency.push(fact);
     }
@@ -516,16 +470,6 @@ fn scan_session_metadata(
             })?;
             sanitize_session_title(&prompt)
         });
-    let mut goal_mode = None;
-    for offset in mode_offsets {
-        reader.seek(SeekFrom::Start(offset)).ok()?;
-        let Some((_, Ok(entry))) = read_json_line::<GoalModeEntry>(&mut reader).ok()? else {
-            continue;
-        };
-        if let Some(change) = extract_goal_mode_change(entry) {
-            goal_mode = change;
-        }
-    }
     Some(DiscoveredSession {
         preload_index: usize::MAX,
         id: header.id?,
@@ -542,7 +486,6 @@ fn scan_session_metadata(
         messages: Vec::new(),
         tool_cards: Vec::new(),
         messages_loaded: false,
-        goal_mode,
     })
 }
 
@@ -1204,7 +1147,7 @@ mod recency_tests {
     }
 
     #[test]
-    fn cached_goal_metadata_changes_without_message_activity() {
+    fn cached_goal_entries_preserve_recency_and_session_data() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("session.jsonl");
         write_session(
@@ -1218,14 +1161,12 @@ mod recency_tests {
                     "tokenBudget":50000,"tokensUsed":1200,"timeUsedSeconds":90,"createdAt":10,"updatedAt":20}}}),
             ],
         );
+        let original = fs::read(&path).unwrap();
         let mut cache = SessionCatalogCache::default();
         let before = read_session_header_cached(&path, &mut cache).unwrap();
-        assert_eq!(
-            before.goal_mode.as_ref().unwrap().goal.objective,
-            "Standing objective"
-        );
         let warm = read_session_header_cached(&path, &mut cache).unwrap();
-        assert!(warm.goal_mode.unwrap().enabled);
+        assert_eq!(warm.last_message_at, before.last_message_at);
+        assert_eq!(fs::read(&path).unwrap(), original);
         assert_eq!(cache.content_scans, 1);
         let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
         writeln!(
@@ -1235,7 +1176,7 @@ mod recency_tests {
         )
         .unwrap();
         let after = read_session_header_cached(&path, &mut cache).unwrap();
-        assert!(after.goal_mode.is_none());
+        assert_eq!(after.id, "s");
         assert_eq!(after.last_message_at, before.last_message_at);
         assert_ne!(after.file_stamp, before.file_stamp);
     }

@@ -248,18 +248,6 @@ pub(crate) async fn handle_client_message_for_connection(
             )
             .await
         }
-        ClientMessage::GoalStart {
-            session_id,
-            objective,
-            token_budget,
-        } => handle_goal_start(state, session_id, objective, token_budget).await,
-        ClientMessage::GoalControl { session_id, action } => {
-            handle_goal_control(state, session_id, action).await
-        }
-        ClientMessage::GoalSetBudget {
-            session_id,
-            token_budget,
-        } => handle_goal_set_budget(state, session_id, token_budget).await,
         ClientMessage::ControlPrompt {
             client_id,
             conversation_id,
@@ -1843,7 +1831,6 @@ pub(crate) fn opened_session_record(
         context_window: existing.and_then(|record| record.context_window),
         context_percent: existing.and_then(|record| record.context_percent),
         plan_mode: existing.and_then(|record| record.plan_mode.clone()),
-        goal_mode: existing.and_then(|record| record.goal_mode.clone()),
         session_skills: None,
         pending_plan_review: existing.and_then(|record| record.pending_plan_review.clone()),
         pending_ask: None,
@@ -2196,11 +2183,6 @@ pub(crate) async fn handle_slash_command(
             }
         }
         "plan" => handle_plan_slash_command(state, session_id, args).await,
-        "goal" => vec![notice(
-            session_id,
-            NoticeLevel::Warning,
-            "Goal Mode is controlled from the Goal card in Fura.",
-        )],
         "model" | "models" => handle_model_slash_command(state, session_id, args).await,
         "thinking" => handle_thinking_slash_command(state, session_id, args).await,
         "fork" => handle_fork_slash_command(state, session_id).await,
@@ -2221,13 +2203,15 @@ pub(crate) async fn handle_slash_command(
         "settings" | "copy" | "hotkeys" | "extensions" | "agents" | "branch" | "tree" | "login"
         | "logout" | "mcp" | "ssh" | "resume" | "btw" | "background" | "bg" | "debug"
         | "memory" | "move" | "exit" | "quit" | "q" | "marketplace" | "plugins"
-        | "reload-plugins" | "force" | "vibe" | "queue" | "pause" | "delete" => vec![notice(
-            session_id,
-            NoticeLevel::Warning,
-            format!(
-                "/{name} is a TUI-only command or needs a dedicated Fura UI before it can be safely supported."
-            ),
-        )],
+        | "reload-plugins" | "force" | "vibe" | "queue" | "pause" | "delete" | "goal" => {
+            vec![notice(
+                session_id,
+                NoticeLevel::Warning,
+                format!(
+                    "/{name} is a TUI-only command or needs a dedicated Fura UI before it can be safely supported."
+                ),
+            )]
+        }
         _ => return None,
     };
 
@@ -2512,85 +2496,6 @@ pub(crate) async fn handle_model_slash_command(
             }
             handle_model_set_command(state, session_id, provider, model_id).await
         }
-    }
-}
-
-pub(crate) async fn handle_goal_start(
-    state: &AppState,
-    session_id: String,
-    objective: String,
-    token_budget: Option<u64>,
-) -> Vec<ServerMessage> {
-    let objective = objective.trim().to_string();
-    if objective.is_empty() {
-        return vec![notice(
-            session_id,
-            NoticeLevel::Error,
-            "Goal objective cannot be empty.",
-        )];
-    }
-    if token_budget == Some(0) {
-        return vec![notice(
-            session_id,
-            NoticeLevel::Error,
-            "Goal budget must be a positive integer.",
-        )];
-    }
-    send_goal_rpc_command(
-        state,
-        session_id,
-        goal_mode_command(next_rpc_id(), "create", Some(objective), token_budget),
-    )
-    .await
-}
-
-pub(crate) async fn handle_goal_control(
-    state: &AppState,
-    session_id: String,
-    action: GoalControlAction,
-) -> Vec<ServerMessage> {
-    let op = match action {
-        GoalControlAction::Pause => "pause",
-        GoalControlAction::Resume => "resume",
-        GoalControlAction::Drop => "drop",
-    };
-    send_goal_rpc_command(
-        state,
-        session_id,
-        goal_mode_command(next_rpc_id(), op, None, None),
-    )
-    .await
-}
-
-pub(crate) async fn handle_goal_set_budget(
-    state: &AppState,
-    session_id: String,
-    token_budget: Option<u64>,
-) -> Vec<ServerMessage> {
-    if token_budget == Some(0) {
-        return vec![notice(
-            session_id,
-            NoticeLevel::Error,
-            "Goal budget must be a positive integer.",
-        )];
-    }
-    send_goal_rpc_command(
-        state,
-        session_id,
-        goal_mode_command(next_rpc_id(), "set_budget", None, token_budget),
-    )
-    .await
-}
-
-async fn send_goal_rpc_command(
-    state: &AppState,
-    session_id: String,
-    command: Value,
-) -> Vec<ServerMessage> {
-    info!(action = "goal.command", session_id = %session_id, command_type = command_type(&command));
-    match send_rpc_command(state, &session_id, command).await {
-        Ok(()) => Vec::new(),
-        Err(message) => vec![notice(session_id, NoticeLevel::Error, message)],
     }
 }
 
@@ -4336,7 +4241,6 @@ mod review_comment_tests {
             context_window: None,
             context_percent: None,
             plan_mode: None,
-            goal_mode: None,
             session_skills: None,
             pending_plan_review: None,
             pending_ask: None,

@@ -1814,34 +1814,60 @@ describe("mountMobileApp", () => {
     expect(connection.sent.some(message => message.type === "sessionChanges.request")).toBe(false);
   });
 
-  it("does not render mobile Goal Mode controls", () => {
+  it("keeps mobile history and prompts usable with legacy Goal fields on snapshots and deltas", () => {
     const { connection } = createHarness();
-    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
+    const goalMode = {
+      enabled: true,
+      mode: "active",
+      goal: {
+        id: "goal-1",
+        objective: "Legacy standing context",
+        status: "active",
+        tokenBudget: 1234,
+        tokensUsed: 0,
+        timeUsedSeconds: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const legacySummary = { ...summary("live", { title: "Ordinary goal discussion" }), goalMode };
+    const legacyState = { ...projection("live"), summary: legacySummary, goalMode };
+    connection.emit({ type: "sessions.snapshot", sessions: [legacySummary] });
     clickSession();
-    connection.emit({
-      type: "session.snapshot",
-      sessionId: "live",
-      state: projection("live", {
-        goalMode: {
-          enabled: true,
-          mode: "active",
-          goal: {
-            id: "goal-1",
-            objective: "Ship mobile Goal Mode controls",
-            status: "active",
-            tokenBudget: 1234,
-            tokensUsed: 0,
-            timeUsedSeconds: 0,
-            createdAt: 1,
-            updatedAt: 2,
-          },
-        },
-      }),
-    });
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: legacyState });
+    expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Transcript live");
+    expect(document.querySelector("#mobileSessionTitle")?.textContent).toBe("Ordinary goal discussion");
+    expect(document.querySelector(".session-goal-badge, .goal-mode-card")).toBeNull();
 
-    expect(document.querySelector("#mobileGoalModeCardHost")).toBeNull();
-    expect(document.querySelector(".goal-mode-card-mobile")).toBeNull();
-    expect(document.querySelector(".goal-mode-objective-input")).toBeNull();
+    const legacyDelta = {
+      summary: legacySummary,
+      transcriptReplaceFrom: 1,
+      transcriptAppend: [{
+        kind: "message" as const,
+        id: "new-answer",
+        role: "assistant" as const,
+        blocks: [{ kind: "text" as const, text: "A subsequent answer" }],
+        timestamp: null,
+        isNew: true,
+        renderHash: "legacy-next",
+      }],
+      baseSeq: 0,
+      seq: 1,
+      isBusy: false,
+      tokensTotal: 20,
+      costUsd: 0,
+      todoPhases: [],
+      goalMode: { ...goalMode, goal: { ...goalMode.goal, tokensUsed: 20 } },
+    };
+    connection.emit({ type: "session.delta", sessionId: "live", state: legacyDelta });
+    expect(document.querySelector("#mobileTranscript")?.textContent).toContain("Transcript live");
+    expect(document.querySelector("#mobileTranscript")?.textContent).toContain("A subsequent answer");
+    expect(document.querySelector(".session-goal-badge, .goal-mode-card")).toBeNull();
+    const input = document.querySelector<HTMLTextAreaElement>("#mobilePromptInput")!;
+    expect(input.disabled).toBe(false);
+    input.value = "Continue the conversation";
+    document.querySelector<HTMLFormElement>("#mobilePromptForm")!.requestSubmit();
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "prompt.send", sessionId: "live", text: "Continue the conversation" }));
     expect(connection.sent.some(message => message.type.startsWith("goal."))).toBe(false);
   });
 });

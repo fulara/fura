@@ -44,8 +44,8 @@ OMP (`--mode rpc-ui`) advertises and runs slash commands:
 
 ## Slash routing (backend, `src/commands.rs::handle_slash_command`)
 
-- **Fura-native** (dedicated UX) stays intercepted: `plan`→`set_plan_mode`, `goal`→Goal-card
-  notice, `model`/`thinking`/`fork`/`rebase`/`session`/`usage`/`export`/`new` (alias
+- **Fura-native** (dedicated UX) stays intercepted: `plan`→`set_plan_mode`,
+  `model`/`thinking`/`fork`/`rebase`/`session`/`usage`/`export`/`new` (alias
   `clear`)/`handoff`/`rename`.
 - `/compact`, including its modes, goes through OMP's builtin prompt parser.
   Fura projects its busy state but does not implement compaction itself.
@@ -55,8 +55,12 @@ OMP (`--mode rpc-ui`) advertises and runs slash commands:
 - **Interactive commands without safe Fura projection state** still return a notice. Most are
   `handleTui`-only: `settings`, `copy`, `hotkeys`, `extensions`, `agents`, `branch`, `tree`,
   `login`, `logout`, `mcp`, `ssh`, `resume`, `btw`, `background`, `debug`, `memory`, `exit`,
-  `quit`, `q`, `marketplace`, `plugins`, `reload-plugins`, `force`, `vibe`, `queue`, `pause`, `delete`.
+  `quit`, `q`, `marketplace`, `plugins`, `reload-plugins`, `force`, `vibe`, `queue`, `pause`, `delete`, `goal`.
   `/move` has an OMP server-side `handle` in v16.2, but Fura keeps it blocked until OMP RPC exposes authoritative cwd after the move.
+  Goal has been removed from Fura, not OMP. `/goal` is unsupported and never forwarded;
+  it does not point to a replacement UI or pause/drop existing Goal state.
+  The frontend's unsupported-command registry also excludes an advertised OMP
+  `goal` builtin from the commands popup and inline palette.
 
 ## Desktop palette + commands popup (frontend)
 

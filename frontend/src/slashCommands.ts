@@ -25,6 +25,7 @@ export const SLASH_COMMANDS: SlashCommandSpec[] = [
   { name: "export", description: "Export session HTML", usage: "[path]", support: "supported" },
 
   { name: "settings", description: "TUI settings panel", support: "tui-only" },
+  { name: "goal", description: "Goal is not available in Fura", support: "tui-only" },
   { name: "vibe", description: "TUI vibe mode", support: "tui-only" },
   { name: "queue", description: "TUI post-yield message queue", support: "tui-only" },
   { name: "pause", description: "TUI global agent pause screen", support: "tui-only" },

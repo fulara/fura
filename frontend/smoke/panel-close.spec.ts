@@ -215,7 +215,7 @@ for (const mode of ["normal", "diffReview"] as const) {
     const repo = fixture();
     try {
       await authenticate(page); await createSession(page, repo, mode); await registry(page, mode);
-      const panels = mode === "normal" ? ["Transcript", "Goal", "Code", "Tools", "Git changes"] : ["Transcript", "Code", "Tools", "Diff"];
+      const panels = mode === "normal" ? ["Transcript", "Code", "Tools", "Git changes"] : ["Transcript", "Code", "Tools", "Diff"];
       await noDestructiveTabs(page.locator(`#${host(mode)}`));
       for (const title of panels) {
         await tab(page, title).click({ button: "middle" });
@@ -308,7 +308,7 @@ for (const target of ["rearranged", "removed"] as const) {
       // not simply append to the original group's tail.
       await page.evaluate(() => {
         const api = window.__panelCloseDockviews.find(entry => entry.hostId === "normalWorkspacePanelHost")!.component;
-        api.getGroupPanel("goal")!.api.moveTo({ group: api.getGroupPanel("transcript")!.group, position: "center", index: 0 });
+        api.addPanel({ id: "compare", component: "compare", title: "Compare", position: { referencePanel: "transcript", direction: "within", index: 0 } });
       });
       const original = await page.evaluate(() => {
         const api = window.__panelCloseDockviews.find(entry => entry.hostId === "normalWorkspacePanelHost")!.component;
@@ -329,7 +329,7 @@ for (const target of ["rearranged", "removed"] as const) {
         if (target === "removed") {
           // Transfer its last remaining panel; Dockview removes the now-empty
           // original group itself, preserving that panel's content.
-          api.getGroupPanel("goal")!.api.moveTo({ group: destination, position: "center", index: 0 });
+          api.getGroupPanel("compare")!.api.moveTo({ group: destination, position: "center", index: 0 });
         } else source.api.moveTo({ group: destination, position: "right" });
       }, { original, target });
       await expect(tab(first, "Code")).toBeVisible();
@@ -339,7 +339,7 @@ for (const target of ["rearranged", "removed"] as const) {
       await nativeReturn(page, second);
       await expect(tab(page, "Tools")).toHaveCount(1);
       await nativeReturn(page, first);
-      for (const title of ["Transcript", "Code", "Goal", "Tools", "Git changes"]) await expect(tab(page, title)).toHaveCount(1);
+      for (const title of ["Transcript", "Code", "Compare", "Tools", "Git changes"]) await expect(tab(page, title)).toHaveCount(1);
       await tab(page, "Transcript").click();
       expect(await transcript!.evaluate(element => element.isConnected && element.ownerDocument === document)).toBe(true);
       const returned = await page.evaluate(() => {
@@ -348,7 +348,7 @@ for (const target of ["rearranged", "removed"] as const) {
         return { group: panel.group.id, tabs: panel.group.panels.map(panel => panel.id), popouts: api.toJSON().popoutGroups?.length ?? 0 };
       });
       expect(returned.popouts).toBe(0);
-      if (target === "rearranged") { expect(returned.group).toBe(original); expect(returned.tabs).toEqual(["goal", "transcript", "code"]); }
+      if (target === "rearranged") { expect(returned.group).toBe(original); expect(returned.tabs).toEqual(["compare", "transcript", "code"]); }
       else expect(returned.group).not.toBe(original);
       await saved(page);
       await screenshot(page, info, `${target}-all-panels-returned`);
@@ -397,7 +397,7 @@ test("@adapter main reload closes owned popups without dialogs or reopening and 
       return { order: group.panels.map(panel => panel.id), groups: api.panels.map(panel => [panel.id, panel.group.id]) };
     });
     const children: Page[] = [];
-    for (const title of ["Transcript", "Goal", "Tools"]) {
+    for (const title of ["Transcript", "Tools"]) {
       const child = await popout(page, title);
       await settlePopup(page, child);
       children.push(child);
@@ -415,7 +415,7 @@ test("@adapter main reload closes owned popups without dialogs or reopening and 
     await Promise.all(closed);
     await expect(page.locator("#connectionStatus")).toHaveText("connected");
     await selectSession(page, name);
-    for (const title of ["Transcript", "Goal", "Code", "Tools", "Git changes"]) await expect(tab(page, title)).toHaveCount(1);
+    for (const title of ["Transcript", "Code", "Tools", "Git changes"]) await expect(tab(page, title)).toHaveCount(1);
     const restored = await page.evaluate(() => {
       const api = window.__panelCloseDockviews.find(entry => entry.hostId === "normalWorkspacePanelHost")!.component;
       return { order: api.getGroupPanel("transcript")!.group.panels.map(panel => panel.id), groups: api.panels.map(panel => [panel.id, panel.group.id]) };
@@ -424,7 +424,7 @@ test("@adapter main reload closes owned popups without dialogs or reopening and 
     expect(restored.groups.sort()).toEqual(original.groups.sort());
     // Restored Code may already be selected. Force a real layout transition
     // before comparing the next native autosave with its serialized snapshot.
-    await tab(page, "Goal").click();
+    await tab(page, "Transcript").click();
     await tab(page, "Code").click();
     await expect(page.locator(".panel-content-code:visible")).toBeVisible();
     await saved(page);
@@ -444,10 +444,10 @@ test("@adapter popup panel close returns only that panel; popup group close retu
     await page.evaluate(() => {
       const api = window.__panelCloseDockviews.find(entry => entry.hostId === "normalWorkspacePanelHost")!.component;
       api.getGroupPanel("code")!.api.moveTo({ group: api.getGroupPanel("transcript")!.group, position: "center" });
-      api.getGroupPanel("goal")!.api.moveTo({ group: api.getGroupPanel("transcript")!.group, position: "center" });
+      api.getGroupPanel("tools")!.api.moveTo({ group: api.getGroupPanel("transcript")!.group, position: "center" });
     });
     await expect(tab(child, "Code")).toBeVisible();
-    await expect(tab(child, "Goal")).toBeVisible();
+    await expect(tab(child, "Tools")).toBeVisible();
     await saved(page);
     await page.evaluate(() => {
       window.__panelCloseDockviews.find(entry => entry.hostId === "normalWorkspacePanelHost")!.component.getGroupPanel("code")!.api.close();
@@ -455,7 +455,7 @@ test("@adapter popup panel close returns only that panel; popup group close retu
     await expect(tab(page, "Code")).toHaveCount(1);
     await expect(tab(child, "Code")).toHaveCount(0);
     await expect(tab(child, "Transcript")).toHaveCount(1);
-    await expect(tab(child, "Goal")).toHaveCount(1);
+    await expect(tab(child, "Tools")).toHaveCount(1);
     expect(child.isClosed()).toBe(false);
     await screenshot(child, info, "popup-panel-close-keeps-siblings");
     const closed = child.waitForEvent("close");
@@ -463,7 +463,7 @@ test("@adapter popup panel close returns only that panel; popup group close retu
       window.__panelCloseDockviews.find(entry => entry.hostId === "normalWorkspacePanelHost")!.component.getGroupPanel("transcript")!.group.api.close();
     });
     await closed;
-    for (const title of ["Transcript", "Code", "Goal"]) await expect(tab(page, title)).toHaveCount(1);
+    for (const title of ["Transcript", "Code", "Tools"]) await expect(tab(page, title)).toHaveCount(1);
     await noDestructiveTabs(page.locator("#normalWorkspacePanelHost"));
   } finally { repo.cleanup(); }
 });
@@ -512,9 +512,9 @@ test("black-box native close and Return to main preserve Transcript content and 
       const child = await popout(page, "Transcript");
       await expect(child.locator(".panel-content-transcript")).toContainText("PANEL_CLOSE_TRANSCRIPT_MESSAGE");
       await noDestructiveTabs(child.locator("body"));
-      // Same persistence fence as diffs-focus.spec.ts. Select two surviving
-      // sibling tabs to drain earlier saves before measuring native resize.
-      for (const [title, id] of [["Goal", "goal"], ["Code", "code"]]) {
+      // Drain earlier saves through surviving main panels before measuring
+      // native resize; only Code remains in Transcript's original group.
+      for (const [title, id] of [["Tools", "tools"], ["Code", "code"]]) {
         await tab(page, title).click();
         await expect.poll(() => page.evaluate(expected => {
           const saved = JSON.parse(localStorage.getItem("fura.dockview.layout") ?? "{}");

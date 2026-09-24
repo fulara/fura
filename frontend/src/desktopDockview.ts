@@ -4,7 +4,7 @@ import type { DockviewGroupPanel, IDockviewPanel, SerializedDockview } from "doc
 import { captureDiffViewScroll, restoreDiffViewScroll } from "./diffViewDom";
 
 export type PinnedDiffPanelId = `pinnedDiff:${string}`;
-export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "goal" | "code" | "tools" | "diffs" | "compare" | PinnedDiffPanelId;
+export type DesktopDockviewPanelId = "sessionChanges" | "transcript" | "code" | "tools" | "diffs" | "compare" | PinnedDiffPanelId;
 
 export type DesktopDockviewLayoutMode = "normal" | "diffReview";
 
@@ -857,14 +857,6 @@ function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLa
     renderer: "always",
   });
   api.addPanel({
-    id: "goal",
-    component: "goal",
-    title: "Goal",
-    position: { referencePanel: "transcript", direction: "within" },
-    inactive: true,
-    renderer: "always",
-  });
-  api.addPanel({
     id: "code",
     component: "code",
     title: "Code",
@@ -890,7 +882,6 @@ function loadDefaultLayout(api: DockviewComponent, layoutMode: DesktopDockviewLa
 
 function ensureRequiredPanels(api: DockviewComponent, layoutMode: DesktopDockviewLayoutMode): void {
   ensureTranscriptPanel(api);
-  if (layoutMode === "normal") ensureGoalPanel(api);
   ensureCodePanel(api);
   ensureToolsPanel(api);
   if (layoutMode === "diffReview") {
@@ -944,18 +935,6 @@ function ensureCodePanel(api: DockviewComponent): void {
   });
 }
 
-function ensureGoalPanel(api: DockviewComponent): void {
-  const hasGoalPanel = api.panels.some(panel => panel.id === "goal");
-  if (hasGoalPanel) return;
-  api.addPanel({
-    id: "goal",
-    component: "goal",
-    title: "Goal",
-    position: { referencePanel: "transcript", direction: "within" },
-    inactive: true,
-    renderer: "always",
-  });
-}
 
 function ensureDiffsPanel(api: DockviewComponent): void {
   const hasDiffsPanel = api.panels.some(panel => panel.id === "diffs");
@@ -997,7 +976,7 @@ function ensureComparePanel(api: DockviewComponent): boolean {
 
 
 function desktopPanelId(name: string): DesktopDockviewPanelId | null {
-  return name === "sessionChanges" || name === "transcript" || name === "goal" || name === "code" || name === "tools" || name === "diffs" || name === "compare" || isPinnedDiffPanelId(name) ? name : null;
+  return name === "sessionChanges" || name === "transcript" || name === "code" || name === "tools" || name === "diffs" || name === "compare" || isPinnedDiffPanelId(name) ? name : null;
 }
 
 function copyStylesToPopout(owner: Document, popWin: Window): void {

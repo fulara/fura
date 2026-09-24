@@ -240,7 +240,7 @@ async function resizeReview(review: Page, main: Page, size: { width: number; hei
   if (review !== main) {
     // Drain any older layout save first, otherwise it could serialize the new
     // size before Dockview's resize-end callback has actually completed.
-    for (const [title, id] of [["Goal", "goal"], ["Transcript", "transcript"]]) {
+    for (const [title, id] of [["Code", "code"], ["Transcript", "transcript"]]) {
       await tab(main, title).click();
       await expect.poll(() => main.evaluate(expected => {
         const saved = JSON.parse(localStorage.getItem("fura.dockview.layout") ?? "{}");

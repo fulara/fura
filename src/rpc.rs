@@ -1324,7 +1324,6 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
             | OmpRpcFrame::ToolExecutionUpdate { .. }
             | OmpRpcFrame::ToolExecutionEnd { .. }
             | OmpRpcFrame::PlanReview { .. }
-            | OmpRpcFrame::GoalUpdated { .. }
             | OmpRpcFrame::SessionSkillsUpdated { .. }
             | OmpRpcFrame::HostToolResult { .. }
             | OmpRpcFrame::HostToolUpdate { .. }
@@ -1722,17 +1721,6 @@ pub(crate) async fn apply_rpc_frame(state: &AppState, session_id: &str, frame: &
                 })
                 .await;
         }
-        OmpRpcFrame::GoalUpdated {
-            state: goal_state, ..
-        } => {
-            let goal_mode = goal_state.as_ref().and_then(map_goal_mode_projection);
-            state
-                .events
-                .mutate_session_snapshot(state, &target_session_id, |record| {
-                    record.goal_mode = goal_mode;
-                })
-                .await;
-        }
         OmpRpcFrame::AvailableCommandsUpdate { commands } => {
             state
                 .events
@@ -1944,79 +1932,6 @@ fn map_plan_mode_state_projection(value: Option<&OmpPlanModeState>) -> Option<Pl
             .clone()
             .unwrap_or_else(|| "local://PLAN.md".to_string()),
         workflow: value.workflow.clone(),
-    })
-}
-
-fn map_goal_runtime_mode(value: &str) -> Option<GoalModeRuntimeMode> {
-    match value {
-        "active" => Some(GoalModeRuntimeMode::Active),
-        "exiting" => Some(GoalModeRuntimeMode::Exiting),
-        _ => None,
-    }
-}
-
-fn map_goal_reason(value: &str) -> Option<GoalModeReason> {
-    match value {
-        "completed" => Some(GoalModeReason::Completed),
-        _ => None,
-    }
-}
-
-fn map_goal_status(value: &str) -> Option<GoalStatusProjection> {
-    match value {
-        "active" => Some(GoalStatusProjection::Active),
-        "paused" => Some(GoalStatusProjection::Paused),
-        "budget-limited" => Some(GoalStatusProjection::BudgetLimited),
-        "complete" => Some(GoalStatusProjection::Complete),
-        "dropped" => Some(GoalStatusProjection::Dropped),
-        _ => None,
-    }
-}
-
-fn map_goal_mode_state_projection(value: Option<&OmpGoalModeState>) -> Option<GoalModeProjection> {
-    let value = value?;
-    let goal = value.goal.as_ref()?;
-    Some(GoalModeProjection {
-        enabled: value.enabled,
-        mode: map_goal_runtime_mode(&value.mode).unwrap_or(GoalModeRuntimeMode::Active),
-        reason: value.reason.as_deref().and_then(map_goal_reason),
-        goal: GoalProjection {
-            id: goal.id.clone(),
-            objective: goal.objective.clone(),
-            status: map_goal_status(&goal.status)?,
-            token_budget: goal.token_budget,
-            tokens_used: goal.tokens_used,
-            time_used_seconds: goal.time_used_seconds,
-            created_at: goal.created_at,
-            updated_at: goal.updated_at,
-        },
-    })
-}
-
-pub(crate) fn map_goal_mode_projection(value: &Value) -> Option<GoalModeProjection> {
-    if value.is_null() {
-        return None;
-    }
-    let goal = value.get("goal")?;
-    Some(GoalModeProjection {
-        enabled: value
-            .get("enabled")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
-        mode: value_str(value, "mode")
-            .and_then(map_goal_runtime_mode)
-            .unwrap_or(GoalModeRuntimeMode::Active),
-        reason: value_str(value, "reason").and_then(map_goal_reason),
-        goal: GoalProjection {
-            id: value_str(goal, "id")?.to_string(),
-            objective: value_str(goal, "objective")?.to_string(),
-            status: value_str(goal, "status").and_then(map_goal_status)?,
-            token_budget: goal.get("tokenBudget").and_then(|v| v.as_u64()),
-            tokens_used: goal.get("tokensUsed").and_then(|v| v.as_u64())?,
-            time_used_seconds: goal.get("timeUsedSeconds").and_then(|v| v.as_u64())?,
-            created_at: goal.get("createdAt").and_then(|v| v.as_u64())?,
-            updated_at: goal.get("updatedAt").and_then(|v| v.as_u64())?,
-        },
     })
 }
 
@@ -2291,7 +2206,6 @@ async fn apply_omp_session_state(
                 context_window,
                 context_percent,
                 plan_mode: Some(map_plan_mode_state_projection(data.plan_mode.as_ref())),
-                goal_mode: Some(map_goal_mode_state_projection(data.goal_mode.as_ref())),
                 todo_phases: Some(data.todo_phases),
                 session_skills: data.session_skills,
             },
@@ -2971,19 +2885,6 @@ pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame
                     record.plan_mode = plan_mode;
                 })
                 .await;
-        }
-        Some("goal_mode") => {
-            let goal_mode = rpc_response_data_as::<OmpGoalModeResponse>(frame)
-                .and_then(|data| map_goal_mode_state_projection(data.goal_mode.as_ref()));
-            let snapshot_sent = state
-                .events
-                .mutate_session_snapshot(state, &current_session_id, |record| {
-                    record.goal_mode = goal_mode;
-                })
-                .await;
-            if snapshot_sent {
-                broadcast_sessions_snapshot(state).await;
-            }
         }
         Some("set_model") => {
             let data = frame.get("data").or_else(|| frame.get("result"));

@@ -138,21 +138,6 @@ select {
   box-shadow: 0 1px 3px #0008;
 }
 
-.session-goal-badge {
-  grid-column: 2;
-  grid-row: 2;
-  align-self: center;
-  justify-self: end;
-  max-width: 4.5rem;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
-  padding: 0;
-  font-size: 0.625rem;
-  line-height: 12px;
-  font-weight: 500;
-}
-
 .session-status::before {
   display: block;
   width: 6px;

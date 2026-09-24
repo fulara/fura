@@ -8,7 +8,6 @@ export type SessionListRenderOptions = {
   selectedCategoryFilter: string;
   activeSessionId: string | null;
   unreadSessionIds: ReadonlySet<string>;
-  sessionGoalLabels?: ReadonlyMap<string, string>;
 };
 
 export type SessionListView = {
@@ -27,7 +26,6 @@ type SessionListItemDom = {
   title: HTMLSpanElement;
   status: HTMLSpanElement;
   meta: HTMLSpanElement;
-  goal: HTMLSpanElement;
   deleteBtn: HTMLButtonElement;
 };
 
@@ -83,7 +81,7 @@ export function createSessionListView(container: HTMLElement, callbacks: Session
           items.set(session.sessionId, dom);
         }
 
-        updateSessionListItem(dom, session, options.activeSessionId, options.unreadSessionIds, options.sessionGoalLabels);
+        updateSessionListItem(dom, session, options.activeSessionId, options.unreadSessionIds);
         if (dom.item !== anchor) container.insertBefore(dom.item, anchor);
         anchor = dom.item.nextSibling;
       }
@@ -139,14 +137,12 @@ function createSessionListItem(
   title.className = "session-id";
 
   const status = ownerDocument.createElement("span");
-  const goal = ownerDocument.createElement("span");
-  goal.className = "session-goal-badge";
 
   const meta = ownerDocument.createElement("span");
   meta.className = "session-meta";
 
   titleRow.append(title, status);
-  button.append(titleRow, meta, goal);
+  button.append(titleRow, meta);
 
   const deleteBtn = ownerDocument.createElement("button");
   deleteBtn.type = "button";
@@ -158,7 +154,7 @@ function createSessionListItem(
   });
 
   item.append(button, deleteBtn);
-  return { item, button, title, status, meta, goal, deleteBtn };
+  return { item, button, title, status, meta, deleteBtn };
 }
 
 function updateSessionListItem(
@@ -166,7 +162,6 @@ function updateSessionListItem(
   session: SessionSummary,
   activeSessionId: string | null,
   unreadSessionIds: ReadonlySet<string>,
-  sessionGoalLabels?: ReadonlyMap<string, string>,
 ): void {
   const isActive = session.sessionId === activeSessionId;
   const hasUpdates = !isActive && unreadSessionIds.has(session.sessionId);
@@ -174,11 +169,10 @@ function updateSessionListItem(
   const label = session.title || shortId(session.sessionId);
   const statusLabel = sessionStatusLabel(session);
   const metadata = formatSessionMeta(session);
-  const goalLabel = sessionGoalLabels?.get(session.sessionId) ?? null;
 
   dom.button.className = classes.join(" ");
   dom.button.setAttribute("aria-current", isActive ? "page" : "false");
-  dom.button.setAttribute("aria-label", [label, statusLabel, hasUpdates ? "Unread updates" : "", metadata, goalLabel].filter(Boolean).join(". "));
+  dom.button.setAttribute("aria-label", [label, statusLabel, hasUpdates ? "Unread updates" : "", metadata].filter(Boolean).join(". "));
   dom.button.title = label;
   dom.title.textContent = label;
   dom.title.dir = "auto";
@@ -188,8 +182,6 @@ function updateSessionListItem(
   dom.status.title = statusLabel;
   dom.status.setAttribute("aria-hidden", "true");
   dom.meta.textContent = metadata;
-  dom.goal.textContent = goalLabel ?? "";
-  dom.goal.hidden = !goalLabel;
   dom.deleteBtn.setAttribute("aria-label", `Delete session ${label}`);
 }
 

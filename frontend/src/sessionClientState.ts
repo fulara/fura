@@ -86,7 +86,6 @@ export function applySessionDelta(
     contextPercent: delta.contextPercent,
     planMode: delta.planMode,
     pendingPlanReview: delta.pendingPlanReview,
-    goalMode: delta.goalMode,
     sessionSkills: delta.sessionSkills,
     todoPhases: delta.todoPhases,
     pendingAsk: delta.pendingAsk,
@@ -110,7 +109,7 @@ function transcriptEntryIsLive(entry: TranscriptEntry): boolean {
  *
  * With a `previous` baseline: true only when `next` introduces a transcript entry
  * (message/tool/review) whose id `previous` did not already contain. Metadata-only updates — status
- * flips, token/cost/context/goal ticks, pending-ask changes, and in-place tool-card progress (same
+ * flips, token/cost/context ticks, pending-ask changes, and in-place tool-card progress (same
  * id, new content) — return false. This kills the periodic no-new-message snapshots/deltas a live
  * session emits while otherwise idle.
  *

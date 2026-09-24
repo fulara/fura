@@ -75,7 +75,8 @@ let planExecutionCount = 0;
 let planMode = null;
 let isCompacting = false;
 let contextTokens = 24000;
-let goalMode = {
+// Upstream compatibility input: Fura must ignore this standing Goal without changing it.
+const goalMode = {
   enabled: true,
   mode: "active",
   goal: {
@@ -106,6 +107,7 @@ const mockImageData =
 
 const availableCommands = [
   { name: "help", aliases: [], description: "Show Fura command help", subcommands: [], source: "builtin" },
+  { name: "goal", aliases: [], description: "Standing session context", subcommands: [], source: "builtin" },
   { name: "model", aliases: ["models"], description: "Select model", input: { hint: "[provider/model]" }, subcommands: [], source: "builtin" },
   { name: "tools", aliases: [], description: "Show tools visible to the agent", subcommands: [], source: "builtin" },
   { name: "skill:develop-fura", aliases: [], description: "Run the develop-fura skill", subcommands: [], source: "skill" },
@@ -192,6 +194,7 @@ for await (const line of rl) {
           percent: contextTokens / currentModel.contextWindow * 100,
         },
       });
+      write({ type: "goal_updated", goal: goalMode.goal, state: goalMode });
       break;
     }
     case "set_plan_mode": {
@@ -203,47 +206,6 @@ for await (const line of rl) {
           }
         : null;
       success(command, { planMode });
-      break;
-    }
-    case "goal_mode": {
-      const now = Date.now();
-      if (command.op === "create") {
-        const objective = String(command.objective ?? "").trim();
-        if (!objective) {
-          error(command, "objective is required when op=create");
-          break;
-        }
-        goalMode = {
-          enabled: true,
-          mode: "active",
-          goal: {
-            id: `mock-goal-${now}`,
-            objective,
-            status: "active",
-            tokenBudget: command.tokenBudget,
-            tokensUsed: 0,
-            timeUsedSeconds: 0,
-            createdAt: now,
-            updatedAt: now,
-          },
-        };
-      } else if (command.op === "pause") {
-        if (goalMode?.goal) {
-          goalMode = { ...goalMode, enabled: false, goal: { ...goalMode.goal, status: "paused", updatedAt: now } };
-        }
-      } else if (command.op === "resume") {
-        if (goalMode?.goal) {
-          goalMode = { ...goalMode, enabled: true, mode: "active", reason: undefined, goal: { ...goalMode.goal, status: "active", updatedAt: now } };
-        }
-      } else if (command.op === "drop") {
-        goalMode = null;
-      } else if (command.op === "set_budget") {
-        if (goalMode?.enabled && goalMode.goal) {
-          goalMode = { ...goalMode, goal: { ...goalMode.goal, tokenBudget: command.tokenBudget, updatedAt: now } };
-        }
-      }
-      success(command, { goalMode });
-      write({ type: "goal_updated", goal: goalMode?.goal ?? null, state: goalMode ?? undefined });
       break;
     }
     case "approve_plan_mode": {

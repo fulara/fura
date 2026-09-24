@@ -1,12 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, isLiveSlashCommandRunnableWhileBusy, SLASH_COMMANDS, SUPPORTED_SLASH_COMMANDS } from "./slashCommands";
+import { buildCommandsPopupSections, findLiveSlashCommand, findSlashCommand, isLiveSlashCommandRunnableWhileBusy, SUPPORTED_SLASH_COMMANDS } from "./slashCommands";
 
 describe("slash command registry", () => {
-  it("does not advertise /goal in Fura", () => {
-    expect(SLASH_COMMANDS.some(command => command.name === "goal")).toBe(false);
-    expect(findSlashCommand("/goal")).toBeUndefined();
-  });
-
   it("tracks upstream aliases and unsupported interactive commands", () => {
     expect(findSlashCommand("/clear")?.name).toBe("new");
     expect(findSlashCommand("/q")?.name).toBe("exit");
@@ -68,6 +63,17 @@ describe("buildCommandsPopupSections", () => {
     expect(commands?.rows.some(row => row.label.startsWith("/plan"))).toBe(true);
     expect(commands?.rows.some(row => row.label === "/help")).toBe(false);
     expect(commands?.rows.some(row => row.label === "/commands")).toBe(false);
+  });
+
+  it("does not reintroduce Goal from OMP's live builtin catalog", () => {
+    const sections = buildCommandsPopupSections([
+      ...live,
+      { name: "goal", aliases: [], subcommands: [], source: "builtin", description: "Standing session context" },
+    ]);
+    expect(sections.flatMap(section => section.rows).some(row => row.insertText === "/goal ")).toBe(false);
+    expect(sections.flatMap(section => section.rows).some(row => row.insertText === "/prewalk ")).toBe(true);
+    expect(sections.flatMap(section => section.rows).some(row => row.insertText === "/skill:develop-fura ")).toBe(true);
+    expect(SUPPORTED_SLASH_COMMANDS.some(command => command.name === "goal")).toBe(false);
   });
 
   it("returns only the Commands section when no live commands are available", () => {

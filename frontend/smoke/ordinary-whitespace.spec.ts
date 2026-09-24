@@ -398,7 +398,7 @@ test("pinned History preserves canonical anchors and original Copy through layou
     await expect(whitespace(popped)).toBeFocused();
     // Same lifecycle fence as diffs-focus.spec.ts: Dockview 5.2 does not cancel
     // its resize-end timer on close. Observe persisted completion, not a sleep.
-    for (const [title, id] of [["Goal", "goal"], ["Transcript", "transcript"]]) {
+    for (const [title, id] of [["Code", "code"], ["Transcript", "transcript"]]) {
       await tab(page, title).click();
       await expect.poll(() => page.evaluate(expected => {
         const saved = JSON.parse(localStorage.getItem("fura.dockview.layout") ?? "{}");

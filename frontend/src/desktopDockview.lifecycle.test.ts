@@ -88,6 +88,68 @@ function gridGroup(api: DockviewComponent, id: string) {
   return visit(api.toJSON().grid.root);
 }
 
+describe("Goal removal and legacy layouts", () => {
+  it.each(["normal", "diffReview"] as const)("has no Goal entry in a fresh %s workspace", layoutMode => {
+    const { api, host } = setup(layoutMode);
+    expect(api.panels.map(panel => panel.id)).not.toContain("goal");
+    expect([...host.querySelectorAll(".dv-default-tab")].map(tab => tab.textContent)).not.toContain("Goal");
+    expect(api.groups.every(group => group.size > 0)).toBe(true);
+  });
+
+  it.each([
+    ["normal", "tab"], ["normal", "split"], ["normal", "floating"], ["normal", "popout"],
+    ["diffReview", "tab"], ["diffReview", "split"], ["diffReview", "floating"], ["diffReview", "popout"],
+  ] as const)("removes legacy Goal %s/%s without resetting surviving groups or panel state", async (layoutMode, location) => {
+    const { api } = setup(layoutMode);
+    const existing = api.getGroupPanel("goal");
+    if (existing) api.removePanel(existing);
+    const code = api.getGroupPanel("code")!;
+    const custom = api.addGroup({ referencePanel: "transcript", direction: "below" });
+    code.api.moveTo({ group: custom });
+    code.api.updateParameters({ retainedSelection: "src/main.rs:42" });
+    code.api.setActive();
+    const survivors = api.groups.map(group => ({
+      id: group.id,
+      panels: group.panels.map(panel => panel.id),
+      active: group.activePanel?.id,
+    })).sort((a, b) => a.id.localeCompare(b.id));
+    api.addPanel({
+      id: "goal", component: "goal", title: "Goal",
+      ...(location === "floating" ? { floating: true } : {
+        position: { referencePanel: "transcript", direction: location === "split" ? "left" : "within" },
+      }),
+    });
+    if (location === "popout") await popout(api, api.getGroupPanel("goal")!);
+    const raw = api.toJSON();
+    function groupOrder(node: SerializedDockview["grid"]["root"]): string[] {
+      return Array.isArray(node.data) ? node.data.flatMap(groupOrder)
+        : node.data.views.some(id => id !== "goal") ? [node.data.id] : [];
+    }
+    const expectedOrder = groupOrder(raw.grid.root);
+    const expectedPanels = structuredClone(raw.panels);
+    delete expectedPanels.goal;
+    localStorage.setItem(`lifecycle.${layoutMode}`, JSON.stringify({ version: 1, layout: raw }));
+    const open = vi.spyOn(window, "open");
+    open.mockClear();
+    const restored = setup(layoutMode);
+    expect(restored.api.getGroupPanel("goal")).toBeUndefined();
+    expect(restored.ready.mock.calls.map(([id]) => id)).not.toContain("goal");
+    expect(restored.api.toJSON().panels).toEqual(expectedPanels);
+    expect(groupOrder(restored.api.toJSON().grid.root)).toEqual(expectedOrder);
+    expect(restored.api.groups.map(group => ({
+      id: group.id, panels: group.panels.map(panel => panel.id),
+      active: group.activePanel?.id,
+    })).sort((a, b) => a.id.localeCompare(b.id))).toEqual(survivors);
+    expect(restored.api.getGroupPanel("code")!.params).toEqual({ retainedSelection: "src/main.rs:42" });
+    expect(restored.api.groups.every(group => group.size > 0)).toBe(true);
+    expect(open).not.toHaveBeenCalled();
+    window.dispatchEvent(new Event("beforeunload"));
+    const reloaded = setup(layoutMode);
+    expect(reloaded.api.toJSON().grid).toEqual(restored.api.toJSON().grid);
+    expect(reloaded.api.toJSON().panels).toEqual(expectedPanels);
+  });
+});
+
 describe("desktop Dockview close lifecycle", () => {
   it.each(["normal", "diffReview"] as const)("blocks panel and group user-close paths in %s without losing content", layoutMode => {
     const { api, desktop, closed, host } = setup(layoutMode);
@@ -134,20 +196,20 @@ describe("desktop Dockview close lifecycle", () => {
     expect(closed).not.toHaveBeenCalled();
   });
 
-  it.each(["goal", "transcript"] as const)("returns a native %s popup to its original tab index without remounting", async panelId => {
+  it.each(["code", "transcript"] as const)("returns a native %s popup to its original tab index without remounting", async panelId => {
     const { api, desktop, closed, ready } = setup();
-    const goal = api.getGroupPanel(panelId)!;
-    const group = goal.group;
+    const panel = api.getGroupPanel(panelId)!;
+    const group = panel.group;
     const order = group.panels.map(panel => panel.id);
     let content: HTMLElement | undefined;
     desktop.withPanel(panelId, element => { content = element; });
     const mounts = ready.mock.calls.length;
-    const popup = await popout(api, goal);
+    const popup = await popout(api, panel);
     popup.close();
     await Promise.resolve();
-    expect(goal.group).toBe(group);
+    expect(panel.group).toBe(group);
     expect(group.panels.map(panel => panel.id)).toEqual(order);
-    expect(goal.api.isVisible).toBe(true);
+    expect(panel.api.isVisible).toBe(true);
     desktop.withPanel(panelId, element => { expect(element).toBe(content); });
     expect(ready).toHaveBeenCalledTimes(mounts);
     expect(closed).not.toHaveBeenCalled();
@@ -155,14 +217,14 @@ describe("desktop Dockview close lifecycle", () => {
 
   it("returns popup close actions instead of destroying panel content", async () => {
     const { api, desktop, closed } = setup();
-    const goal = api.getGroupPanel("goal")!;
-    const popup = await popout(api, goal);
+    const code = api.getGroupPanel("code")!;
+    const popup = await popout(api, code);
     expect(popup.document.querySelector<HTMLButtonElement>(".panel-return-btn")?.textContent).toBe("Return to main");
-    goal.api.close();
+    code.api.close();
     await Promise.resolve();
-    expect(api.getGroupPanel("goal")).toBe(goal);
-    expect(goal.api.location.type).toBe("grid");
-    expect(desktop.panelMounted("goal")).toBe(true);
+    expect(api.getGroupPanel("code")).toBe(code);
+    expect(code.api.location.type).toBe("grid");
+    expect(desktop.panelMounted("code")).toBe(true);
     expect(closed).not.toHaveBeenCalled();
   });
 
@@ -181,14 +243,14 @@ describe("desktop Dockview close lifecycle", () => {
 
   it("returns to the main document when the original group itself became a popup", async () => {
     const { api, closed } = setup();
-    const goal = api.getGroupPanel("goal")!;
-    const original = goal.group;
-    const first = await popout(api, goal);
+    const code = api.getGroupPanel("code")!;
+    const original = code.group;
+    const first = await popout(api, code);
     await popout(api, original);
     first.close();
     await Promise.resolve();
-    expect(api.getGroupPanel("goal")).toBe(goal);
-    expect(goal.api.getWindow()).toBe(window);
+    expect(api.getGroupPanel("code")).toBe(code);
+    expect(code.api.getWindow()).toBe(window);
     expect(closed).not.toHaveBeenCalled();
   });
 
@@ -725,7 +787,7 @@ describe("desktop Dockview close lifecycle", () => {
     window.dispatchEvent(new Event("beforeunload"));
     const saved = JSON.parse(localStorage.getItem(`lifecycle.${layoutMode}`)!);
     expect(Object.keys(saved.layout.panels).sort()).toEqual(layoutMode === "normal"
-      ? ["code", "diffs", "goal", "tools", "transcript"]
+      ? ["code", "diffs", "tools", "transcript"]
       : ["code", "sessionChanges", "tools", "transcript"]);
     expect(saved.layout.floatingGroups ?? []).toEqual([]);
     expect(saved.layout.popoutGroups).toBeUndefined();
@@ -761,7 +823,7 @@ describe("desktop Dockview close lifecycle", () => {
     const original = api.getGroupPanel("transcript")!.group;
     const order = original.panels.map(panel => panel.id);
     await popout(api, api.getGroupPanel("transcript")!);
-    await popout(api, api.getGroupPanel("goal")!);
+    await popout(api, api.getGroupPanel("code")!);
     window.dispatchEvent(new Event("beforeunload"));
     const restored = setup();
     expect(restored.api.getGroupPanel("transcript")!.group.panels.map(panel => panel.id)).toEqual(order);
@@ -778,6 +840,6 @@ describe("desktop Dockview close lifecycle", () => {
     const restored = setup();
     expect(restored.api.getGroupPanel("code")!.group.id).toBe(codeGroup);
     expect(restored.api.getGroupPanel("tools")!.group.id).toBe(toolsGroup);
-    expect(restored.api.getGroupPanel("code")!.group.panels.map(panel => panel.id)).toEqual(["transcript", "goal", "code"]);
+    expect(restored.api.getGroupPanel("code")!.group.panels.map(panel => panel.id)).toEqual(["transcript", "code"]);
   });
 });

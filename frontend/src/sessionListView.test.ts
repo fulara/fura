@@ -30,7 +30,6 @@ function renderList(options: Partial<SessionListRenderOptions> = {}) {
     selectedCategoryFilter: options.selectedCategoryFilter ?? "",
     activeSessionId: options.activeSessionId ?? null,
     unreadSessionIds: options.unreadSessionIds ?? new Set<string>(),
-    sessionGoalLabels: options.sessionGoalLabels,
   });
   return { container, view, selected, deleted };
 }
@@ -67,17 +66,6 @@ describe("createSessionListView", () => {
     expect(buttons[0].getAttribute("aria-current")).toBe("page");
     expect(buttons[0].querySelector(".session-id")?.textContent).toBe("Active");
     expect(buttons[1].className).toBe("session has-updates");
-  });
-  it("renders goal badges for sessions with projected goal state", () => {
-    const sessions = [session({ sessionId: "goal-session", title: "Goal session" })];
-    const { container } = renderList({
-      sessions,
-      sessionGoalLabels: new Map([["goal-session", "Goal set"]]),
-    });
-
-    const badge = container.querySelector(".session-goal-badge");
-    expect(badge?.textContent).toBe("Goal set");
-    expect(badge?.hasAttribute("hidden")).toBe(false);
   });
 
   it("wires select and delete callbacks to the session id", () => {

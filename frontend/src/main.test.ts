@@ -198,8 +198,8 @@ function setPanelVisible(id: string, visible: boolean, workspace: MockWorkspace 
 function activatePanel(id: string, workspace: MockWorkspace = "normal"): void {
   desktopMockActivePanelId[workspace] = id;
   // Diffs is a separate split; activating Transcript does not hide it.
-  if (["transcript", "goal", "code"].includes(id)) {
-    for (const sibling of ["transcript", "goal", "code"]) {
+  if (["transcript", "code"].includes(id)) {
+    for (const sibling of ["transcript", "code"]) {
       if (sibling !== id) setPanelVisible(sibling, false, workspace);
     }
   }
@@ -234,7 +234,7 @@ function installMocks(): void {
       if (normal) desktopMockPanelClosed = options.onPanelClosed ?? null;
       const panels: Record<string, HTMLElement> = {};
       desktopMockPanels.set(options.layoutMode, panels);
-      const ids = normal ? ["diffs", "transcript", "goal"] : ["sessionChanges", "transcript"];
+      const ids = normal ? ["diffs", "transcript"] : ["sessionChanges", "transcript"];
       if (desktopMockMountCodePanel) ids.push("code");
       const mount = (id: string) => {
         if (panels[id]) return false;
@@ -932,7 +932,7 @@ describe("auth gate", () => {
   });
 });
 
-describe("desktop Goal Mode panel", () => {
+describe("legacy session wire compatibility", () => {
   beforeEach(() => {
     vi.resetModules();
     vi.restoreAllMocks();
@@ -940,44 +940,63 @@ describe("desktop Goal Mode panel", () => {
     vi.useRealTimers();
   });
 
-  it("renders no-session Goal panel copy without implying background execution", async () => {
+  it("keeps history and the composer usable while ignoring legacy Goal snapshots and deltas", async () => {
     const { connection } = await createHarness();
-    activatePanel("goal");
-    connection.emit({ type: "sessions.snapshot", sessions: [] });
+    const goalMode = {
+      enabled: true,
+      mode: "active",
+      goal: {
+        id: "goal-1",
+        objective: "Legacy standing context",
+        status: "active",
+        tokenBudget: 50000,
+        tokensUsed: 12500,
+        timeUsedSeconds: 95,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const legacySummary = { ...summary("live"), goalMode };
+    const history = {
+      kind: "message" as const,
+      id: "historical",
+      role: "assistant" as const,
+      blocks: [{ kind: "text" as const, text: "The ordinary goal in this conversation remains readable." }],
+      timestamp: null,
+      isNew: false,
+      renderHash: "legacy-history",
+    };
+    const legacyState = { ...projection("live", { transcript: [history] }), summary: legacySummary, goalMode };
+    connection.emit({ type: "sessions.snapshot", sessions: [legacySummary] });
+    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")!.click();
+    connection.emit({ type: "session.snapshot", sessionId: "live", state: legacyState });
+    expect(document.querySelector("#testTranscriptPanel")?.textContent).toContain(history.blocks[0].text);
+    expect(document.querySelector(".session-goal-badge, .goal-mode-card")).toBeNull();
+    expect(document.querySelector("#statusBar")?.textContent).not.toContain("Goal set");
 
-    expect(document.querySelector("#testGoalPanel")?.textContent).toContain("Select a session to view or set a goal.");
-  });
-
-  it("renders Goal Mode inside the normal Dockview goal panel", async () => {
-    const { connection } = await createHarness();
-    activatePanel("goal");
-    connection.emit({ type: "sessions.snapshot", sessions: [summary("live")] });
-    document.querySelector<HTMLButtonElement>("#sessionsList .session-item button")?.click();
-    connection.emit({
-      type: "session.snapshot",
-      sessionId: "live",
-      state: projection("live", {
-        goalMode: {
-          enabled: true,
-          mode: "active",
-          goal: {
-            id: "goal-1",
-            objective: "Keep Goal Mode in the Dockview workspace",
-            status: "active",
-            tokenBudget: 50000,
-            tokensUsed: 12500,
-            timeUsedSeconds: 95,
-            createdAt: 1,
-            updatedAt: 2,
-          },
-        },
-      }),
-    });
-
-    expect(document.querySelector("#goalModeCardHost")).toBeNull();
-    const goalPanel = document.querySelector("#testGoalPanel");
-    expect(goalPanel?.querySelector(".goal-mode-card-desktop")?.textContent).toContain("Keep Goal Mode in the Dockview workspace");
-    expect(goalPanel?.querySelector(".goal-mode-badge")?.textContent).toBe("Goal set");
+    const legacyDelta = {
+      summary: legacySummary,
+      transcriptReplaceFrom: 1,
+      transcriptAppend: [{ ...history, id: "new-answer", blocks: [{ kind: "text" as const, text: "A subsequent answer" }], renderHash: "legacy-next" }],
+      baseSeq: 0,
+      seq: 1,
+      isBusy: false,
+      tokensTotal: 20,
+      costUsd: 0,
+      todoPhases: [],
+      goalMode: { ...goalMode, goal: { ...goalMode.goal, tokensUsed: 12520 } },
+    };
+    connection.emit({ type: "session.delta", sessionId: "live", state: legacyDelta });
+    expect(document.querySelector("#testTranscriptPanel")?.textContent).toContain(history.blocks[0].text);
+    expect(document.querySelector("#testTranscriptPanel")?.textContent).toContain("A subsequent answer");
+    expect(document.querySelector(".session-goal-badge, .goal-mode-card")).toBeNull();
+    expect(document.querySelector("#statusBar")?.textContent).not.toContain("Goal set");
+    const input = document.querySelector<HTMLTextAreaElement>("#promptInput")!;
+    expect(input.disabled).toBe(false);
+    input.value = "Continue the conversation";
+    document.querySelector<HTMLFormElement>("#promptForm")!.requestSubmit();
+    expect(connection.sent).toContainEqual(expect.objectContaining({ type: "prompt.send", sessionId: "live", text: "Continue the conversation" }));
+    expect(connection.sent.some(message => message.type.startsWith("goal."))).toBe(false);
   });
 });
 

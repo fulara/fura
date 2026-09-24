@@ -14,10 +14,10 @@ use tracing::warn;
 
 use crate::{
     CodeWorkspaceRegistry, ControlCandidate, DiffReviewWorktreeRegistry, DiffScope,
-    FrontendUiSnapshot, GoalModeProjection, PlanModeProjection, PreparedDiff, PromptImagePayload,
-    ProposedModelConfig, ServerMessage, SessionKind, SessionMode, SessionProjectionDelta,
-    SessionRecord, SessionStatus, ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection,
-    VoiceCommand, append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
+    FrontendUiSnapshot, PlanModeProjection, PreparedDiff, PromptImagePayload, ProposedModelConfig,
+    ServerMessage, SessionKind, SessionMode, SessionProjectionDelta, SessionRecord, SessionStatus,
+    ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand,
+    append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -1429,7 +1429,6 @@ pub(crate) struct RpcRecordState {
     pub(crate) context_window: Option<u64>,
     pub(crate) context_percent: Option<f64>,
     pub(crate) plan_mode: Option<Option<PlanModeProjection>>,
-    pub(crate) goal_mode: Option<Option<GoalModeProjection>>,
     pub(crate) todo_phases: Option<Vec<TodoPhaseProjection>>,
     pub(crate) session_skills: Option<crate::SessionSkillsState>,
 }
@@ -1467,9 +1466,6 @@ pub(crate) fn apply_rpc_state_to_record(record: &mut SessionRecord, state: RpcRe
         if !keep_pending_plan {
             record.pending_plan_review = None;
         }
-    }
-    if let Some(goal_mode) = state.goal_mode {
-        record.goal_mode = goal_mode;
     }
     if let Some(todo_phases) = state.todo_phases {
         record.todo_phases = Some(todo_phases);
@@ -1697,7 +1693,6 @@ pub(crate) async fn apply_get_state_update(
                             context_window: None,
                             context_percent: None,
                             plan_mode: None,
-                            goal_mode: None,
                             session_skills: None,
                             pending_plan_review: None,
                             pending_ask: None,
@@ -1971,7 +1966,6 @@ mod tests {
                         context_window: None,
                         context_percent: None,
                         plan_mode: None,
-                        goal_mode: None,
                         todo_phases: None,
                         session_skills: None,
                     },

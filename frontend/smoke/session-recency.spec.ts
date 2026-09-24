@@ -125,20 +125,19 @@ test.describe("isolated conversation recency and desktop tiles", () => {
     } finally { await fixture.close(); }
   });
 
-  test("metadata changes still refresh goals without becoming conversation activity", async ({ page }, testInfo) => {
+  test("historical Goal metadata remains invisible and does not become conversation activity", async ({ page }, testInfo) => {
     const fixture = await startFixture(testInfo, [session("newer", "Newer conversation", created + 3 * day, created + 8 * day), session("older", "Older conversation", created + 2 * day, created + 9 * day)]);
     try {
       await login(page, fixture.baseURL);
       await expect.poll(() => order(page)).toEqual(["Newer conversation", "Older conversation"]);
       await fixture.command({ op: "append", name: "older", mtimeMs: Date.now(), entry: { type: "mode_change", id: "goal-change", parentId: "older-user", timestamp: new Date().toISOString(), mode: "goal", data: { goal: { id: "fixture-goal", objective: "Metadata goal refresh", status: "active", tokenBudget: 1000, tokensUsed: 0, timeUsedSeconds: 0, createdAt: created, updatedAt: Date.now() } } } });
-      const older = page.locator(".session-item").filter({ has: page.locator(".session-id", { hasText: "Older conversation" }) });
-      await expect(older.locator(".session-goal-badge")).toBeVisible();
       await expect.poll(() => order(page)).toEqual(["Newer conversation", "Older conversation"]);
       await fixture.command({ op: "touch", name: "newer", mtimeMs: created });
       await fixture.command({ op: "restart" });
       await page.reload();
       await expect.poll(() => order(page)).toEqual(["Newer conversation", "Older conversation"]);
-      await saveEvidence(testInfo, "metadata-order", { order: await order(page), goalRefreshObserved: true, touchAndRestartPreservedOrder: true });
+      await expect(page.locator(".session-goal-badge")).toHaveCount(0);
+      await saveEvidence(testInfo, "metadata-order", { order: await order(page), goalMetadataIgnored: true, touchAndRestartPreservedOrder: true });
     } finally { await fixture.close(); }
   });
 
