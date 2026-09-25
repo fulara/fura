@@ -215,6 +215,57 @@ beforeEach(() => {
 });
 
 describe("mountMobileApp", () => {
+  it("keeps insights outside transcript updates, scopes them to the selected session and hides them for Ask Fura", () => {
+    vi.useFakeTimers();
+    try {
+      const { connection } = createHarness();
+      connection.emit({ type: "sessions.snapshot", sessions: [summary("one"), summary("two")] });
+      expect(connection.sent.filter(message => message.type === "session.activity.get")).toEqual([]);
+      connection.emit({ type: "session.snapshot", sessionId: "one", state: projection("one") });
+      const request = connection.sent.find(message => message.type === "session.activity.get");
+      if (request?.type !== "session.activity.get") throw new Error("activity request missing");
+      connection.emit({
+        type: "session.activity.result", requestId: request.requestId, sessionId: "one",
+        activity: {
+          sessionId: "one", generation: "g1", observedAt: Date.now(),
+          items: [{ id: "server", kind: "service", label: "Dev server", status: "ready", startedAt: Date.now(), detailAvailable: true }],
+          sources: { jobs: { available: true }, agents: { available: true }, services: { available: true } },
+        },
+      });
+      const activity = document.querySelector<HTMLDetailsElement>("#mobileActivity .session-activity")!;
+      activity.open = true;
+      const transcript = document.querySelector("#mobileTranscript")!;
+      expect(transcript.contains(activity)).toBe(false);
+      connection.emit({ type: "session.snapshot", sessionId: "one", state: projection("one", { seq: 1 }) });
+      expect(document.querySelector("#mobileActivity .session-activity")).toBe(activity);
+      expect(activity.open).toBe(true);
+      const summaryButton = document.querySelector<HTMLButtonElement>("#mobileSummary")!;
+      summaryButton.click();
+      const recap = connection.sent.find(message => message.type === "session.recap.get");
+      if (recap?.type !== "session.recap.get") throw new Error("recap request missing");
+      connection.emit({
+        type: "session.recap.result", sessionId: "one", requestId: recap.requestId,
+        state: { sessionId: "one", enabled: true, idleSeconds: 240, generating: false,
+          recap: { id: 1, text: "Saved recap", createdAt: Date.now(), stale: false, sourceLeafId: "leaf" } },
+      });
+      document.querySelector<HTMLButtonElement>("#mobileAskFuraButton")!.click();
+      expect(summaryButton.hidden).toBe(true);
+      expect(document.querySelector<HTMLElement>("#mobileActivity")!.hidden).toBe(true);
+      expect(document.querySelector<HTMLElement>(".session-summary")!.hidden).toBe(true);
+      const reads = connection.sent.filter(message => message.type.startsWith("session.activity.") || message.type.startsWith("session.recap."));
+      vi.advanceTimersByTime(20_000);
+      expect(connection.sent.filter(message => message.type.startsWith("session.activity.") || message.type.startsWith("session.recap."))).toEqual(reads);
+      document.querySelector<HTMLButtonElement>("#mobileAskFuraButton")!.click();
+      connection.emitClose();
+      expect(activity.dataset.state).toBe("stale");
+      expect(activity.querySelector('[data-activity-id="server"]')).not.toBeNull();
+      expect(connection.sent.some(message => message.type === "prompt.send" || message.type === "raw.rpc")).toBe(false);
+    } finally {
+      window.dispatchEvent(new Event("pagehide"));
+      vi.useRealTimers();
+    }
+  });
+
   it("uses a sessionStorage token and strips URL tokens without storing them", () => {
     const { connection, debug } = createHarness("/mobile.html?token=url-token", "stored-token");
 

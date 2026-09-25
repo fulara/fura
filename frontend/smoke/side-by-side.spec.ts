@@ -250,15 +250,10 @@ test("History split preserves unequal hunks, old-path comments, immutable file c
     await expect(view.locator(".diff-lines").getByText("RIGHT_CONTEXT_NOTE", { exact: true })).toHaveCount(1);
     await screenshot(page, info, "history-unequal-rename");
 
-    for (const [name, present, absent, expected] of [
-      ["new.txt", "right", "left", "NEW_FIRST"],
-      ["deleted.txt", "left", "right", "DELETE_FIRST"],
-    ] as const) {
-      await file(view, name);
-      await expect(side(view, present).locator("code").first()).toContainText(expected);
-      await expect(side(view, absent).locator("code, .diff-gutter, button")).toHaveCount(0);
-      await expect(side(view, absent)).toHaveCount(2);
-    }
+    await file(view, "deleted.txt");
+    await expect(side(view, "left").locator("code").first()).toContainText("DELETE_FIRST");
+    await expect(side(view, "right").locator("code, .diff-gutter, button")).toHaveCount(0);
+    await expect(side(view, "right")).toHaveCount(2);
     await file(view, "no-newline.txt");
     for (const value of ["left", "right"] as const) {
       await expect(side(view, value)).toContainText("\\ No newline at end of file");

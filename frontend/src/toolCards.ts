@@ -31,6 +31,7 @@ export function renderToolCard(card: ToolCard, options: ToolCardRenderOptions = 
   const wrapper = mkEl("section");
   wrapper.className = `tool-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = card.toolName;
+  wrapper.dataset.toolCallId = card.toolCallId;
 
   const resultText = toolResultText(card.partialResult ?? card.result);
   const header = mkEl("div");
@@ -696,6 +697,7 @@ function renderTaskCard(card: ToolCard): HTMLElement {
   const wrapper = mkEl("section");
   wrapper.className = `tool-card task-card ${card.isActive ? "tool-active" : ""} ${card.isError ? "tool-error" : ""}`;
   wrapper.dataset.toolName = "task";
+  wrapper.dataset.toolCallId = card.toolCallId;
 
   const header = mkEl("div");
   header.className = "tool-header task-header";

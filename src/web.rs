@@ -251,6 +251,9 @@ fn client_message_type(message: &ClientMessage) -> &'static str {
         ClientMessage::PromptSend { .. } => "prompt.send",
         ClientMessage::SessionRewindList { .. } => "session.rewind.list",
         ClientMessage::SessionRewindSelect { .. } => "session.rewind.select",
+        ClientMessage::SessionActivityGet { .. } => "session.activity.get",
+        ClientMessage::SessionActivityDetail { .. } => "session.activity.detail",
+        ClientMessage::SessionRecapGet { .. } => "session.recap.get",
         ClientMessage::SessionSkillsGet { .. } => "session.skills.get",
         ClientMessage::SessionSkillsApply { .. } => "session.skills.apply",
         ClientMessage::PromptAbort { .. } => "prompt.abort",
@@ -375,6 +378,22 @@ fn client_message_debug_fields(
                     Value::String(behavior.as_rpc_streaming_behavior().to_string()),
                 );
             }
+        }
+        ClientMessage::SessionActivityGet {
+            session_id,
+            request_id,
+        }
+        | ClientMessage::SessionActivityDetail {
+            session_id,
+            request_id,
+            ..
+        }
+        | ClientMessage::SessionRecapGet {
+            session_id,
+            request_id,
+        } => {
+            fields.insert("sessionId".to_string(), Value::String(session_id.clone()));
+            fields.insert("requestId".to_string(), Value::String(request_id.clone()));
         }
         ClientMessage::SessionSkillsGet {
             session_id,
@@ -699,6 +718,12 @@ pub(crate) async fn handle_socket(
     release_btw_requests_on_disconnect(&state, connection_id).await;
     state
         .session_runtime
+        .pending_session_insights
+        .write()
+        .await
+        .retain(|_, pending| pending.connection_id != connection_id);
+    state
+        .session_runtime
         .detach_session_skills_connection(connection_id)
         .await;
     state
@@ -996,6 +1021,22 @@ pub(crate) fn server_message_visible_to_connection(
     connection_id: u64,
 ) -> bool {
     match message {
+        ServerMessage::SessionActivityResult {
+            target_connection_id,
+            ..
+        }
+        | ServerMessage::SessionActivityDetailResult {
+            target_connection_id,
+            ..
+        }
+        | ServerMessage::SessionRecapResult {
+            target_connection_id,
+            ..
+        }
+        | ServerMessage::SessionInsightsError {
+            target_connection_id,
+            ..
+        } => *target_connection_id == connection_id,
         ServerMessage::SessionBtwUpdate {
             target_connection_id,
             ..
@@ -1263,6 +1304,10 @@ fn server_message_type(message: &ServerMessage) -> &'static str {
         ServerMessage::SessionRewindPoints { .. } => "session.rewind.points",
         ServerMessage::SessionRewindResult { .. } => "session.rewind.result",
         ServerMessage::SessionRewindError { .. } => "session.rewind.error",
+        ServerMessage::SessionActivityResult { .. } => "session.activity.result",
+        ServerMessage::SessionActivityDetailResult { .. } => "session.activity.detail.result",
+        ServerMessage::SessionRecapResult { .. } => "session.recap.result",
+        ServerMessage::SessionInsightsError { .. } => "session.insights.error",
         ServerMessage::SessionSkillsResult { .. } => "session.skills.result",
         ServerMessage::SessionSkillsError { .. } => "session.skills.error",
         ServerMessage::SessionBtwUpdate { .. } => "session.btw.update",
@@ -1442,6 +1487,31 @@ pub(crate) fn log_server_message(message: &ServerMessage) {
             message_type = "session.rewind.error",
             request_id = %request_id,
             source_session_id = %source_session_id,
+            session_id = %session_id
+        ),
+        ServerMessage::SessionActivityResult {
+            request_id,
+            session_id,
+            ..
+        }
+        | ServerMessage::SessionActivityDetailResult {
+            request_id,
+            session_id,
+            ..
+        }
+        | ServerMessage::SessionRecapResult {
+            request_id,
+            session_id,
+            ..
+        }
+        | ServerMessage::SessionInsightsError {
+            request_id,
+            session_id,
+            ..
+        } => info!(
+            direction = "bridge_to_client",
+            message_type = server_message_type(message),
+            request_id = %request_id,
             session_id = %session_id
         ),
         ServerMessage::SessionSkillsResult {

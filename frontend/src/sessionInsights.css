@@ -1,0 +1,128 @@
+.session-activity {
+  flex: 0 0 auto;
+  min-width: 0;
+  border-bottom: 1px solid #303646;
+  background: #151922;
+  color: #d5dceb;
+  font-size: 0.8rem;
+}
+
+.session-activity-heading {
+  padding: 0.45rem 0.65rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-activity[data-state="stale"] > summary,
+.session-activity[data-state="partial"] > summary,
+.session-activity[data-state="unavailable"] > summary {
+  color: #ffd27a;
+}
+
+.session-activity-body {
+  max-height: min(42vh, 24rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 0 0.65rem 0.65rem;
+}
+
+.session-activity-body h3 {
+  margin: 0.6rem 0 0.3rem;
+  font-size: 0.8rem;
+}
+
+.session-activity-item {
+  margin: 0.25rem 0;
+  border: 1px solid #303646;
+  border-radius: 0.35rem;
+  padding: 0.35rem 0.5rem;
+}
+
+.session-activity-item-heading {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.session-activity-label {
+  white-space: pre-wrap;
+}
+
+.session-activity-status {
+  margin-left: 0.6rem;
+  color: #aeb7c8;
+  font-size: 0.75rem;
+}
+
+.session-activity-item[data-status="failed"] .session-activity-status,
+.session-activity-item[data-status="aborted"] .session-activity-status {
+  color: #ffaaa6;
+}
+
+.session-insights-note {
+  margin: 0.4rem 0;
+  color: #aeb7c8;
+  font-size: 0.75rem;
+  overflow-wrap: anywhere;
+}
+
+.session-activity-output,
+.session-summary-text {
+  margin: 0.5rem 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  user-select: text;
+}
+
+.session-activity-output {
+  max-height: 14rem;
+  overflow: auto;
+  padding: 0.5rem;
+  background: #10131a;
+  font-size: 0.75rem;
+}
+
+.session-summary {
+  position: fixed;
+  inset: 4rem 1rem auto auto;
+  z-index: 100;
+  box-sizing: border-box;
+  width: min(36rem, calc(100vw - 2rem));
+  max-height: calc(100dvh - 6rem);
+  overflow: auto;
+  overscroll-behavior: contain;
+  margin: 0;
+  padding: 0.8rem;
+  border: 1px solid #46506a;
+  border-radius: 0.65rem;
+  background: #151922;
+  color: #e2e8f4;
+  box-shadow: 0 12px 40px #0008;
+}
+
+.session-summary-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.session-summary-text {
+  font: inherit;
+  line-height: 1.5;
+}
+
+.session-activity [hidden],
+.session-summary [hidden],
+.session-summary[hidden] {
+  display: none !important;
+}
+
+.session-insights-retry,
+.session-activity-tool,
+.session-summary-close {
+  font: inherit;
+  padding: 0.25rem 0.5rem;
+}

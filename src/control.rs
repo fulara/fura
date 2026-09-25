@@ -396,7 +396,7 @@ async fn ensure_controller_session(state: &AppState) -> Result<String, String> {
         state.clone(),
         transport_session_id.clone(),
         Some(cwd),
-        Vec::new(),
+        vec!["--no-recap".to_string()],
         None,
         None,
     )

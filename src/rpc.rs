@@ -1151,6 +1151,7 @@ where
                 log_rpc_frame(&session_id, &frame);
                 apply_rpc_frame(&state, &session_id, &frame).await;
                 if state.forward_raw_frames
+                    && !is_session_insight_response(&frame)
                     && state
                         .session_runtime
                         .stdin_for_transport(&session_id)
@@ -2671,6 +2672,9 @@ async fn handle_btw_response(
 }
 
 pub(crate) async fn apply_rpc_response(state: &AppState, session_id: &str, frame: &Value) {
+    if handle_session_insight_response(state, session_id, frame).await {
+        return;
+    }
     if handle_session_skills_response(state, session_id, frame).await {
         return;
     }
@@ -3477,7 +3481,7 @@ pub(crate) fn value_str<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
     value.get(key).and_then(|value| value.as_str())
 }
 
-fn rpc_response_data_as<T>(frame: &Value) -> Option<T>
+pub(crate) fn rpc_response_data_as<T>(frame: &Value) -> Option<T>
 where
     T: serde::de::DeserializeOwned,
 {

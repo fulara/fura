@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use crate::{PromptBehavior, PromptImagePayload, SessionRewindPoint, TodoPhaseProjection};
+use crate::{
+    ActivityKind, PromptBehavior, PromptImagePayload, SessionRewindPoint, TodoPhaseProjection,
+};
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
@@ -399,6 +401,18 @@ pub(crate) struct OmpAvailableCommandsResponse {
 pub(crate) enum OmpRpcCommand {
     #[serde(rename = "get_state")]
     GetState { id: String },
+    #[serde(rename = "get_activity")]
+    GetActivity { id: String, session_id: String },
+    #[serde(rename = "get_activity_detail")]
+    GetActivityDetail {
+        id: String,
+        session_id: String,
+        generation: String,
+        kind: ActivityKind,
+        activity_id: String,
+    },
+    #[serde(rename = "get_session_recap")]
+    GetSessionRecap { id: String, session_id: String },
     #[serde(rename = "get_session_skills")]
     GetSessionSkills {
         id: String,

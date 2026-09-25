@@ -682,6 +682,58 @@ export type CodeLocation = {
 
 
 
+export type ActivityStatus = "pending" | "running" | "completed" | "failed" | "cancelled" | "starting" | "ready" | "restarting" | "stopping" | "exited" | "aborted";
+
+export type ActivityItem = {
+  id: string;
+  kind: "job" | "agent" | "service";
+  label: string;
+  status: ActivityStatus;
+  startedAt: number;
+  endedAt?: number;
+  toolCallId?: string;
+  exitCode?: number;
+  queued?: boolean;
+  detailAvailable: boolean;
+};
+
+export type ActivitySourceState = { available: boolean; error?: string };
+
+export type SessionActivitySnapshot = {
+  sessionId: string;
+  generation: string;
+  observedAt: number;
+  items: ActivityItem[];
+  sources: { jobs: ActivitySourceState; agents: ActivitySourceState; services: ActivitySourceState };
+};
+
+export type SessionActivityDetail = {
+  sessionId: string;
+  generation: string;
+  kind: ActivityItem["kind"];
+  activityId: string;
+  text: string;
+  truncated: boolean;
+  observedAt: number;
+};
+
+export type SessionRecap = {
+  id: number;
+  text: string;
+  createdAt: number;
+  sourceLeafId: string | null;
+  stale: boolean | null;
+};
+
+export type SessionRecapSnapshot = {
+  sessionId: string;
+  enabled: boolean;
+  idleSeconds: number;
+  generating: boolean;
+  recap: SessionRecap | null;
+  error?: string;
+};
+
 export type SessionBtwUpdate = {
   type: "session.btw.update";
   targetClientId: string;
@@ -697,6 +749,10 @@ export type SessionBtwUpdate = {
 
 export type ServerMessage =
   | SessionBtwUpdate
+  | { type: "session.activity.result"; requestId: string; sessionId: string; activity: SessionActivitySnapshot }
+  | { type: "session.activity.detail.result"; requestId: string; sessionId: string; detail: SessionActivityDetail }
+  | { type: "session.recap.result"; requestId: string; sessionId: string; state: SessionRecapSnapshot }
+  | { type: "session.insights.error"; requestId: string; sessionId: string; operation: "activity" | "detail" | "recap"; message: string }
   | { type: "session.skills.result"; requestId: string; sessionId: string; state: SessionSkillsState; catalog?: SessionSkillCatalogEntry[] }
   | { type: "session.skills.error"; requestId: string; sessionId: string; message: string; state?: SessionSkillsState }
   | { type: "hello"; serverVersion: string; protocolVersion: number; config: ServerConfig }
@@ -763,6 +819,9 @@ export type WorktreeCreateOptions = {
 export type PlanApprovalMode = "execute" | "compact" | "keep";
 
 export type ClientMessage =
+  | { type: "session.activity.get"; requestId: string; sessionId: string }
+  | { type: "session.activity.detail"; requestId: string; sessionId: string; generation: string; kind: ActivityItem["kind"]; activityId: string }
+  | { type: "session.recap.get"; requestId: string; sessionId: string }
   | ({ type: "session.skills.get"; requestId: string } & SessionSkillsIdentity)
   | ({ type: "session.skills.apply"; requestId: string } & SessionSkillsApplyRequest)
   | { type: "session.btw.start"; clientId: string; sessionId: string; requestId: string; question: string }

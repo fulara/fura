@@ -115,6 +115,67 @@ grids: a long, non-wrapping task description must ellipsize inside its row,
 not widen every message. Long code lines keep their existing wrapping behavior;
 conversation content is not clipped to conceal layout overflow.
 
+### Session activity and saved summary
+
+**Activity** is a collapsed-by-default disclosure inside Transcript, outside the
+conversation scroll container. Its compact heading derives from the current
+snapshot: an individual job/agent label and elapsed time, or counts by kind.
+The same controller serves desktop, Transcript popout/redock and mobile.
+It does not add a Dockview panel, alter saved layouts or change BTW tabs.
+Ask Fura does not expose these controls.
+
+The expanded strip separates active work from recent completions. It shows only
+OMP-registered jobs, the selected root's subagents and explicitly session-owned
+services, not arbitrary OS processes or every project service. Journal identity,
+not an agent's display name, establishes ownership. Terminal history is bounded
+to 20 entries from the last five minutes, after ownership filtering.
+The strip has no stop/restart actions and does not change agent Busy.
+A ready service may remain visible while the main agent is idle.
+
+Output disclosures are read-only plain text, capped at 64 KiB UTF-8 and 200 lines,
+with explicit truncation and unavailable/error states. A **Show tool** link is
+offered only with an originating tool-call ID. Service reads verify both journal
+ownership and immutable service identity, so replacement under the same name
+cannot expose another session's log. Reads do not launch a service broker,
+acquire a lease, consume completion notifications or acknowledge delivery.
+
+Activity is refreshed sequentially every two seconds for the selected connected
+managed session; expanded output is also refreshed. Lost connections retain
+cached output with a stale/unknown indication and stop polling. Source failure
+is not an authoritative empty list. Reconnect refreshes the snapshot; request,
+connection, session and activity-generation correlation reject late replies.
+
+**Summary**, beside the session title, opens the latest persisted OMP recap with
+its saved timestamp and current/stale/unknown freshness. It is a separate
+read-only surface, not an inferred title or a summary synthesized by Fura.
+An open popup refreshes every five seconds; opening, closing, polling and
+reconnecting never start model inference.
+
+OMP's shared TUI/`rpc-ui` recap controller independently schedules generation
+after an eligible terminal idle event. It uses the existing current-model
+recap prompt and `recap.enabled` / `recap.idleSeconds` settings (defaults:
+enabled, 240 seconds), without changing main-context budgets or Busy.
+`--no-recap` disables generation for that RPC host; ordinary `rpc` and direct SDK
+RPC hosts remain passive unless explicitly enabled. Fura's hidden control and
+model-catalog hosts opt out. Disabling generation does not hide saved recaps.
+
+Recaps are stored in `history.db`'s `session_recaps` table, keyed by journal
+identity and bound to the source leaf. Legacy rows without a source leaf show
+unknown freshness. Reads do not append conversation messages or modify JSONL.
+A new admitted prompt invalidates pending work before asynchronous preprocessing;
+maintenance, model/profile changes, session transitions and disposal also reject
+superseded replies. An ignored abort cannot publish into another session or
+overlap a newer recap request.
+
+The browser uses `session.activity.get`, `session.activity.detail` and
+`session.recap.get`; the bridge forwards typed `get_activity`,
+`get_activity_detail` and `get_session_recap` RPC commands. Wire `sessionId`
+remains OMP's `get_state` identity, independently of journal ownership.
+Responses are sent only to the requesting connection, with child/binding checks;
+private insight replies are excluded from raw-frame broadcasts, including
+expired or malformed replies. Reads never claim the dialog or implicitly resume
+a stopped session.
+
 ### Desktop workspace panel lifetime
 
 Top-level Dockview panels (Transcript, Code, Tools, Git changes/Diff and
