@@ -431,6 +431,19 @@ h2 {
   min-width: 0;
 }
 
+.workspace-title-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+}
+
+#sessionSummaryButton {
+  flex: 0 0 auto;
+  padding: 0.2rem 0.4rem;
+  font-size: 0.6875rem;
+}
+
 .workspace-title h2 {
   font-size: 0.8125rem;
   white-space: nowrap;
@@ -780,6 +793,23 @@ h2 {
 .panel-scroll > * {
   min-width: 0;
   max-width: 100%;
+}
+
+.panel-scroll.session-insights-transcript {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+  gap: 0;
+}
+
+.session-insights-conversation {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 /* BTW is local navigation inside Transcript, never another Dockview panel. */

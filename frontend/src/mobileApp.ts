@@ -15,6 +15,7 @@ import {
 } from "./presets";
 import { clearBootstrapToken, consumeBootstrapToken, storeBootstrapToken } from "./bootstrapAuth";
 import type { ConnectionStatus, FuraConnection, WebSocketAuth } from "./connection";
+import { createSessionInsights } from "./sessionInsights";
 import { reconcileChildren, setRenderDocument } from "./dom";
 import {
   askCardRenderKey,
@@ -173,7 +174,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         </div>
         <div class="mobile-session-row">
           <div class="mobile-session-heading">
-            <h2 id="mobileSessionTitle">No session selected</h2>
+            <div class="mobile-session-title-row">
+              <h2 id="mobileSessionTitle">No session selected</h2>
+              <button id="mobileSummary" class="mobile-summary-button" type="button" hidden>Summary</button>
+            </div>
             <p id="mobileSessionMeta">Choose a session to view its transcript.</p>
           </div>
           <div class="mobile-header-actions">
@@ -235,6 +239,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
       <section class="mobile-main" aria-label="Mobile workspace">
         <div id="mobileController" class="mobile-transcript mobile-controller" role="region" aria-label="Ask Fura" hidden></div>
+        <div id="mobileActivity" hidden></div>
         <div id="mobileTranscript" class="mobile-transcript"></div>
       </section>
 
@@ -460,6 +465,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const askFuraButton = requireElement<HTMLButtonElement>(document, "mobileAskFuraButton");
   const controllerView = requireElement<HTMLDivElement>(document, "mobileController");
   const transcript = requireElement<HTMLDivElement>(document, "mobileTranscript");
+  const summaryButton = requireElement<HTMLButtonElement>(document, "mobileSummary");
+  const activityHost = requireElement<HTMLDivElement>(document, "mobileActivity");
   const promptForm = requireElement<HTMLFormElement>(document, "mobilePromptForm");
   const promptInput = requireElement<HTMLTextAreaElement>(document, "mobilePromptInput");
   const sendButton = requireElement<HTMLButtonElement>(document, "mobileSendButton");
@@ -515,6 +522,8 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   let activeSessionId: string | null = readStoredActiveSessionId(window.sessionStorage);
   let projections = new Map<string, SessionProjection>();
   let transcriptRenderCache: MobileTranscriptRenderCache = { nodes: new Map() };
+  const insightSessions = new Set<string>();
+  let insightsInitialized = false;
   const trackedSessionIds = readStoredTrackedSessionIds(window.sessionStorage);
   let pendingRestoreAfterSessionsSnapshot = false;
   const unreadSessions = new Set<string>();
@@ -548,6 +557,35 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   const sessionListView = createSessionListView(sessionsList, {
     onSelectSession: selectSession,
     onDeleteSession: openDeleteSessionPicker,
+  });
+
+  const insights = createSessionInsights(summaryButton, {
+    context: () => {
+      const projection = activeSessionId ? projections.get(activeSessionId) : undefined;
+      return {
+        sessionId: activeSessionId,
+        ready: Boolean(connection?.isOpen() && insightsInitialized && activeSessionId && insightSessions.has(activeSessionId)
+          && projection && (projection.summary.status === "idle" || projection.summary.status === "busy")),
+        visible: activeMobileView === "transcript",
+      };
+    },
+    send,
+    requestId: () => nextClientRequestId("insights"),
+    showTool: toolCallId => {
+      if (!showToolBubbles) applyVisibilityPreferences(true, showEditDiffs, thinkingVisibilityMode);
+      renderActiveSession();
+      const node = [...transcript.querySelectorAll<HTMLElement>("[data-tool-call-id]")]
+        .find(candidate => candidate.dataset.toolCallId === toolCallId);
+      if (!node) return;
+      if (node.tagName === "DETAILS") (node as HTMLDetailsElement).open = true;
+      node.tabIndex = -1;
+      node.focus({ preventScroll: true });
+      node.scrollIntoView({ block: "center" });
+    },
+  });
+  insights.mountActivity(activityHost);
+  document.defaultView?.addEventListener("pagehide", event => {
+    if (!event.persisted) insights.dispose();
   });
 
   askFuraButton.addEventListener("click", () => {
@@ -768,6 +806,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     authGate.hidden = false;
     authSubmit.disabled = true;
     authStatus.textContent = "Connecting…";
+    insightsInitialized = false;
+    insightSessions.clear();
+    insights.disconnect();
     connection?.disconnect();
     connection = createConnection({
       auth: { type: "sessionCookie", token: bridgeToken },
@@ -1891,6 +1932,9 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
   }
 
   function handleConnectionClosed(): void {
+    insightsInitialized = false;
+    insightSessions.clear();
+    insights.disconnect();
     closeMobileRollback(false, true);
     if (!createPendingRequestId) return;
     const requestId = createPendingRequestId;
@@ -1927,8 +1971,10 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
 
 
   function handleServerMessage(message: ServerMessage): void {
+    if (insights.receive(message)) return;
     switch (message.type) {
       case "hello":
+        insightsInitialized = true;
         serverConfig = message.config;
         const helloTextileConfigChanged = setTextileRedmineRootUrl(message.config.textileRedmineRootUrl);
         applyVisibilityPreferences(
@@ -1942,6 +1988,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         if (pendingPresetCommand) resolveMobilePendingPresetCommand();
         console.debug(`[fura-mobile] Connected to fura ${message.serverVersion}.`);
         if (helloTextileConfigChanged) renderActiveSession();
+        insights.sync();
         break;
       case "config.updated":
         serverConfig = message.config;
@@ -1978,6 +2025,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         render();
         break;
       case "session.snapshot": {
+        insightSessions.add(message.sessionId);
         rememberTrackedSessionId(message.sessionId);
         const createdByPendingRequest = isPendingCreatedSession(message.sessionId);
         const previousSnapshotProjection = projections.get(message.sessionId);
@@ -2004,6 +2052,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
           break;
         }
         ({ sessions, projections } = result);
+        insightSessions.add(message.sessionId);
         const projection = projections.get(message.sessionId);
         if (projection) syncVisiblePlanReviewFromProjection(message.sessionId, projection);
         if (!activeSessionId || activeSessionId === message.sessionId) {
@@ -2018,6 +2067,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
         break;
       }
       case "session.exited":
+        insightSessions.delete(message.sessionId);
         appendLog(`Session ${message.sessionId} exited with code ${message.code ?? "unknown"}.`);
         render();
         break;
@@ -2479,6 +2529,7 @@ export function mountMobileApp(options: MobileAppOptions): MobileAppHandle {
     };
   }
   function renderActiveSession(): void {
+    insights.sync();
     if (
       rollbackState
       && rollbackState.phase !== "selecting"

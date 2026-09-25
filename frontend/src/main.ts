@@ -9,6 +9,7 @@ import { createFuraConnection, type ConnectionStatus, type FuraConnection } from
 import { mkEl, reconcileChildren, requireElement, setRenderDocument } from "./dom";
 import { TranscriptBtw, BTW_TOOLTIP } from "./transcriptBtw";
 import { createSessionSkillsView } from "./sessionSkillsView";
+import { createSessionInsights } from "./sessionInsights";
 import { createGitDiffHighlighter } from "./gitDiffHighlight";
 import { splitDiffRows } from "./diffLayout";
 import { renderRangeDiffOutput } from "./rangeDiff";
@@ -254,7 +255,10 @@ app.innerHTML = `
     <section class="workspace">
       <header class="workspace-header">
         <div class="workspace-title">
-          <h2 id="sessionTitle">No session selected</h2>
+          <div class="workspace-title-heading">
+            <h2 id="sessionTitle">No session selected</h2>
+            <button id="sessionSummaryButton" type="button" hidden>Summary</button>
+          </div>
           <p id="sessionMeta">Create or attach to a session to begin.</p>
         </div>
         <div class="workspace-actions">
@@ -1007,6 +1011,55 @@ const sessionSkillsView = createSessionSkillsView(sessionSkillsButton, {
   send,
   requestId: () => nextClientRequestId("session-skills"),
 });
+
+const sessionInsights = createSessionInsights(
+  requireElement<HTMLButtonElement>("sessionSummaryButton"),
+  {
+    context: () => {
+      const sessionId = workspaceMode === "session" ? activeSessionId : null;
+      const summary = sessionId ? currentSessionSummary(sessionId) : undefined;
+      return {
+        sessionId,
+        visible: workspaceMode === "session" && Boolean(sessionId),
+        ready: Boolean(connection?.isOpen() && summary?.kind === "managed"
+          && ["idle", "busy"].includes(summary.status)
+          && rollbackChatState?.phase !== "applying"),
+      };
+    },
+    send,
+    requestId: () => nextClientRequestId("session-insights"),
+    showTool: toolCallId => {
+      if (!activeSessionId) return;
+      desktopDockview?.activatePanel("tools");
+      renderToolsPanelIfNeeded(projections.get(activeSessionId), true);
+      desktopDockview?.withPanel("tools", container => {
+        const card = [...container.querySelectorAll<HTMLElement>("[data-tool-call-id]")]
+          .find(element => element.dataset.toolCallId === toolCallId);
+        if (!card) return;
+        card.scrollIntoView?.({ block: "nearest" });
+        card.tabIndex = -1;
+        card.focus({ preventScroll: true });
+      });
+    },
+  },
+);
+window.addEventListener("beforeunload", () => sessionInsights.dispose());
+const transcriptInsightHosts = new WeakMap<HTMLElement, { activity: HTMLElement; conversation: HTMLElement }>();
+
+function transcriptConversationHost(container: HTMLElement): HTMLElement {
+  let view = transcriptInsightHosts.get(container);
+  if (!view) {
+    const activity = container.ownerDocument.createElement("div");
+    const conversation = container.ownerDocument.createElement("div");
+    conversation.className = "session-insights-conversation";
+    container.classList.add("session-insights-transcript");
+    container.replaceChildren(activity, conversation);
+    view = { activity, conversation };
+    transcriptInsightHosts.set(container, view);
+  }
+  sessionInsights.mountActivity(view.activity);
+  return view.conversation;
+}
 
 function newDiffId(): string {
   return randomUuid();
@@ -1876,6 +1929,7 @@ function connect(token: string): void {
   authSubmit.disabled = true;
   authStatus.textContent = "Connecting…";
   connection?.disconnect();
+  sessionInsights.disconnect();
   sessionSkillsView.close(false);
   transcriptBtw.interrupt();
   btwDrafts.clear();
@@ -1902,6 +1956,7 @@ function connect(token: string): void {
     },
     onClose: () => {
       if (epoch !== connectionEpoch) return;
+      sessionInsights.disconnect();
       for (const pin of pinnedDiffs.values()) pin.disconnect();
       sessionSkillsView.close(false);
       diffFilePicker?.close();
@@ -2073,6 +2128,7 @@ function shouldActivateSnapshot(sessionId: string): boolean {
 }
 
 function handleServerMessage(message: ServerMessage): void {
+  if (sessionInsights.receive(message)) return;
   for (const pin of pinnedDiffs.values()) if (pin.handle(message)) return;
   if (["sessions.snapshot", "session.snapshot", "session.delta", "session.exited"].includes(message.type)) {
     queueMicrotask(() => {
@@ -3868,6 +3924,7 @@ function submitDeleteSessionPicker(): void {
 function render(): void {
   renderSessions();
   renderActiveSession();
+  sessionInsights.sync();
   renderControlConversation();
 }
 
@@ -5390,7 +5447,7 @@ function renderTranscriptPanelIfNeeded(projection: SessionProjection | undefined
   if (!force && !transcriptPanelDirty && !sessionChanged) return;
 
   const rendered = desktopDockview.withPanel("transcript", container => {
-    transcriptBtw.render(container, workspaceMode === "session" ? activeSessionId : null, main => {
+    transcriptBtw.render(transcriptConversationHost(container), workspaceMode === "session" ? activeSessionId : null, main => {
       if (workspaceMode === "controller") renderControllerTranscriptView(main, sessionChanged);
       else renderTranscriptView(main, projection, sessionChanged);
     });

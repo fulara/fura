@@ -48,6 +48,32 @@ body {
   font-size: 0.78rem;
 }
 
+.mobile-session-heading {
+  min-width: 0;
+}
+
+.mobile-session-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.mobile-session-title-row h2 {
+  overflow-wrap: anywhere;
+}
+
+.mobile-summary-button {
+  flex: 0 0 auto;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.45rem;
+}
+
+.mobile-summary-button[hidden],
+#mobileActivity[hidden] {
+  display: none;
+}
+
 .mobile-header-actions {
   display: flex;
   flex: 0 0 auto;
@@ -275,7 +301,20 @@ body {
   min-height: 0;
   overflow: hidden;
   display: grid;
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+#mobileActivity {
+  grid-row: 1;
+  min-height: 0;
+}
+
+#mobileTranscript {
+  grid-row: 2;
+}
+
+#mobileController {
+  grid-row: 1 / -1;
 }
 
 

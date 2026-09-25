@@ -14,10 +14,11 @@ use tracing::warn;
 
 use crate::{
     CodeWorkspaceRegistry, ControlCandidate, DiffReviewWorktreeRegistry, DiffScope,
-    FrontendUiSnapshot, PlanModeProjection, PreparedDiff, PromptImagePayload, ProposedModelConfig,
-    ServerMessage, SessionKind, SessionMode, SessionProjectionDelta, SessionRecord, SessionStatus,
-    ThinkingVisibilityPreference, Timestamp, TodoPhaseProjection, VoiceCommand,
-    append_bridge_debug_event, save_fura_config, sessions_snapshot_from_map,
+    FrontendUiSnapshot, PendingSessionInsight, PlanModeProjection, PreparedDiff,
+    PromptImagePayload, ProposedModelConfig, ServerMessage, SessionKind, SessionMode,
+    SessionProjectionDelta, SessionRecord, SessionStatus, ThinkingVisibilityPreference, Timestamp,
+    TodoPhaseProjection, VoiceCommand, append_bridge_debug_event, save_fura_config,
+    sessions_snapshot_from_map,
 };
 #[derive(Clone)]
 pub(crate) struct AppState {
@@ -570,6 +571,7 @@ pub(crate) struct SessionRuntimeState {
     pub(crate) pending_compaction_commands: Arc<RwLock<HashMap<String, String>>>,
     pub(crate) pending_rewind_rpcs: Arc<RwLock<HashMap<String, PendingRewindRpc>>>,
     pub(crate) pending_session_skills: Arc<RwLock<HashMap<String, PendingSessionSkills>>>,
+    pub(crate) pending_session_insights: Arc<RwLock<HashMap<String, PendingSessionInsight>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -710,6 +712,7 @@ impl SessionRuntimeState {
             pending_compaction_commands: Arc::new(RwLock::new(HashMap::new())),
             pending_rewind_rpcs: Arc::new(RwLock::new(HashMap::new())),
             pending_session_skills: Arc::new(RwLock::new(HashMap::new())),
+            pending_session_insights: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -734,6 +737,13 @@ impl SessionRuntimeState {
         target_session_id: String,
     ) {
         self.pending_session_skills
+            .write()
+            .await
+            .retain(|_, pending| {
+                pending.transport_session_id != transport_session_id
+                    || pending.session_id == target_session_id
+            });
+        self.pending_session_insights
             .write()
             .await
             .retain(|_, pending| {
@@ -765,6 +775,10 @@ impl SessionRuntimeState {
             .write()
             .await
             .remove(transport_session_id);
+        self.pending_session_insights
+            .write()
+            .await
+            .retain(|_, pending| pending.transport_session_id != transport_session_id);
         self.pending_rpc_message_pages
             .write()
             .await

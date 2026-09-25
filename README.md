@@ -30,6 +30,24 @@ exact submission into the conversation. This is optimistic transcript state, not
 an OMP queue listing. Fura reconciles by `clientMessageId`, including skill expansion
 and history refresh; an RPC acknowledgement or queue count alone does not clear it.
 
+## Session activity and saved summary
+
+Desktop Transcript and mobile show a collapsible **Activity** strip above the
+scrolling conversation. It lists the selected session's registered background
+jobs, subagents and services, with bounded recent history and read-only output.
+Background activity is separate from agent Busy: a ready service can outlive a
+turn. Disconnection marks cached state stale instead of claiming work completed.
+There are no process stop/restart controls in this strip.
+
+**Summary**, next to the session title, reads OMP's latest persisted idle recap,
+including its creation time and freshness. Opening it or reconnecting never
+requests inference. Generation is automatic in `rpc-ui`, using OMP's existing
+recap settings and current model; the default idle delay is 240 seconds. This
+background generation can incur model usage even if Summary remains closed.
+Disable it with OMP's `recap.enabled: false` or `--no-recap`; saved recaps remain
+readable. Fura's hidden control/model-catalog hosts always use `--no-recap`.
+See [the UI contract](spec/ui-preferences.md#session-activity-and-saved-summary).
+
 ## Skills
 
 User-invoked `/skill:name` prompts appear as compact user cards, separate from

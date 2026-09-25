@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::{
-    ClientConfig, CodeFileContent, CodeLocation, CodeRange, CodeStatus, CodeTreeEntry,
-    CodeWorkspaceSummary, PresetSummary, ProposedModelConfig, SessionMode, SessionProjection,
-    SessionProjectionDelta, SessionSummary, ThinkingVisibilityPreference,
+    ActivityKind, ClientConfig, CodeFileContent, CodeLocation, CodeRange, CodeStatus,
+    CodeTreeEntry, CodeWorkspaceSummary, InsightOperation, PresetSummary, ProposedModelConfig,
+    SessionActivityDetail, SessionActivitySnapshot, SessionMode, SessionProjection,
+    SessionProjectionDelta, SessionRecapSnapshot, SessionSummary, ThinkingVisibilityPreference,
 };
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub(crate) enum PromptImageType {
@@ -821,6 +822,24 @@ pub(crate) enum ClientMessage {
         images: Option<Vec<PromptImagePayload>>,
         behavior: Option<PromptBehavior>,
     },
+    #[serde(rename = "session.activity.get")]
+    SessionActivityGet {
+        request_id: String,
+        session_id: String,
+    },
+    #[serde(rename = "session.activity.detail")]
+    SessionActivityDetail {
+        request_id: String,
+        session_id: String,
+        generation: String,
+        kind: ActivityKind,
+        activity_id: String,
+    },
+    #[serde(rename = "session.recap.get")]
+    SessionRecapGet {
+        request_id: String,
+        session_id: String,
+    },
     #[serde(rename = "session.skills.get")]
     SessionSkillsGet {
         request_id: String,
@@ -1192,6 +1211,39 @@ pub(crate) enum ServerMessage {
         target_connection_id: Option<u64>,
         request_id: String,
         source_session_id: String,
+        message: String,
+    },
+    #[serde(rename = "session.activity.result")]
+    SessionActivityResult {
+        #[serde(skip)]
+        target_connection_id: u64,
+        request_id: String,
+        session_id: String,
+        activity: SessionActivitySnapshot,
+    },
+    #[serde(rename = "session.activity.detail.result")]
+    SessionActivityDetailResult {
+        #[serde(skip)]
+        target_connection_id: u64,
+        request_id: String,
+        session_id: String,
+        detail: SessionActivityDetail,
+    },
+    #[serde(rename = "session.recap.result")]
+    SessionRecapResult {
+        #[serde(skip)]
+        target_connection_id: u64,
+        request_id: String,
+        session_id: String,
+        state: SessionRecapSnapshot,
+    },
+    #[serde(rename = "session.insights.error")]
+    SessionInsightsError {
+        #[serde(skip)]
+        target_connection_id: u64,
+        request_id: String,
+        session_id: String,
+        operation: InsightOperation,
         message: String,
     },
     #[serde(rename = "session.skills.result")]

@@ -142,6 +142,52 @@ pub(crate) async fn handle_client_message_for_connection(
             images,
             behavior,
         } => send_prompt(state, session_id, text, images, behavior).await,
+        ClientMessage::SessionActivityGet {
+            request_id,
+            session_id,
+        } => {
+            request_session_insight(
+                state,
+                owner_connection_id,
+                request_id,
+                session_id,
+                InsightRequest::Activity,
+            )
+            .await
+        }
+        ClientMessage::SessionActivityDetail {
+            request_id,
+            session_id,
+            generation,
+            kind,
+            activity_id,
+        } => {
+            request_session_insight(
+                state,
+                owner_connection_id,
+                request_id,
+                session_id,
+                InsightRequest::Detail {
+                    generation,
+                    kind,
+                    activity_id,
+                },
+            )
+            .await
+        }
+        ClientMessage::SessionRecapGet {
+            request_id,
+            session_id,
+        } => {
+            request_session_insight(
+                state,
+                owner_connection_id,
+                request_id,
+                session_id,
+                InsightRequest::Recap,
+            )
+            .await
+        }
         ClientMessage::SessionSkillsGet {
             request_id,
             session_id,
@@ -1762,7 +1808,7 @@ pub(crate) async fn handle_model_catalog_list_command(
         state.clone(),
         transport_id.clone(),
         Some(default_cwd),
-        Vec::new(),
+        vec!["--no-recap".to_string()],
         None,
         None,
     )

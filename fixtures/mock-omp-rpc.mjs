@@ -75,6 +75,8 @@ let planExecutionCount = 0;
 let planMode = null;
 let isCompacting = false;
 let contextTokens = 24000;
+const sessionActivities = new Map();
+const sessionRecaps = new Map();
 // Upstream compatibility input: Fura must ignore this standing Goal without changing it.
 const goalMode = {
   enabled: true,
@@ -175,6 +177,36 @@ for await (const line of rl) {
       } else {
         error(command, `unsupported protocol version: ${command.protocolVersion}`);
       }
+      break;
+    }
+    case "get_activity": {
+      if (command.sessionId !== currentSessionId) { error(command, "Session changed"); break; }
+      success(command, {
+        sessionId: currentSessionId, generation: `activity-${currentSessionId}`,
+        observedAt: Date.now(), items: sessionActivities.get(currentSessionId) ?? [],
+        sources: { jobs: { available: true }, agents: { available: true }, services: { available: true } },
+      });
+      break;
+    }
+    case "get_activity_detail": {
+      const item = (sessionActivities.get(currentSessionId) ?? [])
+        .find(item => item.id === command.activityId && item.kind === command.kind);
+      if (command.sessionId !== currentSessionId || command.generation !== `activity-${currentSessionId}` || !item) {
+        error(command, "Activity is no longer available"); break;
+      }
+      success(command, {
+        sessionId: currentSessionId, generation: command.generation, kind: item.kind, activityId: item.id,
+        text: item.kind === "service" ? "Preview listening on loopback\n<img src=x onerror=alert(1)>" : "Build completed successfully",
+        truncated: false, observedAt: Date.now(),
+      });
+      break;
+    }
+    case "get_session_recap": {
+      if (command.sessionId !== currentSessionId) { error(command, "Session changed"); break; }
+      success(command, {
+        sessionId: currentSessionId, enabled: !process.argv.includes("--no-recap"), idleSeconds: 240,
+        generating: false, recap: sessionRecaps.get(currentSessionId) ?? null,
+      });
       break;
     }
     case "get_state": {
@@ -429,6 +461,34 @@ for await (const line of rl) {
         timestamp: now,
       };
       write({ type: "message_end", timestamp: now, message: user });
+      if (sessionRecaps.has(currentSessionId)) sessionRecaps.get(currentSessionId).stale = true;
+      if (promptText.toLowerCase().includes("mock session insights")) {
+        const toolCallId = `insights-tool-${now}`;
+        const owner = currentSessionId;
+        const job = { id: `build-${now}`, kind: "job", label: "Build frontend", status: "running",
+          startedAt: now, toolCallId, detailAvailable: true };
+        const service = { id: `preview-${now}`, kind: "service", label: "Preview server", status: "ready",
+          startedAt: now, toolCallId, detailAvailable: true };
+        sessionActivities.set(owner, [job, service]);
+        const result = { content: [{ type: "text", text: "Background build and preview started." }],
+          details: { async: { state: "running", jobId: job.id, type: "bash" } } };
+        const assistant = { role: "assistant", content: [{ type: "text", text: "The background build and preview are running." }], timestamp: now + 2 };
+        messages.push(user, { role: "toolResult", toolCallId, toolName: "bash", ...result }, assistant);
+        success(command);
+        write({ type: "agent_start", timestamp: now });
+        write({ type: "tool_execution_start", toolCallId, toolName: "bash", args: { command: "mock background build" }, timestamp: now });
+        write({ type: "tool_execution_end", toolCallId, toolName: "bash", result, isError: false, timestamp: now + 1 });
+        write({ type: "message_end", message: assistant, timestamp: now + 2 });
+        write({ type: "agent_end", timestamp: now + 3 });
+        setTimeout(() => {
+          job.status = "completed"; job.endedAt = Date.now(); job.exitCode = 0;
+          sessionRecaps.set(owner, {
+            id: now, text: "Frontend build passed. The preview server is still running. Browser review is next.",
+            createdAt: Date.now(), sourceLeafId: userEntryId, stale: false,
+          });
+        }, 2500);
+        break;
+      }
       if (planMode?.enabled && promptText.toLowerCase().includes("smoke plan")) {
         messages.push(user);
         success(command);
