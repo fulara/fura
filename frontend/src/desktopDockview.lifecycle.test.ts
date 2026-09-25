@@ -53,7 +53,7 @@ function setup(layoutMode: DesktopDockviewLayoutMode = "normal") {
 
 // Only the browser-window boundary is emulated. Dockview performs the actual
 // popout transfer, beforeunload return, group disposal and panel rendering.
-function popupWindow() {
+function popupWindow(closeEvent: "beforeunload" | "pagehide" = "beforeunload") {
   const frame = document.createElement("iframe");
   document.body.append(frame);
   const popup = frame.contentWindow!;
@@ -66,7 +66,7 @@ function popupWindow() {
   vi.spyOn(popup, "close").mockImplementation(() => {
     if (closing) return;
     closing = true;
-    popup.dispatchEvent(new Event("beforeunload"));
+    popup.dispatchEvent(new Event(closeEvent));
   });
   vi.spyOn(window, "open").mockReturnValue(popup);
   return popup;
@@ -192,6 +192,105 @@ describe("desktop Dockview close lifecycle", () => {
     expect(api.getGroupPanel("tools")).toBe(tools);
     expect(tools.api.location.type).toBe("grid");
     expect(desktop.panelMounted("tools")).toBe(true);
+    expect(ready).toHaveBeenCalledTimes(mounts);
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it.each(["beforeunload-checkpoint", "pagehide"] as const)("returns the same popup review across a native %s close boundary", async boundary => {
+    vi.useFakeTimers();
+    const { api, desktop, ready, closed, returned } = setup();
+    desktop.addPinnedPanel("pinnedDiff:native", "Native review");
+    const panel = api.getGroupPanel("pinnedDiff:native")!;
+    const origin = panel.group;
+    let content!: HTMLElement;
+    desktop.withPanel("pinnedDiff:native", element => { content = element; });
+    content.textContent = "Unsent review";
+    const mounts = ready.mock.calls.length;
+    const popup = popupWindow(boundary === "pagehide" ? "pagehide" : "beforeunload");
+    const listeners = vi.spyOn(popup, "addEventListener");
+    const opening = vi.spyOn(api.api, "addPopoutGroup");
+    origin.element.querySelector<HTMLButtonElement>(".panel-popout-btn")!.click();
+    popup.dispatchEvent(new Event("load"));
+    expect(await opening.mock.results[0].value).toBe(true);
+
+    if (boundary === "beforeunload-checkpoint") {
+      const capture = listeners.mock.calls.find(([type, , options]) =>
+        type === "beforeunload" && typeof options === "object" && options?.capture)?.[1];
+      expect(typeof capture).toBe("function");
+      // Browser-native dispatch checkpoints microtasks between listeners.
+      // The adapter's capture listener must not start a transfer before the
+      // library's later native-redock listener has run.
+      (capture as EventListener).call(popup, new Event("beforeunload"));
+      await Promise.resolve();
+      expect(panel.api.getWindow()).toBe(popup);
+      expect(popup.close).not.toHaveBeenCalled();
+    }
+
+    popup.close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.getGroupPanel(panel.id)).toBe(panel);
+    expect(panel.group).toBe(origin);
+    expect(content.ownerDocument).toBe(document);
+    expect(content.isConnected).toBe(true);
+    expect(content.textContent).toBe("Unsent review");
+    expect(ready).toHaveBeenCalledTimes(mounts);
+    expect(closed).not.toHaveBeenCalled();
+    expect(returned).toHaveBeenCalledExactlyOnceWith(panel.id);
+  });
+
+  it.each(["return", "native"] as const)("releases source input overlays for individual popup transfers and %s close", async closeAction => {
+    vi.useFakeTimers();
+    const { api, desktop, host, ready, closed } = setup();
+    desktop.ensureComparePanel();
+    desktop.activatePanel("diffs");
+    const diffs = api.getGroupPanel("diffs")!;
+    const code = api.getGroupPanel("code")!;
+    const originalGroup = diffs.group;
+    let content!: HTMLElement;
+    desktop.withPanel("diffs", element => { content = element; });
+    content.textContent = "Retained review";
+    content.scrollTop = 125;
+    const sourceOverlay = content.closest<HTMLElement>(".dv-render-overlay")!;
+    const codeSourceOverlay = code.view.content.element.closest<HTMLElement>(".dv-render-overlay")!;
+    const mounts = ready.mock.calls.length;
+    const popup = popupWindow();
+    const opening = vi.spyOn(api.api, "addPopoutGroup");
+    originalGroup.element.querySelector<HTMLButtonElement>(".panel-popout-btn")!.click();
+    popup.dispatchEvent(new Event("load"));
+    expect(await opening.mock.results[0].value).toBe(true);
+    api.layout(900, 700);
+    popup.dispatchEvent(new Event("resize"));
+    await vi.advanceTimersByTimeAsync(50);
+
+    // A tabbed source takes Dockview's single-panel path. Its otherwise empty,
+    // still-visible overlay can cover the remaining main transcript.
+    expect(sourceOverlay.isConnected).toBe(false);
+    expect(content.ownerDocument).toBe(popup.document);
+    expect(host.querySelector(".panel-content-transcript")?.isConnected).toBe(true);
+    expect([...host.querySelectorAll(".dv-render-overlay")].every(overlay => overlay.childElementCount > 0)).toBe(true);
+
+    // Transfers into an existing popup and individual returns use the same
+    // ownership boundary, without closing the popup's remaining review.
+    code.api.moveTo({ group: diffs.group });
+    expect(codeSourceOverlay.isConnected).toBe(false);
+    const codePopupOverlay = code.view.content.element.closest<HTMLElement>(".dv-render-overlay")!;
+    expect(codePopupOverlay.ownerDocument).toBe(popup.document);
+    code.api.close();
+    await Promise.resolve();
+    expect(codePopupOverlay.isConnected).toBe(false);
+    expect(code.api.getWindow()).toBe(window);
+    expect(popup.close).not.toHaveBeenCalled();
+
+    if (closeAction === "return") popup.document.querySelector<HTMLButtonElement>(".panel-return-btn")!.click();
+    else popup.close();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(api.getGroupPanel("diffs")).toBe(diffs);
+    expect(diffs.group).toBe(originalGroup);
+    desktop.withPanel("diffs", element => { expect(element).toBe(content); });
+    expect(content.ownerDocument).toBe(document);
+    expect(content.scrollTop).toBe(125);
+    expect(content.textContent).toBe("Retained review");
+    expect([...host.querySelectorAll(".dv-render-overlay")].every(overlay => overlay.childElementCount > 0)).toBe(true);
     expect(ready).toHaveBeenCalledTimes(mounts);
     expect(closed).not.toHaveBeenCalled();
   });

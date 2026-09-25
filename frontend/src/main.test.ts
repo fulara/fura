@@ -1960,6 +1960,56 @@ describe("desktop cog options", () => {
       expect(pinned?.textContent).toContain("/repo");
     });
 
+    it("renders new files full-width beside modified files and preserves pinned review anchors", async () => {
+      const connection = await openDiffs();
+      const request = answerGitRequest(connection, "mixed-files", {
+        summary: { files: [
+          { oldPath: null, newPath: "added.ts", status: "added", added: 2, removed: 0 },
+          { oldPath: "same.ts", newPath: "same.ts", status: "modified", added: 1, removed: 1 },
+        ], truncated: false },
+      });
+      const addedPatch = "diff --git a/added.ts b/added.ts\nnew file mode 100644\n--- /dev/null\n+++ b/added.ts\n@@ -0,0 +1,2 @@\n+const added = 1;\n+\n\\ No newline at end of file";
+      // Match the bridge parser: /dev/null is an explicit null, not an absent line number.
+      const addedRows = simpleDiffRows(addedPatch).map(row => row.type === "line"
+        ? { ...row, location: { ...row.location, oldPath: null } }
+        : row.type === "file" || row.type === "hunk" ? { ...row, oldPath: null } : row);
+      const modifiedPatch = "diff --git a/same.ts b/same.ts\n@@ -1 +1 @@\n-const before = 1;\n+const after = 2;";
+      const emitContent = (file: { newPath: string } | null, patch: string, rows: DiffRow[]) => {
+        connection.emit({ type: "diff.content", content: {
+          targetClientId: request.clientId, diffId: request.diffId, scope: "sessionChanges",
+          comparisonKey: "mixed-files", file, patch, rows, truncated: false, contextLines: 3, generatedAt: "now",
+        } });
+      };
+      emitContent(null, `${addedPatch}\n${modifiedPatch}`, [...addedRows, ...simpleDiffRows(modifiedPatch)]);
+      const layout = document.querySelector<HTMLSelectElement>("#testDiffPanel .diff-layout-select")!;
+      layout.value = "split";
+      layout.dispatchEvent(new Event("change"));
+      document.querySelector<HTMLButtonElement>('#testDiffPanel button[aria-label="Pin as new tab"]')!.click();
+      await Promise.resolve();
+      for (const root of [document.querySelector("#testDiffPanel")!, document.querySelector(".pinned-diff-view")!]) {
+        const lines = root.querySelector(".diff-lines")!;
+        const fullWidth = [...lines.querySelectorAll<HTMLElement>(":scope > .diff-line-wrap")];
+        expect(fullWidth.map(line => line.querySelector(".diff-line-content")!.textContent)).toEqual(["+const added = 1;", "+"]);
+        expect(fullWidth.map(line => line.querySelector(".diff-gutter")!.textContent)).toEqual(["1", "2"]);
+        expect(fullWidth[0].querySelector(".hljs-keyword")?.textContent).toBe("const");
+        expect(fullWidth[1].nextElementSibling?.textContent).toContain("\\ No newline at end of file");
+        expect(lines.querySelector(".diff-split-gap")).toBeNull();
+        expect(lines.querySelectorAll(".diff-split-row")).toHaveLength(1);
+        expect(lines.querySelector('[data-diff-side="left"] .diff-line-content')?.textContent).toBe("-const before = 1;");
+        expect(lines.querySelector('[data-diff-side="right"] .diff-line-content')?.textContent).toBe("+const after = 2;");
+      }
+      const pinned = document.querySelector(".pinned-diff-view")!;
+      pinned.querySelector<HTMLButtonElement>(".diff-line-add .diff-comment-btn")!.click();
+      const input = document.querySelector<HTMLTextAreaElement>(".pinned-diff-view .review-comment-composer textarea")!;
+      input.value = "Review the new file";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.form!.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      expect(connection.sent).toContainEqual(expect.objectContaining({
+        type: "review.comment.create", comparisonKey: "mixed-files",
+        anchor: expect.objectContaining({ oldPath: null, newPath: "added.ts", side: "right", kind: "add", newLine: 1, text: "+const added = 1;" }),
+      }));
+    });
+
     it("keeps two pinned views local across session and workspace changes", async () => {
       const connection = await openDiffs();
       const original = document.querySelector<HTMLElement>("#testDiffPanel .diffs-main-body")!;

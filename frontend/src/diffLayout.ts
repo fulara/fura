@@ -3,6 +3,7 @@ import type { DiffLineLocation, DiffRow } from "./protocol";
 export type DiffSplitCell = { index: number; noteIndex?: number };
 export type DiffSplitRow =
   | { type: "full"; index: number }
+  | { type: "added"; index: number }
   | { type: "pair"; left: DiffSplitCell | null; right: DiffSplitCell | null };
 
 function anchored(row: DiffRow): row is Extract<DiffRow, { type: "line" }> {
@@ -40,6 +41,13 @@ export function splitDiffRows(rows: readonly DiffRow[]): DiffSplitRow[] {
       continue;
     }
     const { location } = row;
+    // The parser maps /dev/null and new-file headers to a null oldPath.
+    // An insertion-only hunk in an existing file still has an old path.
+    if (location.kind === "add" && (location.oldPath === null || location.oldPath === "/dev/null")) {
+      flush();
+      result.push({ type: "added", index });
+      continue;
+    }
     if (
       previous &&
       (previous.hunk !== location.hunk ||

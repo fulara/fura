@@ -143,12 +143,27 @@ request returns only that panel. Existing content instances survive; original ma
 positions are preferred, with a deterministic main-workspace fallback when the
 target is gone. Tabs collected from different origins return to their own
 surviving groups. Normal and diff-review workspaces retain separate ownership.
+The adapter observes both `beforeunload` and `pagehide`, since native browser
+close can omit `beforeunload`. It captures return state once per closing document.
+If panels are still detached at the microtask checkpoint, return correction waits
+for a task in the main window: native events may run microtasks between capture
+and bubble listeners, so correction must not race Dockview's own redock handler.
+If that handler never runs, the same correction returns the retained panels.
 
 Transfer preserves content, draft, review identity, comments, preferences and
 scroll; it does not cancel pending diff/Compare responses or restart History
 smart-entry. BTW conversation subtabs remain independently closeable.
 Restoring a popup's content focus never overrides a control already focused in
 the destination window, such as the main composer.
+
+Main-window transcript controls and wheel scrolling remain usable while a popup
+is open and after redocking. Dockview 5.2 does not release the source render
+container when an individual tab moves between main and popup groups. The adapter
+tracks render ownership at group removal/addition and detaches the old container
+only when ownership changes, removing its empty input-intercepting overlay and
+listeners. Same-container tab moves retain their overlay; whole-group moves stay
+Dockview-owned. This is lifecycle cleanup, not a blanket
+pointer-events override. Dependency upgrades must recheck this compatibility fix.
 
 Ordinary layout saves retain native popup geometry. Main-page shutdown saves
 return positions synchronously, without moving content, reopening windows or

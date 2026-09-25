@@ -71,7 +71,7 @@ describe("split Git diff layout", () => {
     expect(splitDiffRows(rows)).toEqual([pair(0, null), pair(null, 1), pair(2, null), pair(null, 3), pair(4, null), pair(null, 5)]);
   });
 
-  it("preserves insertion/deletion-only files and distinguishes blank source lines from gaps", () => {
+  it("renders added files full-width and distinguishes blank source lines from deletion gaps", () => {
     const rows: DiffRow[] = [
       line("add", "", { oldPath: null, newPath: "new.ts" }),
       line("add", "new", { oldPath: null, newPath: "new.ts", newLine: 2 }),
@@ -80,7 +80,21 @@ describe("split Git diff layout", () => {
       line("remove", "old", { oldPath: "deleted.ts", newPath: "deleted.ts", oldLine: 2 }),
       line("context", ""),
     ];
-    expect(splitDiffRows(rows)).toEqual([pair(null, 0), pair(null, 1), full(2), pair(3, null), pair(4, null), pair(5, 5)]);
+    expect(splitDiffRows(rows)).toEqual([{ type: "added", index: 0 }, { type: "added", index: 1 }, full(2), pair(3, null), pair(4, null), pair(5, 5)]);
+  });
+
+  it("keeps insertion-only hunks split unless the old file is explicitly absent", () => {
+    const rows = [
+      line("add", "inserted at start", { hunk: "@@ -0,0 +1 @@" }),
+      line("add", "missing old-path metadata", { oldPath: undefined }),
+      line("add", "new file", { oldPath: "/dev/null", newPath: "added.ts" }),
+      note,
+      line("remove", "old", { oldPath: "modified.ts", newPath: "modified.ts" }),
+      line("add", "replacement", { oldPath: "modified.ts", newPath: "modified.ts" }),
+    ];
+    expect(splitDiffRows(rows)).toEqual([
+      pair(null, 0), pair(null, 1), { type: "added", index: 2 }, full(3), pair(4, 5),
+    ]);
   });
 
   it("attaches no-newline metadata only to its preceding source side without breaking a replacement", () => {

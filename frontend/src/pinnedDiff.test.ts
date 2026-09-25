@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PinnedDiff, pinnedPatchKey } from "./pinnedDiff";
 import type { ClientMessage, DiffReviewableState, ServerMessage } from "./protocol";
+import { createGitHistoryState, type GitHistoryState } from "./gitHistory";
 
 function state(key = "original"): DiffReviewableState {
   return {
@@ -12,11 +13,11 @@ function state(key = "original"): DiffReviewableState {
   };
 }
 
-function harness(clientId = "client-a", initial = state()) {
+function harness(clientId = "client-a", initial = state(), history?: GitHistoryState) {
   const sent: ClientMessage[] = [];
   let sequence = 0;
   const pin = new PinnedDiff(clientId, "session-a", "Agent A", initial,
-    { selectedFile: "a.ts", layout: "split", ignoreWhitespace: false, changeKind: "unstaged" },
+    { selectedFile: "a.ts", layout: "split", ignoreWhitespace: false, changeKind: "unstaged", history },
     message => { sent.push(message); return true; }, () => `generation-${++sequence}`, () => {});
   pin.remember(pinnedPatchKey(initial, "a.ts"), { patch: "old patch", rows: [], truncated: false, contextLines: 3 });
   return { pin, sent };
@@ -104,6 +105,64 @@ describe("PinnedDiff request ownership", () => {
     const { pin, sent } = harness("history-owner", initial);
     pin.refresh();
     expect(sent[0]).toMatchObject({ type: "sessionChanges.request", sessionId: "session-a", repoId: "/repo/a", currentCommitOid: "b".repeat(40) });
+  });
+
+  it("browses a captured branch independently and rejects superseded commit and branch replies", () => {
+    const first = "b".repeat(40);
+    const older = "a".repeat(40);
+    const source = createGitHistoryState("/repo/a");
+    source.view = "history";
+    source.selectedOid = first;
+    source.page = {
+      repoRoot: "/repo/a", branch: "topic", headOid: first, historyHeadOid: first,
+      historyRef: null, historyTipOid: first, branches: [], branchesTruncated: false, nextCursor: null,
+      commits: [first, older].map(oid => ({ oid, shortOid: oid.slice(0, 12), subject: oid,
+        message: oid, committedAt: "2026-09-25T10:00:00Z", parentOids: [], isMerge: false })),
+    };
+    const initial = state();
+    initial.review.currentCommitOid = first;
+    const { pin, sent } = harness("history-pin", initial, source);
+    expect(pin.history?.historyRef).toBe("refs/heads/topic");
+    pin.requestHistory("head-cursor");
+    expect(sent.at(-1)).toMatchObject({ type: "git.history.request", historyRef: null, cursor: "head-cursor" });
+    pin.handle({ type: "git.history", targetClientId: pin.clientId, sessionId: "session-a",
+      requestId: pin.history!.requestId!, page: { ...source.page, commits: [] }, error: null });
+    expect(pin.history?.error).toBeNull();
+    expect(pin.history?.historyRef).toBe("refs/heads/topic");
+    expect(pin.history?.selectedOid).toBe(first);
+    source.page.commits = [];
+    source.historyRef = "refs/heads/elsewhere";
+    pin.selectCommit(older);
+    expect(pin.history?.page?.commits.map(commit => commit.oid)).toEqual([first, older]);
+    expect(source.selectedOid).toBe(first);
+    const obsolete = summary(pin, "older");
+    pin.selectCommit(first);
+    pin.handle(obsolete);
+    expect(pin.state.comparison.comparisonKey).toBe("original");
+    expect(sent.at(-1)).toMatchObject({ type: "sessionChanges.request", clientId: "history-pin",
+      sessionId: "session-a", repoId: "/repo/a", currentCommitOid: first, selectedFile: null });
+    pin.requestHistory();
+    const oldRequest = pin.history!.requestId!;
+    expect(sent.at(-1)).toMatchObject({ type: "git.history.request", historyRef: "refs/heads/topic" });
+    pin.selectBranch("refs/heads/main");
+    pin.handle({ type: "git.history", targetClientId: pin.clientId, sessionId: "session-a",
+      requestId: oldRequest, page: { ...source.page, historyRef: "refs/heads/topic" }, error: null });
+    expect(pin.history?.selectedOid).toBeNull();
+    const page = { ...source.page, historyRef: "refs/heads/main",
+      commits: [{ oid: older, shortOid: older.slice(0, 12), subject: "Main", message: "Main",
+        committedAt: "2026-09-25T10:00:00Z", parentOids: [], isMerge: false }] };
+    pin.handle({ type: "git.history", targetClientId: pin.clientId, sessionId: "session-a",
+      requestId: pin.history!.requestId!, page, error: null });
+    expect(pin.history?.selectedOid).toBe(older);
+    expect(sent.at(-1)).toMatchObject({ type: "sessionChanges.request", currentCommitOid: older });
+    pin.requestHistory();
+    pin.handle({ type: "git.history", targetClientId: pin.clientId, sessionId: "session-a",
+      requestId: pin.history!.requestId!, page: { ...page, commits: [] }, error: null });
+    expect(pin.history?.selectedOid).toBe(older);
+    pin.selectView("changes");
+    expect(sent.at(-1)).toMatchObject({ type: "sessionChanges.request", currentCommitOid: null, changeKind: "unstaged" });
+    pin.selectView("history");
+    expect(sent.at(-1)).toMatchObject({ type: "sessionChanges.request", currentCommitOid: older });
   });
 
   it("pins historical resolved OIDs rather than branch labels", () => {

@@ -182,12 +182,24 @@ coexist. They use the same file/patch renderer, parser, highlighting, split layo
 and comment anchors, with separate controllers and mutable UI state. Native
 Range-diff explicitly disables Pin because it compares patches, not file versions.
 
-A pin captures the selected canonical worktree, Git group or resolved comparison
-endpoints, selected immutable History OID, file, layout/whitespace settings,
-available patch cache, scroll and local review draft. It reviews that comparison,
-not a moving branch-tip/history browser. Branch movement cannot replace its OID.
+A session-backed pin captures the canonical worktree, Current changes group,
+viewed branch name, selected History OID, file, layout/whitespace settings,
+available patch cache, scroll and local review draft. It is an independent
+repository browser, not a frozen commit-only view: **History** retains its own
+branch picker, clickable commits, older pages and `n`/`p` navigation; **Current
+changes** returns to the captured worktree/group. Pinning checkout History resolves
+its branch name so later checkout changes do not retarget the pin. Detached HEAD
+keeps HEAD semantics. Choosing another branch inside the pin is explicit and local.
+Ordinary ref Compare pins still capture resolved comparison endpoints.
 Two sessions sharing one worktree share its Git changes; pinning is not attribution
 or isolation of one agent's edits.
+
+**Latest** refreshes the pin's viewed branch without replacing its selected
+commit; choosing a commit changes only that pin's comparison. **Refresh** also
+reloads the displayed comparison. History responses have independent request IDs,
+repository/ref validation and bounded pages; stale replies cannot replace a newer
+selection. Older pages retain their original cursor/ref binding even when the
+initial page was loaded through HEAD and the pin now names that branch explicitly.
 
 Switching conversations, ordinary repositories, normal/diffReview workspace,
 focus or visibility does not retarget or refresh pins. **Refresh**, an uncached
@@ -267,6 +279,13 @@ have no source text, gutter or actions; an actual blank source line keeps its
 number. Metadata stays full-width. No-newline markers stay with the preceding
 source side. Binary/unsupported or unanchored patch content remains unified with
 a fallback explanation; no content outside the supplied hunks is invented.
+
+Entirely added files use full-width source rows even with **Side by side**
+selected, including mixed aggregates and pinned views. The canonical parser's
+explicit absent old path (`null` / `/dev/null`) identifies a new file; an
+insertion-only hunk in an existing file does not. All-new patches omit the
+old/new column heading and split minimum width. Line numbers, highlighting,
+blank lines, no-newline markers and right-side review anchors stay intact.
 
 Narrow docked panes scroll the patch horizontally rather than crushing source
 columns; expanding or popping out the pane shows both columns together.

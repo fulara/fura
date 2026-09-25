@@ -7927,6 +7927,7 @@ function pinDiffView(annotationKey: string, state: DiffReviewableState, sourceRo
   const owner = annotationKey === "compareDiff" ? null : annotationKey;
   const pin = new PinnedDiff(randomUuid(), owner, owner ? currentSessionSummary(owner)?.title || owner : "No agent",
     state, { selectedFile: sessionChangesSelectedFiles.get(annotationKey) ?? null, layout: diffLayout, ignoreWhitespace: diffIgnoreWhitespace,
+      history: owner ? gitReviewFor(owner, state.comparison.repoRoot) : undefined,
       changeKind: diffRequestModeForAnnotationKey(annotationKey) === "sessionChanges" ? sessionChangesKinds.get(annotationKey) ?? "unstaged" : undefined },
     send, randomUuid, () => queueMicrotask(() => renderPinnedDiff(pin.id)));
   for (const [key, patch] of diffPatchCache) {
@@ -7942,8 +7943,8 @@ function pinDiffView(annotationKey: string, state: DiffReviewableState, sourceRo
   }
   const filter = diffFileFilters.get(annotationKey);
   if (filter) diffFileFilters.set(pin.id, filter);
-  const mode = pin.target.scope === "sessionChanges" && !pin.target.currentCommitOid
-    ? `Current ${pin.target.changeKind}` : `Fixed ${state.comparison.rightTreeOrCommit.slice(0, 12)}`;
+  const mode = pin.history ? `${pin.history.view === "history" ? "History" : "Current"} ${pin.history.historyRef ?? "HEAD"}`
+    : `Fixed ${state.comparison.rightTreeOrCommit.slice(0, 12)}`;
   const title = `${shortPath(pin.target.repoRoot)} · ${mode}`;
   pinnedPanelOwners.set(pin.id, dockview);
   if (!dockview.addPinnedPanel(pin.id, title)) { closePinnedDiff(pin.id); return; }
@@ -7987,6 +7988,9 @@ function renderPinnedDiff(id: string): void {
     setRenderDocument(container.ownerDocument);
     const scroll = captureDiffViewScroll(container);
     const filterFocus = captureDiffFilterFocus(container);
+    const restoreBranchPicker = preserveHistoryBranchPicker(container);
+    const historyScroll = container.querySelector(".git-history-list")?.scrollTop ?? 0;
+    const historyFocused = Boolean(container.ownerDocument.activeElement?.closest(".git-history-browser"));
     const composer = container.querySelector<HTMLTextAreaElement>(".review-comment-composer-input");
     const composerSelection = composer && container.ownerDocument.activeElement === composer
       ? { start: composer.selectionStart, end: composer.selectionEnd, direction: composer.selectionDirection, top: composer.scrollTop } : null;
@@ -7997,6 +8001,8 @@ function renderPinnedDiff(id: string): void {
     container.replaceChildren();
     const root = mkEl("div");
     root.className = "diffs-view pinned-diff-view";
+    root.classList.toggle("pinned-history-mode", pin.history?.view === "history");
+    root.classList.toggle("git-review-view", Boolean(pin.history));
     root.dataset.pinnedId = id;
     root.dataset.panelId = id;
     root.dataset.reviewTarget = diffReviewTarget(id);
@@ -8016,6 +8022,7 @@ function renderPinnedDiff(id: string): void {
     heading.textContent = `Pinned · ${pin.target.scope === "sessionChanges"
       ? pin.target.currentCommitOid ? `History ${pin.target.currentCommitOid.slice(0, 12)}` : `Current changes (${pin.target.changeKind})`
       : "Fixed comparison"}`;
+    if (pin.history) heading.textContent = `Pinned · ${pin.history.historyRef ?? "HEAD"}`;
     const repo = mkEl("code");
     repo.textContent = pin.target.repoRoot;
     const recipient = mkEl("p");
@@ -8025,13 +8032,18 @@ function renderPinnedDiff(id: string): void {
     refresh.type = "button";
     refresh.textContent = "Refresh";
     refresh.setAttribute("aria-label", "Refresh");
-    refresh.title = "Refresh this captured target only. Session changes and focus never refresh a pin.";
+    refresh.title = "Refresh this repository and branch only. Session changes and focus never refresh a pin.";
     refresh.disabled = pin.loading || Boolean(pin.unavailable) || !connection?.isOpen();
-    refresh.addEventListener("click", () => pin.refresh());
+    refresh.addEventListener("click", () => {
+      if (pin.history) pin.requestHistory();
+      if (!pin.history || pin.history.view === "changes" || pin.history.selectedOid) pin.refresh();
+    });
     header.append(heading, repo, recipient, refresh);
     const freshness = mkEl("p");
     freshness.className = "pinned-diff-recipient";
-    freshness.textContent = "Captured result · Refresh manually to read this source again.";
+    freshness.textContent = pin.history
+      ? "Independent repository view · Choose commits here; Refresh updates branch history."
+      : "Captured result · Refresh manually to read this source again.";
     header.append(freshness);
     const reason = pin.unavailable ?? pin.error ?? (pin.loading ? "Refreshing… Showing previous result." : pinnedActionError(pin));
     if (reason) {
@@ -8042,12 +8054,60 @@ function renderPinnedDiff(id: string): void {
       header.append(status);
     }
     top.append(header);
+    if (pin.history) {
+      const history = pin.history;
+      const navigation = mkEl("nav");
+      navigation.className = "git-review-navigation";
+      navigation.setAttribute("aria-label", "Git review views");
+      for (const [view, label] of [["changes", "Current changes"], ["history", "History"]] as const) {
+        const button = mkEl("button");
+        button.type = "button";
+        button.textContent = label;
+        button.setAttribute("aria-pressed", String(history.view === view));
+        button.disabled = Boolean(pin.unavailable);
+        button.addEventListener("click", () => pin.selectView(view));
+        navigation.append(button);
+      }
+      const identity = mkEl("div");
+      identity.className = "git-repository-identity";
+      heading.className = "git-head-label";
+      heading.title = heading.textContent;
+      repo.className = "git-root-path";
+      repo.title = pin.target.repoRoot;
+      identity.append(heading, repo, recipient);
+      navigation.append(refresh);
+      freshness.remove();
+      header.classList.add("git-review-header");
+      header.title = "Independent repository view. Refresh updates branch history without changing the selected commit.";
+      header.prepend(identity, navigation);
+      root.prepend(header);
+      if (history.view === "history") {
+        top.append(renderGitHistoryBrowser(history, {
+          select: oid => pin.selectCommit(oid),
+          selectBranch: ref => pin.selectBranch(ref),
+          loadOlder: () => { if (history.page?.nextCursor && !history.requestId) pin.requestHistory(history.page.nextCursor); },
+          refresh: () => pin.requestHistory(),
+        }));
+        root.addEventListener("keydown", event => {
+          if (event.defaultPrevented || event.isComposing || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+          if ((event.target as Element).closest("input, textarea, select, [contenteditable]")) return;
+          if (event.key !== "n" && event.key !== "p") return;
+          const index = history.page?.commits.findIndex(commit => commit.oid === history.selectedOid) ?? -1;
+          const next = index < 0 ? undefined : history.page?.commits[index + (event.key === "n" ? -1 : 1)];
+          if (next) { event.preventDefault(); pin.selectCommit(next.oid); }
+        });
+      }
+    }
     sidebar.append(top, files);
     const main = mkEl("section");
     main.className = "diffs-main";
     root.append(sidebar, main);
     container.append(root);
-    renderReviewableDiff(id, pin.state, top, files, main, Boolean(pin.ownerSessionId), pin.scope);
+    if (pin.history?.view === "history" && !pin.history.selectedOid) {
+      renderDiffMessage(main, pin.history.error ?? (pin.history.requestId ? "Loading commit history…" : "Select a commit to review."), Boolean(pin.history.error));
+    } else {
+      renderReviewableDiff(id, pin.state, top, files, main, Boolean(pin.ownerSessionId), pin.scope);
+    }
     if (pin.stale) {
       root.dataset.refreshRetained = "true";
       root.setAttribute("aria-busy", String(pin.loading));
@@ -8055,6 +8115,13 @@ function renderPinnedDiff(id: string): void {
     }
     restoreDiffViewScroll(container, scroll);
     restoreDiffFilterFocus(container, filterFocus);
+    const historyList = root.querySelector(".git-history-list");
+    if (historyList) historyList.scrollTop = historyScroll;
+    if (historyFocused) {
+      (root.querySelector<HTMLElement>(".git-history-commit[aria-pressed='true']") ?? root).focus({ preventScroll: true });
+    }
+    restoreBranchPicker?.();
+    if (pin.history) pinnedPanelOwners.get(id)?.setPanelTitle(pin.id, `${shortPath(pin.target.repoRoot)} · ${pin.history.view === "history" ? "History" : "Current"} ${pin.history.historyRef ?? "HEAD"}`);
     const commit = root.querySelector<HTMLDetailsElement>(".diff-commit-message");
     if (commit && expandedCommit === commit.dataset.comparisonKey) commit.open = true;
     if (composerSelection) {
@@ -8893,14 +8960,18 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
     }
   } else {
     const layout = splitDiffRows(rows);
-    const headings = mkEl("div");
-    headings.className = "diff-split-head";
-    for (const label of ["Old / removed", "New / added"]) {
-      const heading = mkEl("span");
-      heading.textContent = label;
-      headings.append(heading);
+    if (layout.some(row => row.type === "pair")) {
+      const headings = mkEl("div");
+      headings.className = "diff-split-head";
+      for (const label of ["Old / removed", "New / added"]) {
+        const heading = mkEl("span");
+        heading.textContent = label;
+        headings.append(heading);
+      }
+      fragment.append(headings);
+    } else {
+      diff.classList.remove("diff-lines-split");
     }
-    fragment.append(headings);
     if (layout.every(row => row.type === "full") || layout.some(row => row.type === "full" && rows[row.index].type === "line")) {
       const note = mkEl("p");
       note.className = "diff-layout-note";
@@ -8908,7 +8979,7 @@ function renderDiffRows(container: HTMLElement, annotationKey: string, state: Di
       fragment.append(note);
     }
     for (const row of layout) {
-      if (row.type === "full") {
+      if (row.type !== "pair") {
         appendDiffRow(fragment, rows[row.index], annotationKey, state, annotations, comments, key, allowPromptActions, requestMode, highlighter, row.index);
         continue;
       }

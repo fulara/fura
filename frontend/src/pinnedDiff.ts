@@ -1,5 +1,6 @@
 import type { ClientMessage, DiffDetailMode, DiffRefInput, DiffReviewableState, DiffRow, DiffScope, ServerMessage } from "./protocol";
 import type { PinnedDiffPanelId } from "./desktopDockview";
+import { acceptGitHistoryResult, beginGitHistoryRequest, createGitHistoryState, selectGitHistoryRef, type GitHistoryState, type GitReviewView } from "./gitHistory";
 
 export type PinnedPatch = { patch: string; truncated: boolean; rows: DiffRow[]; contextLines: number };
 export type PinnedTarget =
@@ -15,6 +16,8 @@ export class PinnedDiff {
   readonly id: PinnedDiffPanelId;
   readonly target: PinnedTarget;
   readonly cache = new Map<string, PinnedPatch>();
+  readonly history: GitHistoryState | null;
+  private requestedHistoryRef: string | null = null;
   state: DiffReviewableState;
   selectedFile: string | null;
   layout: "unified" | "split";
@@ -35,7 +38,7 @@ export class PinnedDiff {
     readonly ownerSessionId: string | null,
     readonly ownerLabel: string,
     state: DiffReviewableState,
-    settings: { selectedFile: string | null; layout: "unified" | "split"; ignoreWhitespace: boolean; changeKind?: "unstaged" | "staged" | "untracked" },
+    settings: { selectedFile: string | null; layout: "unified" | "split"; ignoreWhitespace: boolean; changeKind?: "unstaged" | "staged" | "untracked"; history?: GitHistoryState },
     private readonly send: (message: ClientMessage) => boolean,
     private readonly uuid: () => string,
     private readonly changed: () => void,
@@ -53,6 +56,19 @@ export class PinnedDiff {
       : { scope: "compareDiff", repoRoot: comparison.repoRoot,
         base: { kind: "gitRef", value: comparison.leftTreeOrCommit },
         head: (comparison.displayedPatchRange?.head ?? comparison.head).kind === "workingTree" ? { kind: "workingTree" } : { kind: "gitRef", value: comparison.rightTreeOrCommit } };
+    this.history = this.target.scope === "sessionChanges" ? createGitHistoryState(comparison.repoRoot) : null;
+    if (this.history) {
+      const source = settings.history;
+      if (source) {
+        this.history.branches = [...source.branches];
+        this.history.branchesTruncated = source.branchesTruncated;
+        // Capture the branch name, not HEAD which may later point at another branch.
+        this.history.historyRef = source.historyRef ?? (source.page?.branch ? `refs/heads/${source.page.branch}` : null);
+        this.history.page = source.page ? { ...source.page, commits: [...source.page.commits] } : null;
+      }
+      this.history.selectedOid = state.review.currentCommitOid ?? null;
+      this.history.view = this.history.selectedOid ? "history" : "changes";
+    }
   }
 
   get scope(): DiffScope { return this.target.scope; }
@@ -68,6 +84,51 @@ export class PinnedDiff {
       if (oldest === undefined) break;
       bytes -= this.cache.get(oldest)!.patch.length;
       this.cache.delete(oldest);
+    }
+  }
+
+  requestHistory(cursor: string | null = null): void {
+    if (!this.history || this.target.scope !== "sessionChanges" || this.closed || this.unavailable) return;
+    // Older pages keep their original cursor/ref binding; Latest resolves the captured branch.
+    this.requestedHistoryRef = cursor && this.history.page ? this.history.page.historyRef : this.history.historyRef;
+    const requestId = this.uuid();
+    beginGitHistoryRequest(this.history, requestId, cursor);
+    if (!this.send({ type: "git.history.request", clientId: this.clientId, requestId,
+      sessionId: this.target.sessionId, repoId: this.target.repoRoot, historyRef: this.requestedHistoryRef, cursor })) {
+      acceptGitHistoryResult(this.history, requestId, null, "Not connected to the Fura bridge.");
+    }
+    this.changed();
+  }
+
+  selectBranch(ref: string | null): void {
+    if (!this.history || this.closed || this.unavailable || this.history.historyRef === ref) return;
+    this.cancel("refreshed");
+    this.loading = false;
+    this.pendingState = null;
+    selectGitHistoryRef(this.history, ref);
+    this.requestHistory();
+  }
+
+  selectCommit(oid: string): void {
+    if (!this.history || this.target.scope !== "sessionChanges" || this.closed || this.unavailable) return;
+    this.history.view = "history";
+    this.history.selectedOid = oid;
+    this.target.currentCommitOid = oid;
+    this.selectedFile = null;
+    this.refresh();
+  }
+
+  selectView(view: GitReviewView): void {
+    if (!this.history || this.target.scope !== "sessionChanges" || this.closed || this.unavailable) return;
+    this.history.view = view;
+    if (view === "history") {
+      const oid = this.history.selectedOid ?? this.history.page?.commits[0]?.oid;
+      if (oid) this.selectCommit(oid);
+      else this.requestHistory();
+    } else {
+      this.target.currentCommitOid = null;
+      this.selectedFile = null;
+      this.refresh();
     }
   }
 
@@ -105,6 +166,18 @@ export class PinnedDiff {
   }
 
   handle(message: ServerMessage): boolean {
+    if (message.type === "git.history") {
+      if (message.targetClientId !== this.clientId) return false;
+      if (this.closed || this.unavailable || !this.history || this.target.scope !== "sessionChanges"
+        || message.sessionId !== this.target.sessionId) return true;
+      const result = { ...this.history, historyRef: this.requestedHistoryRef };
+      if (!acceptGitHistoryResult(result, message.requestId, message.page, message.error)) return true;
+      Object.assign(this.history, result, { historyRef: this.history.historyRef });
+      if (this.history.view === "history" && !this.history.selectedOid && this.history.page?.commits[0]) {
+        this.selectCommit(this.history.page.commits[0].oid);
+      } else this.changed();
+      return true;
+    }
     let client: string | null | undefined;
     let diffId: string | null | undefined;
     let scope: string | undefined;
@@ -174,12 +247,17 @@ export class PinnedDiff {
   }
 
   disconnect(): void {
+    if (this.history) {
+      this.history.requestId = null;
+      this.history.error = "Connection closed. Refresh history to retry.";
+    }
     this.cancel("closed");
     this.generation++;
     this.fail("Connection closed. Showing the captured result; Refresh to reconnect this pin.");
   }
 
   close(): void {
+    if (this.history) this.history.requestId = null;
     this.closed = true;
     this.cancel("closed");
     this.cache.clear();

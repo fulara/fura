@@ -83,6 +83,7 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
   let detachingPanel: PinnedDiffPanelId | undefined;
   let transferSelections: Map<string, boolean> | undefined;
   const guardedGroups = new WeakSet<DockviewGroupPanel>();
+  const removedRenderContainers = new WeakMap<IDockviewPanel, DockviewGroupPanel["model"]["renderContainer"]>();
   win.addEventListener("beforeunload", () => {
     if (api.isDisposed || shuttingDown) return;
     shuttingDown = true;
@@ -214,8 +215,17 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
     group.model.closeAllPanels = close;
     group.model.closePanel = closePanelFromUser;
     group.addDisposables(
-      group.model.onDidAddPanel(() => { order = group.panels.map(panel => panel.id); }),
+      group.model.onDidAddPanel(({ panel }) => {
+        const previous = removedRenderContainers.get(panel);
+        removedRenderContainers.delete(panel);
+        // Dockview 5.2 detaches whole groups but not individual tabs crossing
+        // render containers. The empty source overlay otherwise remains visible
+        // and intercepts main-window input after its content moves to a popup.
+        if (previous && previous !== group.model.renderContainer) previous.detatch(panel);
+        order = group.panels.map(candidate => candidate.id);
+      }),
       group.model.onDidRemovePanel(({ panel }) => {
+        removedRenderContainers.set(panel, group.model.renderContainer);
         if (group.api.location.type !== "popout") rememberLocation(panel, group, order);
         order = group.panels.map(candidate => candidate.id);
       }),
@@ -266,18 +276,19 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
       refresh();
     });
     doc.addEventListener("visibilitychange", refresh);
-    popWin.addEventListener("beforeunload", () => {
+    let returnQueued = false;
+    const scheduleReturn = () => {
       // The initial about:blank window can retain its listener after navigation.
       // Only the loaded document may schedule a return correction.
-      if (shuttingDown || api.isDisposed || popWin.document !== doc) return;
+      if (returnQueued || shuttingDown || api.isDisposed || popWin.document !== doc) return;
       const panels = api.panels.filter(panel => panel.api.getWindow() === popWin);
+      if (panels.length === 0) return;
+      returnQueued = true;
       const restores = panels
         .map(panel => desktopPanelId(panel.id))
         .filter((id): id is DesktopDockviewPanelId => id !== null)
         .map(preserveTransferScroll);
-      // Native close transfers synchronously without disposing content. Correct
-      // only its destination/order afterwards, never recreate removed panels.
-      queueMicrotask(() => {
+      const finishReturn = () => {
         if (shuttingDown || api.isDisposed) return;
         returnPanels(panels);
         for (const restore of restores) restore();
@@ -286,8 +297,17 @@ export function initDesktopDockview(options: DesktopDockviewOptions): DesktopDoc
             options.onPinnedPanelReturned?.(panel.id);
           }
         }
+      };
+      queueMicrotask(() => {
+        // Native events can checkpoint microtasks between capture and bubble
+        // listeners. Never move panels ahead of Dockview's beforeunload handler.
+        // pagehide also covers browsers closing without delivering beforeunload.
+        if (panels.some(panel => panel.api.location.type === "popout")) win.setTimeout(finishReturn, 0);
+        else finishReturn();
       });
-    }, { capture: true });
+    };
+    popWin.addEventListener("beforeunload", scheduleReturn, { capture: true });
+    popWin.addEventListener("pagehide", scheduleReturn, { capture: true });
   }
 
   function preserveTransferScroll(id: DesktopDockviewPanelId): () => void {

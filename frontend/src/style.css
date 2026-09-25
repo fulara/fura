@@ -1561,6 +1561,16 @@ h2 {
   overflow: hidden;
 }
 
+.pinned-history-mode .diffs-sidebar {
+  grid-template-rows: minmax(8rem, 3fr) minmax(6rem, 2fr);
+}
+
+.pinned-history-mode .diffs-sidebar-top {
+  grid-template-rows: minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
 .git-history-browser {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;

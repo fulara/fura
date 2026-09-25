@@ -36,7 +36,7 @@ function fixture(label: string) {
 }
 const ordinary = (page: Page) => page.locator(".session-changes-view:visible:not(.pinned-diff-view)");
 const pins = (page: Page) => page.locator(".pinned-diff-view:visible");
-const pinTabs = (page: Page) => page.locator(".workspace-panel-host-active .dv-tab").filter({ hasText: / · (?:Current |Fixed )/ });
+const pinTabs = (page: Page) => page.locator(".workspace-panel-host-active .dv-tab").filter({ hasText: / · (?:Current |History |Fixed )/ });
 async function activateOrdinary(page: Page) {
   const host = page.locator(".workspace-panel-host-active");
   const review = await host.getAttribute("id") === "diffReviewWorkspacePanelHost";
