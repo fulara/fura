@@ -205,7 +205,20 @@ without restarting does not deploy the new runtime: newly loaded workers may
 refuse an older addon. Build a matching addon and restart only during an explicit
 deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.2.10 plus upstream through `8761110a78`.
+The current fork tracks OMP 18.3.0 through the pinned upstream `62bc57be1b`.
+The launcher preflight exercises the current `*** Edit File` / `*** Find` /
+`*** Replace` parser before starting a bridge, so a same-version stale addon
+cannot pass on its version string alone.
+
+Shell and PTY cleanup require spawn-pinned process identities; a discovered PID,
+foreground group, or registry group number alone never authorizes a signal.
+Pinned descendants survive TERM-to-KILL escalation, and Eval shutdown retains
+unconfirmed workers across retries even after the kernel itself exits. PTY
+cancellation escalates for children that ignore TERM/HUP without reverting to
+raw `Child::kill()` calls. Refresh verification uses private builds and owned
+test groups, then checks a real assistant response and reconnect before push;
+publication does not restart or deploy the live instance.
+
 Desktop Fura exposes one-shot BTW through
 **Ask on the side** and closeable internal Transcript tabs, with a permanent
 Conversation tab while side results exist. Questions use the main-context snapshot

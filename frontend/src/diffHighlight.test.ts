@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import hljs from "highlight.js/lib/common";
 import { createDiffHighlighter, DIFF_HIGHLIGHT_LIMITS } from "./diffHighlight";
 import type { DiffHighlightRow } from "./diffHighlight";
@@ -15,6 +15,8 @@ function render(rows: DiffHighlightRow[]): HTMLElement[] {
   });
 }
 
+// Syntax assertions must not depend on runner load; the budget test advances its own clock.
+beforeEach(() => vi.spyOn(performance, "now").mockReturnValue(0));
 afterEach(() => vi.restoreAllMocks());
 
 describe("diff syntax and intraline composition", () => {
@@ -74,7 +76,6 @@ describe("diff syntax and intraline composition", () => {
   });
 
   it("renders shared context in each side's syntax state without changing unified output", () => {
-    vi.spyOn(performance, "now").mockReturnValue(0);
     const rows = [
       row("-/* old-only split context", "remove"),
       row("+// new-only split context", "add"),
@@ -95,7 +96,6 @@ describe("diff syntax and intraline composition", () => {
   });
 
   it("uses a rename's old language for old context and preserves safe plain fallback on that side", () => {
-    vi.spyOn(performance, "now").mockReturnValue(0);
     const rows = [{ ...row(" pub fn renamed_split_context() {}"), newPath: "new.txt" }];
     const highlighter = createDiffHighlighter(rows, document);
     const old = document.createElement("code");
@@ -182,8 +182,6 @@ describe("diff syntax and intraline composition", () => {
   });
 
   it("evicts cached syntax by payload bytes rather than retaining unbounded source", () => {
-    // Real highlighter, fixed clock: eviction must not depend on runner CPU load.
-    vi.spyOn(performance, "now").mockReturnValue(0);
     const calls = vi.spyOn(hljs, "highlight");
     const makeRows = (id: number) => [row(` /* cache-${id}`), ...Array.from({ length: 4 }, () => row(` ${"x".repeat(3000)}`)), row(" */")];
     render(makeRows(-1));

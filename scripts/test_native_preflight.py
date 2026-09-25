@@ -11,15 +11,27 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class NativePreflight(unittest.TestCase):
     def test_missing_process_identity_never_reaches_bridge_build(self):
-        self.check_rejected_addon("export class Process {}\n")
+        self.check_addon("export class Process {}\n")
 
     def test_same_version_stale_edit_parser_never_reaches_bridge_build(self):
-        self.check_rejected_addon(
+        self.check_addon(
             "export class Process { identity() {} }\n"
             "export function editInspect() { return { paths: [], entries: [], fileOps: [] }; }\n",
         )
 
-    def check_rejected_addon(self, module):
+    def test_current_edit_parser_reaches_bridge_build(self):
+        self.check_addon(
+            "export class Process { identity() {} }\n"
+            "export function editInspect(mode, payload) {\n"
+            " const { input } = JSON.parse(payload);\n"
+            " const match = input.match(/^\\*\\*\\* Edit File: (.+)\\n\\*\\*\\* Find\\nold\\n\\*\\*\\* Replace\\nnew\\n$/);\n"
+            " if (mode !== 'sloppy' || !match) throw new Error('Unsupported edit payload');\n"
+            " return { paths: [match[1]], entries: [], fileOps: [] };\n"
+            "}\n",
+            build_allowed=True,
+        )
+
+    def check_addon(self, module, *, build_allowed=False):
         bun = os.environ.get("BUN_BIN") or shutil.which("bun")
         if bun is None:
             self.skipTest("bun is required for the real addon-import preflight")
@@ -67,8 +79,9 @@ class NativePreflight(unittest.TestCase):
                 environment["PATH"] = f"{directory}:{environment['PATH']}"
                 result = subprocess.run(["bash", str(directory / launcher)], env=environment,
                                         capture_output=True, text=True, timeout=15)
+                # Fake cargo always fails; reaching it means native preflight accepted the addon.
                 self.assertNotEqual(result.returncode, 0)
-                self.assertFalse(marker.exists(), "unsafe addon must be rejected before bridge build")
+                self.assertEqual(marker.exists(), build_allowed, result.stderr)
 
 
 if __name__ == "__main__":

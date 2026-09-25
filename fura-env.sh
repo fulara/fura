@@ -47,7 +47,7 @@ check_omp_native() (
     // A release-version sentinel alone cannot detect native changes within a release.
     const probePath = "fura-native-preflight.txt";
     const inspection = natives.editInspect("sloppy", JSON.stringify({
-      input: `*** SM:EDIT ${probePath}\n*** SM:FIND\nold\n*** SM:PUT\nnew\n`,
+      input: `*** Edit File: ${probePath}\n*** Find\nold\n*** Replace\nnew\n`,
     }));
     if (inspection.paths.length !== 1 || inspection.paths[0] !== probePath) {
       throw new Error("OMP native addon does not support the current Sloppy Edit payload; rebuild it");
