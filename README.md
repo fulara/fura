@@ -223,10 +223,21 @@ without restarting does not deploy the new runtime: newly loaded workers may
 refuse an older addon. Build a matching addon and restart only during an explicit
 deployment, never as part of refresh verification.
 
-The current fork tracks OMP 18.3.0 through the pinned upstream `62bc57be1b`.
+The current fork tracks OMP 18.3.2 through the pinned upstream `7853b4e499`.
 The launcher preflight exercises the current `*** Edit File` / `*** Find` /
 `*** Replace` parser before starting a bridge, so a same-version stale addon
 cannot pass on its version string alone.
+
+The fork uses upstream's typed settings registry, canonical internal-URL router,
+and ticket-based RPC prompt completion. Fura's durable `clientMessageId`, skill
+attachments, session-scoped guidance, BTW isolation, activity and persisted recaps
+remain separate contracts. Stream `messageId` and `session_settled` do not replace
+submission identity or redefine the bridge's Busy state.
+
+Private verification installs that use `bun install --ignore-scripts` must also
+run `bun run gen:tool-views` in their isolated OMP copy; the generated HTML-export
+runtime is required even for CLI/RPC startup. Retain its measured bytes with the
+source/build evidence, rather than copying an unverified generated file from live.
 
 Shell and PTY cleanup require spawn-pinned process identities; a discovered PID,
 foreground group, or registry group number alone never authorizes a signal.

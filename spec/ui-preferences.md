@@ -158,6 +158,13 @@ enabled, 240 seconds), without changing main-context budgets or Busy.
 `--no-recap` disables generation for that RPC host; ordinary `rpc` and direct SDK
 RPC hosts remain passive unless explicitly enabled. Fura's hidden control and
 model-catalog hosts opt out. Disabling generation does not hide saved recaps.
+Live changes to those settings rearm unfinished work only after the enabled host
+has observed a terminal idle event. Disabling cancels pending/in-flight work;
+re-enabling or changing the delay does not regenerate an already attempted or
+saved recap for the same source. Cancellation must drain before another request
+starts, including providers that ignore abort. Queued messages and compaction
+block both inference and publication; source-leaf changes remain authoritative.
+
 
 Recaps are stored in `history.db`'s `session_recaps` table, keyed by journal
 identity and bound to the source leaf. Legacy rows without a source leaf show
